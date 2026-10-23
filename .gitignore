@@ -1,0 +1,31 @@
+# Original disc, extracted game content and generated analysis remain local.
+[iI][sS][oO]/
+*.[iI][sS][oO]
+*.[bB][iI][nN]
+*.[iI][rR][xX]
+*.[eE][lL][fF]
+*.[hH][oO][gG]
+*.[sS][oO]
+*.[tT][dD][xX]
+*.[vV][aA][gG]
+*.[sS][kK][mM]
+*.[sS][kK][lL]
+*.[sS][kK][aA]
+*.[pP][sS][sS]
+*.[iI][mM][gG]
+*.[vV][pP][kK]
+*.[eE][xX][eE]
+*.[dD][lL][lL]
+*.[zZ][iI][pP]
+SCUS_*
+Syphon Filter - The Omega Strain (USA)/
+local/
+third_party/
+build/
+__pycache__/
+*.pyc
+# Port-only (checkpoint 132md1, research/MODDING.md): mods (and textures exported from the disc) stay local.
+/mods/
+# Port-only (checkpoint 132md12): the committed example mods are synthetic (tools/make_example_mod.py), not disc data;
+# their folders are named like the disc's archives.
+!/tools/mods/examples/**/*.[hH][oO][gG]/

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "title": "Syphon Filter: The Omega Strain",
+  "platform": "PlayStation 2",
+  "region": "USA (NTSC-U)",
+  "serial": "SCUS-97264",
+  "boot_executable": "SCUS_972.64",
+  "boot_config_ver": "1.00",
+  "boot_video_mode": "NTSC",
+  "image_format": "ISO9660, 2048-byte sectors",
+  "iso_size": 3457744896,
+  "iso_sha256": "a60a4b41fea808335baa3b887a377bb98063f6f169ca498efee49397fba96130",
+  "executable_size": 4071592,
+  "executable_sha256": "9924da91767c8145411f37fa6c14c9d77208264c17f1ce9ee157d51abdd31dc6",
+  "executable_entry": "0x00100008",
+  "support_policy": "Only this exact disc fingerprint is currently supported. Filename is not part of identity."
+}

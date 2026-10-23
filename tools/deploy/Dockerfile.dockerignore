@@ -1,0 +1,5 @@
+# Only the server's sources go to the Docker build (tools/deploy/Dockerfile, BuildKit's per-Dockerfile ignore file).
+*
+!src/port/online/
+!src/port/app/omega_server_main.cpp
+!tools/deploy/omega_server.example.cfg

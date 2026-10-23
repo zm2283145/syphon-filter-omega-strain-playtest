@@ -1,0 +1,7 @@
+* text=auto
+.githooks/* text eol=lf
+*.py text eol=lf
+*.java text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+tools/deploy/* text eol=lf

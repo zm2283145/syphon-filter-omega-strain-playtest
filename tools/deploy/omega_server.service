@@ -1,0 +1,33 @@
+# omega_server as a systemd service (port-only, 132on2g; research/ONLINE_DEPLOY.md section 5.2).
+# Install: copy omega_server to /opt/omega_server/, create the user and the data folder, put omega_server.cfg
+# (from omega_server.example.cfg, with your own admin_token) in /var/lib/omega_server, then:
+#   sudo useradd --system --home-dir /var/lib/omega_server --shell /usr/sbin/nologin omega
+#   sudo install -d -o omega -g omega -m 0750 /var/lib/omega_server
+#   sudo cp omega_server.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo systemctl enable --now omega_server
+# Stop / restart: systemctl stop|restart omega_server (SIGTERM: a graceful shutdown now; the games keep their
+# results, the stores are saved). A warned restart: omega_server admin 127.0.0.1:10075 --token TOKEN restart 60
+[Unit]
+Description=omega_server (Syphon Filter: The Omega Strain port lobby)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=omega
+Group=omega
+WorkingDirectory=/var/lib/omega_server
+ExecStart=/opt/omega_server/omega_server --no-console --data-dir /var/lib/omega_server --config omega_server.cfg
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+# Hardening: it needs only its data folder and the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/omega_server
+
+[Install]
+WantedBy=multi-user.target

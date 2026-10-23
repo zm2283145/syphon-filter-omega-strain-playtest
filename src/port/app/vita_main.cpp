@@ -1,0 +1,1983 @@
+// Port-only (checkpoint 132vt1, research/VITA.md "The Vita app"): the PS Vita app (SFOS00001). Stage 1 of the Vita
+// port: it brings up the platform layer (src/port/vita) and the GXM backend (gfx_gxm.hpp), proves the backend
+// on a read-back self test, then runs the front end's title screen (TITLESCR, the GuiRuntime / GuiDecor / GuiRenderer
+// path of omega_frontend_formats --gui-capture, live with the handheld's pad) and the TORONTO1 loading screen
+// (build_loading_screen / loading_frame) from the user's disc image, measuring frame times and memory.
+//
+// Everything is logged to ux0:data/omega_strain/omega_vita.log. The disc image is ux0:data/omega_strain/omega_strain.iso
+// (verified once, as on the PC: size, then SHA-256 of research/REQUIRED_DISC.md; iso_verify_vita.cpp caches it).
+// Controls: SELECT goes from the title screen to the loading screen; START + SELECT quits.
+// The front end proper (FrontendApp: menus, mission select, the level hand-off) and the level setup / play loop are
+// still the Windows hosts' (frontend_app.cpp, play_main.cpp): research/VITA.md "Handoff".
+
+#include "audio_device.hpp"
+#include "disc.hpp"
+#include "display_settings.hpp"
+#include "audio_output.hpp"
+#include "frontend_disc.hpp"
+#include "frontend_formats.hpp"
+#include "frame_fit.hpp"
+#include "frame_overlay.hpp"
+#include "frontend_session.hpp"
+#include "zone_profile.hpp"
+#include "game_sound.hpp"
+#include "gamepad_device.hpp"
+#include "gamepad_reports.hpp"
+#include "gfx_device.hpp"
+#include "gfx_gxm.hpp"
+#include "gfx_gxm_shaders.hpp"
+#include "gfx_render_thread.hpp"
+#include "gui_decor.hpp"
+#include "gui_draw.hpp"
+#include "gui_renderer.hpp"
+#include "gui_runtime.hpp"
+#include "ie_draw.hpp"
+#include "iso_verify_vita.hpp"
+#include "loading_screen_host.hpp"
+#include "port_settings.hpp"
+#include "localization.hpp"
+#include "string_pool.hpp"
+#include "sound_iop_host.hpp"
+#include "thread_roles.hpp"
+#include "vita_file.hpp"
+#include "windows_hash.hpp"
+#include "worker_pool.hpp"
+
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/power.h>
+
+#include <malloc.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <new>
+#include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <string>
+#include <thread>
+#include <vector>
+
+extern "C" {
+unsigned int sceUserMainThreadStackSize = 8 * 1024 * 1024;
+// The newlib heap (the game's allocations); the GPU pools are separate memory blocks (gfx_gxm.hpp Options).
+unsigned int _newlib_heap_size_user = 192 * 1024 * 1024;
+}
+
+namespace {
+
+using namespace omega;
+
+FILE* g_log = nullptr;
+std::string g_log_path;
+
+void log(const char* format, ...) {
+    char text[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    const double t = double(sceKernelGetProcessTimeWide()) * 1e-6;
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (g_log) {
+        std::fprintf(g_log, "[%9.3f] %s\n", t, text);
+        std::fflush(g_log);
+        // Vita3K holds a guest file's writes in a host buffer until it is closed: reopen at most every 2 s so a
+        // killed emulator keeps the log.
+        static double reopened = 0.0;
+        if (t - reopened >= 2.0 && !g_log_path.empty()) {
+            reopened = t;
+            std::fclose(g_log);
+            g_log = std::fopen(g_log_path.c_str(), "a");
+        }
+    }
+}
+
+[[gnu::noinline]] double now_seconds() { return double(sceKernelGetProcessTimeWide()) * 1e-6; }
+
+// Port-only diagnostic (research/VITA.md "Front-end speed"): the C++ heap allocations (the replaced operator new below),
+// for the per-frame allocation numbers.
+std::uint32_t g_mallocs = 0;
+
+// Port-only diagnostic: the simulation thread's frame split into parts (lap(i) charges the time since the last lap to
+// part i), logged every 120 frames as mean / max ms, with the allocations and disc reads per frame.
+// The shared code's OMEGA_ZONE slots (zone_profile.hpp), heaviest first, then reset.
+template <class Log> void zone_report(Log&& out, int frames) {
+    std::vector<omega::zone::Slot*> slots;
+    for (auto* s = omega::zone::Slot::head().load(); s; s = s->next)
+        if (s->calls) slots.push_back(s);
+    std::sort(slots.begin(), slots.end(), [](auto* a, auto* b) { return a->ns > b->ns; });
+    char text[1200];
+    int n = std::snprintf(text, sizeof text, "zones (ms/frame, calls/frame):");
+    for (auto* s : slots) {
+        if (n > int(sizeof text) - 80) break;
+        n += std::snprintf(text + n, sizeof text - n, " %s %.2f x%.1f;", s->name, s->ns / 1e6 / frames,
+                           double(s->calls) / frames);
+    }
+    for (auto* s = omega::zone::Slot::head().load(); s; s = s->next) s->ns = 0, s->calls = 0;
+    if (!slots.empty()) out(text);
+}
+
+struct FrameParts {
+    static constexpr int count = 10;
+    const char* names[count] = {"pad",           "session.frame", "sound mix",     "images",   "movie picture",
+                                "canvas record", "audio submit",  "renderer draw", "present",  "other"};
+    double sum[count]{}, peak[count]{};
+    double mark = 0.0;
+    int frames = 0;
+    std::uint64_t mallocs = g_mallocs, reads = 0;
+    std::string overlay;  // the last report's main parts, for the frame overlay
+    void begin() { mark = now_seconds(); }
+    void lap(int part) {
+        const double t = now_seconds(), d = t - mark;
+        sum[part] += d;
+        peak[part] = std::max(peak[part], d);
+        mark = t;
+    }
+    template <class Log> void end(Log&& out, std::uint64_t disc_reads) {
+        if (++frames < 120) return;
+        char text[900];
+        int n = std::snprintf(text, sizeof text, "frame parts (%d frames, ms mean/max):", frames);
+        double total = 0.0;
+        for (int i = 0; i < count; ++i) {
+            total += sum[i];
+            n += std::snprintf(text + n, sizeof text - n, " %s %.2f/%.1f;", names[i], 1000.0 * sum[i] / frames,
+                               1000.0 * peak[i]);
+        }
+        const std::uint64_t m = g_mallocs;
+        std::snprintf(text + n, sizeof text - n, " total %.2f; %.0f allocations, %.2f disc reads per frame",
+                      1000.0 * total / frames, double(m - mallocs) / frames, double(disc_reads - reads) / frames);
+        out(text);
+        zone_report(out, frames);
+        char line[160];
+        std::snprintf(line, sizeof line, "STEP %.1f  RECORD %.1f  DRAW %.1f  MIX %.1f  ALLOC %.0f",
+                      1000.0 * sum[1] / frames, 1000.0 * (sum[3] + sum[4] + sum[5]) / frames, 1000.0 * sum[7] / frames,
+                      1000.0 * sum[2] / frames, double(m - mallocs) / frames);
+        *this = FrameParts{};
+        overlay = line;
+        reads = disc_reads;
+    }
+};
+
+void log_memory(const char* when) {
+    const struct mallinfo m = mallinfo();
+    SceKernelFreeMemorySizeInfo info{};
+    info.size = sizeof info;
+    sceKernelGetFreeMemorySize(&info);
+    const auto gpu = gfx::gxm::memory_stats();
+    log("memory (%s): heap arena %.1f MB, in use %.1f MB; kernel free: user %.1f MB, CDRAM %.1f MB, phycont %.1f MB; "
+        "GPU pools: CDRAM %.1f / %.1f MB (peak %.1f), LPDDR %.1f / %.1f MB (peak %.1f)",
+        when, m.arena / 1048576.0, m.uordblks / 1048576.0, info.size_user / 1048576.0, info.size_cdram / 1048576.0,
+        info.size_phycont / 1048576.0, gpu.cdram_used / 1048576.0, gpu.cdram_pool / 1048576.0,
+        gpu.cdram_peak / 1048576.0, gpu.lpddr_used / 1048576.0, gpu.lpddr_pool / 1048576.0, gpu.lpddr_peak / 1048576.0);
+}
+
+// Per-thread and per-core busy time over a phase (thread_roles.hpp; research/VITA.md "Threads and cores").
+struct ThreadReport {
+    double start = now_seconds();
+    std::vector<ThreadUsage> before = thread_usage();
+    std::uint64_t idle_before[3]{};
+    bool idle_ok = core_idle_us(idle_before);
+    void report(const char* phase) {
+        const double wall = now_seconds() - start;
+        const auto after = thread_usage();
+        double core_busy[3]{};
+        log("threads (%s, %.2f s):", phase, wall);
+        // The registry is append-only and names repeat (one "audio out" per device): match by index.
+        for (std::size_t i = 0; i < after.size(); ++i) {
+            const ThreadUsage& t = after[i];
+            // A reused thread id restarts its kernel run clock: never subtract a larger baseline.
+            const std::uint64_t busy0 = i < before.size() && before[i].busy_us <= t.busy_us ? before[i].busy_us : 0;
+            const std::uint64_t run0 = i < before.size() && before[i].run_us <= t.run_us ? before[i].run_us : 0;
+            if (t.busy_us == busy0 && t.run_us == run0) continue;  // ended, or idle all phase
+            const double busy = double(t.busy_us - busy0) * 1e-6, run = double(t.run_us - run0) * 1e-6;
+            const unsigned core = thread_role_core(t.role);
+            core_busy[core] += busy;
+            if (t.run_us != 0)
+                log("  %-14s %-10s core %u (affinity 0x%05X, priority %d): busy %.3f s = %.1f%%, kernel run clock %.3f s",
+                    t.name.c_str(), thread_role_name(t.role), core, t.affinity, t.priority, busy, 100.0 * busy / wall,
+                    run);
+            else  // Vita3K's sceKernelGetThreadInfo leaves runClocks zero
+                log("  %-14s %-10s core %u (affinity 0x%05X, priority %d): busy %.3f s = %.1f%% (no kernel run clock)",
+                    t.name.c_str(), thread_role_name(t.role), core, t.affinity, t.priority, busy, 100.0 * busy / wall);
+        }
+        std::uint64_t idle_after[3]{};
+        const bool idle = idle_ok && core_idle_us(idle_after);
+        for (unsigned c = 0; c < 3; ++c) {
+            if (idle)
+                log("  core %u: busy %.1f%% by the pinned threads' own count, %.1f%% by the kernel's idle clock", c,
+                    100.0 * core_busy[c] / wall, 100.0 - 100.0 * double(idle_after[c] - idle_before[c]) * 1e-6 / wall);
+            else
+                log("  core %u: busy %.1f%% (the pinned threads' own count; no kernel idle clock here)", c,
+                    100.0 * core_busy[c] / wall);
+        }
+        start = now_seconds();
+        before = after;
+        idle_ok = core_idle_us(idle_before);
+    }
+};
+
+// Frame time statistics over a phase.
+struct FrameStats {
+    std::vector<double> cpu, interval;
+    double last_present = 0.0;
+    void add(double cpu_seconds, double present_time) {
+        cpu.push_back(cpu_seconds);
+        if (last_present > 0.0) interval.push_back(present_time - last_present);
+        last_present = present_time;
+    }
+    static void summary(const char* what, std::vector<double> v) {
+        if (v.empty()) return;
+        std::sort(v.begin(), v.end());
+        double sum = 0.0;
+        for (double x : v) sum += x;
+        log("  %s: %u frames, mean %.2f ms, median %.2f ms, p95 %.2f ms, max %.2f ms", what, unsigned(v.size()),
+            1e3 * sum / double(v.size()), 1e3 * v[v.size() / 2], 1e3 * v[v.size() * 95 / 100], 1e3 * v.back());
+    }
+    void report(const char* phase) {
+        log("frame times (%s):", phase);
+        summary("CPU (update + record + submit)", cpu);
+        summary("present interval", interval);
+        cpu.clear();
+        interval.clear();
+        last_present = 0.0;
+    }
+};
+
+// The GUI program's vertex (VertexLayout::gui).
+struct GuiVertexHost {
+    float x, y, u, v, r, g, b, a, z, w;
+};
+
+void quad(std::vector<GuiVertexHost>& out, float x0, float y0, float x1, float y1, const float c[4]) {
+    const GuiVertexHost p[4] = {{x0, y0, 0, 0, c[0], c[1], c[2], c[3], 0, 1},
+                                {x1, y0, 1, 0, c[0], c[1], c[2], c[3], 0, 1},
+                                {x0, y1, 0, 1, c[0], c[1], c[2], c[3], 0, 1},
+                                {x1, y1, 1, 1, c[0], c[1], c[2], c[3], 0, 1}};
+    for (int k : {0, 1, 2, 2, 1, 3}) out.push_back(p[k]);
+}
+
+// The backend's self test: clears, a GUI-program draw, a region copy and a read-back, checked per pixel.
+bool self_test(gfx::Device& device) {
+    constexpr unsigned w = 64, h = 32;
+    gfx::TextureDesc td;
+    td.width = w;
+    td.height = h;
+    td.bind = gfx::bind_target | gfx::bind_sampled;
+    const auto target = device.create_texture(td, nullptr, {});
+    td.bind = 0;
+    td.usage = gfx::Usage::staging;
+    const auto staging = device.create_texture(td, nullptr, {});
+    gfx::TextureDesc wd;
+    wd.width = wd.height = 1;
+    wd.usage = gfx::Usage::immutable;
+    wd.bind = gfx::bind_sampled;
+    const std::uint32_t white = 0xffffffffU;
+    const gfx::Level level{&white, 4};
+    const auto image = device.create_texture(wd, &level, {});
+    const auto sampler = device.create_sampler({}, "self test sampler");
+    const auto raster = device.create_raster({}, "self test raster");
+    std::vector<GuiVertexHost> v;
+    const float green[4]{0, 1, 0, 1};
+    quad(v, -320, -224, 0, 224, green);  // the left half (GUI space x -320..320 over the target)
+    gfx::BufferDesc bd;
+    bd.bytes = v.size() * sizeof v[0];
+    bd.usage = gfx::Usage::immutable;
+    bd.bind = gfx::bind_vertices;
+    const auto vertices = device.create_buffer(bd, v.data(), "self test vertices");
+    device.prepare(gfx::Program::gui);
+
+    gfx::CommandList list;
+    const float red[4]{1, 0, 0, 1};
+    list.clear_target({target.get(), 0}, red);
+    list.set_target(target.get());
+    list.set_viewport({0, 0, float(w), float(h), 0, 1});
+    list.set_raster(raster.get());
+    list.set_depth(nullptr);
+    list.set_blend(nullptr);
+    list.set_program(gfx::Program::gui);
+    list.set_vertex_buffer(vertices.get(), sizeof(GuiVertexHost));
+    list.set_texture(0, image.get());
+    list.set_sampler(0, sampler.get());
+    list.draw(6, 0);
+    const float blue[4]{0, 0, 1, 1};
+    const gfx::Rect rect{56, 0, 64, 8};
+    list.clear_rects(target.get(), blue, &rect, 1);
+    list.copy(staging.get(), target.get());
+    device.submit(list);
+    int bad = 0;
+    std::uint32_t seen[3]{};
+    device.read(*staging, 0, [&](const std::uint8_t* data, unsigned pitch) {
+        for (unsigned y = 0; y < h; ++y)
+            for (unsigned x = 0; x < w; ++x) {
+                const std::uint8_t* p = data + y * pitch + x * 4;
+                const bool corner = x >= 56 && y < 8;
+                const std::uint8_t want[4] = {std::uint8_t(corner ? 0 : x < w / 2 ? 0 : 255),
+                                              std::uint8_t(!corner && x < w / 2 ? 255 : 0),
+                                              std::uint8_t(corner ? 255 : 0), 255};
+                if (std::memcmp(p, want, 4) != 0) {
+                    if (bad < 8) log("  self test: pixel (%u, %u) = %02x %02x %02x %02x, expected %02x %02x %02x %02x",
+                                     x, y, p[0], p[1], p[2], p[3], want[0], want[1], want[2], want[3]);
+                    ++bad;
+                }
+                ++seen[corner ? 2 : x < w / 2 ? 1 : 0];
+            }
+    }, "self test read");
+    log("GXM self test: %s (%d of %u pixels differ; red %u, green %u, blue %u)", bad ? "FAILED" : "passed", bad,
+        w * h, seen[0], seen[1], seen[2]);
+    if (bad) {
+        sceKernelDelayThread(1000000);
+        device.read(*staging, 0, [&](const std::uint8_t* data, unsigned) {
+            log("  self test: 1 s later pixel (0, 0) = %02x %02x %02x %02x, pixel (40, 0) = %02x %02x %02x %02x", data[0],
+                data[1], data[2], data[3], data[160], data[161], data[162], data[163]);
+        }, "self test reread");
+    }
+    return bad == 0;
+}
+
+// The display copy test (132vt1b, research/VITA.md "Widescreen"; a test switch: vita_test_display_copy.txt): the back
+// buffer cleared to four quadrant colours is copied whole into a texture of its size, as the wide side fill copies it
+// every frame (the vitaGL backend's GPU copy, checked by the backend against the read-back on its first use), then on
+// into a staging texture checked per pixel. Run twice: the first copy includes the backend's check, the second is the
+// per-frame cost (with the read-back wait). Off by default: on Vita3K the next disc read after it never returns.
+bool display_copy_test(gfx::Device& device, const gfx::Texture* back) {
+    const gfx::TextureDesc& bd = back->desc();
+    const unsigned w = bd.width, h = bd.height;
+    gfx::TextureDesc cd;
+    cd.width = w;
+    cd.height = h;
+    cd.format = bd.format;
+    cd.bind = gfx::bind_sampled;
+    const auto copy = device.create_texture(cd, nullptr, {});
+    gfx::TextureDesc sd;
+    sd.width = w;
+    sd.height = h;
+    sd.usage = gfx::Usage::staging;
+    const auto staging = device.create_texture(sd, nullptr, {});
+    const float colours[4][4]{{1, 0, 0, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}, {1, 1, 1, 1}};
+    int bad = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        const double start = now_seconds();
+        gfx::CommandList list;
+        for (unsigned q = 0; q < 4; ++q) {
+            const int x = int((q & 1) ? w / 2 : 0), y = int((q & 2) ? h / 2 : 0);
+            const gfx::Rect r{x, y, x + int(w / 2), y + int(h / 2)};
+            list.clear_rects(back, colours[(q + pass) % 4], &r, 1);
+        }
+        list.copy(copy.get(), back);
+        list.copy(staging.get(), copy.get());
+        device.submit(list);
+        bad = 0;
+        device.read(*staging, 0, [&](const std::uint8_t* data, unsigned pitch) {
+            for (unsigned y = 0; y < h; ++y)
+                for (unsigned x = 0; x < w; ++x) {
+                    const float* c = colours[((x >= w / 2 ? 1 : 0) + (y >= h / 2 ? 2 : 0) + pass) % 4];
+                    const std::uint8_t* p = data + y * pitch + x * 4;
+                    const std::uint8_t want[4]{std::uint8_t(c[0] * 255), std::uint8_t(c[1] * 255),
+                                               std::uint8_t(c[2] * 255), 255};
+                    if (std::memcmp(p, want, 4) != 0) {
+                        if (bad < 4) log("  display copy test: pixel (%u, %u) = %02x %02x %02x %02x, expected %02x %02x %02x %02x",
+                                         x, y, p[0], p[1], p[2], p[3], want[0], want[1], want[2], want[3]);
+                        ++bad;
+                    }
+                }
+        }, "display copy test read");
+        log("display copy test, pass %d: %s (%d of %u pixels differ), %.2f ms with the read-back", pass + 1,
+            bad ? "FAILED" : "passed", bad, w * h, 1000.0 * (now_seconds() - start));
+    }
+    return bad == 0;
+}
+// A 440 Hz tone for one second through SceAudioOut (the audio::Device the game's mixer feeds).
+void audio_test() {
+    audio::Device device(0.1);
+    std::vector<std::int16_t> samples;
+    constexpr int rate = 48000;
+    for (int i = 0; i < rate; ++i) {
+        const auto s = std::int16_t(2000.0 * std::sin(2.0 * 3.14159265358979 * 440.0 * i / rate));
+        samples.push_back(s);
+        samples.push_back(s);
+    }
+    const double start = now_seconds();
+    device.submit(samples);
+    const auto stats = device.stats();
+    log("audio: submitted %llu frames in %.3f s (queued %u, underruns %u)",
+        static_cast<unsigned long long>(stats.submitted_frames), now_seconds() - start, unsigned(stats.queued_frames),
+        unsigned(stats.underruns));
+    for (const auto& line : device.take_log()) log("audio: %s", line.c_str());
+}
+
+struct PadState {
+    GamepadDevice device;
+    std::uint16_t held = 0, previous = 0;
+    std::string source;
+    void read() {
+        previous = held;
+        if (const auto r = device.read()) {
+            held = r->pad.held;
+            source = r->source;
+        }
+        if (held != previous) log("pad: held %04x (%s)", held, source.c_str());
+    }
+    bool pressed(std::uint16_t button) const { return (held & button) && !(previous & button); }
+};
+
+class App {
+public:
+    // The display's device and swap chain are wrapped by the render thread (gfx_render_thread.hpp): the frames are
+    // recorded here on the simulation thread (core 0) and submitted to GXM on the render host thread (core 1).
+    App(gfx::Display display) : inner_(std::move(display)), display_(render_thread_.wrap(inner_)) {}
+    void run();
+
+private:
+    gfx::Display inner_;
+    gfx::RenderThread render_thread_;
+    gfx::Display display_;
+    WorkerPool workers_{WorkerPool::default_workers()};
+    std::shared_ptr<gfx::Texture> back_;
+    std::uint64_t frame_ = 0;
+    PadState pad_;
+    FrameStats stats_;
+    ThreadReport threads_;
+    bool quit_ = false;
+    // Port-only (research/VITA.md "Frame overlay"): frame times over the frame, toggled by SELECT with R held.
+    FrameOverlay overlay_;
+    bool overlay_on_ = true;
+    std::vector<std::string> overlay_lines_{"FRAME TIMES (MEASURING)"};
+    std::string overlay_detail_;
+    // Port-only (research/VITA.md "Boot progress"): a boot step's screen (its text and a bar), so no step longer than a
+    // second shows a frozen or black display. fraction < 0: a moving block (no measure of the step's progress).
+    FrameOverlay progress_text_;
+    double progress_drawn_ = -1.0;
+    void progress(const std::string& text, double fraction, bool force = true) {
+        const double now = now_seconds();
+        if (!force && now - progress_drawn_ < 0.1) return;
+        progress_drawn_ = now;
+        auto back = begin_frame();
+        gfx::CommandList list;
+        const float frame[4]{0.25F, 0.27F, 0.32F, 1.0F}, fill[4]{0.85F, 0.55F, 0.12F, 1.0F};
+        const gfx::Rect outer{180, 300, 780, 324};
+        list.clear_rects(back.get(), frame, &outer, 1);
+        int left = 182, right = 182;
+        if (fraction >= 0.0) {
+            right = 182 + int(596.0 * std::min(fraction, 1.0));
+        } else {
+            left = 182 + int(std::fmod(now * 200.0, 596.0 - 80.0));
+            right = left + 80;
+        }
+        if (right > left) {
+            const gfx::Rect inner{left, 302, right, 322};
+            list.clear_rects(back.get(), fill, &inner, 1);
+        }
+        display_.device->submit(list);
+        progress_text_.draw(*display_.device, back.get(), 960, 544, {"SYPHON FILTER: THE OMEGA STRAIN (NATIVE PORT)", text},
+                            180, 230, 2);
+        display_.swap_chain->present(1, "present");
+        render_thread_.end_frame(++frame_);
+    }
+    double overlay_cpu_ = 0.0, overlay_interval_ = 0.0, overlay_max_ = 0.0, overlay_last_ = 0.0;
+    int overlay_frames_ = 0;
+
+    std::shared_ptr<gfx::Texture> begin_frame() {
+        // One texture for every frame (the backend resolves it to the current back buffer when the list executes).
+        if (!back_) back_ = display_.swap_chain->buffer(true, "back buffer", "back buffer view");
+        const float black[4]{0, 0, 0, 1};
+        gfx::clear_target(*display_.device, back_.get(), black);
+        return back_;
+    }
+    void end_frame(double started) {
+        if (overlay_on_ && back_) overlay_.draw(*display_.device, back_.get(), 960, 544, overlay_lines_, 8, 8, 2);
+        display_.swap_chain->present(1, "present");
+        const double recorded = now_seconds();
+        count_busy_time(static_cast<std::uint64_t>((recorded - started) * 1e6));
+        render_thread_.end_frame(++frame_);
+        const double presented = now_seconds();
+        stats_.add(recorded - started, presented);
+        overlay_update(recorded - started, presented);
+    }
+    void overlay_update(double cpu, double presented) {
+        if (overlay_last_ > 0.0) {
+            const double interval = presented - overlay_last_;
+            overlay_interval_ += interval;
+            overlay_max_ = std::max(overlay_max_, interval);
+            overlay_cpu_ += cpu;
+            ++overlay_frames_;
+        }
+        overlay_last_ = presented;
+        if (overlay_frames_ < 30) return;
+        char a[120], b[120];
+        std::snprintf(a, sizeof a, "FRAME %.1f MS  %.1f FPS  MAX %.1f", 1000.0 * overlay_interval_ / overlay_frames_,
+                      overlay_frames_ / overlay_interval_, 1000.0 * overlay_max_);
+        std::snprintf(b, sizeof b, "CPU %.1f MS  R1 AND SELECT HIDES", 1000.0 * overlay_cpu_ / overlay_frames_);
+        overlay_lines_ = {a, b};
+        if (!overlay_detail_.empty()) overlay_lines_.push_back(overlay_detail_);
+        overlay_cpu_ = overlay_interval_ = overlay_max_ = 0.0;
+        overlay_frames_ = 0;
+    }
+    void report(const char* phase) {
+        stats_.report(phase);
+        log("  render thread: %s", render_thread_.summary().c_str());
+        threads_.report(phase);
+    }
+    void core_check();
+    // Port-only evidence: the back buffer as drawn so far to ux0:data/omega_strain/<name>.bmp (24-bit, bottom-up).
+    void capture(const gfx::Texture* back, const std::string& name) {
+        auto& device = *display_.device;
+        if (!capture_staging_) {
+            gfx::TextureDesc td;
+            td.width = 960;
+            td.height = 544;
+            td.usage = gfx::Usage::staging;
+            capture_staging_ = device.create_texture(td, nullptr, {});
+        }
+        gfx::CommandList list;
+        list.copy(capture_staging_.get(), back);
+        device.submit(list);
+        constexpr unsigned w = 960, h = 544, row = w * 3;
+        std::vector<std::uint8_t> bmp(54 + std::size_t(row) * h);
+        auto put32 = [&](std::size_t at, std::uint32_t v) {
+            for (int k = 0; k < 4; ++k) bmp[at + k] = std::uint8_t(v >> (8 * k));
+        };
+        bmp[0] = 'B';
+        bmp[1] = 'M';
+        put32(2, std::uint32_t(bmp.size()));
+        put32(10, 54);
+        put32(14, 40);
+        put32(18, w);
+        put32(22, h);
+        bmp[26] = 1;
+        bmp[28] = 24;
+        put32(34, row * h);
+        device.read(*capture_staging_, 0, [&](const std::uint8_t* data, unsigned pitch) {
+            for (unsigned y = 0; y < h; ++y)
+                for (unsigned x = 0; x < w; ++x) {
+                    const std::uint8_t* p = data + y * pitch + x * 4;
+                    std::uint8_t* q = bmp.data() + 54 + std::size_t(h - 1 - y) * row + x * 3;
+                    q[0] = p[2];
+                    q[1] = p[1];
+                    q[2] = p[0];
+                }
+        }, "capture read");
+        const std::string path = std::string(vita_data_root) + "/" + name + ".bmp";
+        sceIoRemove(path.c_str());
+        if (FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(bmp.data(), 1, bmp.size(), f);
+            std::fclose(f);
+            log("capture: %s", path.c_str());
+        }
+    }
+    std::shared_ptr<gfx::Texture> capture_staging_;
+    void poll() {
+        pad_.read();
+        if ((pad_.held & ds2::start) && (pad_.held & ds2::select)) quit_ = true;
+        if ((pad_.held & ds2::r1) && pad_.pressed(ds2::select)) {
+            overlay_on_ = !overlay_on_;
+            log("frame overlay %s (R + SELECT)", overlay_on_ ? "on" : "off");
+        }
+    }
+    std::string front_end(DiscImage& disc, const std::string& iso, int frames);
+    void loading_screen(DiscImage& disc, const std::string& level, int frames);
+    void no_disc(int frames);
+    void notice(const std::string& title, const std::string& text);
+    std::string front_end_error_;
+};
+
+// Port-only (research/VITA.md "Errors on screen"): a stop the handheld cannot recover from in place (an unported path
+// naming its address, a disc read failure) as a screen, instead of closing: the title, the message wrapped to the
+// overlay font (unknown characters as spaces), until CROSS (or START + SELECT, which quits).
+void App::notice(const std::string& title, const std::string& text) {
+    log("notice: %s: %s", title.c_str(), text.c_str());
+    std::vector<std::string> lines{title, ""};
+    constexpr std::size_t width = 70;
+    std::string line, word;
+    auto flush_word = [&] {
+        while (word.size() > width) {
+            if (!line.empty()) lines.push_back(line), line.clear();
+            lines.push_back(word.substr(0, width));
+            word.erase(0, width);
+        }
+        if (word.empty()) return;
+        if (!line.empty() && line.size() + 1 + word.size() > width) lines.push_back(line), line.clear();
+        line += (line.empty() ? "" : " ") + word;
+        word.clear();
+    };
+    for (char c : text) {
+        if (c == '\n') {
+            flush_word();
+            lines.push_back(line);
+            line.clear();
+            continue;
+        }
+        if (c == ',' || c == ';') c = '.';
+        if (c == ' ' || !overlay_font_has(c)) flush_word();
+        else word += c;
+    }
+    flush_word();
+    if (!line.empty()) lines.push_back(line);
+    lines.push_back("");
+    lines.push_back("PRESS CROSS TO GO BACK TO THE FRONT END");
+    FrameOverlay text_overlay;
+    for (int frame = 0; !quit_; ++frame) {
+        const double started = now_seconds();
+        poll();
+        if (frame > 30 && pad_.pressed(ds2::cross)) break;
+        auto back = begin_frame();
+        text_overlay.draw(*display_.device, back.get(), 960, 544, lines, 40, 120, 2);
+        if (frame == 60) capture(back.get(), "capture_notice");
+        end_frame(started);
+    }
+}
+
+void App::no_disc(int frames) {
+    std::vector<GuiVertexHost> v;
+    gfx::BufferDesc bd;
+    bd.bytes = 64 * 6 * sizeof(GuiVertexHost);
+    bd.usage = gfx::Usage::dynamic;
+    bd.bind = gfx::bind_vertices;
+    auto& device = *display_.device;
+    const auto vertices = device.create_buffer(bd, nullptr, "no-disc vertices");
+    gfx::TextureDesc wd;
+    wd.width = wd.height = 1;
+    wd.usage = gfx::Usage::immutable;
+    wd.bind = gfx::bind_sampled;
+    const std::uint32_t white = 0xffffffffU;
+    const gfx::Level level{&white, 4};
+    const auto image = device.create_texture(wd, &level, {});
+    const auto sampler = device.create_sampler({}, "sampler");
+    for (int frame = 0; frame < frames && !quit_; ++frame) {
+        const double started = now_seconds();
+        poll();
+        auto back = begin_frame();
+        v.clear();
+        const float t = float(frame) / 60.0F;
+        const float bar[4]{0.8F, 0.2F, 0.1F, 1.0F};
+        quad(v, -300, -20, -300 + 600 * std::fmod(t / 4.0F, 1.0F), 20, bar);
+        for (int b = 0; b < 16; ++b) {
+            const float on[4]{0.9F, 0.9F, 0.9F, 1.0F}, off[4]{0.2F, 0.25F, 0.3F, 1.0F};
+            quad(v, -300 + b * 37.5F, 60, -270 + b * 37.5F, 90, (pad_.held >> b & 1) ? on : off);
+        }
+        device.write(*vertices, v.data(), v.size() * sizeof v[0], "no-disc vertices");
+        gfx::CommandList list;
+        list.set_target(back.get());
+        list.set_viewport({0, 0, 960, 544, 0, 1});
+        list.set_program(gfx::Program::gui);
+        list.set_vertex_buffer(vertices.get(), sizeof(GuiVertexHost));
+        list.set_texture(0, image.get());
+        list.set_sampler(0, sampler.get());
+        list.draw(static_cast<std::uint32_t>(v.size()), 0);
+        device.submit(list);
+        if (frame == 120) capture(back.get(), "capture_no_disc");
+        end_frame(started);
+    }
+    report("no disc: pad test");
+}
+
+// Port-only (132vt2a, research/VITA.md "Movies"): the movie path's ARM-only code checked at boot against the
+// reference on this CPU: idct_8x8_fast vs idct_8x8 on pseudo-random and extreme blocks, frame_to_rgba (NEON) vs
+// frame_to_rgb on pseudo-random frames of two sizes; then their speeds (logged).
+void movie_check() {
+    std::uint32_t seed = 132;
+    const auto rnd = [&] {
+        seed = seed * 1103515245u + 12345u;
+        return static_cast<int>((seed >> 16) & 0x7fff);
+    };
+    std::array<std::int32_t, 64> f{}, a{}, b{};
+    int idct_bad = 0;
+    for (int trial = 0; trial < 4000; ++trial) {
+        const int range = trial % 3 == 0 ? 256 : trial % 3 == 1 ? 2049 : 16000;
+        for (auto& v : f) v = rnd() % (1 + trial % 6) == 0 ? rnd() % (2 * range + 1) - range : 0;
+        if (trial % 50 == 0)
+            for (int i = 0; i < 64; ++i) f[i] = (mpeg2::idct_basis[i & 7][0] < 0) != (mpeg2::idct_basis[i >> 3][0] < 0) ? -2049 : 2049;
+        mpeg2::idct_8x8(f.data(), a.data());
+        mpeg2::idct_8x8_fast(f.data(), b.data());
+        idct_bad += a != b;
+    }
+    // 132vt2a2: the decoder's NEON IDCT (16-bit, the dequantiser's -2048..2047) against idct_8x8.
+    int neon_bad = 0;
+    std::array<std::int16_t, 64> f16{}, o16{};
+    for (int trial = 0; trial < 4000; ++trial) {
+        const int range = trial % 3 == 0 ? 256 : 2048;
+        for (auto& v : f) v = rnd() % (1 + trial % 6) == 0 ? std::clamp(rnd() % (2 * range + 1) - range, -2048, 2047) : 0;
+        if (trial % 50 == 0)
+            for (int i = 0; i < 64; ++i)
+                f[i] = (mpeg2::idct_basis[i & 7][0] < 0) != (mpeg2::idct_basis[i >> 3][0] < 0) ? -2048 : 2047;
+        if (trial % 50 == 25)
+            for (int i = 0; i < 64; ++i) f[i] = (trial / 50) % 2 ? 2047 : -2048;
+        for (int i = 0; i < 64; ++i) f16[std::size_t(i)] = static_cast<std::int16_t>(f[std::size_t(i)]);
+        mpeg2::idct_8x8(f.data(), a.data());
+        mpeg2::idct_8x8_neon(f16.data(), o16.data());
+        bool same = true;
+        for (int i = 0; i < 64; ++i) same = same && a[std::size_t(i)] == o16[std::size_t(i)];
+        neon_bad += !same;
+    }
+    int rgba_bad = 0;
+    for (const auto [w, h] : {std::pair{96, 64}, std::pair{50, 30}}) {
+        mpeg2::Frame frame;
+        frame.width = w;
+        frame.height = h;
+        frame.y.resize(std::size_t(w) * h);
+        frame.u.resize(std::size_t((w + 1) / 2) * ((h + 1) / 2));
+        frame.v.resize(frame.u.size());
+        for (auto& v : frame.y) v = std::uint8_t(rnd());
+        for (auto& v : frame.u) v = std::uint8_t(rnd());
+        for (auto& v : frame.v) v = std::uint8_t(rnd());
+        const auto rgb = movie::frame_to_rgb(frame);
+        std::vector<std::uint8_t> rgba;
+        movie::frame_to_rgba(frame, rgba);
+        for (std::size_t i = 0; i < std::size_t(w) * h; ++i)
+            rgba_bad += rgba[4 * i] != rgb[3 * i] || rgba[4 * i + 1] != rgb[3 * i + 1] || rgba[4 * i + 2] != rgb[3 * i + 2] ||
+                        rgba[4 * i + 3] != 255;
+    }
+    // Speeds: 6720 coded blocks (one 640 x 448 picture's worth) of a typical mix, and one 640 x 448 conversion.
+    std::vector<std::array<std::int32_t, 64>> blocks(6720);
+    for (std::size_t k = 0; k < blocks.size(); ++k) {
+        blocks[k].fill(0);
+        const int n = k % 4 == 0 ? 1 : 2 + int(k % 12);
+        for (int i = 0; i < n; ++i) blocks[k][rnd() % (i < 3 ? 10 : 64)] = rnd() % 401 - 200;
+        if (k % 2) blocks[k][63] ^= 1;
+    }
+    double t = now_seconds();
+    for (const auto& blk : blocks) mpeg2::idct_8x8(blk.data(), a.data());
+    const double ref_ms = (now_seconds() - t) * 1000.0;
+    t = now_seconds();
+    for (const auto& blk : blocks) mpeg2::idct_8x8_fast(blk.data(), b.data());
+    const double fast_ms = (now_seconds() - t) * 1000.0;
+    std::vector<std::array<std::int16_t, 64>> blocks16(blocks.size());
+    for (std::size_t k = 0; k < blocks.size(); ++k)
+        for (int i = 0; i < 64; ++i) blocks16[k][std::size_t(i)] = static_cast<std::int16_t>(blocks[k][std::size_t(i)]);
+    t = now_seconds();
+    for (const auto& blk : blocks16) mpeg2::idct_8x8_neon(blk.data(), o16.data());
+    const double neon_ms = (now_seconds() - t) * 1000.0;
+    mpeg2::Frame big;
+    big.width = 640;
+    big.height = 448;
+    big.y.assign(640 * 448, 100);
+    big.u.assign(320 * 224, 120);
+    big.v.assign(320 * 224, 140);
+    std::vector<std::uint8_t> rgba;
+    movie::frame_to_rgba(big, rgba);
+    t = now_seconds();
+    movie::frame_to_rgba(big, rgba);
+    const double rgba_ms = (now_seconds() - t) * 1000.0;
+    log("movie check (132vt2a / 132vt2a2): idct_8x8_fast %s (%d of 4000 blocks differ), idct_8x8_neon %s (%d of 4000 "
+        "blocks differ), frame_to_rgba %s (%d pixels differ); 6720 blocks: idct_8x8 %.1f ms, idct_8x8_fast %.1f ms, "
+        "idct_8x8_neon %.1f ms; 640 x 448 RGBA %.1f ms",
+        idct_bad ? "FAILED" : "matches", idct_bad, neon_bad ? "FAILED" : "matches", neon_bad,
+        rgba_bad ? "FAILED" : "matches", rgba_bad, ref_ms, fast_ms, neon_ms, rgba_ms);
+}
+
+// Port-only (research/VITA.md "Audio"): the sound host's GameSoundHost calls under the lock the sound pump mixes under,
+// so gameSound (on the simulation thread) and the mix (on the pump thread) never touch the host at once. Every call is
+// forwarded unchanged; the lock is recursive because a 003a85e0 reply re-enters the host through the manager.
+class LockedSoundHost final : public GameSoundHost {
+public:
+    LockedSoundHost(SoundIopHost& host, std::recursive_mutex& lock) : h_(host), m_(lock) {}
+    using Guard = std::lock_guard<std::recursive_mutex>;
+    std::uint32_t owner_serial(std::uint32_t o) override { Guard g(m_); return h_.owner_serial(o); }
+    GameSoundOwnerView owner_view(std::uint32_t o) override { Guard g(m_); return h_.owner_view(o); }
+    std::uint8_t owner_state_108(std::uint32_t o) override { Guard g(m_); return h_.owner_state_108(o); }
+    void owner_clear_2dc8(std::uint32_t o) override { Guard g(m_); h_.owner_clear_2dc8(o); }
+    void lip_sync_391810(std::uint32_t o, const GameSoundResource& r) override { Guard g(m_); h_.lip_sync_391810(o, r); }
+    std::optional<std::array<float, 4>> listener_4ffc0c() override { Guard g(m_); return h_.listener_4ffc0c(); }
+    std::optional<GameSoundCamera> camera_4ffc14() override { Guard g(m_); return h_.camera_4ffc14(); }
+    bool hud_4ffc2c() override { Guard g(m_); return h_.hud_4ffc2c(); }
+    void subtitle_245e00(const std::array<std::uint8_t, 16>& n) override { Guard g(m_); h_.subtitle_245e00(n); }
+    std::string level_name_4ffc90() override { Guard g(m_); return h_.level_name_4ffc90(); }
+    std::uint8_t language_55d470() override { Guard g(m_); return h_.language_55d470(); }
+    std::uint8_t game_mode_4ffba0() override { Guard g(m_); return h_.game_mode_4ffba0(); }
+    bool multiplayer_5721c8() override { Guard g(m_); return h_.multiplayer_5721c8(); }
+    std::uint32_t output_mode_4ffd2c_14() override { Guard g(m_); return h_.output_mode_4ffd2c_14(); }
+    GameSoundHog open_hog_3f96e0(const std::string& p) override { Guard g(m_); return h_.open_hog_3f96e0(p); }
+    void load_lpd_3eae60(std::size_t s, const GameSoundResource& r) override { Guard g(m_); h_.load_lpd_3eae60(s, r); }
+    void release_lpd_3eaa60(std::size_t s, const GameSoundResource& r) override { Guard g(m_); h_.release_lpd_3eaa60(s, r); }
+    void schedule_3ea1d0(std::int32_t d, std::function<void()> e) override { Guard g(m_); h_.schedule_3ea1d0(d, std::move(e)); }
+    std::int32_t snd(std::uint32_t a, const std::vector<std::int32_t>& args) override { Guard g(m_); return h_.snd(a, args); }
+
+private:
+    SoundIopHost& h_;
+    std::recursive_mutex& m_;
+};
+
+// Port-only (research/VITA.md "Audio"): the sound mix on its own thread (core 2, the audio priority), pulled by the
+// output instead of pushed by the simulation frame. The Windows hosts mix 800 frames per 60 Hz simulation step, which
+// only keeps a real-time output fed while every step takes under 16.7 ms; on the handheld a slow frame (the agent
+// screen's 40 ms) starved SceAudioOut. As the PS2's SPU2 / IOP run on their own clock beside the EE, the pump keeps
+// the device's queue at `target` frames by mixing 512-frame grains (SoundIopHost::mix, unchanged) as the output
+// drains it. While a movie plays the window plays the movie's PCM instead; the pump then mixes on the wall clock and
+// drops the result, as the window drops the mix during a movie. The movie's PCM (132vt2a): the simulation thread
+// hands it over without waiting (push_movie; a picture's read brings up to ~0.75 s at once, which the device's
+// blocking submit used to wait out on the simulation thread) and the pump feeds it to the device as the output drains
+// it, keeping `target` frames queued; what is left when the movie ends is dropped (the window's device goes on to the
+// sound mix the same way). The movie's clock (132vt2a2): movie_begin starts it, movie_played_seconds is the movie PCM
+// fed to the device less what it still holds, the sound heard so far; AheadMovie paces the pictures by it.
+class SoundPump {
+public:
+    static constexpr std::size_t grain = 512;
+    SoundPump(SoundIopHost& host, std::recursive_mutex& lock, audio::Device& device, std::size_t target)
+        : host_(host), lock_(lock), device_(device), target_(target), thread_([this] { run(); }) {}
+    ~SoundPump() {
+        stop_ = true;
+        thread_.join();
+    }
+    void set_movie(bool on) {
+        // 132vt2a2: the end of a movie drops its PCM here, on the caller's thread, before the next movie's decode can
+        // push any (the pump thread's own check came later and could drop the next movie's first second).
+        if (movie_.exchange(on) && !on) drop_movie();
+    }
+    // A movie's interleaved stereo PCM, queued for the device (never waits).
+    void push_movie(const std::vector<std::int16_t>& pcm) {
+        std::lock_guard<std::mutex> g(fifo_lock_);
+        fifo_.insert(fifo_.end(), pcm.begin(), pcm.end());
+        movie_pushed_ += pcm.size() / 2;
+    }
+    // A new movie (132vt2a2): drops any movie PCM still waiting and restarts the movie clock.
+    void movie_begin() {
+        drop_movie();
+        clock_fed_ = 0;
+    }
+    // The movie's PCM heard since movie_begin, in seconds (fed to the device less what it still queues).
+    double movie_played_seconds() {
+        const std::uint64_t fed = clock_fed_;
+        const std::uint64_t queued = device_.stats().queued_frames;
+        return double(fed - std::min(queued, fed)) / audio::Mixer::output_rate;
+    }
+    // Movie PCM pushed and not yet heard (the pump's FIFO and the device's queue), in frames.
+    std::size_t movie_buffered() { return movie_waiting() + device_.stats().queued_frames; }
+    int take_peak() { return peak_.exchange(0); }
+    std::uint64_t mixed() const { return mixed_; }
+    double busy_seconds() const { return busy_us_ * 1e-6; }
+    // Movie PCM: frames pushed, fed to the device, dropped at a movie's end, and queued in the pump now.
+    std::uint64_t movie_pushed() const { return movie_pushed_; }
+    std::uint64_t movie_fed() const { return movie_fed_; }
+    std::uint64_t movie_dropped() const { return movie_dropped_; }
+    std::size_t movie_waiting() {
+        std::lock_guard<std::mutex> g(fifo_lock_);
+        return (fifo_.size() - fifo_read_) / 2;
+    }
+
+private:
+    // Up to one grain of the movie's PCM into `out`; false when none is waiting.
+    bool take_movie(std::vector<std::int16_t>& out) {
+        std::lock_guard<std::mutex> g(fifo_lock_);
+        const std::size_t n = std::min(fifo_.size() - fifo_read_, grain * 2);
+        if (!n) return false;
+        out.assign(fifo_.begin() + std::ptrdiff_t(fifo_read_), fifo_.begin() + std::ptrdiff_t(fifo_read_ + n));
+        fifo_read_ += n;
+        if (fifo_read_ >= 1 << 18) {
+            fifo_.erase(fifo_.begin(), fifo_.begin() + std::ptrdiff_t(fifo_read_));
+            fifo_read_ = 0;
+        }
+        return true;
+    }
+    void drop_movie() {
+        std::lock_guard<std::mutex> g(fifo_lock_);
+        movie_dropped_ += (fifo_.size() - fifo_read_) / 2;
+        fifo_.clear();
+        fifo_read_ = 0;
+    }
+    void run() {
+        enter_thread_role(ThreadRole::audio, "sound mix");
+        std::vector<std::int16_t> pcm, movie_pcm;
+        bool was_movie = false;
+        double base = now_seconds();
+        std::uint64_t base_mixed = 0;
+        while (!stop_) {
+            const bool movie = movie_;
+            if (movie != was_movie) {
+                was_movie = movie;
+                base = now_seconds();
+                base_mixed = mixed_;
+            }
+            bool worked = false;
+            if (movie) {
+                // The device holds prime x 2 = 6144 frames: below `target` a grain always fits, so this never waits.
+                while (device_.stats().queued_frames < target_ && take_movie(movie_pcm)) {
+                    device_.submit(movie_pcm);
+                    movie_fed_ += movie_pcm.size() / 2;
+                    clock_fed_ += movie_pcm.size() / 2;
+                    worked = true;
+                }
+            }
+            const bool due = movie ? (now_seconds() - base) * audio::Mixer::output_rate >= double(mixed_ - base_mixed + grain)
+                                   : device_.stats().queued_frames < target_;
+            if (!due) {
+                if (!worked) sceKernelDelayThread(2000);
+                continue;
+            }
+            const std::uint64_t t0 = sceKernelGetProcessTimeWide();
+            {
+                ThreadBusyScope busy;
+                pcm.clear();
+                if (!failed_) {
+                    // A sound host error ends the mix (logged; silence from then on) instead of std::terminate on
+                    // this thread.
+                    try {
+                        std::lock_guard<std::recursive_mutex> g(lock_);
+                        host_.mix(grain, pcm);
+                    } catch (const std::exception& e) {
+                        failed_ = true;
+                        log("sound mix: stopped (%s); the sound is silent from here", e.what());
+                    }
+                }
+                pcm.resize(grain * 2, 0);
+                mixed_ += grain;
+            }
+            busy_us_ += sceKernelGetProcessTimeWide() - t0;
+            if (movie) continue;
+            int p = 0;
+            for (const std::int16_t v : pcm) p = std::max(p, std::abs(int(v)));
+            for (int seen = peak_.load(); p > seen && !peak_.compare_exchange_weak(seen, p);) {}
+            device_.submit(pcm);
+        }
+    }
+    SoundIopHost& host_;
+    std::recursive_mutex& lock_;
+    audio::Device& device_;
+    const std::size_t target_;
+    std::atomic<bool> stop_{false}, movie_{false};
+    bool failed_ = false;
+    std::atomic<int> peak_{0};
+    std::atomic<std::uint64_t> mixed_{0}, busy_us_{0};
+    std::mutex fifo_lock_;
+    std::vector<std::int16_t> fifo_;
+    std::size_t fifo_read_ = 0;
+    std::atomic<std::uint64_t> movie_pushed_{0}, movie_fed_{0}, movie_dropped_{0}, clock_fed_{0};
+    std::thread thread_;
+};
+
+// Port-only (132vt2a2, research/VITA.md "Movies"): the movie's parallel work on the cores the front end leaves idle
+// while a movie plays. Two helper threads (core 0 and core 1, below every other thread there) and the calling thread
+// run a batch's jobs, each index once; run returns when all are done. The MPEG-2 decoder's slices
+// (mpeg2::Decoder::set_slice_runner: a picture's slices are independent and write their own macroblocks) and the
+// RGBA conversion's 16-row bands (frame_to_rgba_rows) go through it: the same bytes, from up to three cores.
+class MoviePool {
+public:
+    static MoviePool& get() {
+        static MoviePool* pool = new MoviePool();   // never destroyed: its helpers live as long as the app
+        return *pool;
+    }
+    // job(0) .. job(count - 1) on the helpers and this thread; the jobs must not throw.
+    void run(int count, const std::function<void(int)>& job) {
+        if (count <= 1) {
+            if (count == 1) job(0);
+            return;
+        }
+        Batch b;
+        b.count = count;
+        b.job = &job;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            batches_.push_back(&b);
+        }
+        cv_.notify_all();
+        const int did = work(b);
+        std::unique_lock<std::mutex> lock(mutex_);
+        b.done += did;
+        done_cv_.wait(lock, [&] { return b.done == b.count && b.users == 0; });
+        batches_.erase(std::find(batches_.begin(), batches_.end(), &b));
+    }
+
+private:
+    struct Batch {
+        int count = 0;
+        const std::function<void(int)>* job = nullptr;
+        std::atomic<int> next{0};
+        int done = 0, users = 0;   // under mutex_
+    };
+    MoviePool() {
+        for (const unsigned core : {0u, 1u}) std::thread([this, core] { helper(core); }).detach();
+    }
+    static int work(Batch& b) {
+        int did = 0;
+        for (int i; (i = b.next.fetch_add(1)) < b.count; ++did) (*b.job)(i);
+        return did;
+    }
+    void helper(unsigned core) {
+        enter_thread_role(core == 0 ? ThreadRole::simulation : ThreadRole::render, "movie helper " + std::to_string(core));
+        sceKernelChangeThreadPriority(sceKernelGetThreadId(), 165);   // below the movie colour thread's 160
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;) {
+            Batch* b = nullptr;
+            cv_.wait(lock, [&] {
+                for (Batch* x : batches_)
+                    if (x->next.load() < x->count) {
+                        b = x;
+                        return true;
+                    }
+                return false;
+            });
+            ++b->users;
+            lock.unlock();
+            const int did = work(*b);
+            lock.lock();
+            --b->users;
+            b->done += did;
+            if (b->done == b->count && b->users == 0) done_cv_.notify_all();
+        }
+    }
+    std::mutex mutex_;
+    std::condition_variable cv_, done_cv_;
+    std::vector<Batch*> batches_;
+};
+
+// frame_to_rgba through the movie pool, in 16-row bands (frame_to_rgba_rows: the same bytes).
+void movie_rgba_banded(const mpeg2::Frame& frame, std::vector<std::uint8_t>& out) {
+    out.resize(std::size_t(std::max(frame.width, 0)) * std::max(frame.height, 0) * 4);
+    std::exception_ptr error;
+    std::mutex error_lock;
+    MoviePool::get().run((frame.height + 15) / 16, [&](int band) {
+        try {
+            movie::frame_to_rgba_rows(frame, out.data(), band * 16, std::min(frame.height, band * 16 + 16));
+        } catch (...) {
+            std::lock_guard<std::mutex> g(error_lock);
+            if (!error) error = std::current_exception();
+        }
+    });
+    if (error) std::rethrow_exception(error);
+}
+
+// Port-only (132vt2a / 132vt2a2, research/VITA.md "Movies"): a movie decoded ahead of the session. The front end's
+// movie player (FrontendSession::fn_3f8220) asks for a picture every second 60 Hz frame and used to decode it there,
+// ~45 ms for one 640 x 448 MPEG-2 picture on the handheld's simulation thread, then convert it to RGBA (~40 ms more)
+// in the same frame: 10-15 pictures a second. Here one thread ("movie decode", the loader's core 2) runs the movie's
+// own next_frame / audio_format / take_audio in the session's order, its slices spread over the movie pool, and a
+// second ("movie colour", core 0 below the simulation thread, which idles in end_frame while a movie plays) converts
+// each picture to RGBA in bands over the pool, a few pictures ahead. The audio (132vt2a2) goes from the decode thread
+// straight to the sound pump, and the decode thread reads the container ahead of the pictures (read_ahead) to keep
+// about a second of it there, so a slow picture never starves the sound. The sound is the clock: the session's
+// next_frame hands over the picture due at the movie PCM heard so far (SoundPump::movie_played_seconds, 30000 / 1001
+// pictures a second), holding the shown one while the next is not due (repeated_picture: the session's serial stays)
+// and skipping pictures that are late; without the movie's sound the wall clock from the first picture paces them.
+// The pictures, their order, the audio and the end are the movie's own; only when they are produced and which are
+// shown when moves.
+class AheadMovie final : public movie::MovieStream {
+public:
+    explicit AheadMovie(std::unique_ptr<movie::MovieStream> inner, std::string name)
+        : inner_(std::move(inner)), name_(std::move(name)), aspect_(inner_->picture_aspect()), sink_(audio_sink_) {
+        if (active_) active_->stop();
+        active_ = this;
+        if (sink_) sink_->movie_begin();
+        decode_thread_ = std::thread([this] { decode(); });
+        colour_thread_ = std::thread([this] { colour(); });
+    }
+    ~AheadMovie() override {
+        stop();
+        if (active_ == this) active_ = nullptr;
+        log("movie %s (decoded ahead, 132vt2a2): %llu pictures decoded, %llu shown, %llu skipped late, %llu held; "
+            "decode %.1f ms mean (%.1f max), RGBA %.1f ms mean (%.1f max); paced by %s; audio read ahead %llu times; "
+            "the decoder was behind the clock %u times",
+            name_.c_str(), static_cast<unsigned long long>(pictures_), static_cast<unsigned long long>(shown_),
+            static_cast<unsigned long long>(skipped_), static_cast<unsigned long long>(held_),
+            pictures_ ? decode_ms_ / pictures_ : 0.0, decode_max_, pictures_ ? colour_ms_ / pictures_ : 0.0, colour_max_,
+            audio_fed_ ? "the movie's sound" : "the wall clock", static_cast<unsigned long long>(read_aheads_.load()),
+            behind_);
+    }
+    // The movie being shown (null when none).
+    static AheadMovie* active() { return active_; }
+    // Stops the shown movie's threads (before the next movie opens: the disc's movies share one stream).
+    static void stop_active() {
+        if (active_) active_->stop();
+    }
+    // The sound pump the movies' 48 kHz stereo PCM goes to (null: the session's take_audio hands it over).
+    static void set_audio_sink(SoundPump* sink) { audio_sink_ = sink; }
+
+    bool next_frame(mpeg2::Frame& frame) override {
+        repeated_ = false;
+        // The end (or an error) stays the answer: the decode thread has stopped.
+        if (current_ && current_->error) std::rethrow_exception(current_->error);
+        if (current_ && current_->ended) return false;
+        std::unique_ptr<Item> next;
+        std::vector<std::unique_ptr<Item>> late;
+        if (!current_) {
+            // The first picture is waited for (the movie's start); the clock starts when it is shown.
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (ready_.empty()) cv_.wait(lock, [this] { return stop_ || !ready_.empty(); });
+            if (ready_.empty()) return false;   // stopped (the next movie opened)
+            next = std::move(ready_.front());
+            ready_.pop_front();
+            start_ = now_seconds();
+            audio_changed_ = start_;
+        } else {
+            const auto due = static_cast<std::uint64_t>(std::max(0.0, clock() * (30000.0 / 1001.0)));
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (current_->index >= due) {
+                // The shown picture is still due: held.
+            } else if (ready_.empty()) {
+                ++behind_;
+            } else {
+                while (!ready_.empty() && (!next || ready_.front()->index <= due)) {
+                    if (next) late.push_back(std::move(next));
+                    next = std::move(ready_.front());
+                    ready_.pop_front();
+                    if (next->ended || next->error) break;
+                }
+            }
+        }
+        if (!next) {
+            ++held_;
+            repeated_ = true;
+            return true;
+        }
+        skipped_ += late.size();
+        for (auto& item : late) recycle(std::move(item));
+        if (current_) recycle(std::move(current_));
+        cv_.notify_all();
+        current_ = std::move(next);
+        if (current_->error) std::rethrow_exception(current_->error);
+        if (current_->ended) return false;
+        std::swap(frame, current_->frame);
+        aspect_ = current_->aspect;
+        if (++shown_ % 300 == 0)
+            log("movie %s: %llu pictures shown (%llu skipped late, %llu held); decode %.1f ms mean, RGBA %.1f ms mean; "
+                "clock %.2f s; movie PCM buffered %u frames",
+                name_.c_str(), static_cast<unsigned long long>(shown_), static_cast<unsigned long long>(skipped_),
+                static_cast<unsigned long long>(held_), pictures_ ? decode_ms_ / pictures_ : 0.0,
+                pictures_ ? colour_ms_ / pictures_ : 0.0, clock(), sink_ ? unsigned(sink_->movie_buffered()) : 0u);
+        return true;
+    }
+    bool repeated_picture() const override { return repeated_; }
+    bool audio_format(int& rate, int& channels) override {
+        if (!current_ || !current_->has_format) return false;
+        rate = current_->rate;
+        channels = current_->channels;
+        return true;
+    }
+    void take_audio(std::vector<std::int16_t>& out) override {
+        if (!current_) return;
+        out.insert(out.end(), current_->audio.begin(), current_->audio.end());
+        current_->audio.clear();
+    }
+    float picture_aspect() const override { return aspect_; }
+    // The RGBA of the picture next_frame handed over (frame_to_rgba's), swapped into `out`; false when there is none.
+    bool take_rgba(std::vector<std::uint8_t>& out) {
+        if (!current_ || current_->ended || current_->rgba.empty()) return false;
+        std::swap(out, current_->rgba);
+        current_->rgba.clear();
+        return true;
+    }
+
+private:
+    struct Item {
+        mpeg2::Frame frame;
+        std::vector<std::int16_t> audio;
+        std::vector<std::uint8_t> rgba;
+        bool ended = false, has_format = false;
+        int rate = 0, channels = 0;
+        float aspect = 0.0F;
+        std::uint64_t index = 0;   // the picture's number in the movie (the end: one past the last)
+        std::exception_ptr error;
+    };
+    static constexpr std::size_t depth = 4;               // pictures decoded or converted ahead of the session
+    static constexpr std::size_t audio_ahead = 48000;     // movie PCM kept buffered ahead of the sound heard (1 s)
+
+    // The movie's time (seconds) the shown picture should be at: the movie PCM heard; when it has not moved for
+    // 0.15 s (not started yet, starved, or the sound ended before the pictures) the wall clock from its last value.
+    double clock() {
+        const double wall = now_seconds();
+        if (!sink_ || !audio_fed_) return wall - start_;
+        const double heard = sink_->movie_played_seconds();
+        if (heard != audio_last_) {
+            audio_last_ = heard;
+            audio_changed_ = wall;
+        }
+        return wall - audio_changed_ < 0.15 ? heard : audio_last_ + (wall - audio_changed_);
+    }
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (decode_thread_.joinable()) decode_thread_.join();
+        if (colour_thread_.joinable()) colour_thread_.join();
+    }
+    void recycle(std::unique_ptr<Item> item) {
+        item->audio.clear();
+        item->ended = item->has_format = false;
+        item->error = nullptr;
+        std::lock_guard<std::mutex> lock(mutex_);
+        free_.push_back(std::move(item));
+    }
+    // The movie's PCM just taken from inner_ (decode thread): to the sound pump once the format is known and is the
+    // window's 48 kHz stereo; other formats are dropped (as front_end drops them). Kept in `pcm` without a pump.
+    void deliver(std::vector<std::int16_t>& pcm) {
+        if (!sink_) return;
+        if (!format_) {
+            int rate = 0, channels = 0;
+            if (inner_->audio_format(rate, channels)) format_ = rate == 48000 && channels == 2 ? 1 : 2;
+        }
+        if (!format_) {
+            early_pcm_.insert(early_pcm_.end(), pcm.begin(), pcm.end());
+        } else if (format_ == 1) {
+            if (!early_pcm_.empty()) {
+                sink_->push_movie(early_pcm_);
+                early_pcm_.clear();
+            }
+            if (!pcm.empty()) {
+                sink_->push_movie(pcm);
+                audio_fed_ = true;
+            }
+        }
+        pcm.clear();
+    }
+    // Reads the container ahead of the pictures while less than audio_ahead frames of its sound wait to be heard.
+    void top_up(std::vector<std::int16_t>& pcm) {
+        while (sink_ && !ahead_done_ && !stop_ && sink_->movie_buffered() < audio_ahead) {
+            try {
+                if (!inner_->read_ahead()) {
+                    ahead_done_ = true;
+                    return;
+                }
+                inner_->take_audio(pcm);
+                deliver(pcm);
+                ++read_aheads_;
+            } catch (...) {
+                ahead_done_ = true;   // next_frame meets the error in its own read
+            }
+        }
+    }
+    void decode() {
+        enter_thread_role(ThreadRole::loader, "movie decode");
+        std::vector<std::int16_t> pcm;
+        std::uint64_t index = 0;
+        for (bool ended = false; !ended;) {
+            top_up(pcm);
+            std::unique_ptr<Item> item;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                const auto room = [this] { return decoded_.size() + ready_.size() + converting_ < depth; };
+                if (!stop_ && !room()) cv_.wait_for(lock, std::chrono::milliseconds(20), [&] { return stop_ || room(); });
+                if (stop_) return;
+                if (!room()) continue;   // the sound topped up again meanwhile
+                if (!free_.empty()) {
+                    item = std::move(free_.back());
+                    free_.pop_back();
+                }
+            }
+            if (!item) item = std::make_unique<Item>();
+            const double t = now_seconds();
+            try {
+                item->ended = !inner_->next_frame(item->frame);
+                item->has_format = inner_->audio_format(item->rate, item->channels);
+                inner_->take_audio(item->audio);
+                deliver(item->audio);
+                item->aspect = inner_->picture_aspect();
+            } catch (...) {
+                item->error = std::current_exception();
+            }
+            ended = item->ended || item->error;
+            item->index = index;
+            if (!ended) ++index;
+            const double ms = (now_seconds() - t) * 1000.0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!ended) {
+                    decode_ms_ += ms;
+                    decode_max_ = std::max(decode_max_, ms);
+                    ++pictures_;
+                }
+                decoded_.push_back(std::move(item));
+            }
+            cv_.notify_all();
+        }
+    }
+    void colour() {
+        enter_thread_role(ThreadRole::simulation, "movie colour");
+        sceKernelChangeThreadPriority(sceKernelGetThreadId(), 160);   // below the simulation thread's 128
+        for (bool ended = false; !ended;) {
+            std::unique_ptr<Item> item;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return stop_ || !decoded_.empty(); });
+                if (stop_) return;
+                item = std::move(decoded_.front());
+                decoded_.pop_front();
+                ++converting_;
+            }
+            ended = item->ended || item->error;
+            double ms = 0.0;
+            if (!ended) {
+                const double t = now_seconds();
+                try {
+                    movie_rgba_banded(item->frame, item->rgba);
+                } catch (...) {
+                    item->error = std::current_exception();
+                    ended = true;
+                }
+                ms = (now_seconds() - t) * 1000.0;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                --converting_;
+                colour_ms_ += ms;
+                colour_max_ = std::max(colour_max_, ms);
+                ready_.push_back(std::move(item));
+            }
+            cv_.notify_all();
+        }
+    }
+
+    static inline AheadMovie* active_ = nullptr;
+    static inline SoundPump* audio_sink_ = nullptr;
+    std::unique_ptr<movie::MovieStream> inner_;
+    const std::string name_;
+    float aspect_;
+    SoundPump* const sink_;
+    // The session's side only.
+    std::unique_ptr<Item> current_;
+    bool repeated_ = false;
+    double start_ = 0.0, audio_last_ = -1.0, audio_changed_ = 0.0;
+    std::uint64_t shown_ = 0, skipped_ = 0, held_ = 0;
+    unsigned behind_ = 0;
+    // The decode thread's side only.
+    int format_ = 0;   // 0 unknown, 1 the pump's 48 kHz stereo, 2 another (dropped)
+    std::vector<std::int16_t> early_pcm_;
+    bool ahead_done_ = false;
+    std::atomic<std::uint64_t> read_aheads_{0};
+    std::atomic<bool> audio_fed_{false};
+    // Shared, under mutex_.
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<std::unique_ptr<Item>> decoded_, ready_, free_;
+    std::size_t converting_ = 0;
+    std::atomic<bool> stop_{false};
+    std::uint64_t pictures_ = 0;
+    double decode_ms_ = 0.0, decode_max_ = 0.0, colour_ms_ = 0.0, colour_max_ = 0.0;
+    std::thread decode_thread_, colour_thread_;
+};
+
+// Port-only (132vt2a2, research/VITA.md "Movies"): INTRO's first pictures through the decoder as the movies run here
+// (the NEON paths, the slices over the movie pool) against tests/movie_tests.cpp's CRC of the sequential reference
+// decode (test_movie_parallel_slices); logged with the decode's speed.
+constexpr std::uint32_t intro_head_crc = 0x84dfc728u;
+constexpr int intro_head_pictures = 45;
+void intro_check(const std::function<std::unique_ptr<movie::MovieStream>(const std::string&)>& open) {
+    const double start = now_seconds();
+    try {
+        auto m = open ? open("INTRO.PSS") : nullptr;
+        if (!m) {
+            log("movie check (132vt2a2): INTRO.PSS not opened; the decode check is skipped");
+            return;
+        }
+        std::uint32_t crc = 0;
+        int n = 0;
+        double decode_ms = 0.0, worst = 0.0;
+        mpeg2::Frame f;
+        for (; n < intro_head_pictures; ++n) {
+            const double t = now_seconds();
+            if (!m->next_frame(f)) break;
+            const double ms = (now_seconds() - t) * 1000.0;
+            decode_ms += ms;
+            worst = std::max(worst, ms);
+            const std::uint32_t c = movie::frame_crc32(f);
+            const std::uint8_t b[4]{std::uint8_t(c), std::uint8_t(c >> 8), std::uint8_t(c >> 16), std::uint8_t(c >> 24)};
+            crc = movie::crc32(b, crc);
+        }
+        const bool ok = n == intro_head_pictures && crc == intro_head_crc;
+        log("movie check (132vt2a2): INTRO's first %d pictures %s (CRC %08x, the reference decode's %08x); decode %.1f ms "
+            "a picture mean (%.1f max, the slices over the movie pool, beside the front end's load); %.2f s",
+            n, ok ? "match" : "DIFFER", crc, intro_head_crc, n ? decode_ms / n : 0.0, worst, now_seconds() - start);
+    } catch (const std::exception& e) {
+        log("movie check (132vt2a2): INTRO decode failed: %s", e.what());
+    }
+}
+
+// Port-only (research/VITA.md "Widescreen", 132ws): the frame aspect. The Vita defaults to wide (the 960 x 544
+// screen is 16:9); ux0:data/omega_strain/port_settings.txt, when present, is read as the PC's port settings file and
+// its aspect= / hud_margin= / movie_fill= / movies= / fov= apply (aspect= wins over the default). A malformed file: logged, defaults kept.
+void apply_display_settings() {
+    const std::string path = std::string(vita_data_root) + "/port_settings.txt";
+    DisplaySettings display;
+    bool has_aspect = false;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::string text;
+        char chunk[1024];
+        for (std::size_t n; (n = std::fread(chunk, 1, sizeof chunk, f)) > 0;) text.append(chunk, n);
+        std::fclose(f);
+        try {
+            const PortSettings settings = parse_port_settings(text);
+            display = display_settings(settings);
+            for (const auto& [key, value] : settings.other) has_aspect = has_aspect || key == "aspect";
+        } catch (const std::exception& e) {
+            display = DisplaySettings{};
+            has_aspect = false;
+            log("display settings: %s: %s; the defaults are used", path.c_str(), e.what());
+        }
+    }
+    frame_aspect_setting() = has_aspect ? display.aspect : FrameAspect::wide;
+    frame_hud_margin_setting() = display.hud_margin;
+    frame_movie_zoom_setting() = display.movie_zoom;
+    frame_movie_fit_setting() = display.movie_fit;   // 132vt2a2
+    frame_fov_setting() = display.fov;   // 132ws3
+    log("display (port-only): aspect %s%s, HUD margin %u %%, movies %s, loading screens %s, field of view %u",
+        frame_aspect_name(frame_aspect_setting()), has_aspect ? " (port_settings.txt)" : " (the Vita default)",
+        frame_hud_margin_setting(), frame_movie_fit_name(frame_movie_fit_setting()),
+        frame_movie_zoom_setting() ? "zoom" : "bars", frame_fov_setting());
+}
+
+// Port-only test input (research/VITA.md "Front end"): ux0:data/omega_strain/vita_test_pads.txt, lines "FRAME MASK"
+// (decimal front-end frame, hexadecimal 0055a44c held mask): from that frame the mask is held with the handheld's own
+// buttons (the evidence runs' cursor moves on Vita3K, which has no scripted input). No file: nothing added.
+struct PadScript {
+    std::vector<std::pair<std::int64_t, std::uint16_t>> steps;
+    std::size_t next = 0;
+    std::uint16_t held = 0;
+    PadScript() {
+        const std::string path = std::string(vita_data_root) + "/vita_test_pads.txt";
+        FILE* f = std::fopen(path.c_str(), "r");
+        if (!f) return;
+        long long frame = 0;
+        unsigned mask = 0;
+        while (std::fscanf(f, "%lld %x", &frame, &mask) == 2) steps.emplace_back(frame, std::uint16_t(mask));
+        std::fclose(f);
+        log("front end: %u scripted pad steps from %s (port-only test)", unsigned(steps.size()), path.c_str());
+    }
+    std::uint16_t at(std::int64_t frame) {
+        for (; next < steps.size() && steps[next].first <= frame; ++next) {
+            held = steps[next].second;
+            log("front end: scripted pad at frame %lld: held %04x (port-only test)", static_cast<long long>(frame), held);
+        }
+        return held;
+    }
+};
+
+// The front end (research/VITA.md "Front end"): FrontendSession over FrontendDisc (the session, services and disc reads
+// the window frontend_app.cpp uses), gameSound over the play sound host (checkpoint 126c: the FRONTEND banks and the
+// MUSIC.HOG streams from the disc, mixed at 48 kHz, 800 frames per 60 Hz step) into the SceAudioOut device, the boot
+// movie through movie_list / movie_texture, and the canvas through GuiDrawer / GuiRenderer. Returns the level of the
+// session's hand-off (state 0xe), empty when it ends without one.
+std::string App::front_end(DiscImage& disc, const std::string& iso, int frames) {
+    progress("LOADING THE FRONT END", -1.0);
+    const double load_start = now_seconds();
+    FrontendDisc data(disc, iso);
+    // Port-only (132vt2a, research/VITA.md "Movies"): the subtitle projection's one-time setup (~1.5 s here) beside the
+    // front end's load and menus, not in the first subtitled movie frame (INTRO's: a 1.5 s stall). The first
+    // append_subtitles waits for it if it is still running (a function-local static).
+    struct Joined {
+        std::thread thread;
+        ~Joined() {
+            if (thread.joinable()) thread.join();
+        }
+    } subtitle_setup{std::thread([] {
+        // The render core below every other thread there (the movie threads take cores 2 and 0).
+        enter_thread_role(ThreadRole::render, "subtitle setup");
+        sceKernelChangeThreadPriority(sceKernelGetThreadId(), 170);
+        const double t = now_seconds();
+        try {
+            front_end_subtitle_projection();
+            log("front end: subtitle projection set up in %.2f s (beside the load, 132vt2a)", now_seconds() - t);
+        } catch (const std::exception& e) {
+            log("front end: subtitle projection setup failed: %s", e.what());
+        }
+    })};
+    audio::Mixer mixer;
+    SoundIopHostConfig sound_config;
+    sound_config.level = "TEST";  // 004ffc90's boot value; the session swaps in "FRONTEND" (frontend_app.cpp)
+    SoundIopHost sound_host(disc, sound_config, mixer);
+    std::recursive_mutex sound_lock;  // SoundPump: the host between gameSound and the mix thread
+    LockedSoundHost locked_host(sound_host, sound_lock);
+    GameSoundManager game_sound(locked_host);
+    sound_host.attach(game_sound);
+    const std::string card = std::string(vita_data_root) + "/card";
+    sceIoMkdir(card.c_str(), 0777);
+    FrontendServices services = data.services(card);
+    services.sound = &game_sound;
+    // Port-only test switch (research/VITA.md "Vita3K"): with ux0:data/omega_strain/vita_test_no_movies.txt the
+    // movies are opened as absent (the session's own "not in ZMOVIES.HOG" path), for Vita3K builds that abort
+    // when a movie starts. No file: the movies play.
+    if (vita_file_size(std::string(vita_data_root) + "/vita_test_no_movies.txt") >= 0) {
+        log("front end: vita_test_no_movies.txt present: the movies are skipped (test switch)");
+        services.open_movie = [](const std::string&) { return std::unique_ptr<movie::PssMovie>(); };
+    }
+    intro_check(services.open_movie);
+    // Port-only (132vt2a, research/VITA.md "Movies"): every movie is decoded ahead of the session (AheadMovie).
+    services.open_movie = [open = std::move(services.open_movie)](const std::string& name) -> std::unique_ptr<movie::MovieStream> {
+        AheadMovie::stop_active();
+        auto inner = open ? open(name) : nullptr;
+        if (!inner) return nullptr;
+        return std::make_unique<AheadMovie>(std::move(inner), name);
+    };
+    // Port-only test switch (research/VITA.md "Vita3K"): ux0:data/omega_strain/vita_test_captures.txt lists more
+    // front-end frames to capture (decimal, whitespace-separated), for Vita3K runs that stop before frame 300.
+    std::set<std::int64_t> capture_frames{300, 1500, 2400};
+    if (FILE* f = std::fopen((std::string(vita_data_root) + "/vita_test_captures.txt").c_str(), "r")) {
+        for (long long n = 0; std::fscanf(f, "%lld", &n) == 1;) capture_frames.insert(n);
+        std::fclose(f);
+        log("front end: %u capture frames (vita_test_captures.txt, test switch)", unsigned(capture_frames.size()));
+    }
+    services.sound_level = [&sound_host, &sound_lock](const std::string& level) {
+        std::lock_guard<std::recursive_mutex> g(sound_lock);
+        sound_host.set_level(level);
+    };
+    FrontendSession session(std::move(services));
+    session.set_pad_state(6);  // the handheld's own controls: always connected (pad_connection.hpp's ready state)
+    sound_host.schedule = [&session](std::int32_t delay, std::function<void()> event) {
+        session.schedule(delay, std::move(event));
+    };
+    sound_host.hud = [] { return false; };
+    GuiRenderer renderer(display_.device);
+    renderer.set_frame_fit(true);
+    std::set<std::uint32_t> uploaded, zeus_uploaded;
+    for (const auto& [slot, image] : data.fonts().images)
+        if (uploaded.insert(slot).second) renderer.set_texture(slot, image);
+    GuiDrawList shown;
+    const auto sync_images = [&] {
+        OMEGA_ZONE("sync_images");
+        for (const auto& [slot, image] : data.assets().images())
+            if (uploaded.insert(slot).second) renderer.set_texture(slot, image);
+        // frontend_app.cpp sync_zeus: the ZEUS / MANTEX / figure pictures held now.
+        const auto& images = data.zeus_images();
+        std::set<std::uint32_t> drawn;
+        for (const auto& b : shown.batches) drawn.insert(b.slot);
+        for (auto it = zeus_uploaded.begin(); it != zeus_uploaded.end();) {
+            if (images.count(*it) || drawn.count(*it)) {
+                ++it;
+                continue;
+            }
+            renderer.drop_texture(*it);
+            it = zeus_uploaded.erase(it);
+        }
+        for (const auto& [slot, image] : images)
+            if (zeus_uploaded.insert(slot).second) renderer.set_texture(slot, image);
+    };
+    sync_images();
+    GuiDrawer drawer([&data](std::uint32_t h) { return data.fonts().font(h); });
+    IeDrawState ie_state;
+    drawer.set_decor(&session.decor(), &ie_state);
+    std::string figure_note;
+    const auto figure_log = [&](const std::string& note) {
+        if (note == figure_note) return;
+        figure_note = note;
+        log("front end: frame %lld agent model: %s", static_cast<long long>(session.frames()), note.c_str());
+    };
+    // frontend_app.cpp's display callbacks: GuiAgentCreate 0028d870, GuiAgentModify 00341f00, GuiWeaponDisplay
+    // 00440580 and GuiAgentDisplay 00361e70.
+    drawer.character_display_draw = [&](GuiDrawList& out, IeDrawState*, const gui::Widget& screen, const gui::Widget&) {
+        OMEGA_ZONE("rec.figure");
+        if (screen.cls == gui::WidgetClass::agentcreate && screen.ac)
+            figure_log(data.agent_figure_draw(out, screen.ac->m.model().packing, screen.ac->m.camera,
+                                              screen.ac->pose_time, 0x28d870));
+        else if (screen.cls == gui::WidgetClass::agentmod && screen.am)
+            figure_log(data.agent_figure_draw(out, screen.am->m.packing, screen.am->m.camera, screen.am->pose_time,
+                                              0x341f00));
+        else
+            throw std::runtime_error("gui draw: unhosted GuiScoresEquip figure draw (0035b390)");
+    };
+    drawer.weapon_display_draw = [&](GuiDrawList& out, IeDrawState* st, const gui::Widget& w) {
+        OMEGA_ZONE("rec.weapon");
+        data.weapon_display_draw(out, st, w, static_cast<std::uint32_t>(session.frames()));
+    };
+    drawer.agent_display_draw = [&](GuiDrawList& out, IeDrawState*, const gui::Widget& w) {
+        OMEGA_ZONE("rec.figure");
+        if (!w.ad) throw std::runtime_error("gui draw: GuiAgentDisplay without its state (00361e70)");
+        figure_log(data.agent_figure_draw(out, w.ad->packing, w.ad->camera, w.ad->pose_time, 0x361e70, w.ad->turns));
+    };
+    // 64 ms primes the output; the pump keeps 4096 frames (85 ms) queued (research/VITA.md "Audio", 132vt1b).
+    // Port-only test switch (research/VITA.md "Vita3K"): with ux0:data/omega_strain/vita_test_no_audio.txt the front
+    // end's output device starts absent (audio::Device's silent path; the mix still runs). No file: SceAudioOut.
+    const bool no_audio = vita_file_size(std::string(vita_data_root) + "/vita_test_no_audio.txt") >= 0;
+    if (no_audio) log("front end: vita_test_no_audio.txt present: no audio output port (test switch)");
+    // Port-only test switch (research/VITA.md "Widescreen", 132vt1b's hardware bisect): with
+    // ux0:data/omega_strain/vita_test_no_wide_fill.txt the wide aspect's side areas stay black (no side fill).
+    const bool no_wide_fill = vita_file_size(std::string(vita_data_root) + "/vita_test_no_wide_fill.txt") >= 0;
+    if (no_wide_fill) log("front end: vita_test_no_wide_fill.txt present: no wide side fill (test switch)");
+    audio::Device sound(0.064, false, no_audio);
+    SoundPump pump(sound_host, sound_lock, sound, 4096);
+    // 132vt2a2: the movies' PCM goes from their decode thread to the pump; before the pump goes, the movie stops.
+    AheadMovie::set_audio_sink(&pump);
+    struct SinkReset {
+        ~SinkReset() {
+            AheadMovie::stop_active();
+            AheadMovie::set_audio_sink(nullptr);
+        }
+    } sink_reset;
+    log("front end: loaded in %.2f s (%u font images, %u decorator images; disc reads %llu, %.1f MB)",
+        now_seconds() - load_start, unsigned(data.fonts().images.size()), unsigned(data.assets().images().size()),
+        static_cast<unsigned long long>(disc.read_stats().reads), disc.read_stats().bytes / 1048576.0);
+    log_memory("front end loaded");
+    PadScript script;
+    FrameParts parts;
+    std::uint32_t last_render_mode = 0;
+    std::uint64_t movie_serial = 0;
+    Texture movie_picture;
+    unsigned movie_pictures = 0;
+    double movie_seconds = 0.0;
+    int peak = 0;
+    std::uint64_t second_frames = 0, nonzero_seconds = 0;
+    std::string view;
+    std::string level;
+    for (int frame = 0; frame < frames && !quit_; ++frame) {
+        const double started = now_seconds();
+        parts.begin();
+        poll();
+        if (pad_.pressed(ds2::select) && !(pad_.held & (ds2::start | ds2::r1))) {
+            log("front end: SELECT at frame %lld: on to the TORONTO1 loading screen (VITA.md \"Controls\")",
+                static_cast<long long>(session.frames()));
+            break;
+        }
+        const std::uint16_t held = pad_.held | script.at(session.frames() + 1);
+        try {
+            const double t = now_seconds();
+            parts.lap(0);
+            session.frame(held);
+            parts.lap(1);
+            if (session.movie_playing()) movie_seconds += now_seconds() - t;
+        } catch (const std::exception& e) {
+            log("front end: stopped at frame %lld: %s", static_cast<long long>(session.frames()), e.what());
+            front_end_error_ = e.what();
+            break;
+        }
+        for (const auto& line : session.take_log()) log("front end: recorded %s", line.c_str());
+        pump.set_movie(session.movie_playing());
+        std::vector<std::string> sound_lines;
+        {
+            std::lock_guard<std::recursive_mutex> g(sound_lock);
+            sound_lines = sound_host.take_log();
+        }
+        for (const auto& line : sound_lines)
+            log("front end sound at frame %lld: %s", static_cast<long long>(session.frames()), line.c_str());
+        parts.lap(2);
+        sync_images();
+        parts.lap(3);
+        if (session.movie_playing() && session.movie_frame()) {
+            if (session.movie_serial() != movie_serial) {
+                movie_serial = session.movie_serial();
+                // One texture rewritten in place and one conversion buffer (research/VITA.md "Movies").
+                const auto& picture = *session.movie_frame();
+                movie_picture.width = static_cast<std::uint32_t>(picture.width);
+                movie_picture.height = static_cast<std::uint32_t>(picture.height);
+                AheadMovie* ahead = AheadMovie::active();
+                if (!ahead || !ahead->take_rgba(movie_picture.rgba)) movie::frame_to_rgba(picture, movie_picture.rgba);
+                renderer.stream_texture(movie_slot, movie_picture);
+                ++movie_pictures;
+            }
+            parts.lap(4);
+            shown = movie_list(session.movie_aspect());
+            if (const auto* track = session.movie_subtitles()) {
+                OMEGA_ZONE("vita.subtitles");
+                append_subtitles(shown, data.fonts(), *track, session.movie_subtitle_colour(), last_render_mode);
+            }
+        } else if (session.gui_drawn()) {
+            shown.batches.clear();
+            drawer.draw_canvas(shown, session.runtime(), session.now_ms());
+            if (!shown.batches.empty()) last_render_mode = shown.batches.back().render_mode;
+            sync_images();
+        } else if (session.movie_playing() || !session.gui_active()) {
+            shown.batches.clear();
+        }
+        parts.lap(5);
+        // As the window: a movie's PCM instead of the sound mix (gameSound is not loaded while a movie plays); the
+        // sound mix itself goes to the device from the pump.
+        const auto movie_pcm = session.take_movie_audio();
+        if (!movie_pcm.empty() && session.movie_rate() == 48000 && session.movie_channels() == 2) {
+            for (const std::int16_t v : movie_pcm) peak = std::max(peak, std::abs(int(v)));
+            pump.push_movie(movie_pcm);   // 132vt2a: queued, never waits (SoundPump)
+        }
+        peak = std::max(peak, pump.take_peak());
+        for (const auto& line : sound.take_log()) log("audio: %s", line.c_str());
+        parts.lap(6);
+        std::string now;
+        if (session.movie_playing()) now = "movie " + session.movie_name();
+        else if (const gui::Widget* top = session.runtime().top(); top && session.gui_active())
+            now = "screen class " + std::to_string(int(top->cls));
+        else
+            now = "state " + std::to_string(int(session.state()));
+        if (now != view) {
+            view = now;
+            log("front end: frame %lld: %s", static_cast<long long>(session.frames()), view.c_str());
+        }
+        parts.lap(9);
+        auto back = begin_frame();
+        // Port-only (132ws, research/VITA.md "Widescreen"): as frontend_app.cpp's present: under the wide aspect a
+        // mod's wide background ("frontend.<screen>") under the 4:3 menu, else the blurred side fill after it.
+        bool wide_background = false;
+        if (!session.movie_playing() && frame_wide(960, 544))
+            if (const gui::Widget* top = session.runtime().top(); top && session.gui_active())
+                wide_background = renderer.draw_wide_background(std::string("frontend.") + frontend_class_name(top->cls),
+                                                                back.get(), 960, 544);
+        renderer.draw(shown, back.get(), 960, 544);
+        if (!wide_background && !session.movie_playing() && !shown.batches.empty() && !no_wide_fill) {
+            OMEGA_ZONE("vita.wide_fill");
+            renderer.draw_wide_fill(back.get(), 960, 544);
+        }
+        parts.lap(7);
+        if (capture_frames.count(frame)) capture(back.get(), "capture_frontend_f" + std::to_string(frame));
+        end_frame(started);
+        parts.lap(8);
+        parts.end([](const char* text) { log("%s", text); }, disc.read_stats().reads);
+        if (!parts.overlay.empty()) overlay_detail_ = parts.overlay;
+        if (++second_frames == 60) {
+            const auto st = sound.stats();
+            if (peak) ++nonzero_seconds;
+            log("audio: second to frame %lld: peak %d of the submitted 48 kHz PCM (%s); submitted %llu frames, queued "
+                "%u, underruns %u; sound mix thread %llu frames, %.3f s busy; movie PCM pushed %llu, fed %llu, waiting "
+                "%u, dropped %llu",
+                static_cast<long long>(session.frames()), peak, session.movie_playing() ? "movie" : "sound mix",
+                static_cast<unsigned long long>(st.submitted_frames), unsigned(st.queued_frames), unsigned(st.underruns),
+                static_cast<unsigned long long>(pump.mixed()), pump.busy_seconds(),
+                static_cast<unsigned long long>(pump.movie_pushed()), static_cast<unsigned long long>(pump.movie_fed()),
+                unsigned(pump.movie_waiting()), static_cast<unsigned long long>(pump.movie_dropped()));
+            peak = 0;
+            second_frames = 0;
+        }
+        if (session.handoff()) {
+            level = session.level();
+            log("front end: hand-off (state 0xe) to %s at frame %lld", level.c_str(), static_cast<long long>(session.frames()));
+            break;
+        }
+    }
+    if (movie_pictures)
+        log("front end: %u movie pictures; the session's frames while a movie played took %.3f s (%.2f ms per frame)",
+            movie_pictures, movie_seconds, 1000.0 * movie_seconds / std::max(1U, movie_pictures * 2));
+    log("front end: %llu seconds with sound out of the reported ones", static_cast<unsigned long long>(nonzero_seconds));
+    report("front end");
+    return level;
+}
+
+void App::loading_screen(DiscImage& disc, const std::string& level, int frames) {
+    progress("LOADING " + level, -1.0);
+    const double load_start = now_seconds();
+    auto assets = build_loading_screen(disc, level);
+    GuiRenderer renderer(display_.device);
+    renderer.set_frame_fit(true);
+    for (const auto& [slot, image] : assets->images()) renderer.set_texture(slot, *image);
+    log("loading screen %s: built in %.2f s", level.c_str(), now_seconds() - load_start);
+    log_memory("loading screen built");
+    IeDrawState state;
+    std::int64_t vblanks = 0;
+    GuiDrawList list;
+    for (int frame = 0; frame < frames && !quit_; ++frame) {
+        const double started = now_seconds();
+        poll();
+        // The loading thread wakes every third NTSC vblank (hud_loading.hpp, omega_frontend_formats --loading-capture).
+        for (bool wake = false; !wake;) {
+            wake = loading_vblank_1667c0(assets->globals);
+            ++vblanks;
+        }
+        list = loading_frame(*assets, state, static_cast<std::uint64_t>(vblanks * 100000 * 1001 / 60000));
+        // Port-only (132ws): one 4:3 picture under wide (bars or zoom), as loading_screen_host.cpp; a mod's wide
+        // background ("loading.<level>") beside the barred picture.
+        for (GuiDrawBatch& b : list.batches) b.port_picture = true;
+        auto back = begin_frame();
+        if (frame_wide(960, 544) && !frame_movie_zoom_setting())
+            renderer.draw_wide_background("loading." + level, back.get(), 960, 544);
+        renderer.draw(list, back.get(), 960, 544);
+        if (frame == 60 || frame == 400) capture(back.get(), "capture_loading_" + level + "_f" + std::to_string(frame));
+        end_frame(started);
+    }
+    log("loading screen %s: %lld vblanks, %u batches, %u texts", level.c_str(), static_cast<long long>(vblanks),
+        unsigned(list.batches.size()), unsigned(assets->screen.screen.drawn_texts().size()));
+    report("loading screen");
+    loading_screen_destroy(assets->screen);
+}
+
+// The three user cores at work: the same pure-integer jobs serially on the simulation thread, then through the worker
+// pool (the caller on core 0 and the workers on core 2) and on the render host thread (core 1) at once.
+void App::core_check() {
+    constexpr std::size_t jobs = 6;
+    std::vector<std::uint32_t> out(jobs);
+    const auto job = [&](std::size_t i) {
+        std::uint32_t x = static_cast<std::uint32_t>(i);
+        for (int k = 0; k < 4000000; ++k) x = x * 1664525U + 1013904223U + (x >> 13);
+        out[i] = x;
+    };
+    double t = now_seconds();
+    for (std::size_t i = 0; i < jobs; ++i) job(i);
+    const double serial = now_seconds() - t;
+    const auto expected = out;
+    std::fill(out.begin(), out.end(), 0U);
+    t = now_seconds();
+    workers_.for_each(jobs, job);
+    const double pooled = now_seconds() - t;
+    const bool same = out == expected;
+    // The render host thread runs the render thread's loop; the loading-screen host thread is the other core 1 thread.
+    std::fill(out.begin(), out.end(), 0U);
+    t = now_seconds();
+    auto done = HostThread::loading_screen().run([&] {
+        ThreadBusyScope busy;
+        job(0);
+        job(1);
+    });
+    workers_.for_each(jobs - 2, [&](std::size_t i) { job(i + 2); });
+    done->wait();
+    const double all = now_seconds() - t;
+    log("cores: %u workers; %u jobs serial %.3f s, pool (core 0 + core 2) %.3f s = %.2fx, pool + render host (cores "
+        "0, 1, 2) %.3f s = %.2fx; results %s",
+        workers_.workers(), unsigned(jobs), serial, pooled, serial / pooled, all, serial / all,
+        same && out == expected ? "identical" : "DIFFER");
+}
+
+void App::run() {
+    log("display: %s", display_.backend.c_str());
+    log_memory("display created");
+    for (std::size_t p = 0; p < gfx::gxm::gxm_program_count; ++p) {
+        progress("PREPARING THE SHADERS " + std::to_string(p + 1) + " / " + std::to_string(gfx::gxm::gxm_program_count) +
+                     " (THE FIRST START COMPILES THEM)",
+                 double(p) / gfx::gxm::gxm_program_count);
+        const double start = now_seconds();
+        try {
+            display_.device->prepare(static_cast<gfx::Program>(p));
+            log("program %u: ready in %.3f s", unsigned(p), now_seconds() - start);
+        } catch (const gfx::gxm::ShaderCompilerMissing&) {
+            throw;
+        } catch (const std::exception& e) {
+            log("program %u: FAILED: %s", unsigned(p), e.what());
+        }
+    }
+    progress("SELF TESTS", -1.0);
+    log("self test on the main thread:");
+    self_test(*inner_.device);
+    log("self test through the render thread:");
+    self_test(*display_.device);
+    if (vita_file_size(std::string(vita_data_root) + "/vita_test_display_copy.txt") >= 0)
+        display_copy_test(*display_.device, begin_frame().get());
+    audio_test();
+    core_check();
+    // 132vt2a2 (research/VITA.md "Movies"): the movie decoder's slices over the movie pool.
+    mpeg2::Decoder::set_slice_runner([](int count, const std::function<void(int)>& job) { MoviePool::get().run(count, job); });
+    movie_check();
+    threads_.report("boot: shaders, self tests, core check");
+    log_memory("after the self tests");
+
+    apply_display_settings();
+    const std::string iso = std::string(vita_data_root) + "/omega_strain.iso";
+    const std::int64_t size = vita_file_size(iso);
+    if (size < 0) {
+        log("no disc image at %s: the pad test runs (VITA.md \"Game data\")", iso.c_str());
+        no_disc(60 * 60);
+        return;
+    }
+    // The full SHA-256 is an option (iso_verify_vita.hpp): ux0:data/omega_strain/verify_full.txt, or TRIANGLE held now.
+    const std::string full_request = std::string(vita_data_root) + "/verify_full.txt";
+    pad_.read();
+    const bool full = vita_file_size(full_request) >= 0 || (pad_.held & ds2::triangle);
+    log("disc image %s: %lld bytes; checking (%s)", iso.c_str(), static_cast<long long>(size),
+        full ? "full SHA-256 requested" : "quick");
+    progress(full ? "VERIFYING THE DISC IMAGE (FULL SHA-256)" : "CHECKING THE DISC IMAGE", full ? 0.0 : -1.0);
+    const double verify_start = now_seconds();
+    std::string how;
+    IsoStream stream = open_checked_iso(
+        iso, OMEGA_ISO_SIZE, OMEGA_ISO_SHA256, OMEGA_ISO_QUICK_SHA256, full,
+        [&](std::uint64_t done, std::uint64_t total) {
+            if (now_seconds() - progress_drawn_ < 0.25) return;
+            char text[120];
+            std::snprintf(text, sizeof text, "VERIFYING THE DISC IMAGE (FULL SHA-256): %llu / %llu MB",
+                          static_cast<unsigned long long>(done >> 20), static_cast<unsigned long long>(total >> 20));
+            progress(text, double(done) / double(total));
+        },
+        how);
+    if (full && how == "full") sceIoRemove(full_request.c_str());
+    log("disc image checked in %.1f s: %s", now_seconds() - verify_start, how.c_str());
+    DiscImage disc(stream, OMEGA_ISO_SIZE);
+    // The front end, the hand-off's loading screen, then (until the level loop is ported: research/VITA.md "Handoff")
+    // a notice and a fresh front end; any stop is shown on screen and logged, never a silent exit.
+    while (!quit_) {
+        front_end_error_.clear();
+        std::string level;
+        try {
+            level = front_end(disc, iso, 60 * 60 * 60);
+        } catch (const std::exception& e) {
+            front_end_error_ = e.what();
+        }
+        log_memory("front end done");
+        if (quit_) break;
+        if (!front_end_error_.empty()) {
+            notice("THE FRONT END STOPPED", front_end_error_);
+            continue;
+        }
+        if (level.empty()) level = "TORONTO1";
+        try {
+            loading_screen(disc, level, 60 * 3);
+        } catch (const std::exception& e) {
+            notice("THE LOADING SCREEN STOPPED", e.what());
+            continue;
+        }
+        if (quit_) break;
+        notice(level + ": IN-LEVEL PLAY IS NOT ON THE VITA YET",
+               "The front end handed off to " + level + " and its loading screen ran. The level setup and the play "
+               "loop are still the Windows host's (src/port/app/play_main.cpp: the level loop and its objects). "
+               "Porting them to the Vita is the next stage (132vt2: research/VITA.md Handoff).");
+    }
+    log_memory("end");
+}
+
+}  // namespace
+
+void* operator new(std::size_t size) {
+    __atomic_fetch_add(&g_mallocs, 1, __ATOMIC_RELAXED);
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+
+int main() {
+    sceIoMkdir(vita_data_root, 0777);
+    const std::string log_path = std::string(vita_data_root) + "/omega_vita.log";
+    sceIoRemove(log_path.c_str());  // Vita3K's "w" open does not truncate an existing file
+    g_log = std::fopen(log_path.c_str(), "w");
+    g_log_path = log_path;
+    log("Omega Strain native port, PS Vita (checkpoint 132vt1)");
+    // research/VITA.md "Threads and cores": the clocks at their highest user settings, then this (the simulation)
+    // thread on core 0.
+    const int arm = scePowerSetArmClockFrequency(444), bus = scePowerSetBusClockFrequency(222),
+              gpu = scePowerSetGpuClockFrequency(222), xbar = scePowerSetGpuXbarClockFrequency(166);
+    log("clocks: set ARM 444 (0x%X), bus 222 (0x%X), GPU 222 (0x%X), GPU crossbar 166 (0x%X); now ARM %d MHz, bus %d "
+        "MHz, GPU %d MHz, GPU crossbar %d MHz",
+        unsigned(arm), unsigned(bus), unsigned(gpu), unsigned(xbar), scePowerGetArmClockFrequency(),
+        scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+    enter_thread_role(ThreadRole::simulation, "simulation");
+    try {
+        gfx::gxm::Options options;
+        options.log = [](const std::string& text) { log("%s", text.c_str()); };
+        // Port-only test switch (research/VITA.md "Widescreen"): ux0:data/omega_strain/vita_test_display_readback.txt
+        // brings back 132vt1's CPU read-back of the display for the wide side fill (the hardware bisect, 132vt1b).
+        options.display_copy_readback =
+            vita_file_size(std::string(vita_data_root) + "/vita_test_display_readback.txt") >= 0;
+        if (options.display_copy_readback) log("display: vita_test_display_readback.txt present: copies read back");
+        // ux0:data/omega_strain/vita_test_display_order.txt ("1" rows as read, "2" reversed): the GPU display copy's
+        // row order without the first-use check (the same section; a hardware fallback should the check refuse).
+        if (FILE* f = std::fopen((std::string(vita_data_root) + "/vita_test_display_order.txt").c_str(), "r")) {
+            const int c = std::fgetc(f);
+            std::fclose(f);
+            options.display_copy_order = c == '2' ? 2 : c == '1' ? 1 : 0;
+            log("display: vita_test_display_order.txt present: the GPU copy's rows %s", c == '2' ? "reversed"
+                                                                                      : c == '1' ? "as read"
+                                                                                                 : "checked (not 1 or 2)");
+        }
+        gfx::Display display = gfx::gxm::create_display(options);
+        try {
+            App(display).run();
+        } catch (const gfx::gxm::ShaderCompilerMissing& e) {
+            log("FATAL: %s", e.what());
+            gfx::gxm::show_message(e.what());
+        } catch (const std::exception& e) {
+            log("FATAL: %s", e.what());
+            gfx::gxm::show_message(std::string("Omega Strain stopped:\n") + e.what());
+        }
+    } catch (const std::exception& e) {
+        log("FATAL: %s", e.what());
+    }
+    log("exit");
+    if (g_log) std::fclose(g_log);
+    sceKernelExitProcess(0);
+    return 0;
+}

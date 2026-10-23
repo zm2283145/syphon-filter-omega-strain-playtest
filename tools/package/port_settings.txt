@@ -1,0 +1,71 @@
+# Syphon Filter: The Omega Strain (PC port) - port settings.
+# Port-only settings: none of these exist in the PS2 game, and none of them change the game's own options
+# (those are saved on the PC memory card folder, local\frontend_card). One key=value per line; lines starting
+# with # are comments and are kept when the game writes this file. README-PLAY.md lists every key. The game's
+# Port Settings page (title Options > Control > PORT SETTINGS, or the pause menu's last entry) changes them too.
+
+# The CPU co-op partner in play (also: title Options > Control > CPU PARTNER).
+coop_partner=0
+
+# Friendly fire on the CPU partner: 0 (the default) your and your allies' shots, melee and explosives never hurt it;
+# 1 the original rules (two players' bullets do each other no damage; explosions, fire and melee do). Read at each level start.
+# partner_friendly_fire=0
+
+# The CPU partner's weapons at each level start: auto (the default: the best of the weapons your agent has unlocked),
+# copy (exactly the loadout you accept) or record (the partner character's own fixed kit). Read at each level start.
+# partner_loadout=auto
+# 1 (the default): the partner picks up better weapons and ammunition from crates and dropped backpacks; it leaves you
+# the ammunition you need. Read at each level start.
+# partner_pickups=1
+
+# Borderless fullscreen on the window's monitor (also: Alt+Enter or F11 at any time, Options > Video > FULLSCREEN).
+fullscreen=0
+
+# Present on the display's vertical blank (also: Options > Video > VSYNC). The game's 60 Hz step is the same either way.
+vsync=1
+
+# The windowed position and size, written when the game closes (left,top,right,bottom in physical screen pixels;
+# window_units=pixels is written with it: a window= without it came from an older build and is converted once).
+# window=100,100,1380,1060
+# window_units=pixels
+
+# Memory card backups (the PC card is local\frontend_card\BASCUS-97264): before the game changes a save, the whole
+# card folder is copied to local\frontend_card\backups\<date-time>\ and the oldest backups past this count are removed
+# (0: no backups, at most 100). OmegaStrain.exe --card-restore <backup folder> puts one back (README-PLAY.md).
+# card_backups=10
+
+# Your own disc image of the game (USA, SCUS-97264). The first run finds or asks for it, verifies it and writes it here.
+# iso=D:\Games\Syphon Filter - The Omega Strain (USA).iso
+# The last fully verified image (size;write time;SHA-256;path), written after the check. While the image's path, size and
+# write time match it, later starts skip the few-second hash (--verify-iso forces it; deleting the line does too).
+# iso_verified=...
+
+# Keep the sound playing while the game window is in the background (0: silenced while unfocused; the game itself
+# keeps running either way). Also: Port Settings > DISPLAY > BG AUDIO.
+# background_audio=0
+
+# The "controller removed" prompt when the gamepad in use is unplugged (0: never shown).
+# controller_prompt=1
+
+# Mouse look in play (the mouse moves the right stick): on/off, sensitivity 0.05..20, invert the vertical axis.
+# mouse_look=1
+# mouse_sensitivity=1
+# mouse_invert_y=0
+
+# Display (none of these changes the game itself): how the 4:3 picture fills the window (pillarbox: menus and HUD at
+# 4:3 with black bars, the 3D view over the whole window; 4:3: black bars everywhere; stretch), the internal
+# resolution as a multiple of the window size (0.25..4), and the frame-time overlay (F3 toggles it in the menus and levels).
+# aspect=pillarbox
+# render_scale=1
+# frame_overlay=0
+# frame_overlay_key=F3
+
+# Mods (port-only, README-PLAY.md "Mods"): asset overrides from the mods folder (default: mods next to the game;
+# each mod a folder with a manifest.txt). 0: your disc's assets only.
+# mods=1
+# mods_folder=mods
+
+# Keyboard / mouse bindings: bind.<menu|play>.<button>=<key>[,<key>] ("none" unbinds; on the Port Settings page Cross
+# replaces a list, Right adds a key, Left removes the last one). Examples:
+# bind.play.cross=Space,MouseLeft
+# bind.menu.cross=Enter
