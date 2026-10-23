@@ -37,9 +37,13 @@
 #include "sound_iop_host.hpp"
 #include "stats_record.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
 #include <wrl/client.h>
+#else
+#include "win32_vita.hpp"  // port-only (132vt2): the PS Vita build's stand-ins
+#endif
 
 #include "device_lost.hpp"
 
@@ -62,6 +66,9 @@ namespace omega {
 namespace {
 
 // FrontendOptions::memory_log: the process's private bytes and handles.
+#ifndef _WIN32
+std::string process_memory() { return process_memory_line(); }  // port-only (132vt2): host_window_vita.hpp
+#else
 std::string process_memory() {
     PROCESS_MEMORY_COUNTERS_EX counters{};
     counters.cb = sizeof counters;
@@ -71,6 +78,7 @@ std::string process_memory() {
         return "memory unavailable";
     return "private " + std::to_string(counters.PrivateUsage / 1024) + " KB, handles " + std::to_string(handles);
 }
+#endif
 
 struct ScriptStep {
     std::int64_t frames = 0;
@@ -330,12 +338,25 @@ struct FrontendApp::Impl {
     std::unique_ptr<FrontendDisc> data;
     audio::Mixer mixer;
     std::unique_ptr<SoundIopHost> sound_host;
+#ifdef __vita__
+    // Port-only (132vt2b2): gameSound's calls to the host under the lock the sound pump mixes under.
+    std::recursive_mutex sound_lock;
+    std::unique_ptr<GameSoundHost> locked_sound_host;
+#endif
     std::unique_ptr<GameSoundManager> game_sound;
     std::unique_ptr<CardBackups> card_backups;  // port-only (132win13): rolling backups before each card change
     std::unique_ptr<FrontendSession> session;
     // Port-only (132ln3): the LAN session (FrontendOptions::lan_loopback: on lan_net, an in-memory network).
     std::shared_ptr<lan::LanLoopbackNetwork> lan_net;
     std::unique_ptr<lan::LanSession> lan_session;
+    // Port-only (132on2b): the online games' own session (online_game_port, port mapping, relay), apart from LAN
+    // Play's so both can be on (lan_play=1 is the default); sockets open only at a host or join.
+    std::unique_ptr<lan::LanSession> online_session;
+    // The session whose game is hosted or joined: the network level load's transport.
+    lan::LanSession* net_session() {
+        if (online_session && online_session->transport()) return online_session.get();
+        return lan_session.get();
+    }
     std::unique_ptr<lan::LanSession> lan_peer;  // port-only test (132ln4): --lan-loopback-peer's hosted game
     // Port-only (checkpoint 132md5, research/MODDING.md "LAN: the mod report at join"): the hosted LAN games' mod
     // gate (the transport's join filter, lan_mod_gate.hpp), the joiner's report in every JOIN_REQ, and the host's
@@ -372,6 +393,10 @@ struct FrontendApp::Impl {
     std::unique_ptr<GuiDrawer> drawer;
     IeDrawState ie_state;
     std::unique_ptr<audio::Device> sound;
+#ifdef __vita__
+    // Port-only (132vt2b2, VitaMovieHooks::sound_pump): the mix on the audio core; it goes before the device.
+    std::unique_ptr<VitaMovieHooks::SoundPumpHandle> sound_pump;
+#endif
 
     // Checkpoint 132win6 (port-only): the controller, its connection state and the keyboard / mouse bindings
     // (FrontendOptions::gamepad / pads / menu_bindings, else the front end's own).
@@ -521,12 +546,35 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
     SoundIopHostConfig sound_config;
     sound_config.level = "TEST";   // 004ffc90's boot value; the session swaps in "FRONTEND"
     sound_host = std::make_unique<SoundIopHost>(disc, sound_config, mixer);
+#ifdef __vita__
+    if (vita_movie_hooks().locked_host && vita_movie_hooks().sound_pump) {
+        locked_sound_host = vita_movie_hooks().locked_host(*sound_host, sound_lock);
+        game_sound = std::make_unique<GameSoundManager>(*locked_sound_host);
+    } else {
+        game_sound = std::make_unique<GameSoundManager>(*sound_host);
+    }
+#else
     game_sound = std::make_unique<GameSoundManager>(*sound_host);
+#endif
     sound_host->attach(*game_sound);
     FrontendServices services = data->services(options.card_folder);
     services.sound = game_sound.get();
+#ifdef __vita__
+    services.sound_level = [this](const std::string& level) {
+        std::lock_guard<std::recursive_mutex> g(sound_lock);
+        sound_host->set_level(level);
+    };
+#else
     services.sound_level = [h = sound_host.get()](const std::string& level) { h->set_level(level); };
+#endif
     services.nested_frame = [this] { nested_frame(); };
+#ifdef __vita__
+    // Port-only (132vt2, research/VITA.md "Movies"): the Vita app's decode-ahead around each movie.
+    if (vita_movie_hooks().wrap)
+        services.open_movie = [open = std::move(services.open_movie)](const std::string& name) -> std::unique_ptr<movie::MovieStream> {
+            return vita_movie_hooks().wrap(open, name);
+        };
+#endif
     test_lost = options.test_device_lost;
     sweep_starts = options.test_device_lost_sweep;
     if (options.menu_bindings) menu_bindings = *options.menu_bindings;
@@ -757,7 +805,8 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
             }
             // Checkpoint 132on2b (ONLINE.md §9.4 / §9.5): the in-level game of an online create / join is the LAN
             // game (LanSession) at the address omega_server hands over; no discovery beacons (the server lists it).
-            if (!lan_session) {
+            // 132on2b2: its own session even when LAN Play's is open, so the online settings below always apply.
+            {
                 lan::LanSessionConfig lc;
                 lc.build_hash = lan::lan_build_hash(OMEGA_ISO_SHA256, OMEGA_EXE_SHA256);
                 lan_mod_config(lc);
@@ -809,11 +858,9 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
                                                                                               : "on (PCP, NAT-PMP)"))
                                       : "off")
                           << ", relay " << relay_mode << "\n";
-                lan_session = std::make_unique<lan::LanSession>(lc);
-            } else {
-                std::cout << "Front end: the online games use the LAN session already open (no relay, no UPnP)\n";
+                online_session = std::make_unique<lan::LanSession>(lc);
             }
-            online_lobby->set_lan(lan_session.get());
+            online_lobby->set_lan(online_session.get());
             // Checkpoint 132on2d (ONLINE.md §3.6): the record's builder, the session's callback +2554 (00452f30 ->
             // 002cbd40 on the selected agent): the rank row (+b50; 0 none), the statistics (00333ee0; at the level's
             // end the level's own, which play_main's end_agent syncs into the agent), the rating and award flags and
@@ -968,7 +1015,15 @@ void FrontendApp::Impl::open_output() {
         audio_pass_start = session->frames();
         const bool absent = audio::starts_absent(audio_events);
         try {
+#ifdef __vita__
+            // 132vt2b2: with the sound pump, the app's front end's device (0.064 s: the pump keeps 4096 frames
+            // queued, above the device's priming).
+            const bool pumped = vita_movie_hooks().sound_pump && locked_sound_host;
+            sound = std::make_unique<audio::Device>(pumped ? 0.064 : 0.15, audio_test, absent);
+            if (pumped) sound_pump = vita_movie_hooks().sound_pump(*sound_host, sound_lock, *sound);
+#else
             sound = std::make_unique<audio::Device>(0.15, audio_test, absent);
+#endif
             if (audio_test)
                 std::cout << "Front end: audio output muted for --test-audio-device (port-only test)"
                           << (absent ? ", no device at startup (simulated)" : "") << "\n";
@@ -1040,6 +1095,9 @@ void FrontendApp::Impl::read_simulated_devices() {
 }
 
 void FrontendApp::Impl::release_output() {
+#ifdef __vita__
+    sound_pump.reset();
+#endif
     sound.reset();
     screen.reset();
     if (host) host->drop_target();
@@ -1065,6 +1123,7 @@ void FrontendApp::Impl::step(std::uint16_t held) {
         s.frame(held);
     }
     if (lan_session) lan_session->pump();  // port-only (132ln3): the hosted LAN game's discovery and transport
+    if (online_session) online_session->pump();  // port-only (132on2b2): the online game's
     if (lan_peer) lan_peer->pump();        // port-only test (132ln4): --lan-loopback-peer
     // Port-only (132on2b): the online lobby's service (the room's game list; a request's callback waits for the
     // screen's 004536b0).
@@ -1077,12 +1136,28 @@ void FrontendApp::Impl::step(std::uint16_t held) {
         for (const auto& line : page->take_log()) std::cout << "Front end: " << line << " at front-end frame " << s.frames() << "\n";
     // This frame's sound (800 frames of 48 kHz at 60 Hz).
     sound_pcm.clear();
+#ifdef __vita__
+    // Port-only (132vt2b2): with the sound pump the mix goes to the device from the audio core (and a movie's PCM
+    // from its decode thread); this step only passes on whether a movie plays.
+    if (sound_pump) {
+        sound_pump->set_movie(s.movie_playing());
+    } else
+#endif
     {
         FrontendProfileScope scope(profile, "sound_mix");
         sound_host->mix(audio::Mixer::output_rate / 60, sound_pcm);
     }
     if (wav) wav->write(sound_pcm);
+#ifdef __vita__
+    std::vector<std::string> sound_lines;
+    {
+        std::lock_guard<std::recursive_mutex> g(sound_lock);
+        sound_lines = sound_host->take_log();
+    }
+    for (const auto& line : sound_lines)
+#else
     for (const auto& line : sound_host->take_log())
+#endif
         std::cout << "Front end sound at frame " << s.frames() << ": " << line << "\n";
     // New decorator textures (the IE manager loads them with each screen).
     {
@@ -1140,6 +1215,10 @@ void FrontendApp::Impl::step(std::uint16_t held) {
                   << (kind == K::lost ? "device lost" : kind == K::gone ? "device lost, no device until back"
                       : kind == K::back ? "device back" : "default output device switched") << "\n";
     }
+#ifdef __vita__
+    if (sound_pump) pcm.clear();  // 132vt2b2: the movie's PCM went to the pump (AheadMovie's sink), the mix too
+    else
+#endif
     if (sound && !s.movie_playing() && pcm.empty()) sound->submit(sound_pcm);
     if (sound && !pcm.empty()) {
         if (s.movie_rate() == 48000 && s.movie_channels() == 2) sound->submit(pcm);
@@ -1218,15 +1297,23 @@ void FrontendApp::Impl::present() {
         const float black[4] = {0, 0, 0, 1};
         gfx::clear_target(*host->gfx(), host->back_buffer(), black);
         // Port-only (checkpoint 132ws): under the wide aspect a mod's wide background for the screen (132md12,
-        // "frontend.<screen>") goes under the 4:3 menu and replaces the side fill.
+        // "frontend.<screen>") goes under the menu and replaces the edge extension and the side fill.
         bool wide_background = false;
         if (!session->movie_playing() && frame_wide(host->width(), host->height()))
             if (const gui::Widget* top = session->runtime().top(); top && session->gui_active())
                 wide_background = screen->draw_wide_background(std::string("frontend.") + frontend_class_name(top->cls),
                                                                host->back_buffer(), host->width(), host->height());
+        // Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the front end's wide menus
+        // (GuiRenderer::set_wide_menu): the 4:3 content drawn unclipped, the art the frame's edges cut (backdrop,
+        // bands, panel lines) extended to the window's edges (set_wide_edge_extend), the header and legend spread;
+        // the blurred side fill (132ws) only for a frame with nothing to extend, and for the GuiSlideShow (the rank
+        // certificates, the ZEUS files: photographs and documents, whose mirror images would show reversed text), drawn as 132ws.
+        const gui::Widget* shown_top = session->gui_active() ? session->runtime().top() : nullptr;
+        const bool slideshow = shown_top && shown_top->cls == gui::WidgetClass::slideshow;
+        screen->set_wide_edge_extend(!wide_background && !session->movie_playing() && !slideshow);
+        screen->set_wide_menu(!slideshow);
         screen->draw(shown, host->back_buffer(), host->width(), host->height());
-        // Port-only (checkpoint 132ws): under the wide aspect a menu's 4:3 picture gets the blurred side fill.
-        if (!wide_background && !session->movie_playing() && !shown.batches.empty())
+        if (!wide_background && !session->movie_playing() && !shown.batches.empty() && screen->wide_edge_images() == 0)
             screen->draw_wide_fill(host->back_buffer(), host->width(), host->height());
         draw_overlay(frame);
         draw_lan_notices();
@@ -1606,6 +1693,12 @@ FrontendResult FrontendApp::Impl::loop() {
                 pacing->set_refresh(display_refresh_hz(host->handle()));
             }
             steps = pacing->next_frame();
+#ifdef __vita__
+            // Port-only (132vt2b2, research/VITA.md "Front end"): one step per present, as the app's own front end
+            // runs; the catch-up steps (up to 4 a present) spiralled on the handheld (the agent screen's 12 ms steps
+            // 4 at a time, 11 fps) and starved the movie threads. The sound pump keeps the sound real-time.
+            steps = std::min(steps, 1);
+#endif
         } else {
             const auto now = std::chrono::steady_clock::now();
             accumulator += std::chrono::duration<double>(now - last).count();
@@ -1678,14 +1771,15 @@ FrontendResult FrontendApp::Impl::loop() {
         // (LanNetCore, PORT-ONLY glue: the DME API on the LAN session's transport, the DME thread model). The DME
         // update thread start 0042a770 and the team setup 0016a970 (checkpoint 132ln5c) run here; checkpoint
         // 132ln5e: the play hosts the level load 001350e0 and the rest (LanNetCore::level_load_finish).
-        if (!lan_session || !lan_session->transport())
+        lan::LanSession* const ns = net_session();
+        if (!ns || !ns->transport())
             throw std::runtime_error("Level load 001693f0 (state 0xe) in a network game without a LAN session: Online play "
                                      "(the DME connect 0042ab00) is not ported");
-        lan_core = std::make_unique<lan::LanNetCore>(*lan_session->transport(), [this] { return lan_session->clock_ms(); },
+        lan_core = std::make_unique<lan::LanNetCore>(*ns->transport(), [ns] { return ns->clock_ms(); },
                                                      s.host_role());
         // Checkpoint 132ln5f: the lobby keep-alive 002ca580 in the level serves LanSession's discovery (the host's
         // advertisement goes on, as the Medius listing does), not its transport (LanDme polls that).
-        lan_core->set_lobby([this] { lan_session->pump_lobby(); });
+        lan_core->set_lobby([ns] { ns->pump_lobby(); });
         try {
             lan_core->level_load_begin(nullptr);
         } catch (const std::exception& e) {
@@ -1695,14 +1789,14 @@ FrontendResult FrontendApp::Impl::loop() {
                       << " time(s), 00429d30 with 005723d0 = " << m.read(0x5723d0, 1) << " (00165bc0: 0042af00 and the 72 "
                       << "registrations on the native DME library, 132ln5b)), 0016a970 native (team data 004ee620 = 0x"
                       << std::hex << m.read(0x4ee620) << std::dec << ", 132ln5c), client index "
-                      << lan_session->transport()->local_index() << ", state 005724b0 = 0x"
+                      << ns->transport()->local_index() << ", state 005724b0 = 0x"
                       << std::hex << m.read(0x5724b0, 1) << std::dec << "; stopped at: " << e.what() << "\n";
             throw;
         }
         auto& m = lan_core->memory();
         std::cout << "Front end: network level load (port-only LanNetCore, 132ln5e): 0042a770 started the DME update thread "
                   << "(the thread ran " << lan_core->thread_runs() << " time(s)), 0016a970 native (team data 004ee620 = 0x"
-                  << std::hex << m.read(0x4ee620) << std::dec << "), client index " << lan_session->transport()->local_index()
+                  << std::hex << m.read(0x4ee620) << std::dec << "), client index " << ns->transport()->local_index()
                   << "; 001350e0 and the rest of 001693f0 are the play's\n";
     }
     if (s.handoff()) {
@@ -1728,7 +1822,7 @@ lan::LanNetCore* FrontendApp::lan_core() { return impl_->lan_core.get(); }
 
 bool FrontendApp::network_session() const {
     const auto& m = *impl_;
-    return m.lan_core || m.lan_session || m.lan_peer || m.online_lobby;
+    return m.lan_core || m.lan_session || m.online_session || m.lan_peer || m.online_lobby;
 }
 
 std::vector<std::string> FrontendApp::online_level_frame() {

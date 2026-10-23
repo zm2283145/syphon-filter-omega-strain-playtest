@@ -400,6 +400,7 @@ void gui_font_draw(GuiDrawList& out, const GuiFont& font, std::span<const std::u
         ++i;
         x = fadd(x, adv);
     }
+    b.port_text = true;  // port-only (132ws5): the wide menu draw does not mirror a string
     if (emitted) out.batches.push_back(std::move(b));  // 00370550
 }
 
@@ -724,6 +725,7 @@ void GuiDrawer::draw_canvas(GuiDrawList& out, const GuiRuntime& gui, std::int32_
     // (1,0,0,0) (0,0,1,0) (0,1,0,0) (0,0,1,1) (sp+30..+6c), and *005392d0
     // (V+10e0) |= 4; 00415eb8..00415ed8 restore the mode word and pop.
     IeDrawState* st = st_;
+    menu_depth_ = 0;  // port-only (132ws5)
     std::uint32_t saved_mode = 0;
     if (st) {
         saved_mode = st->mode;
@@ -742,6 +744,23 @@ void GuiDrawer::draw_canvas(GuiDrawList& out, const GuiRuntime& gui, std::int32_
 }
 
 void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widget& w, std::int32_t now_ms) {
+    // Port-only (checkpoint 132ws5): the batches of each shown screen's element (a canvas child's child, with its
+    // subtree) get one GuiDrawBatch::port_menu tag for the wide menu draw.
+    struct MenuTag {
+        GuiDrawList& out;
+        int& depth;
+        std::uint32_t& tag;
+        std::size_t from;
+        bool element;
+        ~MenuTag() {
+            --depth;
+            if (!element || from == out.batches.size()) return;
+            ++tag;
+            for (std::size_t k = from; k < out.batches.size(); ++k)
+                if (out.batches[k].port_menu == 0) out.batches[k].port_menu = tag;
+        }
+    } menu_tag{out, menu_depth_, menu_tag_, out.batches.size(), menu_depth_ == 1};
+    ++menu_depth_;
     // +44 is the decorator when the widget has one: 00417340 draws its IE
     // element (GuiDecor, Checkpoint 122b) before the widget's own +30.
     if (decor_ && st_ && w.deco) {

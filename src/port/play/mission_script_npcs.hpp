@@ -29,6 +29,9 @@ public:
     // 119b"). An NPC added after connect (a generator's spawn) gets its
     // script filters at once.
     void add(Word npc, std::size_t actor, NpcAiController& controller);
+    // The deleted spawned NPC's record leaves (0040bf50 frees the object the
+    // original's tree lookup found; a later spawn may take its ID: add again).
+    void remove(Word npc);
     // Each NPC actor's pump offers its script AI notifications and hotbox link
     // messages to the host (MissionScriptHost::deliver_ai_notification /
     // deliver_link_message) first (003c8de0 filter +0x38, 003cc850); the

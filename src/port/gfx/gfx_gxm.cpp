@@ -1613,6 +1613,8 @@ MemoryStats memory_stats() {
     return g_impl->snapshot();
 }
 
+std::string placement_line() { return "GPU objects: placed by this backend in its own pools (MemoryStats)"; }
+
 void show_message(const std::string& text) {
     if (!g_impl) return;
     std::lock_guard<std::recursive_mutex> lock(g_impl->mutex);

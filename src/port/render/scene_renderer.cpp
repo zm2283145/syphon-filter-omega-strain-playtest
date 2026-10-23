@@ -5,7 +5,11 @@
 #include "gs_alpha.hpp"
 #include "texture_blocks.hpp"
 
+#ifdef _WIN32
 #include <DirectXMath.h>
+#else
+#include "directxmath_vita.hpp"  // port-only (132vt2): the PS Vita build's camera-matrix subset
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -884,6 +888,35 @@ void SceneRenderer::refresh_geometry() try {
     auto indices=buffer(mesh_.indices.data(),mesh_.indices.size()*sizeof(std::uint32_t),gfx::bind_indices);
     vertices_=std::move(vertices);indices_=std::move(indices);
 } catch (const DeviceLost&) {}
+void SceneRenderer::refresh_vertices(std::vector<std::pair<std::size_t, std::size_t>> ranges) {
+    if (!vertices_ || !indices_ || vertices_->desc().bytes != mesh_.vertices.size() * sizeof(MeshVertex) ||
+        indices_->desc().bytes != mesh_.indices.size() * sizeof(std::uint32_t)) {
+        vertices_.reset();
+        indices_.reset();
+        refresh_geometry();
+        return;
+    }
+    std::sort(ranges.begin(), ranges.end());
+    std::size_t first = 0, end = 0;
+    auto flush = [&] {
+        if (end <= first) return;
+        if (end > mesh_.vertices.size()) throw std::runtime_error("Vertex update outside the mesh");
+        list_.update_buffer(vertices_.get(), mesh_.vertices.data() + first, (end - first) * sizeof(MeshVertex),
+                            first * sizeof(MeshVertex), true);
+    };
+    for (const auto& [f, count] : ranges) {
+        if (!count) continue;
+        if (f > end || end == 0) {
+            flush();
+            first = f;
+            end = f + count;
+        } else {
+            end = std::max(end, f + count);
+        }
+    }
+    flush();
+    device_->submit(list_);
+}
 void SceneRenderer::update_vertices(std::size_t first, std::size_t count) {
     if (first > mesh_.vertices.size() || count > mesh_.vertices.size() - first)
         throw std::runtime_error("Vertex update outside the mesh");

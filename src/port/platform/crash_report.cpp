@@ -1,9 +1,11 @@
 #include "crash_report.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>
 #include <io.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -184,6 +186,9 @@ bool is_runtime_module(std::string_view file_name) {
 
 // --- the handlers ---
 
+// Port-only (132vt2): the PS Vita build has its own handlers (src/port/vita/crash_report_vita.cpp); the pure
+// helpers above are shared.
+#ifdef _WIN32
 namespace {
 
 constexpr DWORD cpp_exception = 0xE06D7363;
@@ -1069,5 +1074,7 @@ void show_message(const Written& w, std::string_view message) {
     }
     MessageBoxW(nullptr, widen(text).c_str(), L"Syphon Filter: The Omega Strain", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
+
+#endif  // _WIN32
 
 }  // namespace omega::crash

@@ -4,15 +4,23 @@
 #include "crash_report.hpp"
 #include "derived_data.hpp"
 #include "disc.hpp"
+#ifdef _WIN32
 #include "launcher_mod_panel.hpp"
+#endif
 #include "mod_manager.hpp"
 #include "ps2_save_icons.hpp"
 #include "windows_hash.hpp"
 
+// Port-only (132vt2): the PS Vita build compiles the portable half (the play argument list, the ISO search and
+// identity, the save icons); the launcher itself (run, its dialogs and the install folder) is Windows-only.
+#ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
 #include <io.h>
 #include <shlobj.h>
+#else
+#include <strings.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -32,6 +40,7 @@ std::atomic<bool> g_active{false};
 std::atomic<bool> g_dialogs{true};
 std::atomic<bool> g_failure_shown{false};
 
+#ifdef _WIN32
 std::wstring widen(const std::string& text) {
     if (text.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0);
@@ -46,6 +55,12 @@ std::string narrow(const std::wstring& text) {
     if (n > 0) WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), out.data(), n, nullptr, nullptr);
     return out;
 }
+#else
+std::string narrow(const std::wstring& text) {  // the Vita: libstdc++'s UTF-32 -> UTF-8
+    const auto u = fs::path(text).u8string();
+    return std::string(u.begin(), u.end());
+}
+#endif
 std::string utf8(const fs::path& p) {
     const auto u = p.u8string();
     return std::string(u.begin(), u.end());
@@ -57,8 +72,12 @@ void show_error(const std::string& message) {
     std::cerr << "Launcher (port-only): error: " << message << "\n";
     std::cerr.flush();
     std::cout.flush();
+#ifdef _WIN32
     if (g_dialogs) MessageBoxW(nullptr, widen(message).c_str(), title, MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+#endif
 }
+
+#ifdef _WIN32
 
 // The folder whose config/disc_us.json marks an install (the exe's own, else the working directory: a repository run).
 fs::path install_folder() {
@@ -144,6 +163,7 @@ std::string size_problem(const fs::path& iso) {
 }
 
 derived::DiscFingerprint fingerprint() { return {OMEGA_ISO_SHA256, OMEGA_BOOT_EXECUTABLE, OMEGA_EXE_SHA256, OMEGA_EXE_SIZE}; }
+#endif  // _WIN32
 
 std::vector<std::string> backslash_path(const std::string& path) {
     std::vector<std::string> parts;
@@ -159,6 +179,7 @@ std::vector<std::string> backslash_path(const std::string& path) {
     return parts;
 }
 
+#ifdef _WIN32
 // The SHA-256 check (the full hash unless iso_verified= matches the file as it is now and hash is false; the play
 // host verifies the image too, and open_verified_iso remembers a verified file for the process, so it is hashed at most
 // once) and the derived files when missing or stale. Returns an error text (empty: success); *verified receives the
@@ -198,6 +219,7 @@ std::string verify_and_derive(const fs::path& iso, const fs::path& folder, bool 
               << (GetTickCount64() - t0) << " ms)\n";
     return {};
 }
+#endif  // _WIN32
 
 }  // namespace
 
@@ -226,11 +248,13 @@ bool is_launcher_executable(const fs::path& exe) {
     return stem == L"omegastrain";
 }
 
+#ifdef _WIN32
 fs::path module_path() {
     std::wstring buffer(32768, L'\0');
     const DWORD n = GetModuleFileNameW(nullptr, buffer.data(), DWORD(buffer.size()));
     return n > 0 && n < buffer.size() ? fs::path(buffer.substr(0, n)) : fs::path();
 }
+#endif
 
 Options parse_options(int argc, const wchar_t* const* argv) {
     Options o;
@@ -446,9 +470,14 @@ bool verified_iso_matches(const std::optional<VerifiedIso>& cached, const Verifi
     if (!cached || cached->sha256 != expected_sha256 || cached->size != now.size || cached->write_time != now.write_time)
         return false;
     // Windows paths compare without case.
+#ifdef _WIN32
     return CompareStringOrdinal(widen(cached->path).c_str(), -1, widen(now.path).c_str(), -1, TRUE) == CSTR_EQUAL;
+#else
+    return strcasecmp(cached->path.c_str(), now.path.c_str()) == 0;  // the Vita's FAT / exFAT names: the same
+#endif
 }
 
+#ifdef _WIN32
 int run(int argc, wchar_t** argv, int (*play)(int, wchar_t**)) {
     Options o;
     try {
@@ -621,5 +650,7 @@ int run(int argc, wchar_t** argv, int (*play)(int, wchar_t**)) {
         return 1;
     }
 }
+
+#endif  // _WIN32
 
 }  // namespace omega::launcher

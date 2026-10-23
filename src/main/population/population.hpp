@@ -318,6 +318,15 @@ void write_population(std::ostream& output, const Population& population);
 // Terrain vertices already use the model's world-space coordinates. No actor transform is inferred.
 void append_terrain(Mesh& destination, CollisionMesh& collision,
                     const Mesh& source, const CollisionMesh& source_collision);
+#ifdef __vita__
+// 132vt2 (research/VITA.md "Memory"): the level's terrain aggregate is reserved once at its expected size (the
+// level's size from local/terrain_reserve.txt, written by an earlier load, or a built-in one), so the 192 MB heap
+// never holds a growing array beside its predecessor. terrain_reserve_end (and a failed load, through
+// terrain_reserve_flush) records the size reached.
+void terrain_reserve_begin(const std::string& level, Mesh& destination, CollisionMesh& collision);
+void terrain_reserve_end(Mesh& destination, CollisionMesh& collision);  // gives back an unused reserve
+void terrain_reserve_flush();
+#endif
 // Diagnostic stored pose only. Collision coefficients remain source metadata, not a physics contract.
 // Nonsingular affine positions; inverse-transpose normals for diagnostic lighting only.
 // Original winding and collision metadata are retained, including reflected placements.

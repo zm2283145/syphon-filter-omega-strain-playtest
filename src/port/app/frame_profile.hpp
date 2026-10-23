@@ -12,7 +12,11 @@
 // per-frame means over the last window of at least half a second); a profile made for the overlay alone keeps no
 // rows (keep_rows false), so a long session does not grow.
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "win32_vita.hpp"  // port-only (132vt2): QueryPerformanceCounter on the PS Vita
+#endif
 
 #include <algorithm>
 #include <array>
@@ -94,7 +98,19 @@ public:
         a.fps = span > 0 ? double(window_.frames) / span : 0;
         averages_ = a;
         window_ = Window{};
+#if defined(OMEGA_ZONE_PROFILE)
+        if (frame_profile_sink()) frame_profile_sink()(a);
+#endif
     }
+#if defined(OMEGA_ZONE_PROFILE)
+    // Port-only (checkpoint 132vt2, research/VITA.md "Profiling"): the PS Vita app's log of each closed window
+    // (vita_main.cpp); only the Vita build defines OMEGA_ZONE_PROFILE.
+    using Sink = void (*)(const Averages&);
+    static Sink& frame_profile_sink() {
+        static Sink sink = nullptr;
+        return sink;
+    }
+#endif
     const std::vector<Row>& rows() const { return rows_; }
 
     // Statistics over rows [first, rows().size()) (skip a warm-up).

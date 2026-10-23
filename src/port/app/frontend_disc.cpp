@@ -576,9 +576,19 @@ Texture movie_texture(const mpeg2::Frame& frame) {
     Texture t;
     t.width = static_cast<std::uint32_t>(frame.width);
     t.height = static_cast<std::uint32_t>(frame.height);
+#ifdef __vita__
+    if (const auto& take = vita_movie_hooks().take_rgba; take && take(t.rgba)) return t;
+#endif
     movie::frame_to_rgba(frame, t.rgba);
     return t;
 }
+
+#ifdef __vita__
+VitaMovieHooks& vita_movie_hooks() {
+    static VitaMovieHooks hooks;
+    return hooks;
+}
+#endif
 
 const movie::SubtitleProjection& front_end_subtitle_projection() {
     static const movie::SubtitleProjection projection = movie::subtitle_projection();

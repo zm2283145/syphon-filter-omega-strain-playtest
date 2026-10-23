@@ -558,6 +558,27 @@ std::shared_ptr<const audio::PcmClip> SoundIopHost::clip(std::uint32_t sector, b
     return decoded;
 }
 
+#ifdef __vita__
+void SoundIopHost::drop_unheard_clips() {
+    std::size_t bytes = 0, count = 0;
+    for (auto it = clips_.begin(); it != clips_.end();) {
+        const auto decoder = std::find_if(decoding_.begin(), decoding_.end(),
+                                          [&](const auto& d) { return d->clip() == it->second; });
+        if (it->second.use_count() > (decoder == decoding_.end() ? 1 : 2)) {
+            ++it;
+            continue;
+        }
+        bytes += it->second->samples.capacity() * sizeof(std::int16_t);
+        ++count;
+        if (decoder != decoding_.end()) decoding_.erase(decoder);
+        it = clips_.erase(it);
+    }
+    if (count)
+        log_.push_back("PS Vita (port-only, 132vt2b2): " + std::to_string(count) + " stream clip(s) no longer played freed, " +
+                       std::to_string(bytes >> 10) + " KB");
+}
+#endif
+
 void SoundIopHost::decode_ahead(std::size_t frames) {
     for (auto it = decoding_.begin(); it != decoding_.end();) {
         auto& d = **it;
@@ -647,6 +668,9 @@ std::int32_t SoundIopHost::snd(std::uint32_t address, const std::vector<std::int
         for (auto& [handle, s] : streams_)
             if (s.voice && mixer_.playing(*s.voice)) mixer_.stop(*s.voice);
         streams_.clear();
+#ifdef __vita__
+        drop_unheard_clips();
+#endif
         engine_->sram_free(stream_ram_, stream_ram_size_);
         engine_errors();
         log_.push_back("003a7200 stream buffers closed: SPU 0x" + hex(stream_ram_) + " + 0x" + hex(stream_ram_size_) + " freed");
@@ -670,6 +694,9 @@ std::int32_t SoundIopHost::snd(std::uint32_t address, const std::vector<std::int
             if (s.voice && mixer_.playing(*s.voice)) mixer_.stop(*s.voice);
         if (!streams_.empty()) log_.push_back("003a7310 streams released: " + std::to_string(streams_.size()));
         streams_.clear();
+#ifdef __vita__
+        drop_unheard_clips();
+#endif
         bank_command(address, args);
         return 0;
     }

@@ -25,11 +25,13 @@
 
 #include <psp2/common_dialog.h>
 #include <psp2/io/stat.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/message_dialog.h>
 #include <vitaGL.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -52,14 +54,104 @@ std::recursive_mutex g_mutex;  // every vitaGL call (the render thread, the load
 class Impl;
 Impl* g_impl = nullptr;
 
+// Port-only test switch (VITA.md "Vita3K"): ux0:data/omega_strain/vita_test_gl_trace.txt logs the backend's resource
+// calls, submits and presents (the first 6000 after the play's window is made: arm_trace), to place an emulator abort.
+int g_trace_left = 0;
+bool g_trace_switch = false;
+std::function<void(const std::string&)> g_trace_log;
+void trace(const char* format, ...) {
+    if (g_trace_left <= 0 || !g_trace_log) return;
+    --g_trace_left;
+    char text[200];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    g_trace_log(std::string("vgl trace: ") + text);
+}
+
+// 132vt2c (VITA.md "Memory"): the GPU memory the backend's buffers and textures hold, by the memory block vitaGL
+// placed each in (its pools fall back CDRAM -> RAM -> phycont -> cdlg -> the newlib heap). Logged with the memory
+// line, and each placement of 1 MB or more as it happens.
+enum Pool : unsigned { pool_cdram, pool_ram, pool_phycont, pool_cdlg, pool_heap, pool_unknown, pool_count };
+const char* const pool_names[pool_count] = {"CDRAM", "RAM pool", "phycont", "cdlg", "newlib heap", "unplaced"};
+constexpr std::size_t placed_bytes = 64u << 10;  // smaller objects are not looked up (a syscall each): "unplaced"
+struct Placement {
+    std::size_t live[pool_count]{}, peak[pool_count]{};
+    std::size_t depth_live = 0, depth_peak = 0;  // the framebuffer objects' depth buffers (vitaGL's own; estimated)
+    std::size_t largest = 0;
+    Pool largest_pool = pool_unknown;
+};
+Placement g_placement;
+
+Pool pool_of(const void* p) {
+    if (!p) return pool_unknown;
+    SceKernelMemBlockInfo info{};
+    info.size = sizeof info;
+    if (sceKernelGetMemBlockInfoByAddr(const_cast<void*>(p), &info) < 0) return pool_unknown;
+    const unsigned type = unsigned(info.type);
+    if ((type & 0xff000000u) == 0x09000000u) return pool_cdram;
+    if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW || type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW)
+        return pool_phycont;
+    if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_CDIALOG_RW || type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_CDIALOG_NC_RW ||
+        type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_RW || type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDIALOG_NC_RW)
+        return pool_cdlg;
+    // Both vitaGL's RAM pool and the newlib heap (which vglUseExtraMem maps for the GPU) are main RW memory blocks.
+    return info.mappedSize == vglMemTotal(VGL_MEM_RAM) ? pool_ram : pool_heap;
+}
+
+void place(std::uint8_t& pool, std::size_t& held, Pool now, std::size_t bytes) {
+    if (held) g_placement.live[pool] -= std::min(g_placement.live[pool], held);
+    pool = std::uint8_t(now);
+    held = bytes;
+    g_placement.live[now] += bytes;
+    g_placement.peak[now] = std::max(g_placement.peak[now], g_placement.live[now]);
+    if (bytes > g_placement.largest) {
+        g_placement.largest = bytes;
+        g_placement.largest_pool = now;
+    }
+}
+void unplace(std::uint8_t pool, std::size_t& held) {
+    g_placement.live[pool] -= std::min(g_placement.live[pool], held);
+    held = 0;
+}
+
 // ---- resources ----
 
 struct VglBuffer final : Buffer {
     explicit VglBuffer(const BufferDesc& d) { desc_ = d; }
     ~VglBuffer() override;
-    std::vector<std::uint8_t> cpu;  // every buffer's bytes (constants are only here; the shadow filter reads vertices)
+    std::vector<std::uint8_t> cpu;  // the buffer's bytes (constants are only here; the shadow filter reads vertices)
     GLuint gl = 0;                  // vertex / index buffers
+    // 132vt2 (research/VITA.md "Memory"): a large vertex / index buffer (the level's scene mesh, 34 MB in TORONTO1)
+    // keeps no copy in the heap: it is written and read through vitaGL's own memory (glMapBuffer), `cpu` empty.
+    bool gl_only = false;
+    std::uint8_t pool = pool_unknown;  // where vitaGL placed it (g_placement)
+    std::size_t placed = 0;
 };
+
+constexpr std::size_t gl_only_bytes = 1u << 20;
+
+// The bytes of a vertex / index buffer (its GL memory when it keeps no heap copy).
+const std::uint8_t* buffer_bytes(const VglBuffer& b) {
+    if (!b.gl_only) return b.cpu.data();
+    glBindBuffer(GL_ARRAY_BUFFER, b.gl);
+    const auto* p = static_cast<const std::uint8_t*>(glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY));
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    if (!p) throw std::runtime_error("gfx vitagl: glMapBuffer failed");
+    return p;
+}
+
+// Writes bytes into a heap-less buffer's GL memory in place (vitaGL's glBufferSubData would copy the whole buffer
+// each frame the GPU has used it: 34 MB per pathed-object update).
+void write_gl_only(VglBuffer& b, const void* data, std::size_t bytes, std::size_t offset) {
+    glBindBuffer(GL_ARRAY_BUFFER, b.gl);
+    auto* p = static_cast<std::uint8_t*>(glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY));
+    if (!p) throw std::runtime_error("gfx vitagl: glMapBuffer failed");
+    if (data) std::memcpy(p + offset, data, bytes);
+    else std::memset(p + offset, 0, bytes);
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+}
 
 struct VglTexture final : Texture {
     VglTexture() = default;
@@ -69,6 +161,8 @@ struct VglTexture final : Texture {
     bool depth = false;       // d24s8: no GL object (vitaGL keeps the depth buffer in each framebuffer object)
     std::uint32_t clear_serial = 0;
     float clear_value = 1.0F;
+    std::uint8_t pool = pool_unknown;  // where vitaGL placed it (g_placement)
+    std::size_t placed = 0;
     unsigned rows() const { return layer_rows * std::max(desc_.layers, 1u); }
     std::size_t stride() const { return align_up(std::max(desc_.width, 1u), 8) * 4; }  // vitaGL's linear RGBA rows
     void set_desc(const TextureDesc& d) { desc_ = d; }
@@ -304,6 +398,7 @@ struct Framebuffer {
     GLuint depth_buffer = 0;
     std::shared_ptr<VglTexture> dummy_colour;  // a depth-only target's colour attachment
     std::uint32_t applied_clear = 0;           // the depth texture's clear serial last drawn into this buffer
+    std::size_t depth_bytes = 0;               // g_placement's estimate of the depth buffer
 };
 
 bool file_exists(const char* path) {
@@ -350,11 +445,17 @@ public:
     void message(const std::string& text);
     void forget(const VglTexture* t);  // a texture's framebuffer objects (it is being destroyed)
     MemoryStats snapshot();
+    // Records where vitaGL put an object's memory (g_placement); logs placements of 1 MB or more.
+    void placed(std::uint8_t& pool, std::size_t& held, const void* p, std::size_t bytes, const char* what);
+    // The same for a heap-less buffer just given its memory (bound): throws when vitaGL found none.
+    void placed_buffer(VglBuffer& b, std::size_t bytes);
 
 private:
     void copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsigned y, const Box& b);
-    void blit_from_display(VglTexture& dst, unsigned w, unsigned h, bool flip);
-    bool check_display_blit(VglTexture& dst, unsigned w, unsigned h, const std::vector<std::uint8_t>& shown);
+    void blit_from_display(VglTexture& dst, unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w, unsigned h,
+                           bool flip);
+    bool check_display_blit(VglTexture& dst, unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w, unsigned h,
+                            const std::vector<std::uint8_t>& shown);
     void write_rows(VglTexture& t, unsigned left, unsigned top, unsigned right, unsigned bottom, unsigned layer,
                     const std::uint8_t* data, unsigned pitch);
 
@@ -381,12 +482,14 @@ private:
 VglBuffer::~VglBuffer() {
     if (!gl) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    unplace(pool, placed);
     glDeleteBuffers(1, &gl);
 }
 
 VglTexture::~VglTexture() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_impl) g_impl->forget(this);
+    unplace(pool, placed);
     if (gl) glDeleteTextures(1, &gl);
 }
 
@@ -403,6 +506,10 @@ Impl::Impl(const Options& o) : options(o) {
     if (vglInitExtended(0x100000, display_width, display_height, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE))
         throw std::runtime_error("gfx vitagl: the display does not support 960x544");
     vglUseExtraMem(GL_TRUE);
+    if (options.log && file_exists("ux0:data/omega_strain/vita_test_gl_trace.txt")) {
+        g_trace_switch = true;
+        g_trace_log = options.log;
+    }
     glDisable(GL_CULL_FACE);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_STENCIL_TEST);
@@ -431,6 +538,31 @@ Impl::Impl(const Options& o) : options(o) {
                       unsigned(vglMemFree(VGL_MEM_RAM) >> 10), unsigned(vglMemTotal(VGL_MEM_RAM) >> 10));
         options.log(text);
     }
+}
+
+void Impl::placed(std::uint8_t& pool, std::size_t& held, const void* p, std::size_t bytes, const char* what) {
+    const Pool now = bytes >= placed_bytes ? pool_of(p) : pool_unknown;
+    place(pool, held, now, bytes);
+    if (bytes >= (1u << 20) && options.log) {
+        char text[200];
+        std::snprintf(text, sizeof text, "vitagl: %s of %u KB placed in %s (vitaGL free: VRAM %u KB, RAM %u KB)", what,
+                      unsigned(bytes >> 10), pool_names[now], unsigned(vglMemFree(VGL_MEM_VRAM) >> 10),
+                      unsigned(vglMemFree(VGL_MEM_RAM) >> 10));
+        options.log(text);
+    }
+}
+
+void Impl::placed_buffer(VglBuffer& b, std::size_t bytes) {
+    const void* p = glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY);
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    if (!p) {
+        char text[160];
+        std::snprintf(text, sizeof text, "gfx vitagl: out of GPU memory for a %u KB buffer (VITA.md \"Memory\")",
+                      unsigned(bytes >> 10));
+        throw std::runtime_error(text);
+    }
+    const bool indices = b.desc().bind & bind_indices;
+    placed(b.pool, b.placed, p, bytes, indices ? "an index buffer" : "a vertex buffer");
 }
 
 MemoryStats Impl::snapshot() {
@@ -601,7 +733,9 @@ std::shared_ptr<VglTexture> Impl::make_texture(const TextureDesc& desc, const Le
                                desc.width, desc.height, 0, bytes, levels[0].data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        if (!vglGetTexDataPointer(GL_TEXTURE_2D)) throw std::runtime_error("gfx vitagl: out of texture memory (VITA.md \"Memory\")");
+        const void* data = vglGetTexDataPointer(GL_TEXTURE_2D);
+        if (!data) throw std::runtime_error("gfx vitagl: out of texture memory (VITA.md \"Memory\")");
+        placed(t->pool, t->placed, data, std::size_t(bytes), "a texture");
         return t;
     }
     default: throw std::runtime_error("gfx vitagl: unknown texture format");
@@ -620,6 +754,7 @@ std::shared_ptr<VglTexture> Impl::make_texture(const TextureDesc& desc, const Le
     auto* base = static_cast<std::uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
     if (!base) throw std::runtime_error("gfx vitagl: out of texture memory (VITA.md \"Memory\")");
     std::memset(base, 0, t->stride() * t->rows());
+    placed(t->pool, t->placed, base, t->stride() * t->rows(), (desc.bind & bind_target) ? "a target" : "a texture");
     const unsigned mips = std::max(desc.mips, 1u);
     if (levels)
         for (unsigned l = 0; l < layers; ++l)
@@ -637,6 +772,7 @@ void Impl::forget(const VglTexture* t) {
                 bound_ = false;
             }
             if (it->second.depth_buffer) glDeleteRenderbuffers(1, &it->second.depth_buffer);
+            g_placement.depth_live -= std::min(g_placement.depth_live, it->second.depth_bytes);
             glDeleteFramebuffers(1, &it->second.fbo);
             it = framebuffers_.erase(it);
         } else {
@@ -679,6 +815,9 @@ void Impl::use_target(const VglTexture* colour, const VglTexture* depth) {
                 glBindRenderbuffer(GL_RENDERBUFFER, f.depth_buffer);
                 glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, attach->desc().width, attach->rows());
                 glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, f.depth_buffer);
+                f.depth_bytes = std::size_t(align_up(attach->desc().width, 32)) * align_up(attach->rows(), 32) * 5;
+                g_placement.depth_live += f.depth_bytes;
+                g_placement.depth_peak = std::max(g_placement.depth_peak, g_placement.depth_live);
             }
             const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
             if (options.log) {
@@ -860,8 +999,8 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
         ShadowFilter filter;
         std::memcpy(filter.clip, shadow->cpu.data(), sizeof filter.clip);
         std::memcpy(filter.facing, shadow->cpu.data() + 96, sizeof filter.facing);
-        const std::uint8_t* vertices = state_.vertices->cpu.data() + state_.offset;
-        const auto* source = indexed ? reinterpret_cast<const std::uint32_t*>(state_.indices->cpu.data()) + first : nullptr;
+        const std::uint8_t* vertices = buffer_bytes(*state_.vertices) + state_.offset;
+        const auto* source = indexed ? reinterpret_cast<const std::uint32_t*>(buffer_bytes(*state_.indices)) + first : nullptr;
         kept.reserve(count);
         for (std::uint32_t k = 0; k + 2 < count; k += 3) {
             const std::uint32_t i0 = source ? source[k] : first + k, i1 = source ? source[k + 1] : first + k + 1,
@@ -1005,11 +1144,12 @@ void Impl::copy_region(const VglTexture* dst, unsigned dst_sub, unsigned x, unsi
     execute(p);
 }
 
-// A copy out of the display. A copy of the whole display into a texture of its size (the 132ws wide side fill and the
-// vision blur, every frame) is drawn on the GPU: glBlitFramebuffer samples the display's colour surface into the
-// texture's framebuffer object, with no wait. Its first use is checked against the read-back below (research/VITA.md
-// "Widescreen"); other copies, a failed check and Options::display_copy_readback (a test switch) read back:
-// glReadPixels (vitaGL ends the scene and waits for the GPU, then the CPU reads the uncached display), rows bottom-up.
+// A copy out of the display. A copy into a single-layer texture (the 132ws wide side fill and the vision blur: the
+// whole display, every frame; 132vt2: the heat-haze sprites' boxes, one per sprite) is drawn on the GPU:
+// glBlitFramebuffer samples the display's colour surface into the texture's framebuffer object, with no wait. Its
+// first use is checked against the read-back below (research/VITA.md "Widescreen"); copies into array layers, a failed
+// check and Options::display_copy_readback (a test switch) read back: glReadPixels (vitaGL ends the scene and waits
+// for the GPU, then the CPU reads the uncached display), rows bottom-up.
 void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsigned y, const Box& box) {
     OMEGA_ZONE("vgl.copy_from_display");
     const unsigned right = std::min(box.right, display_width), bottom = std::min(box.bottom, display_height);
@@ -1020,13 +1160,12 @@ void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsign
     const unsigned w = std::min(right - box.left, dst.desc().width - std::min(x, dst.desc().width));
     const unsigned h = std::min(bottom - box.top, dst.layer_rows - std::min(y, dst.layer_rows));
     if (!w || !h) return;
-    const bool whole = layer == 0 && x == 0 && y == 0 && box.left == 0 && box.top == 0 && w == dst.desc().width &&
-                       h == dst.layer_rows && dst.rows() == dst.layer_rows;
-    const bool gpu = whole && !options.display_copy_readback && display_blit_ != DisplayBlit::failed;
+    const bool single = layer == 0 && dst.rows() == dst.layer_rows;
+    const bool gpu = single && !options.display_copy_readback && display_blit_ != DisplayBlit::failed;
     if (gpu && display_blit_ == DisplayBlit::unchecked && options.display_copy_order)
         display_blit_ = options.display_copy_order == 2 ? DisplayBlit::flipped : DisplayBlit::direct;
     if (gpu && display_blit_ != DisplayBlit::unchecked) {
-        blit_from_display(dst, w, h, display_blit_ == DisplayBlit::flipped);
+        blit_from_display(dst, box.left, box.top, x, y, w, h, display_blit_ == DisplayBlit::flipped);
         ++display_blits_;
         return;
     }
@@ -1048,30 +1187,40 @@ void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsign
             out[4 * k + 3] = in[4 * k + 3];
         }
     }
-    if (gpu && check_display_blit(dst, w, h, up)) return;
+    if (gpu && check_display_blit(dst, box.left, box.top, x, y, w, h, up)) return;
     write_rows(dst, x, y, x + w, y + h, layer, rows.data(), w * 4);
     ++display_readbacks_;
 }
 
-// The GPU copy: the display's top-left w x h (GL rows display_height - h .. display_height) drawn over the whole
-// destination, point-sampled; `flip` reverses the rows (the order the check found).
-void Impl::blit_from_display(VglTexture& dst, unsigned w, unsigned h, bool flip) {
+// The GPU copy: the display's w x h at (sx, sy) (top-left origin; GL rows display_height - sy - h .. display_height -
+// sy, as vitaGL samples the display) drawn at (dx, dy) of the destination, point-sampled. vitaGL's destination rows
+// are in the order the check found: `flip` (the handheld's) has the destination's GL row = its row from the top, else
+// GL row = rows() - its row from the top. The whole-display copy is sx = sy = dx = dy = 0, w x h = the texture.
+void Impl::blit_from_display(VglTexture& dst, unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w,
+                             unsigned h, bool flip) {
     use_target(&dst, nullptr);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    const GLint top = static_cast<GLint>(display_height), bottom = top - static_cast<GLint>(h);
-    glBlitFramebuffer(0, flip ? top : bottom, static_cast<GLint>(w), flip ? bottom : top, 0, 0, static_cast<GLint>(w),
-                      static_cast<GLint>(h), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    const GLint top = static_cast<GLint>(display_height - sy), bottom = top - static_cast<GLint>(h);
+    const GLint x0 = static_cast<GLint>(sx), x1 = x0 + static_cast<GLint>(w);
+    const GLint d0 = static_cast<GLint>(dx), d1 = d0 + static_cast<GLint>(w);
+    if (flip)
+        glBlitFramebuffer(x0, top, x1, bottom, d0, static_cast<GLint>(dy), d1, static_cast<GLint>(dy + h),
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    else
+        glBlitFramebuffer(x0, bottom, x1, top, d0, static_cast<GLint>(dst.rows() - dy - h),
+                          d1, static_cast<GLint>(dst.rows() - dy), GL_COLOR_BUFFER_BIT, GL_NEAREST);
     bound_ = false;  // the read binding is the display now: the next target binds both again
 }
 
 // The first whole-display copy: the GPU copy in both row orders, each compared byte for byte with the read-back
 // (`shown`, rows bottom-up as glReadPixels gives them; the texture keeps RGBA bytes for both formats). The matching
 // order is kept; neither matching: the read-back path from then on. True when the texture holds the copy.
-bool Impl::check_display_blit(VglTexture& dst, unsigned w, unsigned h, const std::vector<std::uint8_t>& shown) {
+bool Impl::check_display_blit(VglTexture& dst, unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w,
+                              unsigned h, const std::vector<std::uint8_t>& shown) {
     std::size_t differ[2]{};
     char where[2][96]{};
     for (const bool flip : {false, true}) {
-        blit_from_display(dst, w, h, flip);
+        blit_from_display(dst, sx, sy, dx, dy, w, h, flip);
         glFinish();
         glBindTexture(GL_TEXTURE_2D, dst.gl);
         const auto* base = static_cast<const std::uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
@@ -1081,7 +1230,7 @@ bool Impl::check_display_blit(VglTexture& dst, unsigned w, unsigned h, const std
         }
         unsigned rows = 0, first = h, last = 0;
         for (unsigned r = 0; r < h; ++r) {
-            const std::uint8_t* got = base + std::size_t(r) * dst.stride();
+            const std::uint8_t* got = base + std::size_t(dy + r) * dst.stride() + std::size_t(dx) * 4;
             const std::uint8_t* want = shown.data() + std::size_t(h - 1 - r) * w * 4;
             std::size_t row_differ = 0;
             for (unsigned k = 0; k < w * 4; ++k) row_differ += got[k] != want[k];
@@ -1128,6 +1277,23 @@ void Impl::update_buffer(VglBuffer& b, const void* data, std::size_t bytes, std:
     OMEGA_ZONE("vgl.update_buffer");
     const std::size_t size = b.desc().bytes;
     if (offset > size || bytes > size - offset) throw std::runtime_error("gfx vitagl: a buffer update past its end");
+    if (b.gl_only) {
+        if (!bytes) return;
+        if (b.desc().usage == Usage::dynamic) {
+            glBindBuffer(GL_ARRAY_BUFFER, b.gl);
+            if (!keep_rest || (offset == 0 && bytes == size)) {
+                glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(align_up(std::max<std::size_t>(size, 16), 16)), nullptr,
+                             GL_DYNAMIC_DRAW);
+                placed_buffer(b, b.placed);
+                write_gl_only(b, data, bytes, offset);
+            } else {
+                glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(bytes), data);
+            }
+        } else {
+            write_gl_only(b, data, bytes, offset);
+        }
+        return;
+    }
     if (b.cpu.size() < size) b.cpu.resize(size);
     if (bytes) std::memcpy(b.cpu.data() + offset, data, bytes);
     if (!b.gl || !bytes) return;
@@ -1307,12 +1473,14 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     bound_ = display_bound_ = false;
     bound_colour_ = bound_depth_ = nullptr;
-    const int vsync = sync_interval > 0 ? 1 : 0;
+    // The sync interval in vertical blanks (2 for the level's 30 fps steps: vitaGL's display callback waits that many).
+    const int vsync = static_cast<int>(std::min(sync_interval, 4u));
     if (vsync != vsync_) {
-        vglWaitVblankStart(vsync ? GL_TRUE : GL_FALSE);
+        eglSwapInterval(nullptr, vsync);
         vsync_ = vsync;
     }
     vglSwapBuffers(GL_FALSE);
+    if (options.presented) options.presented();
     stats.scenes_last_frame = targets_;
     stats.draws_last_frame = draws_;
     targets_ = draws_ = 0;
@@ -1351,19 +1519,35 @@ public:
     Capabilities capabilities() const override { return {.block_textures = true}; }   // 132md11 (DXT1 / DXT5)
     std::shared_ptr<Buffer> create_buffer(const BufferDesc& desc, const void* initial, const char*) override {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        trace("create_buffer %u bytes, bind %u", unsigned(desc.bytes), unsigned(desc.bind));
         auto b = std::make_shared<VglBuffer>(desc);
-        b->cpu.assign(align_up(std::max<std::size_t>(desc.bytes, 16), 16), 0);
+        const std::size_t padded = align_up(std::max<std::size_t>(desc.bytes, 16), 16);
+        if (!(desc.bind & bind_constants) && padded >= gl_only_bytes) {
+            b->gl_only = true;
+            glGenBuffers(1, &b->gl);
+            glBindBuffer(GL_ARRAY_BUFFER, b->gl);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(padded), nullptr,
+                         desc.usage == Usage::dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
+            impl_.placed_buffer(*b, padded);
+            write_gl_only(*b, initial, initial ? desc.bytes : padded, 0);
+            if (initial && padded > desc.bytes) write_gl_only(*b, nullptr, padded - desc.bytes, desc.bytes);
+            return b;
+        }
+        b->cpu.assign(padded, 0);
         if (initial) std::memcpy(b->cpu.data(), initial, desc.bytes);
         if (!(desc.bind & bind_constants)) {
             glGenBuffers(1, &b->gl);
             glBindBuffer(GL_ARRAY_BUFFER, b->gl);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(b->cpu.size()), b->cpu.data(),
                          desc.usage == Usage::immutable ? GL_STATIC_DRAW : GL_DYNAMIC_DRAW);
+            impl_.placed(b->pool, b->placed, nullptr, b->cpu.size(), "a buffer");
         }
         return b;
     }
     std::shared_ptr<Texture> create_texture(const TextureDesc& desc, const Level* levels, const TextureLabels&) override {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        trace("create_texture %ux%u format %u, %u mips, %u layers, bind %u", desc.width, desc.height,
+              unsigned(desc.format), unsigned(desc.mips), unsigned(desc.layers), unsigned(desc.bind));
         return impl_.make_texture(desc, levels);
     }
     std::shared_ptr<BlendState> create_blend(const BlendDesc& desc, const char*) override {
@@ -1389,12 +1573,14 @@ public:
     void prepare(Program program) override {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
         const GxmProgram& g = gxm_program(program);
+        trace("prepare program %u (vertex %u, fragment %u)", unsigned(program), g.vertex, g.fragment);
         impl_.shader(true, g.vertex);
         impl_.shader(false, g.fragment);
         if (g.fragment_alt != ~0U) impl_.shader(false, g.fragment_alt);
     }
     void submit(CommandList& list) override {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        trace("submit");
         impl_.submit(list);
     }
     void write(const Buffer& buffer, const void* data, std::size_t bytes, const char*) override {
@@ -1432,6 +1618,7 @@ public:
     void resize(unsigned, unsigned, const char*) override {}  // the Vita display is fixed at 960x544
     Presented present(unsigned sync_interval, const char*) override {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        trace("present (interval %u)", sync_interval);
         return impl_.present(sync_interval);
     }
 
@@ -1461,10 +1648,27 @@ Display create_display(const Options& options) {
     return d;
 }
 
+void arm_trace() {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (g_trace_switch) g_trace_left = 6000;
+}
+
 MemoryStats memory_stats() {
     if (!g_impl) return {};
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     return g_impl->snapshot();
+}
+
+std::string placement_line() {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const Placement& p = g_placement;
+    std::string line = "GPU objects KB (live/peak):";
+    for (unsigned i = 0; i < pool_count; ++i)
+        if (p.peak[i]) line += " " + std::string(pool_names[i]) + " " + std::to_string(p.live[i] >> 10) + "/" +
+                               std::to_string(p.peak[i] >> 10) + ",";
+    line += " depth buffers ~" + std::to_string(p.depth_live >> 10) + "/" + std::to_string(p.depth_peak >> 10) +
+            "; largest " + std::to_string(p.largest >> 10) + " in " + pool_names[p.largest_pool];
+    return line;
 }
 
 void show_message(const std::string& text) {

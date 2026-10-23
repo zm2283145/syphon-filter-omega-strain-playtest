@@ -196,6 +196,9 @@ private:
     // Port-only (checkpoint 132win5): the VPK clips still decoding, a chunk ahead of the voices that read them.
     std::vector<std::unique_ptr<audio::VpkProgressive>> decoding_;
     void decode_ahead(std::size_t frames);
+    // Port-only (132vt2b2, PS Vita, research/VITA.md "Memory"): the clips no stream or voice plays any more leave the
+    // cache (a VPK track's whole decoded PCM, ~30 MB for the front end's THEME_MAIN.VPK, held into the level before).
+    void drop_unheard_clips();
     std::map<std::uint32_t, std::string> members_;            // sector -> HOG member
     // Port-only (checkpoint 132md4, research/MODDING.md "Sounds and music"): sector -> the member's asset key, and the
     // mods' replacement clips by (sector, looping) (nullptr: refused, the disc's is played), and those still decoding

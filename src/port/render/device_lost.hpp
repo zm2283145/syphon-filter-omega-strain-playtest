@@ -7,6 +7,8 @@
 // half (DeviceLost, the loss mark, the test hook) is gfx_device_lost.hpp, which the renderers use.
 #include "gfx_device_lost.hpp"
 
+// Port-only (132vt2): the PS Vita build shares only the backend-neutral half (its backends report no HRESULTs).
+#ifdef _WIN32
 #include <d3d11.h>
 #include <dxgi.h>
 
@@ -48,3 +50,5 @@ inline void throw_if_failed(HRESULT r, const char* operation) {
 inline void check_device(HRESULT r, const char* operation) { throw_if_failed(device_result(r, operation), operation); }
 
 }  // namespace omega
+
+#endif  // _WIN32

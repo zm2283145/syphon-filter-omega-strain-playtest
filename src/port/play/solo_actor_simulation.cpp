@@ -34,6 +34,7 @@
 #include "morph_resources.hpp"
 #include "player_camera.hpp"
 #include "port_cheats.hpp"
+#include "zone_profile.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -2961,6 +2962,7 @@ void SoloActorSimulation::run_frame(std::span<SoloActorSimulation* const> actors
     // Marks the actor whose own phase runs: another actor's damage may reach
     // it between its phases (apply_damage), not during them.
     const auto run=[](Impl& s,const auto& f){s.executing=true;f();s.executing=false;};
+    OMEGA_ZONE_LAPS(actor_laps);   // port-only (132vt2, zone_profile.hpp): the frame's passes on the Vita
     for(std::size_t i=0;i<actors.size();++i){
         auto& s=*actors[i]->impl_;
         if(s.config.dt!=actors[0]->impl_->config.dt)throw std::runtime_error("Actor world: every actor steps with the world's elapsed time");
@@ -2984,8 +2986,10 @@ void SoloActorSimulation::run_frame(std::span<SoloActorSimulation* const> actors
             if(!a->impl_->player())a->impl_->controller.ai->pump(*a);
         });
     }
+    OMEGA_ZONE_LAP(actor_laps,"actor.pump");
     // The frame-update broadcast reaches the world's child services first.
     if(services)services();
+    OMEGA_ZONE_LAP(actor_laps,"actor.services");
     // First traversal: +4c (component +3c), then actor logic when eligible.
     for(std::size_t i=0;i<actors.size();++i){
         if(!traversed(i))continue;
@@ -2994,6 +2998,8 @@ void SoloActorSimulation::run_frame(std::span<SoloActorSimulation* const> actors
             if(!s.player())s.controller.ai->always_run(*actors[i],s.config.dt);
             if(actors[i]->eligible())s.logic(inputs[i]);
         });
+        if(s.player())OMEGA_ZONE_LAP(actor_laps,"actor.logic player");
+        else OMEGA_ZONE_LAP(actor_laps,"actor.logic ai");
     }
     // The array's later entries (00133420 walks 0040ca30 in registration
     // order: the level's generators 001c2ae0 come after its NPCs and player).
@@ -3013,12 +3019,15 @@ void SoloActorSimulation::run_frame(std::span<SoloActorSimulation* const> actors
             if(a->actor->eligible())s.logic(*a->input);
         });
     }
+    OMEGA_ZONE_LAP(actor_laps,"actor.generators");
     // Second traversal: the model/physical phase of every eligible actor.
     for(std::size_t i=0;i<actors.size();++i)if(traversed(i)&&actors[i]->eligible())run(*actors[i]->impl_,[&]{actors[i]->impl_->physics(inputs[i]);});
     for(const auto& a:late)if(a.actor->eligible())run(*a.actor->impl_,[&]{a.actor->impl_->physics(*a.input);});
+    OMEGA_ZONE_LAP(actor_laps,"actor.physics");
     // The frame-update event: the hotbox trackers of present actors.
     for(std::size_t i=0;i<actors.size();++i)if(traversed(i)&&actors[i]->eligible())run(*actors[i]->impl_,[&]{actors[i]->impl_->frame_event();});
     for(const auto& a:late)if(a.actor->eligible())run(*a.actor->impl_,[&]{a.actor->impl_->frame_event();});
+    OMEGA_ZONE_LAP(actor_laps,"actor.frame_event");
 }
 
 SoloActorSimulation::SoloActorSimulation(SoloCollisionWorld world,const SoloActorConfig& config,

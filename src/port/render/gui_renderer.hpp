@@ -121,7 +121,41 @@ struct GuiEdgeVertex {
     float x = 0.0F, y = 0.0F, u = 0.0F, v = 0.0F;
     float r = 0.0F, g = 0.0F, b = 0.0F, a = 0.0F;
 };
-std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>& triangles, float half_width);
+// 132ws5: the wide menu draw passes max_overhang (a triangle crossing the edge by more is not mirrored) and min_width
+// (a triangle narrower than it, an end bracket or a thin line, is not mirrored).
+std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>& triangles, float half_width,
+                                                float max_overhang = 1e30F, float min_width = 0.0F);
+
+// Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the wide menu draw's trim of a batch's
+// triangles (flat GUI units, w 1): a triangle that crosses the 4:3 frame's left or right edge by at most `overhang`
+// units (art ending just past the PS2 frame, which its overscan hid) is cut at that edge, so gui_wide_edge_images
+// mirrors its inside part; one that overhangs further (art continuing past the frame: the CMDCENTR ring) is kept
+// whole and drawn past the edge, as is one narrower than menu_extend_span (a highlight's end bracket: drawn whole,
+// not mirrored). A vertex less than `reach` inside an edge, of a triangle at least menu_extend_span wide,
+// goes to the edge (art ending a few units short of the PS2 frame, the title's and the options' backdrops, then
+// meets its mirror image without a dark seam). Returns triangles (three vertices each).
+std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& triangles, float overhang,
+                                              float reach = 0.0F);
+// Port-only (checkpoint 132ws5): the wide menu draw's spread of a screen's header and legend. `bounds`: each screen
+// element's (GuiDrawBatch::port_menu) x0, x1, y0, y1 (flat GUI units, y up). An element lying in the header band
+// (y0 >= menu_header_y) or the legend band (y1 <= menu_legend_y), narrower than menu_spread_width and not reaching a
+// 4:3 edge (a band backdrop extended into the sides) is grouped with the band's neighbours less than menu_spread_gap
+// apart (an icon and its label); each group moves by c * (half_width / 320 - 1), c its centre, so the row spreads
+// in proportion to the target's width. Everything else (the centred content) does not move. Returns tag -> shift.
+// The draw gives a batch lying in a band its own tag when its element does not spread (gui_wide_menu_spreads false:
+// ACNTLOGN's "Accept" label is part of the login form's element while its Square icon is an element of its own;
+// ONLIPREF's d-pad icon the other way round), so a label and its icon move together.
+inline constexpr float menu_header_y = 168.0F;
+inline constexpr float menu_legend_y = -165.0F;
+inline constexpr float menu_spread_width = 360.0F;
+inline constexpr float menu_spread_gap = 12.0F;
+inline constexpr float menu_trim_overhang = 16.0F;
+inline constexpr float menu_edge_reach = 4.0F;
+inline constexpr float menu_extend_span = 24.0F;
+std::map<std::uint32_t, float> gui_wide_menu_shifts(const std::map<std::uint32_t, std::array<float, 4>>& bounds,
+                                                    float half_width);
+// Whether bounds (x0, x1, y0, y1) lie in the header or legend band and are narrow enough to spread (the test above).
+bool gui_wide_menu_spreads(const std::array<float, 4>& b);
 
 // The three fonts the application registers at boot (002cb934 / 002cb95c /
 // 002cb984 -> 004185a0): "default" (DEFAULT.FNT, the manager's default +10),
@@ -338,7 +372,7 @@ public:
     //     mapped over the whole target unclipped, so a marker past the 4:3 edge lands on its Hor+ place.
     // Everything else (menu content, 4:3 artwork, a picture under bars) is drawn in the fitted rectangle exactly
     // as pillarbox draws it, clipped at the 4:3 edges, so nothing that overhangs the PS2 frame leaks into the
-    // sides. A 4:3 backdrop drawn as textured strips that together cover the frame counts as one backdrop
+    // sides (132ws5: under set_wide_menu, the front end's, it is drawn unclipped; see there). A 4:3 backdrop drawn as textured strips that together cover the frame counts as one backdrop
     // (wide_backdrop). wide_draws counts the draws that applied it.
     std::uint64_t wide_draws() const { return wide_draws_; }
     // The last wide draw's anchored HUD elements: tag -> x shift (GUI units; 0 for one that stays centred).
@@ -346,7 +380,7 @@ public:
     // Whether the last wide draw had a 4:3 backdrop picture: a flat textured batch, not a HUD element nor a
     // picture, whose bounds cover the frame (the play's loadout screen). The caller then adds draw_wide_fill.
     bool wide_backdrop() const { return wide_backdrop_; }
-    // Port-only (checkpoint 132ws): the wide aspect's side fill for a 4:3 picture (the front end's menus): the
+    // Port-only (checkpoint 132ws): the wide aspect's side fill for a 4:3 picture (132ws5: the front end only where no edge image was drawn): the
     // target's fitted 4:3 rectangle copied, shrunk (256 x 256 then 32 x 32, bilinear: a strong blur), and drawn
     // dimmed into the side areas left and right of it, mirrored at the rectangle's edges, so a 4:3 background
     // extends without being stretched. No-op unless frame_wide(width, height) with the frame fit on. Needs a
@@ -356,11 +390,23 @@ public:
     // Port-only (checkpoint 132ws2): under the wide aspect, the 4:3 panel art the frame's edges cut (flat batches drawn
     // in the fitted rectangle, textured or untextured, IE or sprite: not covers, HUD elements, pictures or
     // perspective / clip batches) is extended into the side areas with gui_wide_edge_images, each image drawn right
-    // after its batch (same texture and sampler, the whole viewport). Off by default (the front end has the side
-    // fill); the play overlay sets it. wide_edge_images counts the triangles the last draw added.
+    // after its batch (same texture and sampler, the whole viewport). Off by default; the play overlay sets it, and
+    // 132ws5: the front end and the Vita set it with set_wide_menu (they skip draw_wide_fill when it added images). wide_edge_images counts the triangles the last draw added.
     void set_wide_edge_extend(bool on) { wide_edge_extend_ = on; }
     bool wide_edge_extend() const { return wide_edge_extend_; }
     std::size_t wide_edge_images() const { return wide_edge_images_; }
+    // Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the front end's wide menus (the front
+    // end and the Vita set it; the play overlay does not). Under the wide aspect draw() then also:
+    //   - draws the flat 4:3 content (untagged frame batches) unclipped over the whole target at its 4:3 place, so
+    //     art that continues past the PS2 frame (the CMDCENTR ring) shows; a triangle overhanging an edge by at
+    //     most menu_trim_overhang is cut there first (gui_wide_menu_trim) and edge-extended with the rest;
+    //   - with set_wide_edge_extend, extends the art the 4:3 edges cut as the play overlay does, but never a font
+    //     string (GuiDrawBatch::port_text: no mirrored glyphs);
+    //   - spreads the header and legend elements (GuiDrawBatch::port_menu) with gui_wide_menu_shifts.
+    // wide_menu_shifts: the last draw's moved elements (tag -> x shift, GUI units).
+    void set_wide_menu(bool on) { wide_menu_ = on; }
+    bool wide_menu() const { return wide_menu_; }
+    const std::map<std::uint32_t, float>& wide_menu_shifts() const { return wide_menu_shifts_; }
     // Port-only (checkpoint 132win2): device-lost recovery. Re-creates every GPU object on a new device and
     // context (the shared game window's, after HostWindow::recover_device) and uploads the slot images again
     // from the copies set_texture keeps for a renderer on a caller's device; the lazily made images (vision
@@ -429,6 +475,8 @@ private:
     bool wide_backdrop_ = false;
     bool wide_edge_extend_ = false;      // 132ws2
     std::size_t wide_edge_images_ = 0;   // 132ws2
+    bool wide_menu_ = false;             // 132ws5
+    std::map<std::uint32_t, float> wide_menu_shifts_;
     bool copy_images_ = true;  // 132win5: keep_image_copies
     bool keep_images_ = false;  // a renderer on a caller's device keeps its slot images (reset_device)
     std::map<std::uint32_t, Texture> images_kept_;

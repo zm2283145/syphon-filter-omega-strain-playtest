@@ -154,6 +154,13 @@ struct GuiDrawBatch {
     // elements): the wide draw maps it over the whole window (Hor+ positions past the 4:3 edges stay visible),
     // with no anchor shift and no 4:3 clip. Unused by every other aspect.
     bool port_free = false;
+    // Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the wide menu draw's hints
+    // (GuiRenderer::set_wide_menu), unused otherwise. port_menu: non-zero for the batches of one element of a shown
+    // screen (a child of a canvas child; numbered in draw order per frame by GuiDrawer::draw_canvas); the wide menu
+    // draw spreads the header and legend elements towards the window's edges. port_text: a font string (0036a330),
+    // never mirrored into the side areas.
+    std::uint32_t port_menu = 0;
+    bool port_text = false;
 };
 inline constexpr std::uint32_t port_anchor_widget = 0x10000;
 
@@ -327,6 +334,10 @@ private:
     GuiDecor* decor_ = nullptr;
     IeDrawState* st_ = nullptr;
     std::map<const gui::Widget*, TextState> text_;
+    // Port-only (132ws5): draw_widget's depth below the canvas and the last screen element tag given
+    // (GuiDrawBatch::port_menu; never reset, so the tags of one list stay distinct).
+    int menu_depth_ = 0;
+    std::uint32_t menu_tag_ = 0;
 };
 
 }  // namespace omega

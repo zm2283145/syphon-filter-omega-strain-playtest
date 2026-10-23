@@ -18,13 +18,7 @@
 // a host monotonic clock in the EE's 10 us ticks; stop() is the 00166190
 // teardown (the thread ends, then 00271cd0).
 
-#ifdef _WIN32
 #include "host_window.hpp"
-#else
-namespace omega {
-class HostWindow;  // port-only (132vt1): the Win32 game window; the Vita build has no LoadingScreenHost yet
-}
-#endif
 #include "hud_loading.hpp"
 
 #include <atomic>

@@ -34,6 +34,9 @@
 // the buffers follow at the next sync_buffers, and the render scale and the 4:3 fit (frame_fit.hpp) work on the
 // new client pixels. The saved window= placement is in physical pixels (window_units=pixels, saved_window_pixels).
 
+#ifndef _WIN32
+#include "host_window_vita.hpp"  // port-only (132vt2): the PS Vita's fixed screen (research/VITA.md)
+#else
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -306,3 +309,5 @@ std::optional<WindowRect> fit_saved_window(const WindowRect& saved, const std::v
 std::optional<WindowRect> saved_window_pixels(const PortSettings& settings, unsigned system_dpi, bool& migrated);
 
 }  // namespace omega
+
+#endif  // _WIN32

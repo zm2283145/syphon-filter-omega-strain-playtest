@@ -427,6 +427,41 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
             l.draw(s.count, s.first);
             continue;
         }
+#if defined(__vita__)
+        // Port-only (132vt2, the Vita): each copy from the display ends vitaGL's GXM scene, so the sprites go in runs
+        // whose boxes do not overlap: one copy of the run's bounding box, then the run's draw. Each sprite still
+        // reads its box with every earlier overlapping sprite drawn, as the per-sprite copies below.
+        for (std::uint32_t v = s.first; v < s.first + s.count;) {
+            gfx::Box run{};
+            std::uint32_t end = v;
+            for (; end < s.first + s.count; end += 6) {
+                const gfx::Box& box = haze_boxes[end / 6];
+                if (box.right <= box.left || box.bottom <= box.top) break;
+                bool overlaps = false;
+                for (std::uint32_t u = v; u < end && !overlaps; u += 6) {
+                    const gfx::Box& o = haze_boxes[u / 6];
+                    overlaps = box.left < o.right && o.left < box.right && box.top < o.bottom && o.top < box.bottom;
+                }
+                if (overlaps) break;
+                if (end == v) run = box;
+                else {
+                    run.left = std::min(run.left, box.left);
+                    run.top = std::min(run.top, box.top);
+                    run.right = std::max(run.right, box.right);
+                    run.bottom = std::max(run.bottom, box.bottom);
+                }
+            }
+            if (end == v) {   // an empty box: no draw
+                v += 6;
+                continue;
+            }
+            l.set_texture(2, nullptr);
+            l.copy_region(frame_copy_.get(), 0, run.left, run.top, target, 0, &run);
+            l.set_texture(2, frame_copy_.get());
+            l.draw(end - v, v);
+            v = end;
+        }
+#else
         // One haze sprite at a time: its target pixels (with every earlier sprite drawn) to frame_cd first.
         for (std::uint32_t v = s.first; v < s.first + s.count; v += 6) {
             const gfx::Box& box = haze_boxes[v / 6];
@@ -436,6 +471,7 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
             l.set_texture(2, frame_copy_.get());
             l.draw(6, v);
         }
+#endif
     }
     const gfx::Texture* none[3]{};
     l.set_textures(0, 3, none);

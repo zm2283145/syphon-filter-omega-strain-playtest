@@ -10,6 +10,12 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#ifdef __vita__
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <string>
+#endif
 
 namespace omega {
 namespace {
@@ -749,6 +755,123 @@ void apply_stored_pose(Mesh& mesh, CollisionMesh& collision, const PopulationObj
     mesh.declared_bounds = mesh.bounds;
 }
 
+#ifdef __vita__
+namespace {
+struct TerrainSizes {
+    std::size_t vertices{}, indices{}, collision_vertices{}, collision_triangles{};
+};
+TerrainSizes terrain_reached;
+std::string terrain_level;
+bool terrain_complete = false;
+constexpr const char* terrain_reserve_file = "local/terrain_reserve.txt";
+
+// The built-in sizes (a level not yet in local/terrain_reserve.txt): the disc's own levels as measured (132vt2c: the
+// play host's launcher arguments, --textured with the sky; TORONTO1 and TRAINING agree with the Vita3K runs' "Terrain
+// size" lines). A level not measured (a mod's) reserves TORONTO1's sizes and gives back what it did not use at
+// terrain_reserve_end; growing the aggregate from nothing re-allocated it ~20 times (the 132vt2b hardware run's
+// std::bad_alloc at 29.9 MB, with the last 26.8 MB copy and the heap's holes alive).
+constexpr TerrainSizes default_terrain_sizes{588765, 1257144, 66437, 94662};
+const std::map<std::string, TerrainSizes>& builtin_terrain_sizes() {
+    static const std::map<std::string, TerrainSizes> sizes{
+        {"BELARUS1", {520152, 1147428, 60271, 77114}},  {"BELARUS2", {718475, 1521618, 126453, 183785}},
+        {"CHECHNYA", {259443, 531933, 54873, 80208}},   {"ITALY", {189226, 383535, 39964, 51879}},
+        {"KYRGSTAN", {215526, 444018, 35491, 49629}},   {"LORELEI", {427848, 897198, 68341, 85745}},
+        {"MINSK", {449404, 890271, 73940, 98080}},      {"MNTNEGR1", {176513, 381327, 20600, 33085}},
+        {"MYANMAR", {574800, 1258851, 93905, 151654}},  {"TOKYO", {566462, 1199028, 59985, 80087}},
+        {"TORONTO1", default_terrain_sizes},            {"TORONTO2", {309625, 657699, 43941, 59319}},
+        {"TORONTO3", {125361, 267894, 18818, 23441}},   {"TRAINING", {125565, 281148, 6098, 9072}},
+        {"UKRAINE", {531003, 1110612, 49303, 68580}},   {"YEMEN1", {328289, 624333, 55537, 76471}},
+        {"YEMEN2", {163648, 309687, 23006, 30249}},     {"ZURICH", {343058, 747024, 36377, 51082}},
+    };
+    return sizes;
+}
+
+std::map<std::string, std::pair<TerrainSizes, bool>> read_terrain_sizes() {
+    std::map<std::string, std::pair<TerrainSizes, bool>> sizes;
+    std::ifstream in(terrain_reserve_file);
+    std::string level, state;
+    TerrainSizes s;
+    while (in >> level >> s.vertices >> s.indices >> s.collision_vertices >> s.collision_triangles >> state)
+        sizes[level] = {s, state == "complete"};
+    return sizes;
+}
+}  // namespace
+
+void terrain_reserve_begin(const std::string& level, Mesh& dst, CollisionMesh& col) {
+    terrain_level = level;
+    terrain_reached = {};
+    terrain_complete = false;
+    TerrainSizes want;
+    const char* source = "none";
+    const auto stored = read_terrain_sizes();
+    const auto found = stored.find(level);
+    if (found != stored.end() && found->second.second) {
+        want = found->second.first;
+        source = terrain_reserve_file;
+    } else {
+        if (const auto builtin = builtin_terrain_sizes().find(level); builtin != builtin_terrain_sizes().end()) {
+            want = builtin->second;
+            source = "built in";
+        } else {
+            want = default_terrain_sizes;
+            source = "not measured: TORONTO1's, the rest given back at the end";
+        }
+        if (found != stored.end()) {  // a failed load's sizes, +1/4, when past the built-in ones
+            const auto& s = found->second.first;
+            const auto more = [](std::size_t& w, std::size_t r) { w = std::max(w, r + r / 4); };
+            more(want.vertices, s.vertices);
+            more(want.indices, s.indices);
+            more(want.collision_vertices, s.collision_vertices);
+            more(want.collision_triangles, s.collision_triangles);
+        }
+    }
+    dst.vertices.reserve(want.vertices);
+    dst.indices.reserve(want.indices);
+    col.vertices.reserve(want.collision_vertices);
+    col.triangles.reserve(want.collision_triangles);
+    std::cout << "Terrain reserve (port-only, PS Vita): " << level << " " << want.vertices << " vertices, " << want.indices
+              << " indices, " << want.collision_vertices << " / " << want.collision_triangles
+              << " collision vertices / triangles (" << source << ")\n";
+}
+
+void terrain_reserve_end(Mesh& dst, CollisionMesh& col) {
+    terrain_reached = {dst.vertices.size(), dst.indices.size(), col.vertices.size(), col.triangles.size()};
+    const auto fit = [](auto& v) { if (v.capacity() - v.size() > v.size() / 8) v.shrink_to_fit(); };
+    fit(dst.vertices);
+    fit(dst.indices);
+    fit(col.vertices);
+    fit(col.triangles);
+    terrain_complete = true;
+    std::cout << "Terrain size (port-only, PS Vita): " << terrain_level << " " << terrain_reached.vertices << " vertices ("
+              << (dst.vertices.capacity() * sizeof(MeshVertex) >> 10) << " KB held), " << terrain_reached.indices
+              << " indices, " << terrain_reached.collision_vertices << " / " << terrain_reached.collision_triangles
+              << " collision vertices / triangles\n";
+    terrain_reserve_flush();
+}
+
+void terrain_reserve_flush() {
+    if (terrain_level.empty()) return;
+    auto sizes = read_terrain_sizes();
+    auto& entry = sizes[terrain_level];
+    if (terrain_complete || !entry.second) {
+        auto& s = entry.first;
+        if (terrain_complete) s = terrain_reached;
+        else {
+            s.vertices = std::max(s.vertices, terrain_reached.vertices);
+            s.indices = std::max(s.indices, terrain_reached.indices);
+            s.collision_vertices = std::max(s.collision_vertices, terrain_reached.collision_vertices);
+            s.collision_triangles = std::max(s.collision_triangles, terrain_reached.collision_triangles);
+        }
+        entry.second = terrain_complete;
+        std::ofstream out(terrain_reserve_file, std::ios::trunc);
+        for (const auto& [level, e] : sizes)
+            out << level << ' ' << e.first.vertices << ' ' << e.first.indices << ' ' << e.first.collision_vertices << ' '
+                << e.first.collision_triangles << ' ' << (e.second ? "complete" : "partial") << '\n';
+    }
+    terrain_level.clear();
+}
+#endif
+
 void append_terrain(Mesh& dst, CollisionMesh& col, const Mesh& src, const CollisionMesh& source_col) {
     if (dst.vertices.size() + src.vertices.size() > 10000000 || dst.indices.size() + src.indices.size() > 30000000
         || col.vertices.size() + source_col.vertices.size() > 10000000)
@@ -758,6 +881,19 @@ void append_terrain(Mesh& dst, CollisionMesh& col, const Mesh& src, const Collis
     const auto textures = static_cast<std::uint32_t>(dst.textures.size());
     const auto materials = static_cast<std::uint32_t>(dst.materials.size());
     const bool had_geometry = !dst.indices.empty();
+#ifdef __vita__
+    // 132vt2 (research/VITA.md "Memory"): terrain_reserve_begin reserved the level's expected size; past it the
+    // aggregate grows by an eighth rather than doubling, and the size reached is noted for the next load.
+    const auto grow = [](auto& v, std::size_t more, std::size_t& reached) {
+        const std::size_t need = v.size() + more;
+        reached = std::max(reached, need);
+        if (need > v.capacity()) v.reserve(std::max(need, v.size() + v.size() / 8));
+    };
+    grow(dst.vertices, src.vertices.size(), terrain_reached.vertices);
+    grow(dst.indices, src.indices.size(), terrain_reached.indices);
+    grow(col.vertices, source_col.vertices.size(), terrain_reached.collision_vertices);
+    grow(col.triangles, source_col.triangles.size(), terrain_reached.collision_triangles);
+#endif
     dst.vertices.insert(dst.vertices.end(), src.vertices.begin(), src.vertices.end());
     for (const auto index : src.indices) dst.indices.push_back(vertices + index);
     dst.textures.insert(dst.textures.end(), src.textures.begin(), src.textures.end());

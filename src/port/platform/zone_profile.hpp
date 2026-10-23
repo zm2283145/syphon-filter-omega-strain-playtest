@@ -3,7 +3,8 @@
 // spots. OMEGA_ZONE("name") times the rest of the enclosing scope (inclusive of nested zones) into a static slot;
 // the Vita app prints the slots every 120 frames and resets them. Without OMEGA_ZONE_PROFILE (every Windows build)
 // the macro is an empty statement, so the shared code is unchanged. Zones belong on the simulation thread only (the
-// counters are not atomic).
+// counters are not atomic). OMEGA_ZONE_LAPS(laps) / OMEGA_ZONE_LAP(laps, "name") time consecutive stretches of
+// one long scope (the play step's sections) without new scopes: each lap adds the time since the previous one.
 
 #if defined(OMEGA_ZONE_PROFILE)
 #include <atomic>
@@ -47,8 +48,25 @@ struct Scope {
     Scope& operator=(const Scope&) = delete;
 };
 
+struct Laps {
+    std::uint64_t t = now_ns();
+};
+
+inline void lap(Laps& laps, Slot& slot) {
+    const std::uint64_t now = now_ns();
+    slot.ns += now - laps.t;
+    ++slot.calls;
+    laps.t = now;
+}
+
 }  // namespace omega::zone
 
+#define OMEGA_ZONE_LAPS(var) ::omega::zone::Laps var
+#define OMEGA_ZONE_LAP(var, label)                    \
+    do {                                              \
+        static ::omega::zone::Slot omega_lap_{label}; \
+        ::omega::zone::lap(var, omega_lap_);          \
+    } while (false)
 #define OMEGA_ZONE_CAT2(a, b) a##b
 #define OMEGA_ZONE_CAT(a, b) OMEGA_ZONE_CAT2(a, b)
 #define OMEGA_ZONE(label)                                                                \
@@ -59,5 +77,11 @@ struct Scope {
 #else
 #define OMEGA_ZONE(label) \
     do {                  \
+    } while (false)
+#define OMEGA_ZONE_LAPS(var) \
+    do {                     \
+    } while (false)
+#define OMEGA_ZONE_LAP(var, label) \
+    do {                           \
     } while (false)
 #endif

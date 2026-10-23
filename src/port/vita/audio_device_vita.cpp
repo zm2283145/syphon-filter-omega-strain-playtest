@@ -1,7 +1,8 @@
 // Port-only (checkpoint 132vt1, research/VITA.md "Platform layer"): audio::Device (audio_device.hpp) on the PS Vita's
 // SceAudioOut main port, replacing the Windows build's XAudio2 audio_device.cpp. The game's mixer output (16-bit
 // interleaved stereo at Mixer::output_rate, 48 kHz) goes through the same PcmRing (audio_output.hpp) as on Windows:
-// submit() appends to it (waiting while it is full, as the XAudio2 device does), and an output thread pulls one
+// submit() appends to it (past a full ring into a bounded FIFO, 132vt2; it waits only beyond that, as the XAudio2
+// device does), and an output thread pulls one
 // 512-frame grain at a time (SceAudioOut grains are multiples of 64 frames; 512 at 48 kHz is 10.7 ms, the Windows
 // device's buffers are 10 ms) and blocks in sceAudioOutOutput until the hardware takes it. A Vita has one fixed audio
 // output, so the loss / default-device-switch paths of the Windows device do not occur here: the simulate_* hooks
@@ -75,7 +76,9 @@ struct Device::Impl {
             {
                 ThreadBusyScope busy_time;
                 std::lock_guard lock(mutex);
+                feed();
                 ring.read(out, grain_frames);
+                feed();
                 last_pull = seconds_now();
             }
             drained.notify_all();
@@ -84,7 +87,32 @@ struct Device::Impl {
         sceAudioOutOutput(port, nullptr);  // waits until the last grain has played before the buffers go
     }
 
+    // 132vt2: what does not fit in the ring waits here (in order) instead of in submit, up to `overflow_cap` frames:
+    // a movie's PCM arrives in bursts (a demuxed packet at a time) and the play host's front end submits it on the
+    // session thread, which waited up to a second in each burst (132vt1b's hardware log: movie audio submit 15 ms
+    // mean, 1005 ms max). The output thread moves it into the ring as the ring drains. Only a submit beyond the cap
+    // (a simulation far ahead of real time) still waits, as on Windows. Called with `mutex` held.
+    void feed() {
+        while (overflow_at < overflow.size()) {
+            const std::size_t frames = (overflow.size() - overflow_at) / 2;
+            const std::size_t wrote = ring.write(overflow.data() + overflow_at, frames);
+            if (wrote == 0) break;
+            overflow_at += wrote * 2;
+        }
+        if (overflow_at == overflow.size()) {
+            overflow.clear();
+            overflow_at = 0;
+        } else if (overflow_at > overflow.size() / 2) {
+            overflow.erase(overflow.begin(), overflow.begin() + std::ptrdiff_t(overflow_at));
+            overflow_at = 0;
+        }
+    }
+    std::size_t overflow_frames() const { return (overflow.size() - overflow_at) / 2; }
+
     static constexpr std::size_t buffers = 3;
+    static constexpr std::size_t overflow_cap = 2 * Mixer::output_rate;  // 2 s
+    std::vector<std::int16_t> overflow;
+    std::size_t overflow_at = 0;
     PcmRing ring;
     bool muted = false;
     bool background_muted = false;
@@ -130,6 +158,8 @@ void Device::submit(const std::vector<std::int16_t>& samples) {
         try {
             d.close();
             d.ring.clear();
+            d.overflow.clear();
+            d.overflow_at = 0;
             d.open();
             d.recovery.reopened();
         } catch (const std::exception& e) {
@@ -145,10 +175,15 @@ void Device::submit(const std::vector<std::int16_t>& samples) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     std::unique_lock lock(d.mutex);
     std::size_t done = 0;
-    while (done < frames) {
-        done += d.ring.write(samples.data() + done * 2, frames - done);
+    while (true) {
+        d.feed();
+        if (d.overflow_frames() == 0) done += d.ring.write(samples.data() + done * 2, frames - done);
+        if (done < frames && d.overflow_frames() + (frames - done) <= Impl::overflow_cap) {
+            d.overflow.insert(d.overflow.end(), samples.begin() + std::ptrdiff_t(done * 2), samples.end());
+            done = frames;
+        }
         if (done == frames) break;
-        if (d.drained.wait_for(lock, std::chrono::milliseconds(50)) == std::cv_status::timeout && !d.ring.space() &&
+        if (d.drained.wait_for(lock, std::chrono::milliseconds(50)) == std::cv_status::timeout &&
             std::chrono::steady_clock::now() >= deadline)
             break;
     }
@@ -159,7 +194,7 @@ void Device::submit(const std::vector<std::int16_t>& samples) {
 Device::Stats Device::stats() const {
     std::lock_guard lock(impl_->mutex);
     const auto& d = *impl_;
-    Stats s{d.ring.underruns(), d.ring.silent_frames(), d.submitted, d.dropped, d.ring.queued()};
+    Stats s{d.ring.underruns(), d.ring.silent_frames(), d.submitted, d.dropped, d.ring.queued() + d.overflow_frames()};
     s.losses = d.recovery.losses();
     s.reopens = d.recovery.reopens();
     s.failed_reopens = d.recovery.failed_reopens();

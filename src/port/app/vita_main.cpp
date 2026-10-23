@@ -11,6 +11,11 @@
 // still the Windows hosts' (frontend_app.cpp, play_main.cpp): research/VITA.md "Handoff".
 
 #include "audio_device.hpp"
+#include "crash_report.hpp"
+#include "crash_report_vita.hpp"
+#include "derived_data.hpp"
+#include "host_window.hpp"
+#include "launcher.hpp"
 #include "disc.hpp"
 #include "display_settings.hpp"
 #include "audio_output.hpp"
@@ -18,6 +23,7 @@
 #include "frontend_formats.hpp"
 #include "frame_fit.hpp"
 #include "frame_overlay.hpp"
+#include "frame_profile.hpp"
 #include "frontend_session.hpp"
 #include "zone_profile.hpp"
 #include "game_sound.hpp"
@@ -35,6 +41,7 @@
 #include "iso_verify_vita.hpp"
 #include "loading_screen_host.hpp"
 #include "port_settings.hpp"
+#include "population.hpp"
 #include "localization.hpp"
 #include "string_pool.hpp"
 #include "sound_iop_host.hpp"
@@ -51,6 +58,7 @@
 #include <psp2/power.h>
 
 #include <malloc.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -64,6 +72,11 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <streambuf>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -72,6 +85,15 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+// play_main.cpp's entry on the handheld (the PC's wmain without the launcher).
+int omega_play_entry(int argc, wchar_t** argv);
+
+// The C++ heap profile (defined with operator new at the end of this file).
+namespace heap_profile {
+void report(const char* when, int top);
+extern std::atomic<bool> enabled;
+}
 
 extern "C" {
 unsigned int sceUserMainThreadStackSize = 8 * 1024 * 1024;
@@ -85,6 +107,7 @@ using namespace omega;
 
 FILE* g_log = nullptr;
 std::string g_log_path;
+double g_log_reopen_seconds = 2.0;   // 0 with vita_test_log_lines.txt (every line reaches Vita3K's host file)
 
 void log(const char* format, ...) {
     char text[1024];
@@ -101,13 +124,42 @@ void log(const char* format, ...) {
         // Vita3K holds a guest file's writes in a host buffer until it is closed: reopen at most every 2 s so a
         // killed emulator keeps the log.
         static double reopened = 0.0;
-        if (t - reopened >= 2.0 && !g_log_path.empty()) {
+        if (t - reopened >= g_log_reopen_seconds && !g_log_path.empty()) {
             reopened = t;
             std::fclose(g_log);
             g_log = std::fopen(g_log_path.c_str(), "a");
         }
     }
 }
+
+// std::cout / std::cerr (the play host's and the shared code's log) into the log file, a line at a time.
+class LogBuf : public std::streambuf {
+protected:
+    int overflow(int c) override {
+        if (c == traits_type::eof()) return traits_type::not_eof(c);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (c == '\n') flush_line();
+        else line_ += char(c);
+        return c;
+    }
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (std::streamsize i = 0; i < n; ++i) {
+            if (s[i] == '\n') flush_line();
+            else line_ += s[i];
+        }
+        return n;
+    }
+
+private:
+    void flush_line() {
+        if (!line_.empty() && line_.back() == '\r') line_.pop_back();
+        log("%s", line_.c_str());
+        line_.clear();
+    }
+    std::mutex mutex_;
+    std::string line_;
+};
 
 [[gnu::noinline]] double now_seconds() { return double(sceKernelGetProcessTimeWide()) * 1e-6; }
 
@@ -460,8 +512,9 @@ private:
     bool overlay_on_ = true;
     std::vector<std::string> overlay_lines_{"FRAME TIMES (MEASURING)"};
     std::string overlay_detail_;
-    // Port-only (research/VITA.md "Boot progress"): a boot step's screen (its text and a bar), so no step longer than a
-    // second shows a frozen or black display. fraction < 0: a moving block (no measure of the step's progress).
+    // Port-only (research/VITA.md "Boot progress"): a boot step's screen. Only the measured steps (fraction >= 0: the
+    // first start's shader compile, the opt-in full SHA-256 verify) show their text and a bar; the others
+    // (fraction < 0) are a plain black screen (132vt2b, the user's request).
     FrameOverlay progress_text_;
     double progress_drawn_ = -1.0;
     void progress(const std::string& text, double fraction, bool force = true) {
@@ -469,17 +522,17 @@ private:
         if (!force && now - progress_drawn_ < 0.1) return;
         progress_drawn_ = now;
         auto back = begin_frame();
+        if (fraction < 0.0) {
+            log("boot step (black screen): %s", text.c_str());
+            display_.swap_chain->present(1, "present");
+            render_thread_.end_frame(++frame_);
+            return;
+        }
         gfx::CommandList list;
         const float frame[4]{0.25F, 0.27F, 0.32F, 1.0F}, fill[4]{0.85F, 0.55F, 0.12F, 1.0F};
         const gfx::Rect outer{180, 300, 780, 324};
         list.clear_rects(back.get(), frame, &outer, 1);
-        int left = 182, right = 182;
-        if (fraction >= 0.0) {
-            right = 182 + int(596.0 * std::min(fraction, 1.0));
-        } else {
-            left = 182 + int(std::fmod(now * 200.0, 596.0 - 80.0));
-            right = left + 80;
-        }
+        const int left = 182, right = 182 + int(596.0 * std::min(fraction, 1.0));
         if (right > left) {
             const gfx::Rect inner{left, 302, right, 322};
             list.clear_rects(back.get(), fill, &inner, 1);
@@ -594,6 +647,8 @@ private:
     void loading_screen(DiscImage& disc, const std::string& level, int frames);
     void no_disc(int frames);
     void notice(const std::string& title, const std::string& text);
+    int play(DiscImage& disc, const std::string& iso);
+    std::string play_error_;
     std::string front_end_error_;
 };
 
@@ -641,6 +696,163 @@ void App::notice(const std::string& title, const std::string& text) {
         if (frame == 60) capture(back.get(), "capture_notice");
         end_frame(started);
     }
+}
+
+void install_play_movie_hooks(bool on);
+std::thread start_subtitle_setup();
+
+// Checkpoint 132vt2 (research/VITA.md "The play host"): the PC play host (play_main.cpp) on the handheld, as
+// OmegaStrain.exe runs it (launcher.cpp's run): its front end, the in-process hand-off, the loading screen, the level
+// (TORONTO1 first), pause / loadout and the level end, all the shared code. The working folder is
+// ux0:data/omega_strain (the play host's relative paths: config/disc_us.json, local/..., mods), the derived files
+// (launcher.cpp's derive step) in local/derived, and the display handed over unwrapped (the play makes its own render
+// thread). ux0:data/omega_strain/play_args.txt (one argument per line) adds play host arguments.
+int App::play(DiscImage& disc, const std::string& iso) {
+    namespace fs = std::filesystem;
+    static LogBuf log_buf;
+    std::cout.rdbuf(&log_buf);
+    std::cerr.rdbuf(&log_buf);
+    if (chdir(vita_data_root) != 0) throw std::runtime_error(std::string("cannot enter ") + vita_data_root);
+    char cwd[512]{};
+    log("play host: working folder %s", getcwd(cwd, sizeof cwd) ? cwd : "(getcwd failed)");
+    std::error_code ec;
+    fs::create_directories("config", ec);
+    fs::create_directories("local/derived", ec);
+    const std::string profile = std::string(vita_data_root) + "/config/disc_us.json";
+    if (vita_file_size(profile) != vita_file_size("app0:config/disc_us.json")) {
+        std::ifstream in("app0:config/disc_us.json", std::ios::binary);
+        std::ofstream out(profile, std::ios::binary | std::ios::trunc);
+        out << in.rdbuf();
+        log("play host: %s copied from the package", profile.c_str());
+    }
+    // vt1's settings file (ux0:data/omega_strain/port_settings.txt) becomes the play host's local/port_settings.txt.
+    const std::string settings = std::string(vita_data_root) + "/local/port_settings.txt";
+    const std::string old_settings = std::string(vita_data_root) + "/port_settings.txt";
+    if (vita_file_size(settings) < 0 && vita_file_size(old_settings) >= 0) {
+        fs::copy_file(old_settings, settings, ec);
+        log("play host: %s copied to %s", old_settings.c_str(), settings.c_str());
+    }
+    bool has_aspect = false;
+    if (std::ifstream in{settings, std::ios::binary}) {
+        std::stringstream text;
+        text << in.rdbuf();
+        try {
+            for (const auto& [key, value] : parse_port_settings(text.str()).other) has_aspect = has_aspect || key == "aspect";
+        } catch (const std::exception& e) {
+            log("play host: %s: %s", settings.c_str(), e.what());
+        }
+    }
+
+    const derived::DiscFingerprint fingerprint{OMEGA_ISO_SHA256, OMEGA_BOOT_EXECUTABLE, OMEGA_EXE_SHA256, OMEGA_EXE_SIZE};
+    const fs::path derived_folder = "local/derived";
+    const auto files = derived::derived_files(derived_folder);
+    if (!derived::derived_data_current(files, fingerprint)) {
+        progress("PREPARING THE GAME DATA (THE FIRST START READS THE BOOT EXECUTABLE AND THE MOTION FILES)", -1.0);
+        const double start = now_seconds();
+        derived::derive_game_data(disc, fingerprint, derived_folder);
+        log("play host: derived the motion graphs and tunings into local/derived in %.1f s", now_seconds() - start);
+    } else {
+        log("play host: local/derived is current");
+    }
+
+    launcher::Options options;
+    options.dialogs = false;
+    if (!has_aspect) options.extra = {L"--aspect", L"wide"};   // the 960 x 544 screen's default (132ws)
+    options.extra.push_back(L"--frame-overlay");
+    // 132vt2: the play's render thread (gfx_render_thread.hpp) stays off: its queue would call vitaGL from two threads
+    // (vitaGL's state is global and unlocked; Vita3K aborts at the level's first frame). A later "--render-thread 1"
+    // in play_args.txt overrides it (research/VITA.md "The play host").
+    options.extra.push_back(L"--render-thread");
+    options.extra.push_back(L"0");
+    // 132vt2: the level steps at the original's world dt (two NTSC fields, 0.033367 s: frame_pacer.hpp), half the
+    // PC's 1/60 steps; the presents wait two vertical blanks (30 fps). "--dt 0.0166667" in play_args.txt overrides it.
+    options.extra.push_back(L"--dt");
+    options.extra.push_back(L"0.033367");
+    const std::string args_file = std::string(vita_data_root) + "/play_args.txt";
+    std::vector<std::wstring> drops;
+    if (std::ifstream in{args_file}) {
+        for (std::string line; std::getline(in, line);) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            if (line.empty() || line[0] == '#') continue;
+            if (line[0] == '!') {
+                // "!--frontend": drops that argument from the launcher's list (a direct level start on Vita3K, whose
+                // front-end audio aborts the emulator: "Vita3K").
+                const std::wstring drop(line.begin() + 1, line.end());
+                drops.push_back(drop);
+                log("play host: argument %s dropped (play_args.txt)", line.c_str() + 1);
+                continue;
+            }
+            options.extra.emplace_back(line.begin(), line.end());
+            log("play host: argument %s (play_args.txt)", line.c_str());
+        }
+    }
+    std::vector<std::wstring> storage{L"omega_vita"};
+    // The whole path: open_verified_iso's per-process key (the path, size, mtime and digest) is the one the boot check
+    // above remembered, so the play host does not hash the 3.46 GB image again.
+    for (auto& a : launcher::play_arguments(fs::path(iso), files, options))
+        if (std::find(drops.begin(), drops.end(), a) == drops.end()) storage.push_back(std::move(a));
+    std::vector<wchar_t*> pointers;
+    for (auto& a : storage) pointers.push_back(a.data());
+    pointers.push_back(nullptr);
+    {
+        std::string line;
+        for (const auto& a : storage) line += std::string(a.begin(), a.end()) + " ";
+        log("play host: %s", line.c_str());
+    }
+
+    // The app's own frames are done: its render thread idles (vitaGL's state is global) before the play's starts.
+    render_thread_.drain();
+    back_.reset();
+    capture_staging_.reset();
+    set_vita_window_display({inner_, 960, 544, {}});
+    crash::install({fs::absolute("local") / "crashes", false});
+    log_memory("play host start");
+    threads_ = ThreadReport{};
+    // The play loop's split (frame_profile.hpp, the --frame-overlay profile) and the OMEGA_ZONE slots, logged about
+    // every 10 s with the heap and the allocations per frame: the in-level hot spots (research/VITA.md "Profiling").
+    FrameProfile::frame_profile_sink() = [](const FrameProfile::Averages& a) {
+        static double sum[FrameProfile::phase_count]{}, peak = 0.0, started = 0.0;
+        static unsigned frames = 0, windows = 0;
+        static std::uint32_t mallocs = g_mallocs;
+        if (started == 0.0) started = now_seconds();
+        for (int p = 0; p < FrameProfile::phase_count; ++p) sum[p] += a.ms[std::size_t(p)] * a.frames;
+        peak = std::max(peak, a.max_total);
+        frames += a.frames;
+        ++windows;
+        const double span = now_seconds() - started;
+        if (span < 10.0 || frames == 0) return;
+        log("play frames: %u in %.1f s = %.1f fps; ms/frame sim %.2f, script %.2f, render %.2f, present %.2f "
+            "(longest frame %.1f); %.0f allocations per frame; %s",
+            frames, span, frames / span, sum[0] / frames, sum[1] / frames, sum[2] / frames, sum[3] / frames, peak,
+            double(g_mallocs - mallocs) / frames, process_memory_line().c_str());
+        zone_report([](const char* text) { log("%s", text); }, int(frames));
+        std::fill(std::begin(sum), std::end(sum), 0.0);
+        peak = 0.0;
+        started = now_seconds();
+        frames = windows = 0;
+        mallocs = g_mallocs;
+    };
+    int code = 0;
+    install_play_movie_hooks(true);
+    std::thread subtitle_setup = start_subtitle_setup();
+    heap_profile::enabled = true;
+    try {
+        code = omega_play_entry(int(storage.size()), pointers.data());
+    } catch (const std::exception& e) {
+        log("play host: stopped: %s", e.what());
+        code = -1;
+        play_error_ = e.what();
+    }
+    heap_profile::enabled = false;
+    omega::terrain_reserve_flush();   // a failed load's terrain size, for the next one (research/VITA.md "Memory")
+    if (subtitle_setup.joinable()) subtitle_setup.join();
+    install_play_movie_hooks(false);
+    std::cout.flush();
+    std::cerr.flush();
+    log("play host: ended (exit %d)", code);
+    log_memory("play host end");
+    threads_.report("play host");
+    return code;
 }
 
 void App::no_disc(int frames) {
@@ -1076,16 +1288,23 @@ public:
         colour_thread_ = std::thread([this] { colour(); });
     }
     ~AheadMovie() override {
+        std::size_t waiting = 0, converting = 0, ready = 0;   // 132vt2b2: where the pictures were at the end
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            waiting = decoded_.size();
+            converting = converting_;
+            ready = ready_.size();
+        }
         stop();
         if (active_ == this) active_ = nullptr;
         log("movie %s (decoded ahead, 132vt2a2): %llu pictures decoded, %llu shown, %llu skipped late, %llu held; "
             "decode %.1f ms mean (%.1f max), RGBA %.1f ms mean (%.1f max); paced by %s; audio read ahead %llu times; "
-            "the decoder was behind the clock %u times",
+            "the decoder was behind the clock %u times; at the end %u decoded waiting, %u converting, %u ready",
             name_.c_str(), static_cast<unsigned long long>(pictures_), static_cast<unsigned long long>(shown_),
             static_cast<unsigned long long>(skipped_), static_cast<unsigned long long>(held_),
             pictures_ ? decode_ms_ / pictures_ : 0.0, decode_max_, pictures_ ? colour_ms_ / pictures_ : 0.0, colour_max_,
             audio_fed_ ? "the movie's sound" : "the wall clock", static_cast<unsigned long long>(read_aheads_.load()),
-            behind_);
+            behind_, unsigned(waiting), unsigned(converting), unsigned(ready));
     }
     // The movie being shown (null when none).
     static AheadMovie* active() { return active_; }
@@ -1095,6 +1314,8 @@ public:
     }
     // The sound pump the movies' 48 kHz stereo PCM goes to (null: the session's take_audio hands it over).
     static void set_audio_sink(SoundPump* sink) { audio_sink_ = sink; }
+    // The movie colour thread's core: the render core (the play host) or the simulation core (the app's front end).
+    static void set_colour_on_render_core(bool on) { colour_on_render_core_ = on; }
 
     bool next_frame(mpeg2::Frame& frame) override {
         repeated_ = false;
@@ -1297,7 +1518,13 @@ private:
         }
     }
     void colour() {
-        enter_thread_role(ThreadRole::simulation, "movie colour");
+        // 132vt2b2: in the play host the session thread draws and presents on core 0 itself (no render thread), so
+        // the conversion goes to the render core, which its front end leaves idle.
+        if (colour_on_render_core_) {
+            enter_thread_role(ThreadRole::render, "movie colour");
+        } else {
+            enter_thread_role(ThreadRole::simulation, "movie colour");
+        }
         sceKernelChangeThreadPriority(sceKernelGetThreadId(), 160);   // below the simulation thread's 128
         for (bool ended = false; !ended;) {
             std::unique_ptr<Item> item;
@@ -1334,6 +1561,7 @@ private:
 
     static inline AheadMovie* active_ = nullptr;
     static inline SoundPump* audio_sink_ = nullptr;
+    static inline bool colour_on_render_core_ = false;
     std::unique_ptr<movie::MovieStream> inner_;
     const std::string name_;
     float aspect_;
@@ -1395,6 +1623,81 @@ void intro_check(const std::function<std::unique_ptr<movie::MovieStream>(const s
     } catch (const std::exception& e) {
         log("movie check (132vt2a2): INTRO decode failed: %s", e.what());
     }
+}
+
+// 132vt2 (research/VITA.md "Movies"): the play host's front end (frontend_app.cpp) gets the same decode-ahead as the
+// app's own front end, through frontend_disc.hpp's hooks; `on` false removes them (after the play host ends).
+void install_play_movie_hooks(bool on) {
+    auto& hooks = vita_movie_hooks();
+    if (!on) {
+        AheadMovie::stop_active();
+        AheadMovie::set_colour_on_render_core(false);
+        hooks = {};
+        return;
+    }
+    AheadMovie::set_colour_on_render_core(true);
+    // 132vt2b2: the play host's front end mixes on the sound pump as the app's own front end does (it mixed 800 frames
+    // in each 60 Hz step on the session thread, which starved the output whenever a step ran late), and the pump is
+    // the movies' sink and clock (without it their pictures were paced by the wall clock and the PCM of a late
+    // picture was dropped).
+    class PlayHostPump final : public VitaMovieHooks::SoundPumpHandle {
+    public:
+        PlayHostPump(SoundIopHost& host, std::recursive_mutex& lock, audio::Device& device)
+            : pump_(host, lock, device, 4096), start_(now_seconds()) {
+            AheadMovie::set_audio_sink(&pump_);
+            log("play host front end: the sound pump mixes on the audio core (132vt2b2)");
+        }
+        ~PlayHostPump() override {
+            AheadMovie::stop_active();
+            AheadMovie::set_audio_sink(nullptr);
+            log("play host front end: the sound pump stops after %.1f s: %.1f s mixed (%.1f s busy); movie PCM %.1f s "
+                "pushed, %.1f s fed, %.1f s dropped at movie ends",
+                now_seconds() - start_, double(pump_.mixed()) / audio::Mixer::output_rate, pump_.busy_seconds(),
+                double(pump_.movie_pushed()) / audio::Mixer::output_rate,
+                double(pump_.movie_fed()) / audio::Mixer::output_rate,
+                double(pump_.movie_dropped()) / audio::Mixer::output_rate);
+        }
+        void set_movie(bool on) override { pump_.set_movie(on); }
+
+    private:
+        SoundPump pump_;
+        const double start_;
+    };
+    hooks.locked_host = [](SoundIopHost& host, std::recursive_mutex& lock) -> std::unique_ptr<GameSoundHost> {
+        return std::make_unique<LockedSoundHost>(host, lock);
+    };
+    hooks.sound_pump = [](SoundIopHost& host, std::recursive_mutex& lock,
+                          audio::Device& device) -> std::unique_ptr<VitaMovieHooks::SoundPumpHandle> {
+        return std::make_unique<PlayHostPump>(host, lock, device);
+    };
+    hooks.wrap = [](const std::function<std::unique_ptr<movie::MovieStream>(const std::string&)>& open,
+                    const std::string& name) -> std::unique_ptr<movie::MovieStream> {
+        AheadMovie::stop_active();   // the disc's movies share one stream: the last movie's reads stop first
+        auto inner = open ? open(name) : nullptr;
+        if (!inner) return nullptr;
+        return std::make_unique<AheadMovie>(std::move(inner), name);
+    };
+    hooks.take_rgba = [](std::vector<std::uint8_t>& out) {
+        AheadMovie* ahead = AheadMovie::active();
+        return ahead && ahead->take_rgba(out);
+    };
+}
+
+// 132vt2a: the subtitle projection's one-time setup (~1.5 s on the handheld) on a low-priority thread beside a load,
+// not in the first subtitled movie frame; the first append_subtitles waits for it if it is still running.
+std::thread start_subtitle_setup() {
+    return std::thread([] {
+        // The render core below every other thread there (the movie threads take cores 2 and 0).
+        enter_thread_role(ThreadRole::render, "subtitle setup");
+        sceKernelChangeThreadPriority(sceKernelGetThreadId(), 170);
+        const double t = now_seconds();
+        try {
+            front_end_subtitle_projection();
+            log("front end: subtitle projection set up in %.2f s (beside the load, 132vt2a)", now_seconds() - t);
+        } catch (const std::exception& e) {
+            log("front end: subtitle projection setup failed: %s", e.what());
+        }
+    });
 }
 
 // Port-only (research/VITA.md "Widescreen", 132ws): the frame aspect. The Vita defaults to wide (the 960 x 544
@@ -1473,18 +1776,7 @@ std::string App::front_end(DiscImage& disc, const std::string& iso, int frames) 
         ~Joined() {
             if (thread.joinable()) thread.join();
         }
-    } subtitle_setup{std::thread([] {
-        // The render core below every other thread there (the movie threads take cores 2 and 0).
-        enter_thread_role(ThreadRole::render, "subtitle setup");
-        sceKernelChangeThreadPriority(sceKernelGetThreadId(), 170);
-        const double t = now_seconds();
-        try {
-            front_end_subtitle_projection();
-            log("front end: subtitle projection set up in %.2f s (beside the load, 132vt2a)", now_seconds() - t);
-        } catch (const std::exception& e) {
-            log("front end: subtitle projection setup failed: %s", e.what());
-        }
-    })};
+    } subtitle_setup{start_subtitle_setup()};
     audio::Mixer mixer;
     SoundIopHostConfig sound_config;
     sound_config.level = "TEST";  // 004ffc90's boot value; the session swaps in "FRONTEND" (frontend_app.cpp)
@@ -1710,8 +2002,19 @@ std::string App::front_end(DiscImage& disc, const std::string& iso, int frames) 
             if (const gui::Widget* top = session.runtime().top(); top && session.gui_active())
                 wide_background = renderer.draw_wide_background(std::string("frontend.") + frontend_class_name(top->cls),
                                                                 back.get(), 960, 544);
+        // 132ws5 (research/FRONTEND.md "Checkpoint 132ws5"): the front end's wide menus (GuiRenderer::set_wide_menu):
+        // the 4:3 content unclipped, the art the frame's edges cut extended to the screen's edges, the header and
+        // legend spread; the side fill only for a frame with nothing to extend and for the GuiSlideShow (photographs).
+        const gui::Widget* shown_top = session.gui_active() ? session.runtime().top() : nullptr;
+        const bool slideshow = shown_top && shown_top->cls == gui::WidgetClass::slideshow;
+        const bool edge_extend = renderer.wide_edge_extend();
+        renderer.set_wide_edge_extend(!wide_background && !session.movie_playing() && !slideshow);
+        renderer.set_wide_menu(!slideshow);
         renderer.draw(shown, back.get(), 960, 544);
-        if (!wide_background && !session.movie_playing() && !shown.batches.empty() && !no_wide_fill) {
+        renderer.set_wide_menu(false);
+        renderer.set_wide_edge_extend(edge_extend);
+        if (!wide_background && !session.movie_playing() && !shown.batches.empty() && !no_wide_fill &&
+            renderer.wide_edge_images() == 0) {
             OMEGA_ZONE("vita.wide_fill");
             renderer.draw_wide_fill(back.get(), 960, 544);
         }
@@ -1874,7 +2177,7 @@ void App::run() {
     IsoStream stream = open_checked_iso(
         iso, OMEGA_ISO_SIZE, OMEGA_ISO_SHA256, OMEGA_ISO_QUICK_SHA256, full,
         [&](std::uint64_t done, std::uint64_t total) {
-            if (now_seconds() - progress_drawn_ < 0.25) return;
+            if (!full || now_seconds() - progress_drawn_ < 0.25) return;
             char text[120];
             std::snprintf(text, sizeof text, "VERIFYING THE DISC IMAGE (FULL SHA-256): %llu / %llu MB",
                           static_cast<unsigned long long>(done >> 20), static_cast<unsigned long long>(total >> 20));
@@ -1884,6 +2187,20 @@ void App::run() {
     if (full && how == "full") sceIoRemove(full_request.c_str());
     log("disc image checked in %.1f s: %s", now_seconds() - verify_start, how.c_str());
     DiscImage disc(stream, OMEGA_ISO_SIZE);
+    // The default: the play host (front end, levels, pause, level end). ux0:data/omega_strain/bringup.txt runs vt1's
+    // bring-up loop below instead (the app's own front end and loading screen, no level).
+    if (vita_file_size(std::string(vita_data_root) + "/bringup.txt") < 0) {
+        const int code = play(disc, iso);
+        const std::string message = !play_error_.empty() ? play_error_ : crash::vita_last_message();
+        if (code != 0 || !message.empty()) {
+            // The play host's display is gone; the app's own frames go on over the same device.
+            notice("THE GAME STOPPED (EXIT " + std::to_string(code) + ")",
+                   (message.empty() ? std::string("See ux0:data/omega_strain/omega_vita.log.") : message) +
+                       "\nThe log is ux0:data/omega_strain/omega_vita.log.");
+        }
+        log_memory("end");
+        return;
+    }
     // The front end, the hand-off's loading screen, then (until the level loop is ported: research/VITA.md "Handoff")
     // a notice and a fresh front end; any stop is shown on screen and logged, never a silent exit.
     while (!quit_) {
@@ -1918,16 +2235,133 @@ void App::run() {
 
 }  // namespace
 
-void* operator new(std::size_t size) {
+// Port-only diagnostic (132vt2, research/VITA.md "Memory"): every C++ allocation carries an 8-byte header (its caller's
+// slot and its size), so the bytes each caller holds are known at any time. heap_profile_report logs the callers
+// holding the most (the .vpk's eboot loads 0x49000 above its link base, 132vt2b2: an ELF address is the logged one
+// less 0x49000, less 1 for a Thumb return address; arm-vita-eabi-addr2line -f -C names it):
+// each time the heap in use passes a new 16 MB step, on a failed allocation, and when asked (log_memory).
+namespace heap_profile {
+struct Slot {
+    std::uintptr_t caller;
+    std::int64_t live, peak;
+    std::uint32_t count;
+};
+struct Header {
+    std::uint32_t slot, size;
+};
+constexpr std::uint32_t slot_count = 8192;
+Slot table[slot_count];
+std::atomic_flag busy = ATOMIC_FLAG_INIT;
+std::int64_t in_use = 0, reported = 0;
+std::atomic<bool> enabled{false};   // the reports (the accounting is always on)
+
+struct Lock {
+    // 132vt2b2: a spin, then sleeps: a holder of lower priority on the same core (no time slicing between priorities)
+    // gets to run and release it; the pure spin could hold the spinning thread's core until it was preempted.
+    Lock() {
+        for (unsigned n = 0; busy.test_and_set(std::memory_order_acquire); ++n)
+            if (n >= 64) sceKernelDelayThread(50);
+    }
+    ~Lock() { busy.clear(std::memory_order_release); }
+};
+
+std::uint32_t record(std::uintptr_t caller, std::uint32_t size) {
+    Lock lock;
+    std::uint32_t i = std::uint32_t((caller >> 1) * 2654435761u) % slot_count;
+    for (std::uint32_t n = 0; n < slot_count; ++n, i = (i + 1) % slot_count) {
+        Slot& s = table[i];
+        if (s.caller == caller || s.caller == 0) {
+            s.caller = caller;
+            s.live += size;
+            s.peak = std::max(s.peak, s.live);
+            ++s.count;
+            in_use += size;
+            return i;
+        }
+    }
+    in_use += size;
+    return slot_count;   // the table is full: counted in the total only
+}
+void release(std::uint32_t slot, std::uint32_t size) {
+    Lock lock;
+    if (slot < slot_count) {
+        table[slot].live -= size;
+        --table[slot].count;
+    }
+    in_use -= size;
+}
+void report(const char* when, int top = 24) {
+    // One report at a time (the rows are static): a second thread's report is skipped.
+    static std::atomic_flag reporting = ATOMIC_FLAG_INIT;
+    if (reporting.test_and_set(std::memory_order_acquire)) return;
+    struct Reporting {
+        ~Reporting() { reporting.clear(std::memory_order_release); }
+    } reporting_done;
+    struct Row {
+        std::uintptr_t caller;
+        std::int64_t live, peak;
+        std::uint32_t count;
+    };
+    static Row rows[slot_count];
+    std::uint32_t n = 0;
+    std::int64_t total = 0;
+    {
+        Lock lock;
+        for (const Slot& s : table)
+            if (s.caller) rows[n++] = {s.caller, s.live, s.peak, s.count};
+        total = in_use;
+    }
+    std::sort(rows, rows + n, [](const Row& a, const Row& b) { return a.live > b.live; });
+    log("heap profile (%s): %.1f MB in C++ allocations by %u callers; the top %d by bytes held:", when, total / 1048576.0, n,
+        top);
+    for (int i = 0; i < top && std::uint32_t(i) < n; ++i)
+        log("  %p: %.2f MB in %u blocks (peak %.2f MB)", reinterpret_cast<void*>(rows[i].caller), rows[i].live / 1048576.0,
+            rows[i].count, rows[i].peak / 1048576.0);
+}
+}  // namespace heap_profile
+
+[[gnu::noinline]] void* operator new(std::size_t size) {
     __atomic_fetch_add(&g_mallocs, 1, __ATOMIC_RELAXED);
-    if (void* p = std::malloc(size ? size : 1)) return p;
-    throw std::bad_alloc();
+    const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    void* raw = std::malloc(size + sizeof(heap_profile::Header));
+    if (!raw || size >= (4u << 20)) {
+        static thread_local bool inside = false;
+        if (!inside) {
+            inside = true;
+            const struct mallinfo m = mallinfo();
+            log("heap: %s %.2f MB (heap in use %.1f MB, arena %.1f MB), caller %p", raw ? "allocated" : "FAILED to allocate",
+                size / 1048576.0, m.uordblks / 1048576.0, m.arena / 1048576.0, reinterpret_cast<void*>(caller));
+            if (!raw) heap_profile::report("the failed allocation", 40);
+            inside = false;
+        }
+    }
+    if (!raw) throw std::bad_alloc();
+    auto* header = static_cast<heap_profile::Header*>(raw);
+    header->slot = heap_profile::record(caller, std::uint32_t(size));
+    header->size = std::uint32_t(size);
+    if (heap_profile::enabled.load(std::memory_order_relaxed) && heap_profile::in_use >= heap_profile::reported + (16 << 20)) {
+        static thread_local bool inside = false;
+        if (!inside) {
+            inside = true;
+            heap_profile::reported = heap_profile::in_use;
+            char when[64];
+            std::snprintf(when, sizeof when, "passed %d MB", int(heap_profile::reported >> 20));
+            heap_profile::report(when, 12);
+            inside = false;
+        }
+    }
+    return header + 1;
 }
 void* operator new[](std::size_t size) { return operator new(size); }
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p) noexcept {
+    if (!p) return;
+    auto* header = static_cast<heap_profile::Header*>(p) - 1;
+    heap_profile::release(header->slot, header->size);
+    std::free(header);
+}
+void operator delete[](void* p) noexcept { operator delete(p); }
+void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
+void operator delete[](void* p, std::size_t) noexcept { operator delete(p); }
 
 int main() {
     sceIoMkdir(vita_data_root, 0777);
@@ -1935,6 +2369,9 @@ int main() {
     sceIoRemove(log_path.c_str());  // Vita3K's "w" open does not truncate an existing file
     g_log = std::fopen(log_path.c_str(), "w");
     g_log_path = log_path;
+    // Port-only test switch (research/VITA.md "Vita3K"): vita_test_log_lines.txt reopens the log after every line, so
+    // an emulator abort keeps the last line before it.
+    if (vita_file_size(std::string(vita_data_root) + "/vita_test_log_lines.txt") >= 0) g_log_reopen_seconds = 0.0;
     log("Omega Strain native port, PS Vita (checkpoint 132vt1)");
     // research/VITA.md "Threads and cores": the clocks at their highest user settings, then this (the simulation)
     // thread on core 0.
@@ -1963,6 +2400,22 @@ int main() {
                                                                                       : c == '1' ? "as read"
                                                                                                  : "checked (not 1 or 2)");
         }
+        // The displayed frame rate (the presenting thread, after each swap), logged every 10 s: in-level fps evidence.
+        options.presented = [] {
+            static double window_start = 0.0, last = 0.0, longest = 0.0;
+            static unsigned frames = 0;
+            const double now = now_seconds();
+            if (last > 0.0) longest = std::max(longest, now - last);
+            last = now;
+            if (window_start == 0.0) window_start = now;
+            ++frames;
+            if (now - window_start < 10.0) return;
+            log("display: %u frames in %.1f s = %.1f fps (mean %.1f ms, longest %.1f ms)", frames, now - window_start,
+                frames / (now - window_start), 1000.0 * (now - window_start) / frames, 1000.0 * longest);
+            window_start = now;
+            frames = 0;
+            longest = 0.0;
+        };
         gfx::Display display = gfx::gxm::create_display(options);
         try {
             App(display).run();

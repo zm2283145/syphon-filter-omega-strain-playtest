@@ -151,6 +151,10 @@ public:
     // Re-upload vertices [first, first + count) of the main mesh after their
     // values (not the array) change.
     void update_vertices(std::size_t first, std::size_t count);
+    // Port-only (132vt2c, research/VITA.md "Memory"): re-upload the changed vertex ranges ({first, count}) in place,
+    // so the level's 35 MB vertex buffer never stands beside a second one (refresh_geometry makes new buffers first).
+    // A mesh whose array sizes changed is made again, its old buffers released first.
+    void refresh_vertices(std::vector<std::pair<std::size_t, std::size_t>> ranges);
     // Optional second mesh (e.g. a CPU-skinned character) drawn untextured after
     // the main mesh. The renderer keeps the pointer; call refresh_overlay after
     // its arrays change. nullptr removes it.

@@ -555,6 +555,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     OMEGA_ZONE("gr.draw");
     if (lost()) return;  // port-only (132win2): the frame is lost; the owner re-creates the device
     wide_edge_images_ = 0;
+    wide_menu_shifts_.clear();
     struct Segment {
         std::uint32_t first = 0, count = 0;
         const gfx::Texture* view = nullptr;
@@ -579,9 +580,11 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         std::uint8_t kind = wide_frame;
         float aspect = 0.0F;   // wide_aspect_picture: GuiDrawBatch::port_picture_aspect
         MovieFit fit = MovieFit::bars;   // a picture's: movies= for a movie, movie_fill (fill / bars) otherwise
+        std::uint32_t menu = 0;          // 132ws5: the wide menu draw's screen element (GuiDrawBatch::port_menu)
     };
     std::vector<WideRange> wide_ranges;
-    std::uint32_t wide_anchor = 0;
+    std::uint32_t wide_anchor = 0, wide_menu_tag = 0;
+    const bool wide_menu = wide && wide_menu_;
     bool wide_pict = false, cover_run = false, wide_free = false, wide_movie = false;
     float wide_aspect = 0.0F;
     float backdrop_rows = 0.0F;  // 132ws: the GUI rows the frame-wide textured strips cover (a 4:3 backdrop picture)
@@ -604,9 +607,11 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         const MovieFit picture_fit = wide_movie ? movie_fit : movie_zoom ? MovieFit::fill : MovieFit::bars;
         // A picture under the bars setting is the same: drawn as the pillarbox draws it (its overhang clipped).
         // 132ws2: a port_free batch (the callouts, the lock-on) is mapped over the whole target, not clipped.
+        // 132ws5: the wide menu draw maps the flat 4:3 content over the whole target too (its overhang shows).
         const bool fit = wide && wide_anchor == 0 && !wide_free &&
-                         (kind == wide_frame || (kind == wide_picture && picture_fit == MovieFit::bars));
-        if (wide && !fit) wide_ranges.push_back({first, vertices.size(), wide_anchor, kind, wide_aspect, picture_fit});
+                         ((kind == wide_frame && !wide_menu) || (kind == wide_picture && picture_fit == MovieFit::bars));
+        if (wide && !fit)
+            wide_ranges.push_back({first, vertices.size(), wide_anchor, kind, wide_aspect, picture_fit, wide_menu_tag});
         if (!segments.empty() && !clear_next) {
             Segment& s = segments.back();
             if (s.view == view && s.opaque == opaque && s.linear == linear && s.wrap == wrap && s.depth == depth_run
@@ -624,6 +629,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     // (gui_wide_edge_images), drawn right after it with the same texture and sampler over the whole target.
     const auto edge_extend = [&](const GuiDrawBatch& b, std::size_t first, const gfx::Texture* tex, bool opaque, bool linear) {
         if (!wide || !wide_edge_extend_ || b.perspective || b.clip || b.port_anchor || b.port_picture || b.port_free) return;
+        if (wide_menu && b.port_text) return;  // 132ws5: no mirrored glyphs
         if (first >= vertices.size()) return;
         std::vector<GuiEdgeVertex> source;
         source.reserve(vertices.size() - first);
@@ -632,14 +638,45 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             if (v.w != 1.0F) return;
             source.push_back({v.x, v.y, v.u, v.v, v.r, v.g, v.b, v.a});
         }
-        const auto images = gui_wide_edge_images(source, frame_wide_half_width(width, height));
+        // 132ws5: under the wide menu draw a triangle still crossing the edge (after menu_trim) is drawn past it as is.
+        const auto images = gui_wide_edge_images(source, frame_wide_half_width(width, height), wide_menu ? 0.5F : 1e30F,
+                                                 wide_menu ? menu_extend_span : 0.0F);
         if (images.empty()) return;
         const std::size_t at = vertices.size();
         for (const GuiEdgeVertex& e : images) vertices.push_back({e.x, e.y, e.u, e.v, e.r, e.g, e.b, e.a});
         wide_edge_images_ += images.size() / 3;
         wide_free = true;
+        const std::uint32_t tag = wide_menu_tag;
+        wide_menu_tag = 0;  // the images reach the target's edges: not part of the element's spread bounds
         add(tex, opaque, linear, at);
         wide_free = b.port_free;
+        wide_menu_tag = tag;
+    };
+    // Port-only (checkpoint 132ws5): the wide menu draw cuts a flat batch's triangles that overhang a 4:3 edge
+    // by at most menu_trim_overhang at that edge (gui_wide_menu_trim) before they are drawn, so they are mirrored
+    // like the art ending on the edge rather than drawn a little past it under their own mirror images. Only a batch
+    // spanning the frame (a backdrop, a band) is cut that far; another (the CMDCENTR seal, a panel's end) only within
+    // menu_edge_reach, and is otherwise drawn whole past the edge, as the art continues.
+    const auto menu_trim = [&](const GuiDrawBatch& b, std::size_t first) {
+        if (!wide_menu || b.perspective || b.clip || b.port_anchor || b.port_picture || b.port_free) return;
+        if (first >= vertices.size()) return;
+        std::vector<GuiEdgeVertex> source;
+        source.reserve(vertices.size() - first);
+        bool over = false;
+        float x0 = 1e30F, x1 = -1e30F;
+        for (std::size_t k = first; k < vertices.size(); ++k) {
+            const HostVertex& v = vertices[k];
+            if (v.w != 1.0F || v.z != 0.0F) return;
+            over = over || v.x < -320.0F + menu_edge_reach || v.x > 320.0F - menu_edge_reach;
+            x0 = std::min(x0, v.x);
+            x1 = std::max(x1, v.x);
+            source.push_back({v.x, v.y, v.u, v.v, v.r, v.g, v.b, v.a});
+        }
+        if (!over) return;
+        const bool spans = x0 <= -320.0F + menu_edge_reach && x1 >= 320.0F - menu_edge_reach;
+        const auto cut = gui_wide_menu_trim(source, spans ? menu_trim_overhang : menu_edge_reach, menu_edge_reach);
+        vertices.resize(first);
+        for (const GuiEdgeVertex& e : cut) vertices.push_back({e.x, e.y, e.u, e.v, e.r, e.g, e.b, e.a});
     };
     // Checkpoint 132h: a run of 003836b0 batches (the HUD weapon preview's gun parts) is one model the
     // GS draws with its Z test; this target has no depth buffer, so the run's triangles are drawn far
@@ -657,6 +694,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         wide_movie = b.port_picture && b.port_movie;
         wide_aspect = b.port_picture ? b.port_picture_aspect : 0.0F;
         wide_free = b.port_free;
+        wide_menu_tag = wide_menu ? b.port_menu : 0;
         // Checkpoint 132f6: a run of 002bfa90 batches (the loadout figure's parts) is one actor the GS draws
         // with its Z test under the figure's own camera: drawn here with a host depth buffer cleared at the
         // run's start (host choice), depth LESS with writes, wrapped texture addressing, the GUI blend.
@@ -670,6 +708,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 const bool textured = (g.render_mode & 1) != 0;
                 const std::size_t at = vertices.size();
                 wide_anchor = g.port_anchor;
+                wide_menu_tag = wide_menu ? g.port_menu : 0;
                 for (const GuiTriangleVertex& t : gui_triangles(g, view))
                     vertices.push_back({t.pos[0], t.pos[1], t.uv[0], t.uv[1], t.colour[0], t.colour[1], t.colour[2],
                                         t.colour[3], t.depth[0], t.depth[1]});
@@ -810,6 +849,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 if (x0 <= -wide_backdrop_reach && x1 >= wide_backdrop_reach)
                     backdrop_rows += std::min(y1, 224.0F) - std::max(y0, -224.0F);
             }
+            if (!full_run && !cover_run) menu_trim(b, first);
             add(textured ? view_of(b.slot) : white_view_.get(), (b.render_mode & 0x200) != 0,
                 !textured || (b.filter & 0x20) != 0, first);
             const bool covered = full_run || cover_run;
@@ -830,6 +870,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             for (const HostVertex& v : {tl, tr, bl, bl, tr, br}) vertices.push_back(v);
         }
         // The subtitle sprites filter as their TEX1 pair says (MMAG, checkpoint 132cp11).
+        if (!b.port_text) menu_trim(b, first);
         add(view_of(b.slot), false, b.flush != 0x4118e0 || (b.filter & 0x20) != 0, first);
         edge_extend(b, first, view_of(b.slot), false, b.flush != 0x4118e0 || (b.filter & 0x20) != 0);
     }
@@ -854,11 +895,51 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             if (b[0] <= b[1])
                 wide_shift[tag] = frame_wide_anchor_shift(frame_wide_anchor_side(0.5F * (b[0] + b[1])), width, height,
                                                           frame_hud_margin_setting());
+        // 132ws5: the wide menu draw's header and legend spread (gui_wide_menu_shifts).
+        std::map<std::uint32_t, float> menu_shift;
+        if (wide_menu) {
+            const auto range_bounds = [&](const WideRange& r) {
+                std::array<float, 4> b{1e30F, -1e30F, 1e30F, -1e30F};
+                for (std::size_t k = r.first; k < r.end; ++k) {
+                    const HostVertex& v = vertices[k];
+                    if (v.w <= 0.0F) continue;
+                    const float x = v.x / v.w, y = v.y / v.w;
+                    b = {std::min(b[0], x), std::max(b[1], x), std::min(b[2], y), std::max(b[3], y)};
+                }
+                return b;
+            };
+            const auto bounds_of = [&] {
+                std::map<std::uint32_t, std::array<float, 4>> out;
+                for (const WideRange& r : wide_ranges) {
+                    if (r.menu == 0 || r.anchor != 0 || r.kind != wide_frame) continue;
+                    const auto b = range_bounds(r);
+                    auto [it, fresh] = out.try_emplace(r.menu, b);
+                    if (!fresh)
+                        it->second = {std::min(it->second[0], b[0]), std::max(it->second[1], b[1]),
+                                      std::min(it->second[2], b[2]), std::max(it->second[3], b[3])};
+                }
+                return out;
+            };
+            auto menu_bounds = bounds_of();
+            // A batch that spreads, of an element that does not, gets a tag of its own (gui_wide_menu_spreads).
+            bool split = false;
+            for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
+                WideRange& r = wide_ranges[i];
+                if (r.menu == 0 || r.anchor != 0 || r.kind != wide_frame) continue;
+                if (gui_wide_menu_spreads(menu_bounds[r.menu]) || !gui_wide_menu_spreads(range_bounds(r))) continue;
+                r.menu = 0x80000000U | static_cast<std::uint32_t>(i);
+                split = true;
+            }
+            if (split) menu_bounds = bounds_of();
+            menu_shift = gui_wide_menu_shifts(menu_bounds, frame_wide_half_width(width, height));
+        }
+        wide_menu_shifts_ = menu_shift;
         const GuiWideMap m = gui_wide_map(width, height);
         for (const WideRange& r : wide_ranges) {
             if (r.kind == wide_full) continue;
             const auto it = r.anchor ? wide_shift.find(r.anchor) : wide_shift.end();
-            const float shift = it == wide_shift.end() ? 0.0F : it->second;
+            const auto mt = r.menu && r.kind == wide_frame ? menu_shift.find(r.menu) : menu_shift.end();
+            const float shift = it != wide_shift.end() ? it->second : mt != menu_shift.end() ? mt->second : 0.0F;
             for (std::size_t k = r.first; k < r.end; ++k) {
                 HostVertex& v = vertices[k];
                 if (r.kind == wide_picture && r.fit == MovieFit::fill) {  // the 4:3 picture scaled to the target's width
@@ -1173,7 +1254,8 @@ GuiWideMap gui_wide_map(unsigned width, unsigned height) {
     return m;
 }
 
-std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>& triangles, float half_width) {
+std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>& triangles, float half_width,
+                                                float max_overhang, float min_width) {
     std::vector<GuiEdgeVertex> out;
     const float extra = half_width - 320.0F;
     if (!(extra > 0.0F)) return out;
@@ -1187,7 +1269,9 @@ std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>
             const float edge = 320.0F * s;
             // The depth into the frame (0 on the edge, > 0 inside); the triangle must reach the edge.
             const auto depth = [&](const GuiEdgeVertex& p) { return (p.x - edge) * -s; };
-            if (!(std::min({depth(t[0]), depth(t[1]), depth(t[2])}) <= 0.5F)) continue;
+            const float nearest = std::min({depth(t[0]), depth(t[1]), depth(t[2])});
+            if (!(nearest <= 0.5F) || nearest < -max_overhang) continue;
+            if (std::max({t[0].x, t[1].x, t[2].x}) - std::min({t[0].x, t[1].x, t[2].x}) < min_width) continue;
             // The part inside the frame (depth >= 0): one Sutherland-Hodgman pass.
             std::vector<GuiEdgeVertex> poly;
             for (std::size_t i = 0; i < 3; ++i) {
@@ -1211,6 +1295,84 @@ std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>
                 }
                 for (std::size_t i = 1; i + 1 < img.size(); ++i) out.insert(out.end(), {img[0], img[i], img[i + 1]});
             }
+        }
+    }
+    return out;
+}
+
+std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& triangles, float overhang, float reach) {
+    std::vector<GuiEdgeVertex> out;
+    out.reserve(triangles.size());
+    const auto lerp = [](const GuiEdgeVertex& p, const GuiEdgeVertex& q, float t) {
+        const auto l = [t](float a, float b) { return a + (b - a) * t; };
+        return GuiEdgeVertex{l(p.x, q.x), l(p.y, q.y), l(p.u, q.u), l(p.v, q.v), l(p.r, q.r), l(p.g, q.g), l(p.b, q.b), l(p.a, q.a)};
+    };
+    for (std::size_t k = 0; k + 2 < triangles.size(); k += 3) {
+        const GuiEdgeVertex* t = &triangles[k];
+        const float x0 = std::min({t[0].x, t[1].x, t[2].x}), x1 = std::max({t[0].x, t[1].x, t[2].x});
+        const float left = -320.0F - x0, right = x1 - 320.0F;  // the overhang past each edge
+        if (left > overhang || right > overhang || (x1 - x0 < menu_extend_span && (left > 0.0F || right > 0.0F))) {
+            out.insert(out.end(), t, t + 3);
+            continue;
+        }
+        if (left <= 0.0F && right <= 0.0F) {
+            const std::size_t at = out.size();
+            out.insert(out.end(), t, t + 3);
+            if (x1 - x0 >= menu_extend_span)
+                for (std::size_t i = at; i < out.size(); ++i) {
+                    if (out[i].x < -320.0F + reach && -left < reach) out[i].x = -320.0F;
+                    if (out[i].x > 320.0F - reach && -right < reach) out[i].x = 320.0F;
+                }
+            continue;
+        }
+        std::vector<GuiEdgeVertex> poly(t, t + 3);
+        for (const float s : {-1.0F, 1.0F}) {
+            if ((s < 0.0F ? left : right) <= 0.0F) continue;
+            const auto depth = [s](const GuiEdgeVertex& p) { return (p.x - 320.0F * s) * -s; };
+            std::vector<GuiEdgeVertex> cut;
+            for (std::size_t i = 0; i < poly.size(); ++i) {
+                const GuiEdgeVertex& p = poly[i];
+                const GuiEdgeVertex& q = poly[(i + 1) % poly.size()];
+                const float dp = depth(p), dq = depth(q);
+                if (dp >= 0.0F) cut.push_back(p);
+                if ((dp < 0.0F) != (dq < 0.0F)) cut.push_back(lerp(p, q, dp / (dp - dq)));
+            }
+            poly = std::move(cut);
+        }
+        for (std::size_t i = 1; i + 1 < poly.size(); ++i) out.insert(out.end(), {poly[0], poly[i], poly[i + 1]});
+    }
+    return out;
+}
+
+bool gui_wide_menu_spreads(const std::array<float, 4>& b) {
+    if (!(b[0] <= b[1]) || !(b[2] <= b[3])) return false;
+    if (!(b[2] >= menu_header_y) && !(b[3] <= menu_legend_y)) return false;
+    return b[1] - b[0] < menu_spread_width && b[0] > -319.5F && b[1] < 319.5F;
+}
+
+std::map<std::uint32_t, float> gui_wide_menu_shifts(const std::map<std::uint32_t, std::array<float, 4>>& bounds,
+                                                    float half_width) {
+    std::map<std::uint32_t, float> out;
+    const float k = half_width / 320.0F - 1.0F;
+    if (!(k > 0.0F)) return out;
+    struct Item {
+        std::uint32_t tag;
+        float x0, x1;
+    };
+    for (const bool header : {true, false}) {
+        std::vector<Item> row;
+        for (const auto& [tag, b] : bounds) {
+            if (!gui_wide_menu_spreads(b) || (b[2] >= menu_header_y) != header) continue;
+            row.push_back({tag, b[0], b[1]});
+        }
+        std::sort(row.begin(), row.end(), [](const Item& a, const Item& c) { return a.x0 < c.x0; });
+        for (std::size_t i = 0; i < row.size();) {
+            std::size_t j = i + 1;
+            float x0 = row[i].x0, x1 = row[i].x1;
+            for (; j < row.size() && row[j].x0 - x1 < menu_spread_gap; ++j) x1 = std::max(x1, row[j].x1);
+            const float shift = 0.5F * (x0 + x1) * k;
+            for (std::size_t m = i; m < j; ++m) out[row[m].tag] = shift;
+            i = j;
         }
     }
     return out;

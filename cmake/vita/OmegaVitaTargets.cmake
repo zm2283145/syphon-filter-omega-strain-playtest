@@ -74,6 +74,7 @@ target_link_libraries(omega_gfx_gxm PUBLIC omega_core omega_vita_platform ${omeg
     SceIofilemgr_stub SceLibKernel_stub m)
 
 # One function per package: vita_create_vpk is a macro that accumulates its flags in the calling scope.
+# Extra FILE pairs (source, path in the package) after the LiveArea images.
 function(omega_vita_package target title_id name livearea)
     vita_create_self(${target}.self ${target} UNSAFE)
     vita_create_vpk(${target}.vpk ${title_id} ${target}.self
@@ -82,7 +83,8 @@ function(omega_vita_package target title_id name livearea)
         FILE ${livearea}/icon0.png sce_sys/icon0.png
              ${livearea}/bg.png sce_sys/livearea/contents/bg.png
              ${livearea}/startup.png sce_sys/livearea/contents/startup.png
-             ${livearea}/template.xml sce_sys/livearea/contents/template.xml)
+             ${livearea}/template.xml sce_sys/livearea/contents/template.xml
+             ${ARGN})
 endfunction()
 
 function(omega_vita_livearea out title subtitle)
@@ -94,20 +96,39 @@ function(omega_vita_livearea out title subtitle)
     endif()
 endfunction()
 
+# Checkpoint 132vt2 (research/VITA.md "The play host"): the PC play host (play_main.cpp and its companions, the same
+# sources as CMakeLists.txt's omega_play_objects) with the handheld's stand-ins for the Windows-only pieces:
+# host_window_vita (the fixed screen as the game window), crash_report_vita, pacing_probe_vita, and
+# audio_device_vita / gamepad_vita (omega_vita_platform) for audio_device.cpp / gamepad_device.cpp.
 add_executable(omega_vita src/port/app/vita_main.cpp src/port/render/gui_renderer.cpp src/port/app/loading_screen_host.cpp
-    src/port/app/frontend_disc.cpp src/port/app/agent_preview.cpp src/port/render/frame_overlay.cpp)
+    src/port/app/frontend_disc.cpp src/port/app/agent_preview.cpp src/port/render/frame_overlay.cpp
+    src/port/app/play_main.cpp src/port/app/launcher.cpp src/port/app/frontend_app.cpp
+    src/port/render/scene_renderer.cpp src/port/render/particle_renderer.cpp src/port/render/corona_renderer.cpp
+    src/port/platform/crash_report.cpp src/port/platform/gamepad_simulation.cpp src/port/disc/derived_data.cpp
+    src/port/vita/crash_report_vita.cpp src/port/vita/pacing_probe_vita.cpp src/port/vita/host_window_vita.cpp)
 target_link_libraries(omega_vita PRIVATE omega_gfx_gxm omega_vita_platform omega_core ScePower_stub)
 omega_vita_link_threads(omega_vita)
+# play_main.cpp reuses a few names as both a type and a member (accepted by MSVC; GCC's -Wchanges-meaning).
+# -O1 for this one file (research/VITA.md "Build"): at -O2 GCC needs more than 4 GB and over an hour for its ~1.2 MB
+# translation unit; the host's hot paths live in the core library, which keeps -O2.
+set_source_files_properties(src/port/app/play_main.cpp PROPERTIES COMPILE_OPTIONS "-Wno-changes-meaning;-O1")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/config/disc_us.json" OMEGA_VITA_DISC_PROFILE)
 string(JSON OMEGA_VITA_ISO_SIZE GET "${OMEGA_VITA_DISC_PROFILE}" iso_size)
 string(JSON OMEGA_VITA_ISO_SHA256 GET "${OMEGA_VITA_DISC_PROFILE}" iso_sha256)
+string(JSON OMEGA_VITA_EXE_SIZE GET "${OMEGA_VITA_DISC_PROFILE}" executable_size)
+string(JSON OMEGA_VITA_EXE_SHA256 GET "${OMEGA_VITA_DISC_PROFILE}" executable_sha256)
+string(JSON OMEGA_VITA_BOOT_EXECUTABLE GET "${OMEGA_VITA_DISC_PROFILE}" boot_executable)
 target_compile_definitions(omega_vita PRIVATE OMEGA_ISO_SIZE=${OMEGA_VITA_ISO_SIZE}ULL
     OMEGA_ISO_SHA256="${OMEGA_VITA_ISO_SHA256}"
+    OMEGA_EXE_SIZE=${OMEGA_VITA_EXE_SIZE}ULL OMEGA_EXE_SHA256="${OMEGA_VITA_EXE_SHA256}"
+    OMEGA_BOOT_EXECUTABLE="${OMEGA_VITA_BOOT_EXECUTABLE}"
     # iso_verify_vita.hpp's boot check: SHA-256 of the image's first and last MiB and its ISO 9660 root directory.
     OMEGA_ISO_QUICK_SHA256="61445c6c05423c7bc50abb94411c494332b4f318733d6cbfa4488c1360670714")
 omega_vita_livearea(${CMAKE_CURRENT_BINARY_DIR}/livearea_app "OMEGA STRAIN" "NATIVE PORT")
+# config/disc_us.json (the disc profile: sizes and hashes, nothing disc-derived) goes in the package: the play host
+# checks for it under its working folder (vita_main.cpp copies it to ux0:data/omega_strain/config).
 omega_vita_package(omega_vita ${OMEGA_VITA_TITLE_ID} "Omega Strain (native port)"
-    ${CMAKE_CURRENT_BINARY_DIR}/livearea_app)
+    ${CMAKE_CURRENT_BINARY_DIR}/livearea_app ${CMAKE_CURRENT_SOURCE_DIR}/config/disc_us.json config/disc_us.json)
 
 # SFOS00003: the display bring-up check (src/port/app/vita_red_main.cpp; nothing from the game; VITA.md).
 add_executable(omega_vita_red src/port/app/vita_red_main.cpp)

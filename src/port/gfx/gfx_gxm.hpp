@@ -26,6 +26,9 @@ struct Options {
     // Port-only test switch (the same section): the GPU copy's row order given (1 rows as read, 2 reversed) instead of
     // checked against the read-back on its first use; 0 checks.
     int display_copy_order = 0;
+    // Port-only (checkpoint 132vt2): run on the presenting thread after each swap (the frame-rate log); the vitaGL
+    // backend calls it, the GXM backend does not yet.
+    std::function<void()> presented;
 };
 
 // The memory the backend holds (research/VITA.md "Memory").
@@ -42,6 +45,10 @@ struct MemoryStats {
 // naming the failed sce call; a missing libshacccg.suprx throws ShaderCompilerMissing at the first program.
 Display create_display(const Options& options = {});
 MemoryStats memory_stats();
+// 132vt2c (VITA.md "Memory", vitaGL backend): the backend's buffers and textures by the memory vitaGL placed them in.
+std::string placement_line();
+// Test switch vita_test_gl_trace.txt (VITA.md "Vita3K"): the backend's call trace starts here (the play's window).
+void arm_trace();
 // A system message dialog (SceMsgDialog drawn by SceCommonDialog over the display) shown until the user closes it:
 // the fatal-error path (e.g. ShaderCompilerMissing), which needs no shader. Needs create_display first.
 void show_message(const std::string& text);

@@ -25,6 +25,10 @@ void ActorWorldScriptNpcs::add(Word npc, std::size_t actor, NpcAiController& con
     if (host_) connect_one(npc, found->second);
 }
 
+void ActorWorldScriptNpcs::remove(Word npc) {
+    if (!npcs_.erase(npc)) throw std::runtime_error("Script NPCs: NPC " + std::to_string(npc) + " removed but not added");
+}
+
 void ActorWorldScriptNpcs::connect_one(Word npc, const Entry& e) {
     MissionScriptHost& host = *host_;
     const Word id = npc;

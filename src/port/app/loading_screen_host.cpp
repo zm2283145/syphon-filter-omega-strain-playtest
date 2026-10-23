@@ -17,15 +17,9 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "worker_pool.hpp"
-#ifdef _WIN32
 #include "device_lost.hpp"
+#include "worker_pool.hpp"
 #include "crash_report.hpp"  // port-only (132mt3): the stall watch
-#else
-namespace omega::crash {
-class StallWatch {};  // no stall watchdog off Windows
-}  // namespace omega::crash
-#endif
 
 namespace omega {
 
@@ -105,10 +99,6 @@ GuiDrawList loading_frame(LoadingScreenAssets& assets, IeDrawState& state, std::
     return list;
 }
 
-// Port-only (checkpoint 132vt1): the threaded host below presents into the Win32 game window (host_window.hpp); the
-// Vita build drives build_loading_screen / loading_frame from its own loop (vita_main.cpp) until the window host is
-// ported (research/VITA.md "Next").
-#ifdef _WIN32
 // Port-only (132mt3): this screen's run on the session's loading-screen host thread (HostThread::loading_screen).
 struct LoadingScreenHost::Run {
     std::shared_ptr<HostThread::Completion> completion;
@@ -158,13 +148,11 @@ LoadingScreenHost::LoadingScreenHost(std::unique_ptr<LoadingScreenAssets> assets
                                      LoadingHostOptions options)
     : assets_(std::move(assets)), level_(std::move(level)), options_(std::move(options)) {
     if (!assets_) throw std::invalid_argument("loading screen host: no screen");
-#ifdef _WIN32
     if (options_.stall_seconds > 0)
         watch_ = std::make_unique<crash::StallWatch>(
             "loading screen " + level_, options_.stall_seconds,
             [this]() -> std::int64_t { return ended_ ? -(++ended_ticks_) : frames_.load(); },
             [this] { return stall_state(); });
-#endif
     run_ = std::make_shared<Run>();
     run_->completion = HostThread::loading_screen().run([this] { run(); });
 }
@@ -383,6 +371,5 @@ void LoadingScreenHost::run() {
         failure_ = std::current_exception();
     }
 }
-#endif  // _WIN32
 
 }  // namespace omega

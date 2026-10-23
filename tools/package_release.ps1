@@ -26,7 +26,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $VsPath) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path -LiteralPath $vswhere) { $VsPath = & $vswhere -latest -products '*' -property installationPath }
+    if (Test-Path -LiteralPath $vswhere) { $VsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath }
     if (-not $VsPath) { $VsPath = 'D:\Program Files\Microsoft Visual Studio\18\Enterprise' }
 }
 $root = Split-Path -Parent $PSScriptRoot

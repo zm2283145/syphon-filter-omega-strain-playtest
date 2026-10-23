@@ -23,7 +23,7 @@ $hasTests = Test-Path -LiteralPath (Join-Path $root 'tests\native_tests.cpp')
 if (-not $Targets) { $Targets = if ($hasTests) { @('omega_vita.vpk', 'omega_core_tests.vpk') } else { @('omega_vita.vpk') } }
 if (-not $VisualStudio) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path -LiteralPath $vswhere) { $VisualStudio = & $vswhere -latest -products '*' -property installationPath }
+    if (Test-Path -LiteralPath $vswhere) { $VisualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath }
 }
 $build = Join-Path $root 'local\build-vita'
 $cmakeDir = if ($VisualStudio) { Join-Path $VisualStudio 'Common7\IDE\CommonExtensions\Microsoft\CMake' } else { $root }

@@ -23,12 +23,22 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#ifdef __vita__
+#include <mutex>
+#endif
 #include <string>
 #include <vector>
 
 namespace omega {
 
 class DiscImage;
+#ifdef __vita__
+class GameSoundHost;
+class SoundIopHost;
+namespace audio {
+class Device;
+}
+#endif
 
 // The movie picture as one GUI quad over the whole 640 x 448 canvas space
 // (host choice: the PS2 player's 003f7060 upload and sprite are not modelled),
@@ -40,6 +50,30 @@ constexpr std::uint32_t movie_slot = 0xffff;
 // frame: GuiDrawBatch::port_picture_aspect), narrower it is pillarboxed. 0: the disc movie's 4:3 quad.
 GuiDrawList movie_list(float aspect = 0.0F);
 Texture movie_texture(const mpeg2::Frame& frame);
+#ifdef __vita__
+// Port-only (132vt2, research/VITA.md "Movies"): the Vita app's decode-ahead (vita_main.cpp's AheadMovie) for the play
+// host's front end (frontend_app.cpp): `wrap` opens each movie the session asks for (through `open`, the disc's or a
+// mod's) and wraps it, `take_rgba` hands over the shown
+// picture's RGBA (converted ahead, swapped into the argument); movie_texture converts as before when it has none.
+struct VitaMovieHooks {
+    std::function<std::unique_ptr<movie::MovieStream>(
+        const std::function<std::unique_ptr<movie::MovieStream>(const std::string&)>& open, const std::string& name)>
+        wrap;
+    std::function<bool(std::vector<std::uint8_t>&)> take_rgba;
+    // Port-only (132vt2b2): the app's sound pump (vita_main.cpp's SoundPump) for the play host's front end, as the
+    // app's own front end has it: `sound_pump` mixes `host` into `device` on the audio core as the output drains it
+    // (frame-rate independent) and is the movies' audio sink and clock; the host's other users go through
+    // `locked_host` (calls under `lock`, which the mix takes too). set_movie: a movie is playing (its PCM instead of
+    // the mix). The handle stops the pump; it goes before the device.
+    struct SoundPumpHandle {
+        virtual ~SoundPumpHandle() = default;
+        virtual void set_movie(bool on) = 0;
+    };
+    std::function<std::unique_ptr<GameSoundHost>(SoundIopHost&, std::recursive_mutex&)> locked_host;
+    std::function<std::unique_ptr<SoundPumpHandle>(SoundIopHost&, std::recursive_mutex&, audio::Device&)> sound_pump;
+};
+VitaMovieHooks& vita_movie_hooks();
+#endif
 // Checkpoint 132cp11: the subtitle object 0x571cf0's overlay over the picture:
 // 004118e0's packet with the DEFAULT font (00418420's default handle, the
 // object's +54) and TEX1 per 003bb620 from the last render mode.

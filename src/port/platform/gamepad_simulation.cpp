@@ -1,6 +1,8 @@
 #include "gamepad_simulation.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -44,7 +46,9 @@ std::uint8_t b1_of(const Ds2Pad& p) {
                                      (p.down(l3) ? 0x40 : 0) | (p.down(r3) ? 0x80 : 0));
 }
 
+#ifdef _WIN32
 std::wstring widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+#endif
 
 }  // namespace
 
@@ -192,6 +196,7 @@ std::vector<PadDeviceEvent> parse_pad_device_events(std::string_view text) {
 
 // --- the simulation ---
 
+#ifdef _WIN32
 struct GamepadSimulation::Impl {
     struct Pad {
         std::string alias;
@@ -441,5 +446,31 @@ unsigned long GamepadSimulation::xinput_set(unsigned long slot, const XInputVibr
         }
     return ERROR_DEVICE_NOT_CONNECTED;
 }
+
+#else
+// Port-only (132vt2): the simulated devices are Windows named pipes and an XInput table (the hidden hot-plug tests);
+// the PS Vita build has neither, so --test-pad-devices / --frontend-test-pad-devices stop here with this error.
+struct GamepadSimulation::Impl {};
+namespace {
+[[noreturn]] void no_simulation() {
+    throw std::runtime_error("Simulated pad devices (--test-pad-devices, gamepad_simulation.hpp) are Windows-only");
+}
+}  // namespace
+GamepadSimulation::GamepadSimulation() { no_simulation(); }
+GamepadSimulation::~GamepadSimulation() = default;
+void GamepadSimulation::connect(const std::string&) { no_simulation(); }
+void GamepadSimulation::disconnect(const std::string&) { no_simulation(); }
+void GamepadSimulation::set_pad(const std::string&, const Ds2Pad&) { no_simulation(); }
+std::string GamepadSimulation::apply(const PadDeviceEvent&) { no_simulation(); }
+std::optional<std::pair<bool, std::uint8_t>> GamepadSimulation::vibration(const std::string&) const { no_simulation(); }
+std::size_t GamepadSimulation::connected() const { no_simulation(); }
+std::vector<GamepadSimulation::SonyDevice> GamepadSimulation::sony_devices() const { no_simulation(); }
+void* GamepadSimulation::rescan_event() const { no_simulation(); }
+void GamepadSimulation::device_opened(const std::wstring&) { no_simulation(); }
+void GamepadSimulation::device_report(const std::wstring&) { no_simulation(); }
+void GamepadSimulation::device_lost(const std::wstring&) { no_simulation(); }
+unsigned long GamepadSimulation::xinput_get(unsigned long, XInputGamepad&, unsigned long&) const { no_simulation(); }
+unsigned long GamepadSimulation::xinput_set(unsigned long, const XInputVibration&) { no_simulation(); }
+#endif  // _WIN32
 
 }  // namespace omega

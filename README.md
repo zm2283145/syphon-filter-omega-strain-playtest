@@ -16,7 +16,7 @@ lands. Each update's commit message names the development commit it was taken fr
 | --- | --- |
 | Front end | Boot movies, title, options, agent profiles and memory card, command centre, loadout, loading screens, debriefs |
 | Levels that play to their end | **13 of 18:** TRAINING, TORONTO1, TORONTO2, TORONTO3, BELARUS1, BELARUS2, UKRAINE, MNTNEGR1, TOKYO, YEMEN1, ITALY, KYRGSTAN, MINSK |
-| Widescreen | True 16:9 (and wider) in levels: a wider view with the HUD anchored to the screen edges. Menus are 4:3 with filled sides (full 16:9 menus in progress). 4:3, pillarbox and stretch options |
+| Widescreen | True 16:9 (and wider) in levels and menus: a wider view with the HUD, headers and button hints anchored to the screen edges. 4:3, pillarbox and stretch options |
 | Controls | Gamepads and keyboard / mouse |
 | Port Settings page | Display, control and port options inside the game's own Options menu |
 | CPU co-op partners (port-only) | 1–3 CPU agents that follow, fight and climb, and take orders from a command menu (D-pad Up). They do the co-op objectives in TORONTO1–3, BELARUS2 and UKRAINE |
@@ -27,6 +27,7 @@ lands. Each update's commit message names the development commit it was taken fr
 
 ## What does not work yet
 
+- **ITALY** currently stops right after it loads when started from the game (a fix is in progress).
 - **Levels still in progress:** ZURICH, YEMEN2, LORELEI, CHECHNYA and MYANMAR load and play part of the way, then
   stop. When the port reaches something that is not ported yet, it stops with an "unhosted …" or "… not ported"
   message naming the original function; it never guesses. Please report where it stopped (see below).
@@ -36,8 +37,8 @@ lands. Each update's commit message names the development commit it was taken fr
 - **LAN in-level sync:** damage to enemies the other console controls, their aim and fire, and shared objectives are
   still being finished. Expect desyncs.
 - **Online:** the server works, but in-level online play has the same gaps as LAN. Agency cells (clans) are not done.
-- **PS Vita:** in-level play is brand new and untested on hardware. Speed and memory are being worked on. The menus
-  are 4:3 with filled sides.
+- **PS Vita:** in-level play is brand new and still being tested on hardware. Speed (30 fps target) and memory are
+  being worked on.
 
 ## Playing on Windows
 
