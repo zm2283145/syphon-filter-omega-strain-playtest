@@ -759,15 +759,20 @@ int App::play(DiscImage& disc, const std::string& iso) {
     options.dialogs = false;
     if (!has_aspect) options.extra = {L"--aspect", L"wide"};   // the 960 x 544 screen's default (132ws)
     options.extra.push_back(L"--frame-overlay");
-    // 132vt2: the play's render thread (gfx_render_thread.hpp) stays off: its queue would call vitaGL from two threads
-    // (vitaGL's state is global and unlocked; Vita3K aborts at the level's first frame). A later "--render-thread 1"
-    // in play_args.txt overrides it (research/VITA.md "The play host").
+    // 132vt2d: the play's render thread (gfx_render_thread.hpp, core 1) is on, as on the PC: the vitaGL backend takes
+    // its mutex around every vitaGL call (gfx_vitagl.cpp), so the level's GPU submission overlaps the next step on
+    // core 0 (Vita3K TRAINING: no abort, 3.1 fps against 2.7). "--render-thread 0" in play_args.txt turns it off
+    // (research/VITA.md "The play host").
     options.extra.push_back(L"--render-thread");
-    options.extra.push_back(L"0");
+    options.extra.push_back(L"1");
     // 132vt2: the level steps at the original's world dt (two NTSC fields, 0.033367 s: frame_pacer.hpp), half the
     // PC's 1/60 steps; the presents wait two vertical blanks (30 fps). "--dt 0.0166667" in play_args.txt overrides it.
     options.extra.push_back(L"--dt");
     options.extra.push_back(L"0.033367");
+    // 132vt2d: one world update per loop at the loop's measured interval, clamped to [0.001, 0.05] (the original's
+    // world dt, 00133340 -> 005383d0), instead of up to four fixed steps a loop: a slow frame no longer makes the
+    // next one slower ("The play host"). "!--measured-dt" in play_args.txt drops it.
+    options.extra.push_back(L"--measured-dt");
     const std::string args_file = std::string(vita_data_root) + "/play_args.txt";
     std::vector<std::wstring> drops;
     if (std::ifstream in{args_file}) {
@@ -2241,9 +2246,11 @@ void App::run() {
 // less 0x49000, less 1 for a Thumb return address; arm-vita-eabi-addr2line -f -C names it):
 // each time the heap in use passes a new 16 MB step, on a failed allocation, and when asked (log_memory).
 namespace heap_profile {
+// 132vt2d: lock-free (32-bit atomics; a slot's caller is claimed once by compare-and-swap). The 132vt2b2 spin-then-sleep
+// lock was taken twice per allocation by the simulation, render and worker threads alike, and a contended one slept.
 struct Slot {
     std::uintptr_t caller;
-    std::int64_t live, peak;
+    std::int32_t live, peak;
     std::uint32_t count;
 };
 struct Header {
@@ -2251,44 +2258,39 @@ struct Header {
 };
 constexpr std::uint32_t slot_count = 8192;
 Slot table[slot_count];
-std::atomic_flag busy = ATOMIC_FLAG_INIT;
-std::int64_t in_use = 0, reported = 0;
+std::int32_t in_use = 0, reported = 0;
 std::atomic<bool> enabled{false};   // the reports (the accounting is always on)
 
-struct Lock {
-    // 132vt2b2: a spin, then sleeps: a holder of lower priority on the same core (no time slicing between priorities)
-    // gets to run and release it; the pure spin could hold the spinning thread's core until it was preempted.
-    Lock() {
-        for (unsigned n = 0; busy.test_and_set(std::memory_order_acquire); ++n)
-            if (n >= 64) sceKernelDelayThread(50);
-    }
-    ~Lock() { busy.clear(std::memory_order_release); }
-};
-
 std::uint32_t record(std::uintptr_t caller, std::uint32_t size) {
-    Lock lock;
+    const auto bytes = std::int32_t(size);
     std::uint32_t i = std::uint32_t((caller >> 1) * 2654435761u) % slot_count;
     for (std::uint32_t n = 0; n < slot_count; ++n, i = (i + 1) % slot_count) {
         Slot& s = table[i];
-        if (s.caller == caller || s.caller == 0) {
-            s.caller = caller;
-            s.live += size;
-            s.peak = std::max(s.peak, s.live);
-            ++s.count;
-            in_use += size;
-            return i;
+        std::uintptr_t owner = __atomic_load_n(&s.caller, __ATOMIC_ACQUIRE);
+        if (owner == 0) {
+            std::uintptr_t expected = 0;
+            owner = __atomic_compare_exchange_n(&s.caller, &expected, caller, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+                        ? caller
+                        : expected;
         }
+        if (owner != caller) continue;
+        const std::int32_t live = __atomic_add_fetch(&s.live, bytes, __ATOMIC_RELAXED);
+        std::int32_t peak = __atomic_load_n(&s.peak, __ATOMIC_RELAXED);
+        while (live > peak && !__atomic_compare_exchange_n(&s.peak, &peak, live, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        }
+        __atomic_add_fetch(&s.count, 1u, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&in_use, bytes, __ATOMIC_RELAXED);
+        return i;
     }
-    in_use += size;
+    __atomic_add_fetch(&in_use, bytes, __ATOMIC_RELAXED);
     return slot_count;   // the table is full: counted in the total only
 }
 void release(std::uint32_t slot, std::uint32_t size) {
-    Lock lock;
     if (slot < slot_count) {
-        table[slot].live -= size;
-        --table[slot].count;
+        __atomic_sub_fetch(&table[slot].live, std::int32_t(size), __ATOMIC_RELAXED);
+        __atomic_sub_fetch(&table[slot].count, 1u, __ATOMIC_RELAXED);
     }
-    in_use -= size;
+    __atomic_sub_fetch(&in_use, std::int32_t(size), __ATOMIC_RELAXED);
 }
 void report(const char* when, int top = 24) {
     // One report at a time (the rows are static): a second thread's report is skipped.
@@ -2304,13 +2306,13 @@ void report(const char* when, int top = 24) {
     };
     static Row rows[slot_count];
     std::uint32_t n = 0;
-    std::int64_t total = 0;
-    {
-        Lock lock;
-        for (const Slot& s : table)
-            if (s.caller) rows[n++] = {s.caller, s.live, s.peak, s.count};
-        total = in_use;
+    for (Slot& s : table) {
+        const std::uintptr_t caller = __atomic_load_n(&s.caller, __ATOMIC_ACQUIRE);
+        if (caller)
+            rows[n++] = {caller, __atomic_load_n(&s.live, __ATOMIC_RELAXED), __atomic_load_n(&s.peak, __ATOMIC_RELAXED),
+                         __atomic_load_n(&s.count, __ATOMIC_RELAXED)};
     }
+    const std::int64_t total = __atomic_load_n(&in_use, __ATOMIC_RELAXED);
     std::sort(rows, rows + n, [](const Row& a, const Row& b) { return a.live > b.live; });
     log("heap profile (%s): %.1f MB in C++ allocations by %u callers; the top %d by bytes held:", when, total / 1048576.0, n,
         top);
@@ -2339,11 +2341,12 @@ void report(const char* when, int top = 24) {
     auto* header = static_cast<heap_profile::Header*>(raw);
     header->slot = heap_profile::record(caller, std::uint32_t(size));
     header->size = std::uint32_t(size);
-    if (heap_profile::enabled.load(std::memory_order_relaxed) && heap_profile::in_use >= heap_profile::reported + (16 << 20)) {
+    if (heap_profile::enabled.load(std::memory_order_relaxed) &&
+        __atomic_load_n(&heap_profile::in_use, __ATOMIC_RELAXED) >= heap_profile::reported + (16 << 20)) {
         static thread_local bool inside = false;
         if (!inside) {
             inside = true;
-            heap_profile::reported = heap_profile::in_use;
+            heap_profile::reported = __atomic_load_n(&heap_profile::in_use, __ATOMIC_RELAXED);
             char when[64];
             std::snprintf(when, sizeof when, "passed %d MB", int(heap_profile::reported >> 20));
             heap_profile::report(when, 12);

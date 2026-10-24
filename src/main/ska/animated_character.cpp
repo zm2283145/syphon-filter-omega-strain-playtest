@@ -1,6 +1,7 @@
 #include "float_bits.hpp"
 #include "animated_character.hpp"
 #include "skeleton_pose.hpp"
+#include <bit>
 #include <cmath>
 #include <stdexcept>
 #include <type_traits>
@@ -53,7 +54,7 @@ void AnimatedCharacter::replace_parts(std::vector<AnimatedCharacterPart> parts){
     check_parts(parts);
     auto previous=std::move(parts_);
     parts_=std::move(parts);
-    try{geometry_=build_geometry(model_.player(),morph_);}
+    try{geometry_=build_geometry(model_.player(),morph_);geometry_stale_=false;}
     catch(...){parts_=std::move(previous);throw;}
 }
 void AnimatedCharacter::require_idle()const{check(!candidate_,"Animated character frame already active");}
@@ -61,14 +62,41 @@ void AnimatedCharacter::write_node_locals(std::span<const std::optional<std::arr
     require_idle();
     auto next=model_.clone_for_transaction();
     next.write_node_locals(skeleton_,rows,root_translation);
+    if(deferred_skinning_){model_=std::move(next);geometry_stale_=true;return;}   // 132vt2d: skinned at the next geometry()
     auto next_geometry=build_geometry(next.player(),morph_);
     model_=std::move(next);geometry_=std::move(next_geometry);
 }
+// 132vt2d: the commands change channels, selectors, the controller and anchors, never the skinning's inputs
+// (the player's world, orientation and position change only in AnimationModel::step and write_node_locals).
 AnimationModel& AnimatedCharacter::command_model(){return candidate_?*candidate_:model_;}
-void AnimatedCharacter::set_morph_state(const MorphHostState& state){require_idle();morph_=state;}
-void AnimatedCharacter::set_base_shape(std::uint8_t shape,bool enabled){require_idle();set_morph_base_shape(morph_,shape,enabled);}
-void AnimatedCharacter::start_speech(const MorphSpeechTracks& tracks,std::int32_t start_ms){require_idle();start_morph_speech(morph_,tracks,start_ms);}
-void AnimatedCharacter::stop_speech(){require_idle();morph_.speech_active=false;}
+// 132vt2d: a deferred skinning runs on the pose and morph it was deferred on, before either changes outside a step.
+void AnimatedCharacter::materialize_geometry()const{
+    build_geometry_into(model_.player(),morph_,spare_geometry_,morph_scratch_);
+    geometry_.swap(spare_geometry_);geometry_stale_=false;
+}
+void AnimatedCharacter::materialize_before_change(){if(geometry_stale_)materialize_geometry();}
+namespace {
+// 132vt2d: the morph state's fields build_geometry_into reads (morph_face_targets / morph_hand_targets), bit for bit.
+bool same_skin_morph(const MorphHostState& a,const MorphHostState& b){
+    const auto same=[](float x,float y){return std::bit_cast<std::uint32_t>(x)==std::bit_cast<std::uint32_t>(y);};
+    if(a.active_count!=b.active_count)return false;
+    for(std::size_t i=0;i<a.active_count&&i<a.face_slots.size();++i)
+        if(a.face_slots[i].shape_index!=b.face_slots[i].shape_index||!same(a.face_slots[i].weight,b.face_slots[i].weight))return false;
+    for(std::size_t h=0;h<a.grips.size();++h){
+        const auto& x=a.grips[h];const auto& y=b.grips[h];
+        if(x.primary_shape!=y.primary_shape||x.secondary_shape!=y.secondary_shape||!same(x.primary_weight,y.primary_weight)||!same(x.secondary_weight,y.secondary_weight))return false;
+    }
+    return true;
+}
+}
+void AnimatedCharacter::set_morph_state(const MorphHostState& state){
+    require_idle();
+    if(geometry_stale_&&!same_skin_morph(morph_,state))materialize_geometry();
+    morph_=state;
+}
+void AnimatedCharacter::set_base_shape(std::uint8_t shape,bool enabled){require_idle();materialize_before_change();set_morph_base_shape(morph_,shape,enabled);}
+void AnimatedCharacter::start_speech(const MorphSpeechTracks& tracks,std::int32_t start_ms){require_idle();materialize_before_change();start_morph_speech(morph_,tracks,start_ms);}
+void AnimatedCharacter::stop_speech(){require_idle();materialize_before_change();morph_.speech_active=false;}
 void AnimatedCharacter::set_value(std::size_t channel,float value){command_model().set_value(channel,value);}
 void AnimatedCharacter::approach(std::size_t channel,float target,float maximum_step,bool wrapped){command_model().approach(channel,target,maximum_step,wrapped);}
 void AnimatedCharacter::set_target(std::size_t channel,float target,float duration,float damping,bool wrapped){command_model().set_target(channel,target,duration,damping,wrapped);}
@@ -81,7 +109,7 @@ void AnimatedCharacter::queue(std::string_view motion,std::optional<float> durat
 void AnimatedCharacter::clear(){command_model().clear();}
 std::vector<ActorAttachmentChange> AnimatedCharacter::controller_with_attachments(
     ActorAttachmentDraft& draft,ActorAttachmentRuntime& owner,const std::function<void(AnimationModel&)>& operation){
-    require_idle();auto next_model=model_.clone_for_transaction();
+    require_idle();materialize_before_change();auto next_model=model_.clone_for_transaction();
     struct Reset {AnimationModel*& slot;~Reset(){slot=nullptr;}} reset{candidate_};candidate_=&next_model;
     operation(next_model);
     auto changes=draft.commit(owner);
@@ -204,9 +232,10 @@ std::vector<ActorAttachmentChange> AnimatedCharacter::step_impl(const AnimationG
         }else resolved.local_gaze.reset();
     }
     update_morph_host(next_morph,morph_config_,resolved);
-    build_geometry_into(next_model.player(),next_morph,spare_geometry_,morph_scratch_);
+    if(!deferred_skinning_)build_geometry_into(next_model.player(),next_morph,spare_geometry_,morph_scratch_);
     auto changes=attachments?attachments->commit(*attachment_owner):std::vector<ActorAttachmentChange>{};
-    model_=std::move(next_model);morph_=std::move(next_morph);geometry_.swap(spare_geometry_);
+    model_=std::move(next_model);morph_=std::move(next_morph);
+    if(deferred_skinning_)geometry_stale_=true;else geometry_.swap(spare_geometry_);
     if(actor_curves){actor_curves->heading=*next_heading;actor_curves->state=*next_curves;}
     return changes;
 }

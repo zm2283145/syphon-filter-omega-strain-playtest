@@ -3759,6 +3759,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::optional<float> options_gamma;bool objects=false,hidden=false,textured=false,first_pass=false,no_coronas=false;unsigned max_frames=0;std::set<unsigned> captures;float ledge_survey=0;bool hotbox_survey=false;bool shadows_on=true;unsigned shadow_capture=0;bool shadow_debug=false;std::optional<std::array<float,4>> start_override;bool activate_all=false;std::optional<std::int32_t> npc_serial;bool mission_scripts=false;bool script_start_calls=false;
         bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
         std::optional<float> fixed_dt;std::wstring dt_trace_path;
+        int max_steps_per_loop=4;bool measured_dt=false;   // port-only (132vt2d): --max-steps, --measured-dt
+#if defined(__vita__)
+        bool terrain_light_memo_on=true;   // port-only (132vt2d): --terrain-light-memo (also the pass's fast reject)
+        set_terrain_light_fast_reject(true);
+        AnimatedCharacter::set_deferred_skinning(true);   // port-only (132vt2d): --deferred-skinning
+#else
+        bool terrain_light_memo_on=false;set_terrain_light_fast_reject(false);
+        AnimatedCharacter::set_deferred_skinning(false);
+#endif
         std::set<unsigned> debrief_captures;unsigned debrief_advance=120;   // checkpoint 132f11 (the debrief 00134110)
         // Checkpoint 126: --frontend runs the boot movie, title and menus first (frontend_app.hpp).
         bool loadout_all_records=false;   // PORT-ONLY test hook (132wp1): 0051ee38 = 1 for the loadout screen
@@ -3947,6 +3956,26 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             else if(arg==L"--next-level-god")next_level_god=number<unsigned>(value());   // 132ob10 (port-only test cheat): --god for the next level
             else if(arg==L"--dt")fixed_dt=number<float>(value());
             else if(arg==L"--dt-trace")dt_trace_path=value();
+            // Port-only (132vt2d, research/VITA.md "The play host"): at most N world steps per loop (1..4, default 4),
+            // and --measured-dt: each step's dt is the loop's own interval, clamped to [0.001, 0.05] as the original's
+            // world dt (00133340's T1 interval at 005383d0), one step per loop. The Vita passes both.
+            else if(arg==L"--max-steps"){max_steps_per_loop=number<int>(value());
+                if(max_steps_per_loop<1||max_steps_per_loop>4)throw std::runtime_error("--max-steps must be 1 to 4");}
+            else if(arg==L"--measured-dt")measured_dt=true;
+            // Port-only (132vt2d): the terrain light pass keeps a batch whose light list is unchanged (on by default
+            // on the PS Vita, off on Windows; the pixels and traces are the same either way).
+            else if(arg==L"--terrain-light-memo"){
+                const auto v=value();
+                if(v!=L"on"&&v!=L"off")throw std::runtime_error("--terrain-light-memo needs on or off");
+                terrain_light_memo_on=v==L"on";set_terrain_light_fast_reject(terrain_light_memo_on);
+            }
+            // Port-only (132vt2d): AnimatedCharacter skins a pose at its first geometry() read instead of at every
+            // step and upper-body rewrite (on by default on the PS Vita, off on Windows; the same geometry).
+            else if(arg==L"--deferred-skinning"){
+                const auto v=value();
+                if(v!=L"on"&&v!=L"off")throw std::runtime_error("--deferred-skinning needs on or off");
+                AnimatedCharacter::set_deferred_skinning(v==L"on");
+            }
             else if(arg==L"--capture"){captures.insert(number<unsigned>(value()));}
             else if(arg==L"--debrief-capture"){debrief_captures.insert(number<unsigned>(value()));}
             else if(arg==L"--debrief-advance"){debrief_advance=number<unsigned>(value());if(debrief_advance==0)throw std::runtime_error("--debrief-advance needs a frame count above 0");}
@@ -4197,6 +4226,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "--worker-threads N|auto (port-only, 132mt3; default the worker_threads= setting, auto: hardware threads - 1,\n"
                     "at most 7): the CPU draw preparation (character skinning, the particle programs) on N worker threads with a\n"
                     "fixed-order merge (the same bytes); 0 runs it on the main thread as before.\n"
+                    "Speed (port-only, 132vt2d; the PS Vita play host's defaults): --max-steps N (1..4, default 4) world steps a\n"
+                    "loop at most; --measured-dt: one step a loop at the loop's measured interval, clamped to [0.001, 0.05] (the\n"
+                    "original's world dt); --terrain-light-memo on|off (default off, on on the Vita): a terrain batch whose light\n"
+                    "list is unchanged keeps its colours, and the pass skips the vertices well beyond a light's range (the same\n"
+                    "colours); --deferred-skinning on|off (default off, on on the Vita): a character is\n"
+                    "skinned at its first geometry read, not at every step and upper-body rewrite (the same geometry).\n"
                     "Mods (port-only, 132md1, research/MODDING.md): --mods <folder> overrides disc files, archive members and\n"
                     "textures with the folder's mods (any run; interactive runs default to the mods_folder= setting, else mods\\\n"
                     "next to the game, unless mods=0); --no-mods: the disc's assets only. --lan-mod-policy gameplay|any|cosmetic|none|\n"
@@ -5340,8 +5375,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             std::size_t multipass_drawn=0;
             for(auto& material:terrain.materials){
                 // Multipass materials (shader-2 base pass, later passes with
-                // VU1 programs 10/11 reflection map, 12 additive, 14 emboss
-                // subtract) draw every pass. --first-pass keeps only the base.
+                // VU1 programs 10/11 reflection map, 12 same coordinates, 14
+                // emboss, 2 stored coordinates, each blended with its section's
+                // ALPHA_1) draw every pass. --first-pass keeps only the base.
                 // Shader 13 (VU1 program 0x595) draws as shader 2 plus the
                 // material animators' packet q1 / texture frame (00376ad0).
                 // Material flag 0x20 (132ws4) only marks a floor-reflection receiver: its one EE reader is the
@@ -5354,11 +5390,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 bool extras=layered;
                 if(layered)for(std::size_t k=1;k<material.passes.size();++k){
                     const auto& pass=material.passes[k];
-                    // 132ws6: a later program-2 pass draws with its section's ALPHA_1 (fix add / over / subtract).
-                    const bool program2=pass.shader==2&&pass.gs_alpha&&[&]{
-                        const auto blend=gs_blend_state(*pass.gs_alpha).blend;
-                        return blend==GsBlend::fix_add||blend==GsBlend::fix_over||blend==GsBlend::fix_subtract;}();
-                    const bool known=pass.shader==10||pass.shader==11||pass.shader==12||pass.shader==14||program2;
+                    // 132ws7: every later pass draws with its section's ALPHA_1 (later_pass_blend).
+                    const bool known=later_pass_blend(pass.shader,pass.gs_alpha).has_value();
                     const bool image=pass.texture<textures.size()&&textures[pass.texture].width>0;
                     // Reflection passes need the model frame (rotation only).
                     const bool frame=!(pass.shader==10||pass.shader==11)||material.rigid_pose;
@@ -5709,6 +5742,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         if(fixed_dt&&!dt_trace.empty())throw std::runtime_error("--dt and --dt-trace exclude each other");
         if(fixed_dt){if(!(*fixed_dt>0.0F)||!std::isfinite(*fixed_dt))throw std::runtime_error("--dt must be positive");config.dt=*fixed_dt;}
         if(!dt_trace.empty())config.dt=dt_trace.front();
+        if(measured_dt){
+            if(!dt_trace.empty())throw std::runtime_error("--measured-dt and --dt-trace both set the step's dt");
+            max_steps_per_loop=1;
+        }
         const bool trace_timing=fixed_dt.has_value()||!dt_trace.empty();
         if(start_override){
             const auto& v=*start_override;config.start={v[0],v[1],v[2],1};config.yaw_degrees=v[3];
@@ -6919,6 +6956,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // The vertex colour bytes the terrain light pass relights from (decoded byte / 128) and the colour
         // patches (003767e0) change; the batches the light pass relit last.
         std::vector<std::array<std::uint8_t,3>> terrain_base_colours;std::vector<std::size_t> terrain_lit_batches;
+        // Port-only (132vt2d, --terrain-light-memo): per batch, the light list its vertex colours were last computed
+        // with (empty: the base colours) and whether that is still current; a batch whose list is unchanged keeps
+        // its colours (the pass is a function of the list and the base colours), so it is neither relit nor uploaded.
+        std::vector<std::vector<TerrainPointLight>> terrain_light_memo;std::vector<std::uint8_t> terrain_light_memo_valid;
+#if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
+        std::uint64_t terrain_memo_kept=0,terrain_memo_relit=0,terrain_memo_vertices=0;
+#endif
         if(textured||!patch_models.empty()){
             terrain_base_colours.reserve(terrain.vertices.size());
             for(const auto& v:terrain.vertices){
@@ -9640,6 +9684,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 m.bits_68=bits;
                 std::sort(changed.begin(),changed.end());changed.erase(std::unique(changed.begin(),changed.end()),changed.end());
+                if(!changed.empty())std::fill(terrain_light_memo_valid.begin(),terrain_light_memo_valid.end(),std::uint8_t{0});   // new base colours
                 std::vector<std::pair<std::size_t,std::size_t>> relit;
                 for(const auto b:terrain_lit_batches)relit.push_back({terrain.batch_spans[b].first_vertex,terrain.batch_spans[b].first_vertex+terrain.batch_spans[b].vertex_count});
                 std::size_t written=0;
@@ -12149,6 +12194,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         int last_view_rotation=0;       // the aim-view +d90 angle diagnostic (0.5 degree steps, printed on change)
         std::string last_camera_lock;   // the camera diagnostic line (printed on change)
         auto last=std::chrono::steady_clock::now();double accumulator=0;const float dt=config.dt;double elapsed=0;int hud_ticker_shown=-1;
+        std::optional<std::chrono::steady_clock::time_point> measured_dt_last;float measured_step_dt=dt;   // --measured-dt (132vt2d)
         double gui_elapsed=0;   // elapsed plus the frames the start menu pauses (the GUI's clock)
         std::optional<std::int64_t> sweep_call;std::uint64_t sweep_first=0;std::vector<std::string> sweep_sites;   // --test-device-lost-sweep (132win5)
         auto video_ticks_since=last;std::int32_t video_frames_1d8=0;std::uint64_t video_rate_frames=0,video_rate_slow=0;
@@ -12169,7 +12215,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const bool pacing_on=frame_pacing_flag.value_or(script.empty()||!hidden);
         std::optional<LoopPacing> pacing;
         if(pacing_on){
-            pacing.emplace(double(dt),vsync_on);
+            pacing.emplace(double(dt),vsync_on,max_steps_per_loop);
             pacing->set_cadence_allowed(frame_cadence_flag.value_or(true));
             pacing->start(std::chrono::steady_clock::now());
             // 132win13 port-only diagnostic: --pacing-refresh <hz> stands in for the display's refresh (a hidden run
@@ -12445,9 +12491,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }else if(script.empty()){
                 const auto now=std::chrono::steady_clock::now();
                 accumulator+=std::chrono::duration<double>(now-last).count();last=now;
-                steps=std::min(4,static_cast<int>(accumulator/dt));accumulator-=steps*dt;
+                steps=std::min(max_steps_per_loop,static_cast<int>(accumulator/dt));accumulator-=steps*dt;
                 if(accumulator>0.25)accumulator=0;
                 if(state.paused)steps=0;
+            }
+            if(measured_dt){
+                // Port-only (132vt2d): the original's world dt is the T1 interval since the last frame, clamped to
+                // [0, 0.05] (00133340 -> 005383d0), with one world update a frame; the loop's own interval stands in
+                // (a paused loop counts too, as the original's frames run on under its pause). The actors need a
+                // positive dt: 1 ms is the floor.
+                const auto t=std::chrono::steady_clock::now();
+                if(measured_dt_last)measured_step_dt=static_cast<float>(std::clamp(std::chrono::duration<double>(t-*measured_dt_last).count(),0.001,0.05));
+                if(steps>0||state.paused||!measured_dt_last)measured_dt_last=t;   // a loop that steps nothing carries its time over
+                steps=std::min(steps,1);
             }
             const auto steps_begin=std::chrono::steady_clock::now();
             if(prof)prof->begin_frame();
@@ -12459,7 +12515,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(!dt_trace.empty()){
                     if(frame>=dt_trace.size())throw std::runtime_error("dt trace ends at frame "+std::to_string(frame));
                     step_dt=dt_trace[frame];actors.set_step_dt(step_dt);
-                }
+                }else if(measured_dt&&script.empty()){step_dt=measured_step_dt;actors.set_step_dt(step_dt);}
                 generator_dt=step_dt;
                 if(god_from&&frame>=*god_from)sim.set_invulnerable_33a4(true);   // --god (port-only test cheat)
                 // Physical stick deflection and pressure slots for this frame.
@@ -16236,24 +16292,54 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             for(const auto& l:lights)if(terrain_batch_reached(l,terrain.batch_spans[b])){lit.push_back({b,lit_lights.size()});break;}
                         if(lit.size()>from)lit_lights.push_back(std::move(lights));
                     }
+                    OMEGA_ZONE_LAP(step_laps,"sim.terrain_light.lists");
                     std::vector<std::size_t> touched=terrain_lit_batches;
                     for(const auto& [b,l]:lit)touched.push_back(b);
                     std::sort(touched.begin(),touched.end());touched.erase(std::unique(touched.begin(),touched.end()),touched.end());
-                    std::vector<std::array<float,3>> positions;std::vector<std::array<std::uint8_t,3>> colours;
-                    std::size_t next=0;
+                    std::vector<std::array<float,3>> positions;std::vector<std::array<std::uint8_t,3>> colours;std::vector<TerrainPointLight> batch_lights;
+                    std::size_t next=0,update_first=0,update_count=0;
+                    if(terrain_light_memo_on&&terrain_light_memo.size()!=terrain.batch_spans.size()){
+                        terrain_light_memo.assign(terrain.batch_spans.size(),{});terrain_light_memo_valid.assign(terrain.batch_spans.size(),0);
+                    }
                     for(const auto b:touched){
                         const auto& batch=terrain.batch_spans[b];
-                        colours.assign(terrain_base_colours.begin()+batch.first_vertex,terrain_base_colours.begin()+batch.first_vertex+batch.vertex_count);
                         while(next<lit.size()&&lit[next].first<b)++next;
-                        if(next<lit.size()&&lit[next].first==b){
+                        const bool batch_lit=next<lit.size()&&lit[next].first==b;
+                        if(terrain_light_memo_on){
+                            // The pass skips a light that does not reach the batch's sphere (apply_terrain_point_lights),
+                            // so the batch's colours are a function of the reaching lights, in list order.
+                            batch_lights.clear();
+                            if(batch_lit)for(const auto& l:lit_lights.at(lit[next].second))if(terrain_batch_reached(l,batch))batch_lights.push_back(l);
+                            auto& memo=terrain_light_memo[b];
+                            if(terrain_light_memo_valid[b]&&memo.size()==batch_lights.size()
+                                &&(memo.empty()||std::memcmp(memo.data(),batch_lights.data(),memo.size()*sizeof(TerrainPointLight))==0)){
+#if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
+                                ++terrain_memo_kept;
+#endif
+                                continue;
+                            }
+                            memo=batch_lights;terrain_light_memo_valid[b]=1;
+                        }
+#if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
+                        ++terrain_memo_relit;terrain_memo_vertices+=batch.vertex_count;
+#endif
+                        colours.assign(terrain_base_colours.begin()+batch.first_vertex,terrain_base_colours.begin()+batch.first_vertex+batch.vertex_count);
+                        if(batch_lit){
                             positions.clear();
                             for(std::size_t v=0;v<batch.vertex_count;++v){const auto& p=terrain.vertices[batch.first_vertex+v].position;positions.push_back({p.x,p.y,p.z});}
                             apply_terrain_point_lights(lit_lights.at(lit[next].second),batch,positions,colours);
                         }
                         for(std::size_t v=0;v<batch.vertex_count;++v)
                             for(std::size_t i=0;i<3;++i)terrain.vertices[batch.first_vertex+v].color[i]=float(colours[v][i])/128;
+                        // Port-only (132vt2d, with the memo): adjacent relit batches go to the GPU as one update.
+                        if(terrain_light_memo_on){
+                            if(update_count&&update_first+update_count==batch.first_vertex){update_count+=batch.vertex_count;continue;}
+                            if(update_count)state.renderer->update_vertices(update_first,update_count);
+                            update_first=batch.first_vertex;update_count=batch.vertex_count;continue;
+                        }
                         state.renderer->update_vertices(batch.first_vertex,batch.vertex_count);
                     }
+                    if(update_count)state.renderer->update_vertices(update_first,update_count);
                     terrain_lit_batches.clear();
                     for(const auto& [b,l]:lit)terrain_lit_batches.push_back(b);
                 }
@@ -18408,6 +18494,18 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"Window run timing: "<<std::setprecision(2)<<time_steps*1000/frame<<" ms per game step, "<<time_render*1000/render_loops
                     <<" ms per render pass, "<<time_present*1000/render_loops<<" ms per present ("<<render_loops<<" renders)\n";
             std::cout<<std::defaultfloat;}
+#if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
+        // Port-only (132vt2d, research/VITA.md "Profiling"): a PC build configured with OMEGA_ZONE_PROFILE ranks the
+        // Vita's zones (ms per stepped frame, heaviest first) on stderr; no shipped Windows build defines it.
+        if(frame>0){
+            std::vector<omega::zone::Slot*> slots;
+            for(auto* s=omega::zone::Slot::head().load();s;s=s->next)if(s->calls)slots.push_back(s);
+            std::sort(slots.begin(),slots.end(),[](auto* a,auto* b){return a->ns>b->ns;});
+            std::cerr<<"zones over "<<frame<<" frames (ms/frame, calls/frame):\n";
+            std::cerr<<"  terrain light batches kept "<<terrain_memo_kept<<", relit "<<terrain_memo_relit<<" ("<<terrain_memo_vertices<<" vertices)\n";
+            for(auto* s:slots)std::cerr<<"  "<<s->name<<" "<<s->ns/1e6/double(frame)<<" x"<<double(s->calls)/double(frame)<<"\n";
+        }
+#endif
         if(mission_host){
             // The HUD script state (hud_script_state.hpp), not drawn.
             const auto& hud=mission_host->hud();

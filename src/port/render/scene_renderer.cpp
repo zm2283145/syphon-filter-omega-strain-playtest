@@ -183,16 +183,18 @@ void SceneRenderer::initialize(const CollisionMesh& collision, const std::vector
     using O = gfx::BlendOp;
     blend_ = device_->create_blend(one_target(blend_target(F::src_alpha, F::inv_src_alpha, O::add, F::one, F::zero)),
                                    "Create preview blend state");
-    // Later material passes: GS ALPHA 0x68 / 0x62 with FIX 0x40 give
-    // Cd + Cs*64/128 and Cd - Cs*64/128 (blend factor 0.5). RGB only.
+    // GS ALPHA 0x68 Cd + Cs*FIX and 0x62 Cd - Cs*FIX with the blend factor
+    // FIX / 128 (the glows' base pass and the later material passes, whose
+    // sections carry FIX 0x06..0x80, check_later_pass_state.py). RGB only.
     blend_add_half_ = device_->create_blend(one_target(blend_target(F::factor, F::one, O::add, F::one, F::zero, gfx::mask_rgb)),
                                             "Create additive pass blend state");
     blend_subtract_half_ = device_->create_blend(
         one_target(blend_target(F::factor, F::one, O::rev_subtract, F::one, F::zero, gfx::mask_rgb)),
         "Create subtractive pass blend state");
-    // Base-pass render states from the VUM batch packets (gs_blend_state):
-    // 0x48 Cs*As + Cd, 0x42 Cd - Cs*As, 0x64 (Cs - Cd)*FIX + Cd. 0x68 and
-    // 0x62 use the pass states above with the blend factor FIX / 128.
+    // Render states from the VUM batch packets and later-pass sections
+    // (gs_blend_state): 0x48 Cs*As + Cd, 0x42 Cd - Cs*As, 0x64 (Cs - Cd)*FIX
+    // + Cd. 0x68 and 0x62 use the states above. Nothing reads the target
+    // alpha (no destination-alpha blend factor), so writing it is harmless.
     blend_alpha_add_ = device_->create_blend(one_target(blend_target(F::src_alpha, F::one, O::add, F::one, F::zero)),
                                              "Create alpha add blend state");
     blend_alpha_subtract_ = device_->create_blend(
@@ -604,6 +606,19 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
         skin_program = false;
         skin_bound = nullptr;
     };
+    // The host blend object for a GS blend; premultiplied: 0x48 / 0x42 drawn
+    // from the raw-alpha image with ONE/ONE (gs_premultiplied_source).
+    const auto blend_object = [&](GsBlend blend, bool premultiplied) -> const gfx::BlendState* {
+        switch (blend) {
+        case GsBlend::source_alpha_over: return blend_.get();
+        case GsBlend::source_alpha_add: return premultiplied ? blend_one_add_.get() : blend_alpha_add_.get();
+        case GsBlend::source_alpha_subtract: return premultiplied ? blend_one_subtract_.get() : blend_alpha_subtract_.get();
+        case GsBlend::fix_over: return blend_fix_over_.get();
+        case GsBlend::fix_add: return blend_add_half_.get();
+        case GsBlend::fix_subtract: return blend_subtract_half_.get();
+        }
+        throw std::runtime_error("Unknown GS blend");
+    };
     const auto draw_main_surface = [&](std::size_t s) {
             const auto& surface = mesh_.surfaces[s];
             const gfx::Texture* texture = nullptr;
@@ -653,19 +668,8 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
                 update();
             }
             if (blend.blend != GsBlend::source_alpha_over) {
-                const gfx::BlendState* state = nullptr;
-                switch (blend.blend) {
-                case GsBlend::source_alpha_add: state = premultiplied ? blend_one_add_.get() : blend_alpha_add_.get(); break;
-                case GsBlend::source_alpha_subtract:
-                    state = premultiplied ? blend_one_subtract_.get() : blend_alpha_subtract_.get();
-                    break;
-                case GsBlend::fix_over: state = blend_fix_over_.get(); break;
-                case GsBlend::fix_add: state = blend_add_half_.get(); break;
-                case GsBlend::fix_subtract: state = blend_subtract_half_.get(); break;
-                case GsBlend::source_alpha_over: break;
-                }
                 const float factor[4]{blend.fix, blend.fix, blend.fix, blend.fix};
-                l.set_blend(state, factor);
+                l.set_blend(blend_object(blend.blend, premultiplied), factor);
             }
             l.draw_indexed(surface.index_count, surface.first_index);
             if (fb_only) {
@@ -682,44 +686,36 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
             data.uv_offset = {0, 0, 0, 0};
             // Later passes redraw the same strip with a new render state, as the
             // VU1 microcode re-kicks its output buffer (00377270 patches each
-            // pass's MSCAL from the program table at 00538080).
+            // pass's MSCAL from the program table at 00538080), blended with
+            // the ALPHA_1 of the pass's section (132ws7, later_pass_blend:
+            // FIX 0x06..0x80 with 0x68 / 0x64 / 0x62, or As with 0x48 / 0x44 /
+            // 0x42; As = texel alpha x vertex alpha as in the base pass).
             for (std::size_t k = 1; k < material.passes.size(); ++k) {
                 const auto& pass = material.passes[k];
-                float mode = 0;
-                const gfx::BlendState* state = blend_add_half_.get();
-                float factor = 0.5F;
-                switch (pass.shader) {
-                case 10: case 11: mode = 1; break;  // reflection map
-                case 12: mode = 2; break;           // same coordinates
-                case 14: mode = 3; state = blend_subtract_half_.get(); break;  // emboss
-                case 2: {
-                    // 132ws6: a later program-2 pass (VU1 0x156 re-run over the strip, as the base pass) with
-                    // the pass texture and the ALPHA_1 of its section (BELARUS1 NI_BUCKET 0x68 FIX 0x0c..0x11
-                    // Cs*FIX+Cd, MINSK doors' ENV_map 0x64 FIX 0x20 (Cs-Cd)*FIX+Cd).
-                    if (!pass.gs_alpha) throw std::runtime_error("Program-2 material pass without its ALPHA_1");
-                    const auto pass_blend = gs_blend_state(*pass.gs_alpha);
-                    factor = pass_blend.fix;
-                    switch (pass_blend.blend) {
-                    case GsBlend::fix_add: break;
-                    case GsBlend::fix_over: state = blend_fix_over_.get(); break;
-                    case GsBlend::fix_subtract: state = blend_subtract_half_.get(); break;
-                    default: throw std::runtime_error("Unsupported program-2 material pass ALPHA_1");
-                    }
-                    break;
-                }
-                default: throw std::runtime_error("Unsupported material pass shader " + std::to_string(pass.shader));
-                }
+                const auto pass_blend = later_pass_blend(pass.shader, pass.gs_alpha);
+                if (!pass_blend)
+                    throw std::runtime_error("Unsupported material pass shader " + std::to_string(pass.shader) + " or ALPHA_1");
+                float mode = 0;                                       // 0x156 (shader 2): stored coordinates
+                if (pass.shader == 10 || pass.shader == 11) mode = 1;  // 0x4f8: reflection map
+                else if (pass.shader == 12) mode = 2;                  // 0x57a: same coordinates
+                else if (pass.shader == 14) mode = 3;                  // 0x5cd: emboss, uv - 1/64
                 if (mode == 1 && !material.rigid_pose)
                     throw std::runtime_error("Reflection pass needs a rotation-only model placement");
                 const gfx::Texture* pass_image = pass.texture < textures_.size() ? textures_[pass.texture].get() : nullptr;
                 if (!pass_image) throw std::runtime_error("Material pass has no decoded texture");
+                const gfx::Texture* pass_raw =
+                    pass.texture < raw_alpha_textures_.size() && !raw_alpha_textures_[pass.texture].empty()
+                        ? raw_alpha_textures_[pass.texture][0].get() : nullptr;
+                const bool pass_premultiplied = pass_raw &&
+                    (pass_blend->blend == GsBlend::source_alpha_add || pass_blend->blend == GsBlend::source_alpha_subtract);
                 data.options.x = 1;
                 data.options.w = mode;
                 data.up = {material.model_up.x, material.model_up.y, material.model_up.z, 0};
+                data.alpha_test.z = pass_premultiplied ? 1.0F : 0.0F;
                 update();
-                const float constant[4]{factor, factor, factor, factor};
-                l.set_blend(state, constant);
-                bind0(pass_image);
+                const float constant[4]{pass_blend->fix, pass_blend->fix, pass_blend->fix, pass_blend->fix};
+                l.set_blend(blend_object(pass_blend->blend, pass_premultiplied), constant);
+                bind0(pass_premultiplied ? pass_raw : pass_image);
                 l.draw_indexed(surface.index_count, surface.first_index);
             }
             data.options.w = 0;

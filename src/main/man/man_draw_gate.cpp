@@ -45,9 +45,37 @@ Word vrnd(double x){
     if(h==0x7f800000U)return sign|kVuMax;
     return sign|(h+0x800000U);
 }
-Word vmul(Word a,Word b){return vrnd(vval(a)*vval(b));}
-Word vadd(Word a,Word b){return vrnd(vval(a)+vval(b));}
-Word vsub(Word a,Word b){return vrnd(vval(a)-vval(b));}
+Word vmul_exact(Word a,Word b){return vrnd(vval(a)*vval(b));}
+Word vadd_exact(Word a,Word b){return vrnd(vval(a)+vval(b));}
+Word vsub_exact(Word a,Word b){return vrnd(vval(a)-vval(b));}
+// Port-only fast path (132vt2d, exact): with no operand at exponent 255, one binary32 operation is the same correctly
+// rounded result as the double operation then vrnd (a binary32 product is exact in double; a sum's double rounding is
+// innocuous, 53 >= 2 x 24 + 2), with a zero-exponent operand read as its signed zero. A result at exponent 2..254 is
+// that word; one at exponent 0 (zero, or tiny: vrnd flushes it) is its signed zero; exponent 1 (a tiny exact result
+// rounded up, or flushed by a flush-to-zero unit) and 255 (overflow) take the double path.
+bool vfast(Word w){return ((w>>23)&0xffU)!=0xffU;}
+float vfloat(Word w){return std::bit_cast<float>(((w>>23)&0xffU)==0?(w&0x80000000U):w);}
+bool vdone(float r,Word& out){
+    const Word b=std::bit_cast<Word>(r),ex=(b>>23)&0xffU;
+    if(ex==0){out=b&0x80000000U;return true;}
+    if(ex>=2&&ex<=254){out=b;return true;}
+    return false;
+}
+Word vmul(Word a,Word b){
+    Word out;
+    if(vfast(a)&&vfast(b)&&vdone(vfloat(a)*vfloat(b),out))return out;
+    return vmul_exact(a,b);
+}
+Word vadd(Word a,Word b){
+    Word out;
+    if(vfast(a)&&vfast(b)&&vdone(vfloat(a)+vfloat(b),out))return out;
+    return vadd_exact(a,b);
+}
+Word vsub(Word a,Word b){
+    Word out;
+    if(vfast(a)&&vfast(b)&&vdone(vfloat(a)-vfloat(b),out))return out;
+    return vsub_exact(a,b);
+}
 // MAX orders the words sign-magnitude and transfers the operand unchanged.
 std::int64_t vkey(Word b){return (b>>31)?-static_cast<std::int64_t>(b&0x7fffffffU):static_cast<std::int64_t>(b);}
 Word vmax(Word a,Word b){
@@ -151,6 +179,10 @@ ObjectCull object_cull_003c8990(const ShadowMatrix& clip,float near_z,const std:
     const std::uint32_t front=(vsub(top[2],word(near_z))>>31)?0U:0x10U;
     out.code=front|(behind>0?4U:(any!=0?2U:1U));
     return out;
+}
+std::uint32_t object_cull_vu_op(std::uint32_t a,std::uint32_t b,int op,bool fast){
+    if(fast)return op==0?vmul(a,b):op==1?vadd(a,b):vsub(a,b);
+    return op==0?vmul_exact(a,b):op==1?vadd_exact(a,b):vsub_exact(a,b);
 }
 std::uint32_t man_draw_flags_0037c350(std::uint32_t mode_word,std::uint32_t code,std::uint32_t a3){
     if(code&0x80U)return 0x80000000U;

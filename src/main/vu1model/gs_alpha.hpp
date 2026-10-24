@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 namespace omega {
 
@@ -31,6 +32,18 @@ struct GsBlendState {
 
 // Throws naming the register value for selections without a host mapping.
 GsBlendState gs_blend_state(std::uint64_t alpha);
+// The same mapping, empty for selections without one.
+std::optional<GsBlendState> try_gs_blend_state(std::uint64_t alpha);
+
+// Later material passes (132ws7). 00377270 patches each pass section's
+// TEX0_1 (texture +0x50) and MSCAL (00538080[shader]) only; VU1 programs
+// 0x156 (shader 2), 0x4f8 (10 / 11), 0x57a (12) and 0x5cd (14) copy the
+// section's GIF tag, TEX1_1, TEX0_1 and ALPHA_1 (qwords 2..5 at TOPS) with
+// lq / sq into the output buffer at +283 and XGKICK it, so the GS blends
+// each pass with the section's ALPHA_1 as stored in the file
+// (tools/ee/check_later_pass_state.py). Empty for other shaders, a missing
+// ALPHA_1 or a selection without a host mapping.
+std::optional<GsBlendState> later_pass_blend(std::uint32_t shader, std::optional<std::uint64_t> alpha);
 
 // One 8-bit colour channel of the GS blend with COLCLAMP = 1 (the model
 // draws, 0037c350): ((A - B) * C >> 7) + D clamped to 0..255, C being As or

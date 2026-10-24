@@ -210,18 +210,27 @@ void Spu2Voices::envelope(Voice& x) {
 void Spu2Voices::render_add(std::size_t frames, std::vector<std::int16_t>& out) {
     if (out.size() < frames * 2) throw std::runtime_error("SPU2 host model: render past the start of the buffer");
     auto* dst = out.data() + (out.size() - frames * 2);
-    for (std::size_t f = 0; f < frames; ++f) {
-        std::int32_t left = 0, right = 0;
-        for (std::uint32_t core = 0; core < 2; ++core) {
-            for (std::uint32_t v = 0; v < 24; ++v) {
-                auto& x = voices_[core][v];
-                if (x.phase == Phase::off) continue;
+    // Voice by voice into integer sums, then one clamp per frame: the voices are independent within a render
+    // (key on / off and the switches change only between renders) and integer sums do not depend on their order,
+    // so this is the frame-by-frame mix's exact output with the off voices skipped once rather than per frame.
+    mix_.assign(frames * 2, 0);
+    if (frames == 0) return;
+    std::int32_t* sum = mix_.data();
+    for (std::uint32_t core = 0; core < 2; ++core) {
+        for (std::uint32_t v = 0; v < 24; ++v) {
+            auto& x = voices_[core][v];
+            if (x.phase == Phase::off) continue;
+            const bool to_left = (switches_[0x18][core] & (1u << v)) != 0;
+            const bool to_right = (switches_[0x1a][core] & (1u << v)) != 0;
+            const std::int32_t vl = to_left ? volume(x.voll) : 0, vr = to_right ? volume(x.volr) : 0;
+            const std::uint32_t step = std::min<std::uint32_t>(x.pitch, 0x3fff);
+            for (std::size_t f = 0; f < frames && x.phase != Phase::off; ++f) {
                 const std::int32_t s = x.prev + (((x.cur - x.prev) * std::int32_t(x.frac)) >> 12);
                 const std::int32_t e = (s * x.level) >> 15;
-                if (switches_[0x18][core] & (1u << v)) left += (e * volume(x.voll)) >> 15;
-                if (switches_[0x1a][core] & (1u << v)) right += (e * volume(x.volr)) >> 15;
+                if (to_left) sum[f * 2] += (e * vl) >> 15;
+                if (to_right) sum[f * 2 + 1] += (e * vr) >> 15;
                 envelope(x);
-                x.frac += std::min<std::uint32_t>(x.pitch, 0x3fff);
+                x.frac += step;
                 while (x.frac >= 0x1000 && x.phase != Phase::off) {
                     x.frac -= 0x1000;
                     x.prev = x.cur;
@@ -229,9 +238,9 @@ void Spu2Voices::render_add(std::size_t frames, std::vector<std::int16_t>& out) 
                 }
             }
         }
-        dst[f * 2] = static_cast<std::int16_t>(std::clamp(dst[f * 2] + left, -0x8000, 0x7fff));
-        dst[f * 2 + 1] = static_cast<std::int16_t>(std::clamp(dst[f * 2 + 1] + right, -0x8000, 0x7fff));
     }
+    for (std::size_t f = 0; f < frames * 2; ++f)
+        dst[f] = static_cast<std::int16_t>(std::clamp(dst[f] + sum[f], -0x8000, 0x7fff));
 }
 
 std::size_t Spu2Voices::active_voices() const {

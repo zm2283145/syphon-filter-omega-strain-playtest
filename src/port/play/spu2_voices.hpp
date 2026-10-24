@@ -101,6 +101,7 @@ private:
     std::array<std::array<Voice, 24>, 2> voices_{};
     std::array<std::array<std::uint32_t, 2>, 0x20> switches_{};  // [reg][core]
     std::map<std::uint32_t, std::shared_ptr<const std::vector<std::uint8_t>>> overlays_;
+    std::vector<std::int32_t> mix_;  // render_add's per-voice sums (left, right per frame)
 };
 
 }

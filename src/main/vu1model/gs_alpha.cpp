@@ -12,22 +12,32 @@ GsAlpha decode_gs_alpha(std::uint64_t value) {
             static_cast<std::uint8_t>(value >> 32 & 0xff)};
 }
 
-GsBlendState gs_blend_state(std::uint64_t alpha) {
+std::optional<GsBlendState> try_gs_blend_state(std::uint64_t alpha) {
     constexpr std::uint8_t cs = 0, cd = 1, zero = 2, as = 0, fix = 2;
     const auto f = decode_gs_alpha(alpha);
     const float factor = f.c == fix ? float(f.fix) / 128 : 1.0F;
     if (f.d == cd && (f.c == as || f.c == fix)) {
         const bool constant = f.c == fix;
         if (f.a == cs && f.b == cd)
-            return {constant ? GsBlend::fix_over : GsBlend::source_alpha_over, factor};
+            return GsBlendState{constant ? GsBlend::fix_over : GsBlend::source_alpha_over, factor};
         if (f.a == cs && f.b == zero)
-            return {constant ? GsBlend::fix_add : GsBlend::source_alpha_add, factor};
+            return GsBlendState{constant ? GsBlend::fix_add : GsBlend::source_alpha_add, factor};
         if (f.a == zero && f.b == cs)
-            return {constant ? GsBlend::fix_subtract : GsBlend::source_alpha_subtract, factor};
+            return GsBlendState{constant ? GsBlend::fix_subtract : GsBlend::source_alpha_subtract, factor};
     }
+    return std::nullopt;
+}
+
+GsBlendState gs_blend_state(std::uint64_t alpha) {
+    if (const auto state = try_gs_blend_state(alpha)) return *state;
     char text[19];
     std::snprintf(text, sizeof text, "%llx", static_cast<unsigned long long>(alpha));
     throw std::runtime_error(std::string("Unsupported GS ALPHA_1 selection 0x") + text);
+}
+
+std::optional<GsBlendState> later_pass_blend(std::uint32_t shader, std::optional<std::uint64_t> alpha) {
+    if (!alpha || (shader != 2 && shader != 10 && shader != 11 && shader != 12 && shader != 14)) return std::nullopt;
+    return try_gs_blend_state(*alpha);
 }
 
 std::uint8_t gs_blend_channel(std::uint64_t alpha, std::uint8_t cs, std::uint8_t as, std::uint8_t cd) {

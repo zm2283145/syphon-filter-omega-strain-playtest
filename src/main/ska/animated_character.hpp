@@ -47,7 +47,13 @@ public:
     AnimatedCharacter& operator=(const AnimatedCharacter&)=delete;
     const AnimationModel& model() const {return model_;}
     const MorphHostState& morph() const {return morph_;}
-    const std::vector<AnimatedCharacterGeometry>& geometry() const {return geometry_;}
+    const std::vector<AnimatedCharacterGeometry>& geometry() const {if(geometry_stale_)materialize_geometry();return geometry_;}
+    // Port-only (checkpoint 132vt2d, speed only; the PS Vita play host turns it on): step and write_node_locals
+    // leave the skinning to the first geometry() after them, so a pose replaced before any read (the upper-body
+    // pass rewrites the step's nodes) is not skinned. The geometry is the same function of the committed pose,
+    // morph and parts; only a skinning overflow throws at the read instead of rolling the step back.
+    static void set_deferred_skinning(bool on){deferred_skinning_=on;}
+    static bool deferred_skinning(){return deferred_skinning_;}
     const std::vector<AnimatedCharacterPart>& parts() const {return parts_;}
     // ActorModel_Setup 0038c920 on a built character (game::SwitchBodies / RestoreBody, 001b469c /
     // 001b46cc): the part list replaced under the constructor's checks; the skeleton, pose, morph
@@ -118,11 +124,15 @@ private:
     std::vector<SkinMatrix> inverse_bind_,scales_;
     AnimationModel model_;
     MorphHostState morph_;
-    std::vector<AnimatedCharacterGeometry> geometry_;
+    mutable std::vector<AnimatedCharacterGeometry> geometry_;
+    mutable bool geometry_stale_{false};   // 132vt2d: geometry_ awaits materialize_geometry() (deferred skinning)
+    inline static bool deferred_skinning_{false};
+    void materialize_geometry() const;
+    void materialize_before_change();
     // Checkpoint 132win10 (port-side speed only): the previous frame's geometry and the morph deformation's
     // mesh, kept for their storage (step_impl skins into spare_geometry_ and swaps it with geometry_ at commit).
-    std::vector<AnimatedCharacterGeometry> spare_geometry_;
-    SkinnedMesh morph_scratch_;
+    mutable std::vector<AnimatedCharacterGeometry> spare_geometry_;
+    mutable SkinnedMesh morph_scratch_;
     AnimationModel* candidate_{};
     AnimationModel& command_model();
     void require_idle() const;

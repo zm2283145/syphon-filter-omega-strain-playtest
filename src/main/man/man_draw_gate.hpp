@@ -30,6 +30,9 @@ namespace omega {
 struct ObjectCull { std::uint32_t code{}; float dist{}; };
 ObjectCull object_cull_003c8990(const ShadowMatrix& clip,float near_z,const std::array<float,3>& lo,const std::array<float,3>& hi,
     const std::optional<ShadowMatrix>& transform);
+// Test access (port-only, 132vt2d): one VU0 multiply (op 0), add (1) or subtract (2) on VU float words, through the
+// binary32 fast path (fast) or the double path it must equal.
+std::uint32_t object_cull_vu_op(std::uint32_t a,std::uint32_t b,int op,bool fast);
 
 // 0037c350(renderer, transform, code, a3) return value (model +0x2bd4): 0x80000000
 // for code 0x80; else s = (mode_word | a3) & 0xbfffffff with s & 0x80000 required

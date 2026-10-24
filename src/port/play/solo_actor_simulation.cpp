@@ -2705,10 +2705,12 @@ void SoloActorSimulation::Impl::logic(const SoloActorFrameInput& input){
 void SoloActorSimulation::Impl::physics(const SoloActorFrameInput& input){
     const float dt=config.dt;
     SoloActorFrame& result=*current;
+    OMEGA_ZONE_LAPS(physics_laps);   // port-only (132vt2d, zone_profile.hpp): actor.physics's parts on the Vita
     if(model){
         model->set_anchor_constraint(flor_key,RootMotionConstraint{RootConstraintKind::reject_axis,frame_state.response.physical.up_axis_9f0});
         sync_external_parents();
         model->step(dt);
+        OMEGA_ZONE_LAP(physics_laps,"physics.model_step");
         roots.set_local(floor_root,model->anchor_state(flor_key));
         // The model's 'edge' anchor is actor root +3294.
         if(model->has_anchor(edge_key))roots.set_local(edge_root,model->anchor_state(edge_key));
@@ -2729,6 +2731,7 @@ void SoloActorSimulation::Impl::physics(const SoloActorFrameInput& input){
         roots.set_local(floor_root,local);
         component=roots.world_pose(floor_root).position;published_set=false;frame_begun=true;response_ran=false;
     }
+    OMEGA_ZONE_LAP(physics_laps,"physics.roots");
     // 001811c0: bounds (001ea240) and gather run before 001e9980, so they see
     // the previous frame's +2f0/+300.
     {
@@ -2744,7 +2747,9 @@ void SoloActorSimulation::Impl::physics(const SoloActorFrameInput& input){
         bounds_in.byte_3d3=frame_state.auxiliary.second_requested!=0;bounds_in.byte_480=frame_state.edges.slots[1].request;
         gather(actor_gather_bounds(bounds_in));
     }
+    OMEGA_ZONE_LAP(physics_laps,"physics.gather");
     result.trace=run_actor_physical_frame(frame_state,dt,frame_host);response_ran=true;
+    OMEGA_ZONE_LAP(physics_laps,"physics.physical_frame");
     // 001e40ec: a floor-probe hit stores its triangle info (001e1b70) at physical +100: the surface
     // record (001e1dc0: COL +2c[index], a static default before version 3) at +140, its byte 1 the
     // material index of the COL fixup 003c20c8.
@@ -2761,9 +2766,11 @@ void SoloActorSimulation::Impl::physics(const SoloActorFrameInput& input){
     result.found_ledge=found_ledge_130;
     // 00392aa0: the secondary component's update follows the physical step.
     if(secondary_update)secondary_update(dt);
+    OMEGA_ZONE_LAP(physics_laps,"physics.secondary");
     // Then, with the node collection (actor +2e64), the context bounds 003a9220
     // (not retained here) and centroid 003a9090 (392af0..392b08).
     rebuild_model_centroid();
+    OMEGA_ZONE_LAP(physics_laps,"physics.centroid");
 }
 
 // The frame-update event after the world update.

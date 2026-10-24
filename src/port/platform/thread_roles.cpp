@@ -76,7 +76,9 @@ void mark_gone(void* slot) {
 void enter_thread_role(ThreadRole role, const std::string& name) {
     std::call_once(g_exit_once, [] { pthread_key_create(&g_exit_key, mark_gone); });
     const SceUID id = sceKernelGetThreadId();
-    const int mask = SCE_KERNEL_CPU_MASK_USER_0 << thread_role_core(role);
+    const int mask = role == ThreadRole::worker
+        ? (SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2)   // 132vt2d: also the render core's idle time
+        : SCE_KERNEL_CPU_MASK_USER_0 << thread_role_core(role);
     const int set = sceKernelChangeThreadCpuAffinityMask(id, mask);
     const int prio = sceKernelChangeThreadPriority(id, role_priority(role));
     Entry e{};

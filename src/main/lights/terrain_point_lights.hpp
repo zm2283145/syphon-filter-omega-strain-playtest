@@ -72,4 +72,10 @@ bool terrain_batch_reached(const TerrainPointLight& light,const MeshBatch& batch
 // so it lights the vertices within the inner distance fully and no others.
 void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const MeshBatch& batch,
     std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours);
+// Port-only (checkpoint 132vt2d, speed only; the PS Vita play host turns it on with --terrain-light-memo):
+// apply_terrain_point_lights skips a vertex whose double-precision distance from a light exceeds the light's
+// range by a margin (1e-4 of the operands) far above the VU path's rounding, where that path gives a <= 0.
+// The colours are the same either way (tests/terrain_point_lights_tests.cpp compares them).
+void set_terrain_light_fast_reject(bool on);
+bool terrain_light_fast_reject();
 }

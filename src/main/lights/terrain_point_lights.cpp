@@ -141,6 +141,10 @@ bool terrain_batch_reached(const TerrainPointLight& light,const MeshBatch& batch
     return reached(vu,light,batch_sphere(vu,batch));
 }
 
+namespace {bool fast_reject=false;}
+void set_terrain_light_fast_reject(bool on){fast_reject=on;}
+bool terrain_light_fast_reject(){return fast_reject;}
+
 void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const MeshBatch& batch,
                                 std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours){
     require(positions.size()==batch.vertex_count&&colours.size()==batch.vertex_count,"vertex spans differ from the batch");
@@ -152,8 +156,20 @@ void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const 
         // div q: a zero divisor gives +-FLT_MAX (sign 1 xor span), as the EE interpreter returns (vu_float.hpp);
         // the vision light 0025fbb0 starts at range 0 = inner 0 while its fade +2c is 0.
         const float q=span==0.0F?std::copysign(std::numeric_limits<float>::max(),span):vu.r(vu::div(1.0F,span));
+        // Port-side speed only (132vt2d): a vertex at least `beyond` from the light (double distance) gets a <= 0
+        // on the VU path, so it is skipped without it. The VU path's error (the rounded differences, squares,
+        // sums, eleng, the subtraction, q and the product) is a few binary32 ulps of |dl| + |B.w|; the margin
+        // here is 1e-4 of the operands, far above it. Only for a positive span (a falls as the distance grows).
+        double beyond2=std::numeric_limits<double>::infinity();
+        if(fast_reject&&span>0.0F){
+            const double range=light.a[3],inner=light.b[3];
+            const double beyond=(range+1e-4*(std::fabs(range)+std::fabs(inner))+1e-30)/(1.0-1e-4);
+            if(beyond>0.0)beyond2=beyond*beyond;
+        }
         for(std::size_t v=0;v<positions.size();++v){
             const auto& p=positions[v];
+            const double ex=double(light.a[0])-p[0],ey=double(light.a[1])-p[1],ez=double(light.a[2])-p[2];
+            if(ex*ex+ey*ey+ez*ez>=beyond2)continue;
             const float dl=vu.eleng(vu.sub(light.a[0],p[0]),vu.sub(light.a[1],p[1]),vu.sub(light.a[2],p[2]));
             Vu w;                                                                         // the w MAC flags of msubq
             const float raw=1.0F-(vu.sub(dl,light.b[3])*q);

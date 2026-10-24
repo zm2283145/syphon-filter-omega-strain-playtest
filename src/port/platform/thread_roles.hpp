@@ -8,7 +8,8 @@
 // priority and registers it for the per-thread busy-time report (thread_usage()):
 //   simulation (+ mission scripts, the level load)  core 0
 //   render (GXM submission, the loading screens)     core 1
-//   worker (WorkerPool), loader                      core 2
+//   worker (WorkerPool), loader                      core 2 (132vt2d: the workers may also run on core 1, below the
+//                                                    render thread's priority, in its waits)
 //   audio (SceAudioOut output)                       core 2, high priority
 // Every other platform: enter_thread_role and ThreadBusyScope do nothing (the Windows build is unchanged).
 #include <cstdint>
@@ -20,7 +21,7 @@ namespace omega {
 enum class ThreadRole : std::uint8_t { simulation, render, worker, loader, audio };
 
 const char* thread_role_name(ThreadRole role);
-// The user core (0..2) the role is pinned to on the Vita.
+// The user core (0..2) the role is pinned to on the Vita (a worker's home core; it may also run on core 1).
 unsigned thread_role_core(ThreadRole role);
 
 // Called once by a thread at the top of its body (name: for the report, e.g. "worker 1").
