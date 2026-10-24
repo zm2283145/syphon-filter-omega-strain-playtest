@@ -42,10 +42,11 @@
 // - The gait / footstep part of 00197e00 (00197e00..00198274) is not run; the
 //   IR switch's argument +33e6 is not modelled (only 00199590, not hosted,
 //   would read it).
-// - Admitted launches: hold class 1 with damage type 0, 2, 3, 9 or 13 (the
-//   explosion through CombatThrowConfig::explode); the area types 4..8 (fire,
-//   gases, smoke: ignition 00186360, the gas exposure's node and LOS, the tear
-//   gas action, the smoke volumes of 002594a0) and hold class 7 (the star
+// - Admitted launches: hold class 1 with damage type 0, 2, 3, 4, 9 or 13 (the
+//   explosion through CombatThrowConfig::explode; type 4's fire area ignites
+//   through 00186360 since 132ms8); the area types 5..8 (gases, smoke: the
+//   gas exposure's node and LOS, the tear gas action, the smoke volumes of
+//   002594a0) and hold class 7 (the star
 //   message 004eeed0, its sound, the scan's +d byte) throw at the start or
 //   launch.
 // - 001960c0's melee branch (COMBAT.md, "Checkpoint 113 NeckSnap takedown"):

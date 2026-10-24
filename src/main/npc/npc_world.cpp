@@ -287,6 +287,9 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
                 if(!combat_.eye_c0_of)throw std::runtime_error("NPC AI: the eye +c0 of an object (NpcCombatLink::eye_c0_of)");
                 return combat_.eye_c0_of(o,sub);};
             t.position_f4=[this](std::uint64_t o){
+                // A node object's +f4 (vtable 004d95b0 -> 0015bf40 -> 0015c170): the yaw +8c matrix whose
+                // row 3 is (+80, +84, +88, 1) (CHECHNYA GrenadeToss: SetGrenadeTarget on node 1643717).
+                if(const auto n=graph_.node_of_object(o))return graph_.position(*n);
                 if(!combat_.position_f4_of)throw std::runtime_error("NPC AI: +f4 of an object (NpcCombatLink::position_f4_of)");
                 return combat_.position_f4_of(o);};
             t.inventory_84=[inventory]{return inventory().current_84;};

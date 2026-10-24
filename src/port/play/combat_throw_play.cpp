@@ -407,8 +407,9 @@ struct CombatThrows::Impl final:AreaWorld {
         if(record.hold_class_f0()!=1&&record.hold_class_f0()!=7)
             fail("a launch of hold class "+std::to_string(record.hold_class_f0())+" is not hosted");
         const auto type=record.damage_type_bc();
-        if(!(type==0||type==2||type==3||type==9||type==13))
-            fail("a thrown item of damage type "+std::to_string(type)+" (its area: ignition, gas exposure, tear gas or smoke volumes) is not hosted");
+        // Type 4 (fire) since 132ms8: its area's fire branch (00259bb0) is this host's ignite (00186360).
+        if(!(type==0||type==2||type==3||type==4||type==9||type==13))
+            fail("a thrown item of damage type "+std::to_string(type)+" (its area: gas exposure, tear gas or smoke volumes) is not hosted");
         ThrowLaunchActor l;
         l.hand_frame=actor.skeleton_node_world_matrix(hand_node);                         // 00132a30 / 00133ed0
         l.actor_matrix=rows_of(root_placement_matrix(actor.floor_root_placement()));       // virtual +f4

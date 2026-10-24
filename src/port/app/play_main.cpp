@@ -628,6 +628,9 @@ std::vector<ScriptStep> read_script(const fs::path& path){
 //                                       horizontal rectangle X0..X1 by Y0..Y1 (to pass a patrol behind its back);
 //                                       stops the run after N frames
 //   hold's optional 18th value presses Select (checkpoint 132uk6).
+//   npcwatch R PERIOD                   (checkpoint 132ms8d) from now on, every PERIOD frames (0: off), print each
+//                                       present --combat actor within R (horizontal) with its position, floor-root heading
+//                                       (degrees, as the player's) and life state (takes no frame)
 //   goto prints the player's position every 120 frames ("Pilot goto at frame").
 //   In aim and hunt an ID may be gG: every actor generator G has spawned (spawn IDs depend on the
 //   run's spawn order, and IDs above 2^24 are not exact as floats); a lone gG is done early once G
@@ -659,10 +662,10 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
             if(used!=token.size())throw std::runtime_error("Pilot command arguments: "+line);
         }
         if((!c.generators.empty()||c.cover||c.up!=0||c.spacing)&&c.op!="aim"&&c.op!="hunt")throw std::runtime_error("Pilot command arguments: "+line);
-        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc")throw std::runtime_error("Unknown pilot command: "+line);
+        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch")throw std::runtime_error("Unknown pilot command: "+line);
         if(c.op=="clear"){c.cover=20;if(c.args.size()<4||std::any_of(c.args.begin()+4,c.args.end(),[](float v){return v>=0;}))throw std::runtime_error("Pilot command arguments: "+line);}
         if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
-            (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6))
+            (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6)||(c.op=="npcwatch"&&(c.args.size()!=2||c.args[1]<0)))
             throw std::runtime_error("Pilot command arguments: "+line);
         out.push_back(std::move(c));
     }
@@ -903,6 +906,10 @@ bool enable_event_object(Word object,bool enable) override{return event_enable?e
     // Checkpoint 132sx5: game::SpawnLight 00230660 -> 00231f00 (empty: deferred).
     std::function<bool(Word,float,float)> light_spawn;
     bool spawn_light(Word object,float outer,float end) override{return light_spawn?light_spawn(object,outer,end):false;}
+    // Checkpoint 132ms8d: the same at an actor's +e4 (00132860, resolved by the host).
+    std::function<bool(Word,const RootVector&,float,float)> actor_light_spawn;
+    bool spawn_actor_light(Word object,const RootVector& e4,float outer,float end) override{
+        return actor_light_spawn?actor_light_spawn(object,e4,outer,end):false;}
 
     // game::SetNotGasable(GOBJ, int) 00185140 on the player: actor +346b. Its only reader, the gas
     // exposure test 002596e0, is reached by gas grenades / areas the play throw world refuses
@@ -941,10 +948,15 @@ bool enable_event_object(Word object,bool enable) override{return event_enable?e
     bool remove_all_backpacks() override{return backpacks_remove_all?backpacks_remove_all():false;}
     bool reset_level() override{return level_reset?level_reset():false;}
     // game::SwitchBodies / game::RestoreBody (001b3b60 -> 00390fc0 / 00391210 on the receiver's model):
-    // the player's figure (empty: deferred). An NPC receiver's figure is not rebuilt.
+    // the player's figure (empty: deferred). Checkpoint 132ms8d: an NPC receiver's switch (001b469c) rebuilds its
+    // figure (npc_body_request; empty: not hosted, throws); its restore (001b46cc) is not hosted.
     std::function<bool(bool,Word)> body_request;
+    std::function<bool(Word,Word)> npc_body_request;
     bool switch_bodies(std::optional<Word> receiver,Word costume) override{
-        if(receiver)throw std::runtime_error("001b469c: 00390fc0 on an NPC's model (its figure is not rebuilt; not hosted)");
+        if(receiver){
+            if(!npc_body_request)throw std::runtime_error("001b469c: 00390fc0 on an NPC's model (its figure is not rebuilt; not hosted)");
+            return npc_body_request(*receiver,costume);
+        }
         return body_request?body_request(false,costume):false;
     }
     bool restore_body(std::optional<Word> receiver) override{
@@ -7119,8 +7131,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<CombatInventoryMessage> inventory_msgs;
         // Checkpoint 132k: the cNetSpawnParticleMsgs 002307b0 queued to their object (003c9420 transport 0): object, index.
         std::vector<std::pair<Word,std::int8_t>> net_particle_msgs;
-        // Checkpoint 132sx5: the cNetSpawnLightMsgs 00230660 queued to their object (003c9420 transport 0): object, f12, f13.
-        std::vector<std::tuple<Word,float,float>> net_light_msgs;
+        // Checkpoint 132sx5: the cNetSpawnLightMsgs 00230660 queued to their object (003c9420 transport 0): object, f12, f13
+        // (132ms8d: and whether the object is an actor, receiver 001b3b60).
+        std::vector<std::tuple<Word,float,float,bool>> net_light_msgs;
         bool npc_figures_added=false;   // the overlay textures follow a spawn
         std::vector<std::uint32_t> pathed_order;   // their record order (00133420 visits objects in registration order)
         std::optional<ZoneActivationMap> zone_map;std::optional<ZoneTracker> zone_tracker;   // --mission-scripts: 001c24d0 / 0013db30
@@ -9140,24 +9153,28 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // f12, over [0, f13]: effect_service), then the cNetSpawnLightMsg (key 004f7c00, vtable
                         // 004dbac0; +24 object, +28 f12, +2c f13, +20 = 4) queued to the object. Hosted with the effect
                         // update 003ec4c0 that ticks it.
-                        script_world->light_spawn=[&play_particles,&population,&net_light_msgs,&ni_events,position_e4=bc.host_objects.position_e4](Word object,float outer,float end){
+                        auto spawn_light_at=[&play_particles,&net_light_msgs](Word object,const RootVector& e4,float outer,float end,bool actor){
+                            std::array<std::array<float,4>,4> m{{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}}};
+                            for(std::size_t c=0;c<4;++c)m[3][c]=e4[c];
+                            auto& p=*play_particles;
+                            const auto light=particle::spawn_light_effect(p.effects,p.lights,m,outer,end);
+                            ++p.script_lights;p.script_lights_lit+=light.has_value();
+                            std::cout<<"SpawnLight (00230660): "<<(actor?"actor ":"object ")<<object<<" at ("<<e4[0]<<", "<<e4[1]<<", "<<e4[2]
+                                <<"), outer "<<outer<<", over [0, "<<end<<"]: 00231f00 -> ";
+                            if(light)std::cout<<"point light "<<*light<<" scheduled\n";
+                            else std::cout<<"no free point light (empty effect)\n";
+                            net_light_msgs.emplace_back(object,outer,end,actor);
+                            return true;};
+                        script_world->light_spawn=[spawn_light_at,&population,&ni_events,position_e4=bc.host_objects.position_e4](Word object,float outer,float end){
                             std::size_t k=0;
                             while(k<population.objects.size()&&population.objects[k].id!=object)++k;
                             const bool nie=k==population.objects.size()&&ni_events&&ni_events->contains(object);   // as SpawnParticle
                             if(k==population.objects.size()&&!nie)throw std::runtime_error("game::SpawnLight (00230660): virtual +e4 of object "
                                 +std::to_string(object)+" (neither a population GOB nor an NIE) is not hosted");
-                            std::array<std::array<float,4>,4> m{{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}}};
-                            const auto e4=nie?ni_events->position(object):position_e4(k);
-                            for(std::size_t c=0;c<4;++c)m[3][c]=e4[c];
-                            auto& p=*play_particles;
-                            const auto light=particle::spawn_light_effect(p.effects,p.lights,m,outer,end);
-                            ++p.script_lights;p.script_lights_lit+=light.has_value();
-                            std::cout<<"SpawnLight (00230660): object "<<object<<" at ("<<e4[0]<<", "<<e4[1]<<", "<<e4[2]
-                                <<"), outer "<<outer<<", over [0, "<<end<<"]: 00231f00 -> ";
-                            if(light)std::cout<<"point light "<<*light<<" scheduled\n";
-                            else std::cout<<"no free point light (empty effect)\n";
-                            net_light_msgs.emplace_back(object,outer,end);
-                            return true;};
+                            return spawn_light_at(object,nie?ni_events->position(object):position_e4(k),outer,end,false);};
+                        // Checkpoint 132ms8d: an actor's +e4 (00132860), resolved by the host (the player, an NPC record).
+                        script_world->actor_light_spawn=[spawn_light_at](Word object,const RootVector& e4,float outer,float end){
+                            return spawn_light_at(object,e4,outer,end,true);};
                         // Checkpoint 132cp9: game::SmokeToronto3 -> 00232c00(type, -1, f12..f15): 00177060 retires the
                         // old field G+1a4 (vt+60(1), 0040c9a0, 003cb230 deletes it 0.1 s later; host: its instances
                         // are freed now, 00235ae0's 003a2ba0 + 0036b130) and registers (0040c9d0) the new 00235df0
@@ -10007,6 +10024,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<ScriptStep> script;if(!script_path.empty())script=read_script(script_path);
         std::vector<PilotCommand> pilot;if(!pilot_path.empty())pilot=read_pilot(pilot_path);
         std::size_t pilot_index=0;unsigned pilot_frames=0,pilot_aim_frames=0,pilot_off_aim=0,pilot_release=0,pilot_next_fire=0,pilot_spaced=0;float pilot_prev_yaw_error=0,pilot_prev_pitch_error=0;
+            float pilot_watch_radius=0;unsigned pilot_watch_period=0;
         float pilot_prev_h=0,pilot_prev_x=0,pilot_prev_y=0,pilot_prev_distance=0;bool pilot_have_prev=false;std::vector<std::int32_t> pilot_dead;unsigned pilot_kill_pause=0;
         // aim / hunt cK: a target that took no damage from K presses in tolerance is behind cover (passed over in this command).
         std::set<std::int32_t> pilot_covered;std::map<std::int32_t,std::array<float,4>> pilot_clear_covered;std::int32_t pilot_shot_target=-1;float pilot_shot_health=0;unsigned pilot_dry_shots=0;
@@ -10115,7 +10133,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::optional<CharacterAppearance> player_look;std::optional<AppearancePacking> player_body_backup;
         std::vector<std::size_t> player_part_pairs;   // the drawn player parts' pair indices in player_look (Checkpoint 132cp6)
         std::map<Word,AppearancePacking> costume_packings;
-        struct BodyRequest{bool restore{};Word costume{};};
+        struct BodyRequest{bool restore{};Word costume{};std::optional<Word> receiver;};   // receiver: an NPC (132ms8d), else the player
         std::vector<BodyRequest> body_requests;
         TeamRelations printed_teams=mission_host?mission_host->teams():TeamRelations{};
         const auto resolve_player_look=[&]()->CharacterAppearance&{
@@ -10152,41 +10170,39 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             player_look=std::move(look);player_part_pairs=std::move(load_pairs);
             return *player_look;
         };
-        const auto apply_body_request=[&](const BodyRequest& request){
-            auto& look=resolve_player_look();
-            BodySwitch info;
-            if(request.restore){
-                if(!restore_body_packing(look.state,player_body_backup)){
-                    std::cout<<"game::RestoreBody: no backup (+2c14 = 0), 00391210 does nothing\n";
-                    return;
-                }
-            }else{
-                auto costume=costume_packings.find(request.costume);
-                if(costume==costume_packings.end()){
-                    const NpcRosterEntry* entry=nullptr;for(const auto& e:roster)if(e.actor_id==request.costume)entry=&e;
-                    if(!entry)throw std::runtime_error("001b3b60: costume NPC "+std::to_string(request.costume)+" outside the roster (a spawned NPC's +a0 is not kept)");
-                    costume=costume_packings.emplace(request.costume,resolve_character_appearance(entry->appearance,entry->serial,registry).state).first;
-                }
-                info=switch_body_packing(look.state,costume->second,player_body_backup);
-                // The cache lookups of steps 4 / 5 (004046f0); a miss loads the member (MeshCache_Load, MANSKM.HOG).
-                for(const auto& name:info.cache_lookups){
-                    const auto key=appearance_mesh_request(name);
-                    bool found=false;
-                    for(const auto& m:mesh_cache)if(appearance_preregistered_slot(key,m.name))found=true;
-                    for(const auto& m:loaded_part_meshes)if(appearance_preregistered_slot(key,m.key.members[0]))found=true;
-                    if(found)continue;
-                    if(!manskm.count(key.members[0]))throw std::runtime_error("00390940: MeshCache_Load of "+name+" absent from MANSKM.HOG (not hosted)");
-                    register_loaded_mesh(key,key.members[0],manskm.count(key.members[1])?std::optional<std::string>(key.members[1]):std::nullopt);
-                }
+        // 00390fc0 step 3 reads (and rewrites) the costume NPC's +a0 packing: resolved like its figure once and kept.
+        const auto costume_packing=[&](Word id)->AppearancePacking&{
+            auto costume=costume_packings.find(id);
+            if(costume==costume_packings.end()){
+                const NpcRosterEntry* entry=nullptr;for(const auto& e:roster)if(e.actor_id==id)entry=&e;
+                if(!entry)throw std::runtime_error("001b3b60: costume NPC "+std::to_string(id)+" outside the roster (a spawned NPC's +a0 is not kept)");
+                costume=costume_packings.emplace(id,resolve_character_appearance(entry->appearance,entry->serial,registry).state).first;
             }
-            const auto body=appearance_of_packing(look.name,look.state);
-            if(body.skeleton!=look.skeleton)throw std::runtime_error("0038c920: the packing's skeleton slot changed (003aa160 is not run again)");
-            // 0038c920: each pair's LOD 0 / LOD 1 mesh from the cache (004046f0; preregistered entries first; a miss
-            // leaves no part), 004068b0's mouth pair without LOD 1; 0038e030: the images by their 16-byte name in the
-            // texman list (00381f30), a miss taking 00381000 (ERROR.TDX), LOD 1 with byte 14 '1' (a miss: LOD 0's).
-            std::vector<AnimatedCharacterPart> new_parts;std::vector<Texture> images;std::vector<bool> textured;
+            return costume->second;
+        };
+        // The cache lookups of steps 4 / 5 (004046f0); a miss loads the member (MeshCache_Load, MANSKM.HOG).
+        const auto load_switch_lookups=[&](const BodySwitch& info){
+            for(const auto& name:info.cache_lookups){
+                const auto key=appearance_mesh_request(name);
+                bool found=false;
+                for(const auto& m:mesh_cache)if(appearance_preregistered_slot(key,m.name))found=true;
+                for(const auto& m:loaded_part_meshes)if(appearance_preregistered_slot(key,m.key.members[0]))found=true;
+                if(found)continue;
+                if(!manskm.count(key.members[0]))throw std::runtime_error("00390940: MeshCache_Load of "+name+" absent from MANSKM.HOG (not hosted)");
+                register_loaded_mesh(key,key.members[0],manskm.count(key.members[1])?std::optional<std::string>(key.members[1]):std::nullopt);
+            }
+        };
+        // 0038c920: each pair's LOD 0 / LOD 1 mesh from the cache (004046f0; preregistered entries first; a miss
+        // leaves no part), 004068b0's mouth pair without LOD 1; 0038e030: the images by their 16-byte name in the
+        // texman list (00381f30), a miss taking 00381000 (ERROR.TDX), LOD 1 with byte 14 '1' (a miss: LOD 0's).
+        // morph_table (132ms8d, an NPC's figure): a MORPH.HOG part's SKF is bound (00385d40) as 001b5fe0's parts are.
+        struct SwitchedParts{std::vector<AnimatedCharacterPart> parts;std::vector<Texture> images;std::vector<bool> textured;
             std::vector<const SkinnedMesh*> lod1;std::vector<std::optional<Texture>> lod1_images;std::vector<std::string> mesh_names;
-            std::vector<bool> lod1_own;std::vector<std::size_t> new_pairs;std::vector<std::string> model_keys,lod1_keys;
+            std::vector<bool> lod1_own;std::vector<std::size_t> pairs;std::vector<std::string> model_keys,lod1_keys;std::string report;};
+        const auto switched_parts=[&](const CharacterAppearance& body,std::optional<std::uint8_t> morph_table){
+            SwitchedParts out;
+            auto& new_parts=out.parts;auto& images=out.images;auto& textured=out.textured;auto& lod1=out.lod1;auto& lod1_images=out.lod1_images;
+            auto& mesh_names=out.mesh_names;auto& lod1_own=out.lod1_own;auto& new_pairs=out.pairs;auto& model_keys=out.model_keys;auto& lod1_keys=out.lod1_keys;
             const auto mouth=std::find_if(body.parts.begin(),body.parts.end(),[](const AppearancePart& pair){
                 return pair.mesh.name.size()>5&&pair.mesh.name.compare(1,5,"MOUT_")==0;});
             std::ostringstream report;
@@ -10197,11 +10213,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     found=true;mesh0=Member{manskm_archive,m.lod0};if(m.lod1)mesh1=Member{manskm_archive,*m.lod1};break;}
                 if(!mesh0){report<<' '<<part.mesh.name<<"(no mesh)";continue;}
                 new_parts.push_back({mesh0->name,decode_skinned_mesh(disc.archive_member(mesh0->archive,mesh0->name))});
+                if(morph_table&&mesh0->archive==morph_archive)bind_morph_part(new_parts.back(),mesh0->name,*morph_table);
                 mesh_names.push_back(part.mesh.name);new_pairs.push_back(static_cast<std::size_t>(&part-body.parts.data()));
                 const bool mouth_pair=mouth!=body.parts.end()&&&part==&*mouth;
                 if(mesh1&&!mouth_pair){lod_meshes.push_back(std::make_unique<SkinnedMesh>(decode_skinned_mesh(disc.archive_member(mesh1->archive,mesh1->name))));
                     lod1.push_back(lod_meshes.back().get());lod1_own.push_back(true);}
-                else{lod1.push_back(nullptr);lod1_own.push_back(!mouth_pair);}   // filled below: LOD 0's, or none for the mouth
+                else{lod1.push_back(nullptr);lod1_own.push_back(!mouth_pair);}   // filled by the caller: LOD 0's, or none for the mouth
                 model_keys.push_back(omega::mods::part_key(mesh0->archive,mesh0->name));
                 lod1_keys.push_back(mouth_pair?std::string():mesh1?omega::mods::part_key(mesh1->archive,mesh1->name):model_keys.back());
                 const auto image=loaded_part_textures.find(part.texture.name);
@@ -10217,14 +10234,33 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 lod1_images.push_back(std::move(image1));
                 report<<' '<<mesh0->name<<'/'<<(image!=loaded_part_textures.end()?image->second.name:std::string("ERROR.TDX"));
             }
-            character.replace_parts(std::move(new_parts));
+            out.report=report.str();
+            return out;
+        };
+        const auto apply_body_request=[&](const BodyRequest& request){
+            auto& look=resolve_player_look();
+            BodySwitch info;
+            if(request.restore){
+                if(!restore_body_packing(look.state,player_body_backup)){
+                    std::cout<<"game::RestoreBody: no backup (+2c14 = 0), 00391210 does nothing\n";
+                    return;
+                }
+            }else{
+                info=switch_body_packing(look.state,costume_packing(request.costume),player_body_backup);
+                load_switch_lookups(info);
+            }
+            const auto body=appearance_of_packing(look.name,look.state);
+            if(body.skeleton!=look.skeleton)throw std::runtime_error("0038c920: the packing's skeleton slot changed (003aa160 is not run again)");
+            auto switched=switched_parts(body,std::nullopt);
+            auto& lod1=switched.lod1;auto& lod1_own=switched.lod1_own;auto& mesh_names=switched.mesh_names;
+            character.replace_parts(std::move(switched.parts));
             if(player_body_resort==1&&request.restore)
                 throw std::runtime_error("00391210: RestoreBody in the frame of a SwitchBodies whose 00390570 sort was not drawn yet (its +2dd0 classes are not kept)");
-            player_part_pairs=std::move(new_pairs);player_body_resort=request.restore?2:1;   // the part sort follows (man_sort_of)
+            player_part_pairs=std::move(switched.pairs);player_body_resort=request.restore?2:1;   // the part sort follows (man_sort_of)
             for(std::size_t i=0;i<lod1.size();++i)if(!lod1[i]&&lod1_own[i])lod1[i]=&character.parts()[i].mesh;
-            part_images=std::move(images);textured_parts=std::move(textured);
-            player_lod1=std::move(lod1);player_lod1_images=std::move(lod1_images);
-            player_models=omega::mods::character_model_overrides(skeleton,player_skeleton_name,model_keys,lod1_keys);   // 132md2
+            part_images=std::move(switched.images);textured_parts=std::move(switched.textured);
+            player_lod1=std::move(lod1);player_lod1_images=std::move(switched.lod1_images);
+            player_models=omega::mods::character_model_overrides(skeleton,player_skeleton_name,switched.model_keys,switched.lod1_keys);   // 132md2
             if(player_models)omega::mods::attach_model_images(*player_models,part_images,textured_parts,player_lod1_images);
             player_surfaces=static_cast<std::uint32_t>(character.geometry().size());
             if(combat_session){
@@ -10241,10 +10277,66 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 <<", 0038c920): the player's "<<character.parts().size()<<" parts, hard mesh "<<body.hard_mesh.name
                 <<(info.backup_saved?", backup +2c14 saved":"")<<"; cache lookups";
             for(const auto& name:info.cache_lookups)std::cout<<' '<<name;
-            std::cout<<";"<<report.str()<<"\n";
+            std::cout<<";"<<switched.report<<"\n";
         };
-        if(script_world&&!registry.empty())script_world->body_request=[&body_requests](bool restore,Word costume){
-            body_requests.push_back({restore,costume});return true;};
+        // Checkpoint 132ms8d: game::SwitchBodies(GOBJ, NPC) on an NPC (001b469c): the same 00390fc0 on the receiver's
+        // model +60 (its figure's packing, which 00390570 sorts again at its next draw) with its own +2c14 backup, then
+        // 0038c920 / 0038e030 on its figure (the CHECHNYA gravediggers' shovel bodies, MAIN.asm source lines 763 / 1092 /
+        // 1134 / 1196). Not hosted: a skeleton or shape-table change (the figure's skeleton and morph curves are kept)
+        // and the hard mesh's attach points (the figure's, as the player's switch keeps them).
+        std::map<Word,std::optional<AppearancePacking>> npc_body_backups;
+        const auto apply_npc_body_request=[&](const BodyRequest& request){
+            NpcFigure* f=nullptr;for(auto& n:npcs)if(n.actor_id==*request.receiver)f=&n;
+            if(!f)throw std::runtime_error("001b469c: SwitchBodies on NPC "+std::to_string(*request.receiver)+" without a figure (not hosted)");
+            const auto before=appearance_of_packing(f->label,f->sort_state);
+            const auto info=switch_body_packing(f->sort_state,costume_packing(request.costume),npc_body_backups[*request.receiver]);
+            load_switch_lookups(info);
+            const auto body=appearance_of_packing(f->label,f->sort_state);
+            if(body.skeleton!=before.skeleton)throw std::runtime_error("0038c920: NPC "+f->label+"'s packing changed its skeleton slot (003aa160 is not run again)");
+            const auto table=appearance_shape_table(f->sort_state);
+            if(table!=f->morph_table)throw std::runtime_error("0038c920: NPC "+f->label+"'s packing changed its shape table (its morph curves are kept; not hosted)");
+            auto switched=switched_parts(body,table);
+            if(switched.parts.empty())throw std::runtime_error("0038c920: NPC "+f->label+"'s switched packing resolves no parts");
+            f->character->replace_parts(std::move(switched.parts));
+            auto& lod1=switched.lod1;
+            for(std::size_t i=0;i<lod1.size();++i)if(!lod1[i]&&switched.lod1_own[i])lod1[i]=&f->character->parts()[i].mesh;
+            std::string shape="off";
+            if(std::any_of(f->character->parts().begin(),f->character->parts().end(),[](const AnimatedCharacterPart& p){return p.binding==CharacterMorphBinding::face;})){
+                // 0038c920: the key at +50 in table +2c0c (as make_npc_figure).
+                const auto key=appearance_shape_key(f->sort_state);const auto& names=morph_tables.faces.at(table);
+                const auto found=std::find(names.begin(),names.end(),key);
+                const std::string key_text(reinterpret_cast<const char*>(key.data()),strnlen(reinterpret_cast<const char*>(key.data()),key.size()));
+                const bool enabled=found!=names.end()&&key_text!="SHAPE_BASE";
+                f->character->set_base_shape(static_cast<std::uint8_t>(found==names.end()?0:found-names.begin()),enabled);
+                shape="'"+key_text+"'"+(enabled?" deformed":" off");
+            }
+            f->images=std::move(switched.images);f->textured=std::move(switched.textured);f->lod1_images=std::move(switched.lod1_images);
+            f->lod1=std::move(lod1);
+            f->models=omega::mods::character_model_overrides(f->character->skeleton(),body.skeleton,switched.model_keys,switched.lod1_keys,
+                omega::mods::part_shape_tables(f->character->parts(),table,morph_tables.faces,morph_tables.hands));
+            if(f->models)omega::mods::attach_model_images(*f->models,f->images,f->textured,f->lod1_images);
+            if(combat_session){
+                std::vector<HitVolumePart> hit_parts;
+                for(std::size_t i=0;i<f->character->parts().size();++i){
+                    HitVolumePart hp;hp.lod0=&f->character->parts()[i].mesh;hp.lod1=f->lod1[i];
+                    hp.flags0=hp.flags1=part_mesh_hit_flags(std::string_view(switched.mesh_names[i]));
+                    hit_parts.push_back(hp);
+                }
+                if(f->combat_model)f->combat_model->parts=hit_parts;   // a reset (ResetNpc) rebuilds the actor from it
+                combat_session->actors().replace_model_parts(f->actor,std::move(hit_parts));
+            }
+            f->part_pairs=std::move(switched.pairs);f->thermal_classes.clear();f->draw_positions.clear();   // 00390570 again at its next draw
+            npc_figures_added=true;   // the overlay images again
+            std::cout<<"game::SwitchBodies (001b469c -> 00390fc0, 0038c920): NPC "<<f->label<<" ("<<*request.receiver<<") wears costume NPC "
+                <<request.costume<<"'s body: "<<f->character->parts().size()<<" parts, hard mesh "<<body.hard_mesh.name<<", base shape "<<shape
+                <<(info.backup_saved?", backup +2c14 saved":"")<<"; cache lookups";
+            for(const auto& name:info.cache_lookups)std::cout<<' '<<name;
+            std::cout<<";"<<switched.report<<"\n";
+        };
+        if(script_world&&!registry.empty()){
+            script_world->body_request=[&body_requests](bool restore,Word costume){body_requests.push_back({restore,costume,std::nullopt});return true;};
+            script_world->npc_body_request=[&body_requests](Word receiver,Word costume){body_requests.push_back({false,costume,receiver});return true;};
+        }
         // 003870c0's attach-point section for each drawn actor: points 0..7 whose +2410 model is loaded, the
         // point's world matrix (00385240's 0019f350), the eleven GUN matrices and 003855d0's parts, skinned on
         // the CPU with the part's texture.
@@ -12786,6 +12878,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const float speed=pilot_have_prev?std::hypot(here.position[0]-pilot_prev_x,here.position[1]-pilot_prev_y):0.0F;
                         pilot_prev_h=h;pilot_prev_x=here.position[0];pilot_prev_y=here.position[1];pilot_have_prev=true;
                         bool done=false;
+                        if(pilot_watch_period&&frame%pilot_watch_period==0)
+                            for(std::size_t k=0;k<combat_ids.size()&&k<actors.size();++k){
+                                auto& a=actors.actor(k);
+                                if(!a.eligible())continue;
+                                const auto p=a.published_position();
+                                const float r=std::hypot(p[0]-here.position[0],p[1]-here.position[1]);
+                                if(r>=pilot_watch_radius)continue;
+                                const auto o=a.floor_root_placement().orientation;
+                                std::cout<<"Pilot npcwatch at frame "<<frame<<": "<<combat_ids[k]<<" at ("<<p[0]<<", "<<p[1]<<", "<<p[2]
+                                    <<") distance "<<r<<" heading "<<2.0F*std::atan2(o[2],o[3])*57.29578F<<" life "<<int(a.life_state())<<"\n";
+                            }
                         while(pilot_index<pilot.size()&&!done){
                             const auto& c=pilot[pilot_index];
                             auto finish=[&](){std::cout<<"Pilot: \""<<c.text<<"\" done at frame "<<frame<<" ("<<here.position[0]<<", "<<here.position[1]<<", "
@@ -12801,6 +12904,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             if(c.op=="teleport"){
                                 test_teleport({c.args[0],c.args[1],c.args[2],c.args[3]});recorder.teleport(c.args);pilot_have_prev=false;
                                 finish();x=y=0;done=true;continue;
+                            }
+                            if(c.op=="npcwatch"){
+                                pilot_watch_radius=c.args[0];pilot_watch_period=static_cast<unsigned>(c.args[1]);finish();continue;
                             }
                             if(c.op=="waitcommand"){
                                 if(coop_command_over_at&&*coop_command_over_at+pilot_frames>=frame){finish();continue;}
@@ -13631,12 +13737,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Checkpoint 132sx5: the cNetSpawnLightMsgs 00230660 queued before this pump. No script declares a
                 // handler and every SpawnLight object is a kind-1 GOB (C4.vum 140470 / 140562, POWER_Supply.vum
                 // 140518), whose receiver 0021a930 is j 003cea10: the empty +0x20 child list drops it. Checkpoint 132ms2:
-                // MINSK's BlastOff lights an NIE, whose receiver 0023b7d0 -> 0023e890 ends in the same 003cea10.
+                // MINSK's BlastOff lights an NIE, whose receiver 0023b7d0 -> 0023e890 ends in the same 003cea10. Checkpoint
+                // 132ms8d: an actor's (CHECHNYA's photo flash on the player) goes to 001b3b60, which has no branch for
+                // the key and passes it to 003cea10 -> 003caca0 over the actor's +0x20 child list; what fills that list
+                // for actors is not traced (SCRIPT_HOSTING.md "Unhandled notifications"), so it is recorded.
                 if(!net_light_msgs.empty()){
                     const auto queued=std::move(net_light_msgs);net_light_msgs.clear();
-                    for(const auto& [object,outer,end]:queued)
-                        std::cout<<"cNetSpawnLightMsg (outer "<<outer<<", "<<end<<") -> object "<<object<<" at frame "<<frame
-                            <<": no script handler (the GOB receiver -> 003cea10 -> 003caca0: empty +0x20 child list, dropped)\n";
+                    for(const auto& [object,outer,end,actor]:queued)
+                        std::cout<<"cNetSpawnLightMsg (outer "<<outer<<", "<<end<<") -> "<<(actor?"actor ":"object ")<<object<<" at frame "<<frame
+                            <<(actor?": no script handler (001b3b60 -> 003cea10 -> 003caca0: the actor's +0x20 child list, not forwarded)\n"
+                                    :": no script handler (the GOB receiver -> 003cea10 -> 003caca0: empty +0x20 child list, dropped)\n");
                 }
                 for(const auto& d:object_damage){
                     const auto id=static_cast<Word>(blast_objects->host_object(d.object).id_c);
@@ -15868,8 +15978,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(mission_host)mission_host->flush_spawned_npc(spawned.id);
                 }
                 // The body switches the frame's scripts sent: Event_Send runs 001b3b60 synchronously in the native;
-                // the port rebuilds the player's figure here, after the script pump, before the frame's draw.
-                for(const auto& request:body_requests)apply_body_request(request);
+                // the port rebuilds the player's (or, 132ms8d, an NPC's) figure here, after the script pump, before the frame's draw.
+                for(const auto& request:body_requests){if(request.receiver)apply_npc_body_request(request);else apply_body_request(request);}
                 body_requests.clear();
                 if(mission_host){
                     // Port diagnostic (TEAM_RELATIONS.md): the cells the frame's scripts changed, e.g. the CHA suit's

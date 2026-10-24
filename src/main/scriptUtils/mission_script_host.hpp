@@ -661,6 +661,12 @@ public:
     // cNetSpawnLightMsg (key 004f7c00, 003c9420 to the object); false when the
     // world hosts no effect service (the call is then deferred).
     virtual bool spawn_light(Word, float, float) { return false; }
+    // Checkpoint 132ms8d: the same for an actor (class 004da690, whose +e4 is
+    // 00132860): the host resolves the player's or an NPC record's +e4 as for
+    // game::Distance (CHECHNYA's photo triggers schedule SpawnLight(Who(msg),
+    // 50.0, 0.269) on the player). The message goes to the actor's receiver
+    // 001b3b60, which has no branch for the key (003cea10 -> 003caca0).
+    virtual bool spawn_actor_light(Word, const RootVector&, float, float) { return false; }
     // Checkpoint 132g: game::Shatter(GOBJ glass, GOBJ other) (00230d90 ->
     // 00230de0(glass, other, 0)) on the glass record's object, with the
     // other object's +e4; false when the world hosts no shatter (deferred).

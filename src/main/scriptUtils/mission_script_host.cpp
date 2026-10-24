@@ -3651,7 +3651,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
     // Checkpoint 132sx5: game::SpawnLight(GOBJ, float, float) 00230610: lw +8
     // and lw +4 (f13 / f12), 003cc820(lw +0), then 00230660(object, 1, f12,
     // f13) and return 0 (STREETS' BlowPowerSupply, SubwayBlow01 / 02 and the C4
-    // OnDamageMsg handlers: (object, 60.0, 0.269)).
+    // OnDamageMsg handlers: (object, 60.0, 0.269); CHECHNYA's photo triggers
+    // schedule it on the player, Who(msg), with (50.0, 0.269)).
     if (name == "game::SpawnLight") {
         require_signature(script, function, 4, {"object:GOBJ", "primitive:2", "primitive:2"});
         const auto* object = std::get_if<RuntimeObjectHandle>(&arguments.at(0));
@@ -3662,6 +3663,23 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             if (!word) throw std::runtime_error("game::SpawnLight: a float argument is not a word");
             return std::bit_cast<float>(*word);
         };
+        // Checkpoint 132ms8d: an actor's virtual +e4 is 00132860 (the player and the NPC records,
+        // as for game::Distance); other objects answer through the world (003cd260).
+        if (object->id == objects_.player) {
+            const auto p = world_.player_position_e4();
+            if (!p) throw std::runtime_error("game::SpawnLight: the world has no player actor");
+            applied = world_.spawn_actor_light(object->id, *p, real(1), real(2));
+            return std::nullopt;
+        }
+        if (const auto section = objects_.sections.find(object->id);
+            section != objects_.sections.end() && section->second == "npc") {
+            auto* npcs = world_.npcs();
+            if (!npcs) throw std::runtime_error("game::SpawnLight of an NPC while NPCs are not hosted: " + std::to_string(object->id));
+            const auto p = npcs->position_e4(object->id);
+            if (!p) throw std::runtime_error("game::SpawnLight of an NPC the world does not host: " + std::to_string(object->id));
+            applied = world_.spawn_actor_light(object->id, *p, real(1), real(2));
+            return std::nullopt;
+        }
         applied = world_.spawn_light(object->id, real(1), real(2));
         return std::nullopt;
     }

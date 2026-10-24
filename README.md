@@ -15,7 +15,7 @@ lands. Each update's commit message names the development commit it was taken fr
 | Area | State |
 | --- | --- |
 | Front end | Boot movies, title, options, agent profiles and memory card, command centre, loadout, loading screens, debriefs |
-| Levels that play to their end | **14 of 18:** TRAINING, TORONTO1, TORONTO2, TORONTO3, BELARUS1, BELARUS2, UKRAINE, MNTNEGR1, TOKYO, YEMEN1, ITALY, KYRGSTAN, MINSK, LORELEI |
+| Levels that play to their end | **15 of 18:** TRAINING, TORONTO1, TORONTO2, TORONTO3, BELARUS1, BELARUS2, UKRAINE, MNTNEGR1, TOKYO, YEMEN1, ITALY, KYRGSTAN, MINSK, LORELEI, CHECHNYA |
 | Widescreen | True 16:9 (and wider) in levels and menus: a wider view with the HUD, headers and button hints anchored to the screen edges. 4:3, pillarbox and stretch options |
 | Controls | Gamepads and keyboard / mouse |
 | Port Settings page | Display, control and port options inside the game's own Options menu |
@@ -27,7 +27,7 @@ lands. Each update's commit message names the development commit it was taken fr
 
 ## What does not work yet
 
-- **Levels still in progress:** ZURICH, YEMEN2, CHECHNYA and MYANMAR load and play part of the way, then
+- **Levels still in progress:** ZURICH, YEMEN2 and MYANMAR load and play part of the way, then
   stop. When the port reaches something that is not ported yet, it stops with an "unhosted …" or "… not ported"
   message naming the original function; it never guesses. Please report where it stopped (see below).
 - **CPU partners:** they don't use lifts yet, BELARUS1's co-op objective "save all 7 workers" is not escorted, and
