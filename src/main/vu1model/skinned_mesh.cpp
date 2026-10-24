@@ -1,4 +1,5 @@
 #include "skinned_mesh.hpp"
+#include "zone_profile.hpp"
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -163,6 +164,7 @@ void write_vec3(std::ostream& out, const Vec3& v) { write_values(out, std::array
 }
 
 SkinnedMesh decode_skinned_mesh(std::span<const std::uint8_t> bytes, std::uint32_t bones) {
+    OMEGA_ZONE("load.decode_skm");  // port-only (132vt2e): the PS Vita's load-time zones
     check(bytes.size() >= 16 && bytes.size() <= 16 * 1024 * 1024 && bytes.size() % 16 == 0,
           "SKM unsupported file extent");
     check(bones >= 1 && bones <= 21, "SKM unsupported skeleton size");

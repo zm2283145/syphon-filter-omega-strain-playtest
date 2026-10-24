@@ -815,27 +815,65 @@ int App::play(DiscImage& disc, const std::string& iso) {
     threads_ = ThreadReport{};
     // The play loop's split (frame_profile.hpp, the --frame-overlay profile) and the OMEGA_ZONE slots, logged about
     // every 10 s with the heap and the allocations per frame: the in-level hot spots (research/VITA.md "Profiling").
+    // 132vt2e: every 5 s, with the backend's draws and render-target scenes per frame and the draws merged into them
+    // (gfx::CommandList::merge_contiguous_draws).
     FrameProfile::frame_profile_sink() = [](const FrameProfile::Averages& a) {
         static double sum[FrameProfile::phase_count]{}, peak = 0.0, started = 0.0;
         static unsigned frames = 0, windows = 0;
         static std::uint32_t mallocs = g_mallocs;
-        if (started == 0.0) started = now_seconds();
+        static std::uint64_t draws = 0, scenes = 0, merged = 0, state_set = 0, state_skipped = 0, triangles = 0, tested = 0, kept = 0, reallocs = 0, writes = 0, bytes = 0;
+        if (started == 0.0) {
+            started = now_seconds();
+            const auto g = gfx::gxm::memory_stats();
+            draws = g.draws_total;
+            scenes = g.scenes_total;
+            merged = gfx::CommandList::merged_draws.load();
+            state_set = g.gl_state_set;
+            state_skipped = g.gl_state_skipped;
+            triangles = g.triangles_total;
+            tested = g.shadow_tested;
+            kept = g.shadow_kept;
+            reallocs = g.buffer_reallocs;
+            writes = g.buffer_writes;
+            bytes = g.buffer_bytes;
+        }
         for (int p = 0; p < FrameProfile::phase_count; ++p) sum[p] += a.ms[std::size_t(p)] * a.frames;
         peak = std::max(peak, a.max_total);
         frames += a.frames;
         ++windows;
         const double span = now_seconds() - started;
-        if (span < 10.0 || frames == 0) return;
+        if (span < 5.0 || frames == 0) return;
+        const auto g = gfx::gxm::memory_stats();
+        const std::uint64_t merged_now = gfx::CommandList::merged_draws.load();
         log("play frames: %u in %.1f s = %.1f fps; ms/frame sim %.2f, script %.2f, render %.2f, present %.2f "
-            "(longest frame %.1f); %.0f allocations per frame; %s",
+            "(longest frame %.1f); draws/frame %.0f (scenes %.1f, merged %.0f; GL state set %.0f, unchanged %.0f; "
+            "triangles %.0f; shadow filter tested %.0f, kept %.0f; buffer updates %.0f new memory, %.0f in place, %.0f KB); "
+            "%.0f allocations per frame; %s",
             frames, span, frames / span, sum[0] / frames, sum[1] / frames, sum[2] / frames, sum[3] / frames, peak,
-            double(g_mallocs - mallocs) / frames, process_memory_line().c_str());
+            double(g.draws_total - draws) / frames, double(g.scenes_total - scenes) / frames,
+            double(merged_now - merged) / frames, double(g.gl_state_set - state_set) / frames,
+            double(g.gl_state_skipped - state_skipped) / frames, double(g.triangles_total - triangles) / frames,
+            double(g.shadow_tested - tested) / frames, double(g.shadow_kept - kept) / frames,
+            double(g.buffer_reallocs - reallocs) / frames, double(g.buffer_writes - writes) / frames,
+            double(g.buffer_bytes - bytes) / 1024.0 / frames, double(g_mallocs - mallocs) / frames,
+            process_memory_line().c_str());
         zone_report([](const char* text) { log("%s", text); }, int(frames));
         std::fill(std::begin(sum), std::end(sum), 0.0);
         peak = 0.0;
         started = now_seconds();
         frames = windows = 0;
         mallocs = g_mallocs;
+        draws = g.draws_total;
+        scenes = g.scenes_total;
+        merged = merged_now;
+        state_set = g.gl_state_set;
+        state_skipped = g.gl_state_skipped;
+        triangles = g.triangles_total;
+        tested = g.shadow_tested;
+        kept = g.shadow_kept;
+        reallocs = g.buffer_reallocs;
+        writes = g.buffer_writes;
+        bytes = g.buffer_bytes;
     };
     int code = 0;
     install_play_movie_hooks(true);
@@ -2401,6 +2439,12 @@ int main() {
         options.display_copy_readback =
             vita_file_size(std::string(vita_data_root) + "/vita_test_display_readback.txt") >= 0;
         if (options.display_copy_readback) log("display: vita_test_display_readback.txt present: copies read back");
+        // Port-only test switch (VITA.md "Draw batching"): vita_test_gl_state_cache_off.txt sets every draw's GL state.
+        options.gl_state_cache = vita_file_size(std::string(vita_data_root) + "/vita_test_gl_state_cache_off.txt") < 0;
+        if (!options.gl_state_cache) log("display: vita_test_gl_state_cache_off.txt present: all GL state set every draw");
+        // Port-only test switch (VITA.md "Depth across scenes"): vita_test_depth_keep_off.txt clears depth at every
+        // GXM scene (vitaGL's default; the vt2d hardware's see-through walls).
+        options.keep_depth = vita_file_size(std::string(vita_data_root) + "/vita_test_depth_keep_off.txt") < 0;
         // ux0:data/omega_strain/vita_test_display_order.txt ("1" rows as read, "2" reversed): the GPU display copy's
         // row order without the first-use check (the same section; a hardware fallback should the check refuse).
         if (FILE* f = std::fopen((std::string(vita_data_root) + "/vita_test_display_order.txt").c_str(), "r")) {

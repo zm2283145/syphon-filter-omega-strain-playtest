@@ -105,7 +105,7 @@ void decode_vpk_chunk(const VpkHeader& h, std::span<const std::uint8_t> b, std::
             if (decode_adpcm_frame(b.subspan(base + c * per + q, 16), states[c], pcm) != 0)
                 throw std::runtime_error("VPK frame with flags");
             const std::size_t first = (done + q) / 16 * 28;
-            for (std::size_t i = 0; i < 28; ++i) clip.samples[(first + i) * h.channels + c] = pcm[i];
+            for (std::size_t i = 0; i < 28; ++i) clip.slot(first + i, c) = pcm[i];
         }
     }
 }
@@ -143,9 +143,18 @@ PcmClip decode_vpk(std::span<const std::uint8_t> b) {
     return clip;
 }
 
-VpkProgressive::VpkProgressive(std::span<const std::uint8_t> header, Reader read)
+VpkProgressive::VpkProgressive(std::span<const std::uint8_t> header, Reader read, bool stream)
     : header_(vpk_header(header, stream_bytes(header))), read_(std::move(read)), states_(header_.channels) {
     const std::size_t frames = std::size_t(header_.channel_bytes) / 16 * 28;
+    const std::size_t chunk_frames = header_.chunk_bytes / header_.channels / 16 * 28;
+    if (stream && chunk_frames && frames > 6 * chunk_frames) {
+        clip_ = std::make_shared<PcmClip>(PcmClip{header_.rate, header_.channels, {}, false});
+        clip_->ring = 4 * chunk_frames;
+        clip_->total = frames;
+        clip_->head.assign(chunk_frames * header_.channels, 0);
+        clip_->samples.assign(clip_->ring * header_.channels, 0);
+        return;
+    }
     clip_ = std::make_shared<PcmClip>(
         PcmClip{header_.rate, header_.channels, std::vector<std::int16_t>(frames * header_.channels), false});
 }
@@ -156,6 +165,12 @@ std::size_t VpkProgressive::decoded_frames() const {
 
 void VpkProgressive::decode_to(std::size_t frames) {
     const std::size_t per = header_.chunk_bytes / header_.channels;
+    // Stream mode: decoding runs at most a chunk past the furthest reader, so a reader more than two chunks
+    // behind the decoded frames went back (a loop, a replay): the ring no longer holds its frames.
+    if (stream() && frames && frames + clip_->ring / 2 < decoded_frames()) {
+        chunk_ = done_bytes_ = 0;
+        std::fill(states_.begin(), states_.end(), AdpcmState{});
+    }
     while (!done() && decoded_frames() < frames) {
         const auto bytes = read_(header_.data_offset + std::uint64_t(chunk_) * header_.chunk_bytes, header_.chunk_bytes);
         if (bytes.size() != header_.chunk_bytes) throw std::runtime_error("VPK chunk read short");

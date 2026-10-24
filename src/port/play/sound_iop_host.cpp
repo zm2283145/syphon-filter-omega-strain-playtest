@@ -389,7 +389,7 @@ std::shared_ptr<const audio::PcmClip> SoundIopHost::replacement_clip(std::uint32
             // The clip is sized from the header up front: no chunk is read.
             const audio::VpkProgressive shape(head, [this, at](std::uint64_t offset, std::size_t size) {
                 return disc_.read({at + offset, size});
-            });
+            }, true);  // 132vt2e: stream mode sizes the clip without allocating it whole
             rate = shape.clip()->rate;
             channels = shape.clip()->channels;
             frames = shape.clip()->frames();
@@ -544,10 +544,21 @@ std::shared_ptr<const audio::PcmClip> SoundIopHost::clip(std::uint32_t sector, b
     if (audio::is_vpk(head)) {
         // Port-only (checkpoint 132win5): music is read and decoded a chunk ahead of the mix (decode_ahead), not
         // all at the stream start; the samples mixed are decode_stream's.
+#ifdef __vita__
+        // 132vt2e (research/VITA.md "Memory"): a long VPK plays from a ring (VpkProgressive stream mode), one
+        // per stream start and not kept in clips_; decode_ahead drops it once nothing plays it.
+        constexpr bool stream = true;
+#else
+        constexpr bool stream = false;
+#endif
         auto progressive = std::make_unique<audio::VpkProgressive>(
-            head, [this, at](std::uint64_t offset, std::size_t size) { return disc_.read({at + offset, size}); });
+            head, [this, at](std::uint64_t offset, std::size_t size) { return disc_.read({at + offset, size}); }, stream);
         progressive->decode_to(1);
         std::shared_ptr<const audio::PcmClip> decoded = progressive->clip();
+        if (progressive->stream()) {
+            decoding_.push_back(std::move(progressive));
+            return decoded;
+        }
         if (!progressive->done()) decoding_.push_back(std::move(progressive));
         clips_[sector] = decoded;
         return decoded;
@@ -582,6 +593,15 @@ void SoundIopHost::drop_unheard_clips() {
 void SoundIopHost::decode_ahead(std::size_t frames) {
     for (auto it = decoding_.begin(); it != decoding_.end();) {
         auto& d = **it;
+        if (d.stream()) {  // 132vt2e: kept for loops and replays while anything holds the clip
+            if (d.clip().use_count() == 1) {
+                it = decoding_.erase(it);
+                continue;
+            }
+            d.decode_to(mixer_.frames_read_by(d.clip().get(), frames));
+            ++it;
+            continue;
+        }
         d.decode_to(mixer_.frames_read_by(d.clip().get(), frames));
         it = d.done() ? decoding_.erase(it) : std::next(it);
     }

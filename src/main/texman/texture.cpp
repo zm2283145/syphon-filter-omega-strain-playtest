@@ -1,6 +1,7 @@
 #include "texture.hpp"
 #include "binary.hpp"
 #include "disc.hpp"
+#include "zone_profile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -485,6 +486,7 @@ Texture decode_frame(std::span<const std::uint8_t> bytes) {
 }
 
 Texture decode_tdx(std::span<const std::uint8_t> bytes) {
+    OMEGA_ZONE("load.decode_tdx");  // port-only (132vt2e): the PS Vita's load-time zones
     auto texture = decode_frame(bytes);
     // 003bb3e8..003bb418: the upload of the texture object's frame (+0x4c)
     // starts at header + 0x40 + frame * (+0x38) and reads its packet through

@@ -29,6 +29,14 @@ struct Options {
     // Port-only (checkpoint 132vt2): run on the presenting thread after each swap (the frame-rate log); the vitaGL
     // backend calls it, the GXM backend does not yet.
     std::function<void()> presented;
+    // Port-only (132vt2e, research/VITA.md "Draw batching"): the vitaGL backend sets only the draw state that changed.
+    // False (test switch ux0:data/omega_strain/vita_test_gl_state_cache_off.txt) sets all of it every draw.
+    bool gl_state_cache = true;
+    // Port-only (132vt2e, research/VITA.md "Depth across scenes"): the display's and the framebuffer objects' depth /
+    // stencil surfaces are loaded at each scene's start and stored at its end, so a scene break inside a frame (a copy
+    // out of the display, a target switch) keeps the depth drawn before it. False (test switch
+    // ux0:data/omega_strain/vita_test_depth_keep_off.txt) leaves vitaGL's default (depth cleared at every scene).
+    bool keep_depth = true;
 };
 
 // The memory the backend holds (research/VITA.md "Memory").
@@ -38,6 +46,12 @@ struct MemoryStats {
     std::size_t transient_bytes = 0;  // the per-frame copy arenas (inside the LPDDR pool)
     std::size_t fixed_bytes = 0;      // rings, patcher memory, display buffers
     unsigned scenes_last_frame = 0, draws_last_frame = 0;
+    std::uint64_t scenes_total = 0, draws_total = 0;   // 132vt2e: since the start (the play log's draws per frame)
+    std::uint64_t gl_state_set = 0, gl_state_skipped = 0;  // 132vt2e, vitaGL: draw state groups set / found unchanged
+    // 132vt2e, vitaGL: triangles drawn; the shadow receivers' triangles tested on the CPU and those kept.
+    std::uint64_t triangles_total = 0, shadow_tested = 0, shadow_kept = 0;
+    // 132vt2e: buffer updates: those that gave the buffer new GL memory (glBufferData), the others, and the bytes.
+    std::uint64_t buffer_reallocs = 0, buffer_writes = 0, buffer_bytes = 0;
     unsigned programs_compiled = 0, programs_cached = 0;
 };
 

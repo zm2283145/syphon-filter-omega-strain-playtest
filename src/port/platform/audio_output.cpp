@@ -101,7 +101,7 @@ std::vector<Mixer::Voice> Mixer::mix(std::size_t frames, std::vector<std::int16_
             const float t = static_cast<float>(s.position & 0xffffffffULL) / 4294967296.0F;
             const auto sample = [&](std::size_t frame, std::size_t ch) {
                 if (frame >= count) frame = s.loop ? frame - count : count - 1;
-                return static_cast<float>(clip.samples[frame * clip.channels + ch]);
+                return static_cast<float>(clip.at(frame, ch));
             };
             float l = sample(i, 0) + (sample(i + 1, 0) - sample(i, 0)) * t;
             float r = 0.0F;

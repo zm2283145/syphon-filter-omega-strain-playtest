@@ -1,5 +1,6 @@
 #include "geometry.hpp"
 #include "binary.hpp"
+#include "zone_profile.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -228,6 +229,7 @@ void write_vec(std::ostream& output, const Vec3& value) {
 }
 
 Mesh decode_vum(std::span<const std::uint8_t> bytes) {
+    OMEGA_ZONE("load.decode_vum");  // port-only (132vt2e): the PS Vita's load-time zones
     checked_bytes(bytes, 0, 112);
     marker(bytes, 0, 0x534d5556);
     if (read_u32(bytes, 100) != 0)
@@ -403,6 +405,7 @@ Mesh decode_vum(std::span<const std::uint8_t> bytes) {
 }
 
 CollisionMesh decode_col(std::span<const std::uint8_t> bytes) {
+    OMEGA_ZONE("load.decode_col");  // port-only (132vt2e): the PS Vita's load-time zones
     checked_bytes(bytes, 0, 48);
     marker(bytes, 0, 0x054c4f43);
     const auto triangle_count = read_u32(bytes, 20);

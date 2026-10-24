@@ -994,6 +994,9 @@ void FrontendApp::Impl::open_output() {
         host->want_mouse_capture(false);  // port-only (132win7): the front end keeps the cursor
         screen = std::make_unique<GuiRenderer>(host->gfx());
         screen->set_frame_fit(true);  // port-only 132win2: the 4:3 PS2 frame with black bars (frame_fit.hpp)
+#ifdef __vita__
+        screen->keep_image_copies(false);  // 132vt2e (research/VITA.md "Memory"): no device loss on the PS Vita
+#endif
         screen_generation = host->device_generation();
         screen_movie_serial = 0;
     }

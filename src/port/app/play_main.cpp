@@ -169,6 +169,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -195,6 +196,36 @@
 namespace {
 namespace fs=std::filesystem;
 using namespace omega;
+
+#ifdef __vita__
+// Port-only (132vt2e, research/VITA.md "Load time"): the level load's phases on the PS Vita, each logged with its
+// seconds, the disc reads made in it and the zones (zone_profile.hpp: the load.* decoders among them) it ran, so a
+// hardware log shows what the load spends its time on.
+struct VitaLoadPhases{
+    std::chrono::steady_clock::time_point begun{},last{};
+    DiscImage::ReadStats disc{};
+    static void reset_zones(){for(auto* s=omega::zone::Slot::head().load();s;s=s->next)s->ns=0,s->calls=0;}
+    void begin(const DiscImage& d){begun=last=std::chrono::steady_clock::now();disc=d.read_stats();reset_zones();}
+    void mark(const DiscImage& d,const char* phase){
+        const auto now=std::chrono::steady_clock::now();const auto& s=d.read_stats();
+        std::vector<omega::zone::Slot*> slots;
+        for(auto* z=omega::zone::Slot::head().load();z;z=z->next)if(z->calls)slots.push_back(z);
+        std::sort(slots.begin(),slots.end(),[](auto* a,auto* b){return a->ns>b->ns;});
+        char text[900];
+        int n=std::snprintf(text,sizeof text,"Load phase (port-only, PS Vita): %s %.2f s (%.1f s from the hand-off); disc %llu reads, %.2f MB in %.2f s",
+            phase,std::chrono::duration<double>(now-last).count(),std::chrono::duration<double>(now-begun).count(),
+            static_cast<unsigned long long>(s.reads-disc.reads),double(s.bytes-disc.bytes)/1048576.0,s.seconds-disc.seconds);
+        for(std::size_t k=0;k<slots.size()&&k<8&&n<int(sizeof text)-90;++k)
+            n+=std::snprintf(text+n,sizeof text-n,"%s %s %.0f ms x%u",k?",":"; zones",slots[k]->name,slots[k]->ns/1e6,slots[k]->calls);
+        std::cout<<text<<"\n";
+        reset_zones();last=std::chrono::steady_clock::now();disc=d.read_stats();
+    }
+};
+VitaLoadPhases vita_load_phases;
+#define VITA_LOAD_PHASE(disc,phase) vita_load_phases.mark(disc,phase)
+#else
+#define VITA_LOAD_PHASE(disc,phase) do{(void)sizeof(&(disc));}while(false)
+#endif
 
 std::string narrow(const std::wstring& text){
     std::string s;
@@ -2708,6 +2739,9 @@ struct PlayGuiOverlay{
          rt(host),drawer([this](std::uint32_t h){return fonts.font(h);}),renderer(scene.device()),
          file(decode_gui(load_frontend_gui(disc,"GAMEGUI"))),assets(shared_assets),
          decor([this](const std::string& name){return assets.resolve(name);},0){
+#ifdef __vita__
+        renderer.keep_image_copies(false);   // 132vt2e (research/VITA.md "Memory"): no device loss to re-upload after
+#endif
         // Port-only (132win2): the flat 640 x 448 GUI in the window's centred 4:3 rectangle (the PS2 view of the
         // Hor+ scene; Vert- in a narrower window, 132win3); its perspective batches keep the whole target (x_scale /
         // y_scale below), the 3D scene stays native.
@@ -3764,9 +3798,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         bool terrain_light_memo_on=true;   // port-only (132vt2d): --terrain-light-memo (also the pass's fast reject)
         set_terrain_light_fast_reject(true);
         AnimatedCharacter::set_deferred_skinning(true);   // port-only (132vt2d): --deferred-skinning
+        gfx::CommandList::merge_contiguous_draws=true;    // port-only (132vt2e): --merge-draws
 #else
         bool terrain_light_memo_on=false;set_terrain_light_fast_reject(false);
         AnimatedCharacter::set_deferred_skinning(false);
+        gfx::CommandList::merge_contiguous_draws=false;
 #endif
         std::set<unsigned> debrief_captures;unsigned debrief_advance=120;   // checkpoint 132f11 (the debrief 00134110)
         // Checkpoint 126: --frontend runs the boot movie, title and menus first (frontend_app.hpp).
@@ -3975,6 +4011,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto v=value();
                 if(v!=L"on"&&v!=L"off")throw std::runtime_error("--deferred-skinning needs on or off");
                 AnimatedCharacter::set_deferred_skinning(v==L"on");
+            }
+            // Port-only (132vt2e): gfx::CommandList folds an indexed draw that continues the previous one (no state
+            // between) into it (on by default on the PS Vita, off on Windows; the same primitives in the same order).
+            else if(arg==L"--merge-draws"){
+                const auto v=value();
+                if(v!=L"on"&&v!=L"off")throw std::runtime_error("--merge-draws needs on or off");
+                gfx::CommandList::merge_contiguous_draws=v==L"on";
             }
             else if(arg==L"--capture"){captures.insert(number<unsigned>(value()));}
             else if(arg==L"--debrief-capture"){debrief_captures.insert(number<unsigned>(value()));}
@@ -4231,7 +4274,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "original's world dt); --terrain-light-memo on|off (default off, on on the Vita): a terrain batch whose light\n"
                     "list is unchanged keeps its colours, and the pass skips the vertices well beyond a light's range (the same\n"
                     "colours); --deferred-skinning on|off (default off, on on the Vita): a character is\n"
-                    "skinned at its first geometry read, not at every step and upper-body rewrite (the same geometry).\n"
+                    "skinned at its first geometry read, not at every step and upper-body rewrite (the same geometry);\n"
+                    "--merge-draws on|off (default off, on on the Vita, 132vt2e): an indexed draw that continues the previous\n"
+                    "one with no state between is folded into it (the same primitives in the same order).\n"
                     "Mods (port-only, 132md1, research/MODDING.md): --mods <folder> overrides disc files, archive members and\n"
                     "textures with the folder's mods (any run; interactive runs default to the mods_folder= setting, else mods\\\n"
                     "next to the game, unless mods=0); --no-mods: the disc's assets only. --lan-mod-policy gameplay|any|cosmetic|none|\n"
@@ -4917,6 +4962,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const bool coop_forced=coop_partner;
         unsigned level_pass=0;   // 0: the first level; 1..: the levels the front end handed off after a level end
         for(;;){
+#ifdef __vita__
+        vita_load_phases.begin(disc);
+#endif
         if(!coop_forced){
             coop_partner=coop_from_setting=false;
             const bool from_rows=frontend_app!=nullptr;
@@ -5038,18 +5086,46 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             vum=model->mesh;
             if(textured)static_model_images.push_back({terrain.materials.size(),key,std::move(model)});
         };
+        VITA_LOAD_PHASE(disc,"hand-off to the terrain (settings, mission tables)");
 #ifdef __vita__
         terrain_reserve_begin(mission,terrain,terrain_collision);   // 132vt2 (research/VITA.md "Memory")
+        // Port-only (132vt2e, research/VITA.md "Load time"): the next few members' VUM / COL decoded across the worker
+        // cores (both decoders are pure in their bytes; the disc reads stay on this thread), then used in order below.
+        struct VumAhead{std::vector<std::vector<std::uint8_t>> data;std::vector<Mesh> vum;std::vector<CollisionMesh> col;std::size_t first=0;
+            bool has(std::size_t at)const{return at>=first&&at<first+vum.size();}};
+        const auto decode_ahead=[&](VumAhead& ahead,std::size_t at,std::size_t total,const std::function<std::pair<std::vector<std::uint8_t>,std::string>(std::size_t)>& read){
+            constexpr std::size_t window=6;
+            const auto n=std::min(window,total-at);
+            ahead.first=at;ahead.data.assign(n,{});ahead.vum.assign(n,{});ahead.col.assign(n,{});
+            std::vector<std::string> names(n);
+            for(std::size_t k=0;k<n;++k){auto r=read(at+k);ahead.data[k]=std::move(r.first);names[k]=std::move(r.second);}
+            workers.for_each(n,[&](std::size_t k){ahead.vum[k]=decode_vum(nested(ahead.data[k],names[k]+".VUM"));
+                ahead.col[k]=decode_col(nested(ahead.data[k],names[k]+".COL"));});
+        };
+        VumAhead terrain_ahead;
 #endif
         for(const auto& item:population.terrain){
             const auto name=uppercase_asset(item.name.substr(0,item.name.size()-4));
+#ifdef __vita__
+            const auto at=static_cast<std::size_t>(&item-population.terrain.data());
+            if(!terrain_ahead.has(at))decode_ahead(terrain_ahead,at,population.terrain.size(),[&](std::size_t k){
+                const auto& t=population.terrain[k];const auto stem=uppercase_asset(t.name.substr(0,t.name.size()-4));
+                return std::make_pair(disc.archive_member({"GAMEDATA",mission,"DATA.HOG"},stem+".HOG"),stem);});
+            const auto& data=terrain_ahead.data[at-terrain_ahead.first];
+            auto terrain_vum=std::move(terrain_ahead.vum[at-terrain_ahead.first]);
+#else
             const auto data=disc.archive_member({"GAMEDATA",mission,"DATA.HOG"},name+".HOG");
             auto terrain_vum=decode_vum(nested(data,name+".VUM"));
+#endif
             replace_static_model({"GAMEDATA",mission,"DATA.HOG",name+".HOG"},name+".VUM",terrain_vum);
             add_terrain_shadow_receiver(shadow_receivers,terrain,terrain_vum);   // terrain instances only (kind 1)
             const auto first_texture=terrain.textures.size(),first_surface=terrain.surfaces.size();
             const auto first_batch=terrain.batch_spans.size(),first_patch=terrain.color_patches.size();
+#ifdef __vita__
+            append_terrain(terrain,terrain_collision,terrain_vum,terrain_ahead.col[at-terrain_ahead.first]);
+#else
             append_terrain(terrain,terrain_collision,terrain_vum,decode_col(nested(data,name+".COL")));
+#endif
             note_patch_model(name,first_patch,true);
             if(textured)model_textures.push_back({first_texture,terrain.textures.size()-first_texture,"TEX.HOG",{},
                 first_surface,terrain.surfaces.size()-first_surface});
@@ -5092,12 +5168,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::set<std::uint32_t> lift_linked;
         for(const auto& o:population.objects)if(o.kind==3)for(const auto& r:o.references)
             if(r[0]<0x100&&r[1]<0x10000&&r[0]!=9&&r[0]!=0xa&&r[0]!=0xb)lift_linked.insert((r[0]<<16)|r[1]);
+#ifdef __vita__
+        VumAhead object_ahead;
+        std::vector<std::size_t> object_order;   // the objects with a model, in population order
+        if(objects)for(std::size_t k=0;k<population.objects.size();++k)if(population.objects[k].asset!="no_vum")object_order.push_back(k);
+        std::size_t object_at=0;
+#endif
         if(objects)for(std::size_t k=0;k<population.objects.size();++k){
             const auto& object=population.objects[k];
             if(object.asset=="no_vum")continue;
             const auto name=uppercase_asset(object.asset.substr(0,object.asset.size()-4));
+#ifdef __vita__
+            const auto at=object_at++;
+            if(!object_ahead.has(at))decode_ahead(object_ahead,at,object_order.size(),[&](std::size_t j){
+                const auto& o=population.objects[object_order[j]];const auto stem=uppercase_asset(o.asset.substr(0,o.asset.size()-4));
+                return std::make_pair(disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},stem+".HOG"),stem);});
+            const auto& data=object_ahead.data[at-object_ahead.first];
+            auto vum=std::move(object_ahead.vum[at-object_ahead.first]);auto col_mesh=std::move(object_ahead.col[at-object_ahead.first]);
+#else
             const auto data=disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},name+".HOG");
             auto vum=decode_vum(nested(data,name+".VUM"));auto col_mesh=decode_col(nested(data,name+".COL"));
+#endif
             replace_static_model({"GAMEDATA",mission,"OBJECTS.HOG",name+".HOG"},name+".VUM",vum);
             const auto first_texture=terrain.textures.size(),first_surface=terrain.surfaces.size();
             const Bounds declared=vum.declared_bounds;const std::uint32_t header_flags=vum.header_flags;
@@ -5214,6 +5305,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     scene_model_bucket(vum.header_flags),vum.declared_bounds,std::nullopt));   // 0013e450: kind 0x10 via +124
                 scene_models.back().hidden=true;
             }
+            VITA_LOAD_PHASE(disc,"terrain (DATA.HOG VUM / COL) and NIE models");
             std::cout<<"NIE models: "<<ni_model_draws.size()<<" kind-1 / kind-3 / kind-6 (0023c3c0) from "<<ni_hogs.size()<<" <group>.HOG containers; "
                 <<ni_beam_models<<" kind-6 beams\n";
             std::cout<<"NIE model COLs (003951b0 -> 003c17a0): "<<ni_collision.size()<<" in the collision world, "<<ni_cols_empty
@@ -5242,6 +5334,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     category=sky_lights.environments.at(*sky_lights.current_environment).id_category&0xffU;
                     for(std::size_t k=0;k<skies.size()&&!chosen;++k)if(skies[k].category()==category)chosen=k;
                 }
+                VITA_LOAD_PHASE(disc,"NIE models to the skybox");
                 std::cout<<"Skybox (001c1b60): "<<skies.size()<<" sky object(s) from "<<section->count<<" SKY: records;";
                 for(const auto& s:skies)std::cout<<" key 0x"<<std::hex<<s.key<<std::dec<<" ("<<s.layers.size()<<" layers)";
                 std::cout<<"\n";
@@ -5295,6 +5388,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // decoded later passes (10/11/12/14); others and undecodable images
         // keep base colours.
         std::vector<Texture> textures;std::vector<bool> untextured;
+#ifdef __vita__
+        // 132vt2e (research/VITA.md "Memory"): each decoded image's TDX (the binder's entries), and which images'
+        // pixels were freed once the level's renderer uploaded them; level_texture decodes one again on demand
+        // (the shatter shards and the coronas, drawn lazily).
+        std::vector<std::vector<std::uint8_t>> texture_tdx;std::vector<bool> texture_released;
+        const auto level_texture=[&](std::size_t i)->const Texture&{
+            if(i<texture_released.size()&&texture_released[i]){textures[i]=decode_tdx(texture_tdx[i]);texture_released[i]=false;}
+            return textures[i];
+        };
+#endif
         std::size_t texture_missing=0,material_unsupported=0;
         std::map<std::string,std::size_t> texture_errors;std::vector<std::string> texture_examples;
         std::vector<std::string> decoded_names;
@@ -5333,13 +5436,34 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Checkpoint 132md8 (port-only, research/MODDING.md "Speed"): the originals first, then the level's
                 // mod replacement images decoded across threads, then attached in entry order (the hook's lines).
                 omega::mods::WithoutReplacements held;
+#ifdef __vita__
+                // Port-only (132vt2e, research/VITA.md "Load time"): the level's images decoded across the worker cores
+                // (decode_tdx is pure in its bytes), then taken in entry order as below.
+                const auto& entries=binder.entries();
+                std::vector<Texture> images_ahead(entries.size());std::vector<std::string> errors_ahead(entries.size());
+                std::vector<char> failed_ahead(entries.size(),0);
+                workers.for_each(entries.size(),[&](std::size_t i){
+                    omega::mods::WithoutReplacements on_this_thread;   // the flag is per thread
+                    try{images_ahead[i]=decode_tdx(entries[i].bytes);}
+                    catch(const std::exception& error){failed_ahead[i]=1;errors_ahead[i]=error.what();}
+                });
+#endif
                 for(const auto& entry:binder.entries()){
                     Texture image;
                     const auto key=uppercase_asset(entry.key)+".TDX";
+#ifdef __vita__
+                    const auto i=static_cast<std::size_t>(&entry-entries.data());
+                    if(!failed_ahead[i])image=std::move(images_ahead[i]);
+                    else{image={};++undecodable;++texture_errors[errors_ahead[i].substr(0,60)];if(texture_examples.size()<6)texture_examples.push_back(key);}
+#else
                     try{image=decode_tdx(entry.bytes);}
                     catch(const std::exception& error){image={};++undecodable;++texture_errors[std::string(error.what()).substr(0,60)];if(texture_examples.size()<6)texture_examples.push_back(key);}
+#endif
                     (entry.container=="TEX.HOG"?from_tex_hog:from_objects)+=entry.key!="ERROR";
                     decoded_names.push_back(key);decoded.push_back(std::move(image));
+#ifdef __vita__
+                    texture_tdx.push_back(entry.bytes);
+#endif
                 }
             }
             {
@@ -5353,8 +5477,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // per-model copies were ~20 MB.
             {
                 std::set<std::int32_t> imaged;
+#ifndef __vita__   // 132vt2e: the PS Vita's corona draw reads the level's image (level_texture) instead of a copy
                 for(auto& t:model_first_texture)if(t&&t->handle>=0&&static_cast<std::size_t>(t->handle)<decoded.size()&&imaged.insert(t->handle).second)
                     t->image=decoded[static_cast<std::size_t>(t->handle)];
+#endif
             }
             // Checkpoint 132md2 (port-only): the replaced level models' glTF images, one decoded texture per (model,
             // material, bound texture), in place of their materials' bound textures (set after the remap below).
@@ -5381,6 +5507,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(const auto index:bound)remap.push_back(index<0?static_cast<std::uint32_t>(decoded.size()):static_cast<std::uint32_t>(index));
             texture_remap=remap;
             texture_missing=binder.misses().size()+undecodable;
+            VITA_LOAD_PHASE(disc,"skybox to the texture binding");
             std::cout<<"Texture binding (00377570): "<<binder.entries().size()<<" texman entries ("<<from_tex_hog<<" from TEX.HOG, "
                 <<from_objects<<" from object HOGs), "<<binder.stats().reused<<" reused by name, "<<binder.misses().size()
                 <<" names bound to ERROR.TDX, "<<undecodable<<" undecodable\n";
@@ -5500,6 +5627,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         if(combat)throw std::runtime_error("Agent appearance: the hard mesh (slot 2) "+look.hard_mesh.name+
                             " has no MANSKM.HOG member; 0038e100's attach points without it are not hosted");
                     }else player_hard_mesh_name=look.hard_mesh.members[0];
+                    VITA_LOAD_PHASE(disc,"texture binding to the agent model");
                     std::cout<<"Agent model (001b3460): skeleton "<<look.skeleton<<", +3260 "<<int(*look.gender_3260)<<" ("
                         <<(*look.gender_3260==1?"FEMALE.SKAS":"MALE.SKAS")<<", 001ae7d0), hard mesh "<<look.hard_mesh.name<<"\n";
                     player_skeleton_name=look.skeleton;
@@ -6003,6 +6131,34 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         struct LookParts{std::vector<AnimatedCharacterPart> parts;std::vector<Texture> images;std::vector<bool> textured;
             std::vector<std::optional<Texture>> lod1_images;std::vector<const SkinnedMesh*> lod1;std::vector<std::size_t> pairs;
             std::vector<std::string> model_keys,lod1_keys;};
+#ifdef __vita__
+        // Port-only (132vt2e, research/VITA.md "Load time"): while the level's NPC roster loads, a part mesh or image
+        // decoded once is copied for the next figure that names the same member (the decoders are pure in their bytes).
+        bool look_cache_on=false;std::map<std::string,SkinnedMesh> look_meshes;std::map<std::string,Texture> look_images;
+        const auto look_key=[](const std::vector<std::string>& archive,const std::string& member){
+            std::string key;for(const auto& a:archive){key+=a;key+='/';}return key+member;};
+#endif
+        const auto look_mesh=[&]([[maybe_unused]] const std::vector<std::string>& archive,[[maybe_unused]] const std::string& member,
+                                 const std::vector<std::uint8_t>& bytes)->SkinnedMesh{
+#ifdef __vita__
+            if(look_cache_on){
+                const auto key=look_key(archive,member);
+                if(const auto found=look_meshes.find(key);found!=look_meshes.end())return found->second;
+                return look_meshes.emplace(key,decode_skinned_mesh(bytes)).first->second;
+            }
+#endif
+            return decode_skinned_mesh(bytes);
+        };
+        const auto look_image=[&](const std::vector<std::string>& archive,const std::string& member)->Texture{
+#ifdef __vita__
+            if(look_cache_on){
+                const auto key=look_key(archive,member);
+                if(const auto found=look_images.find(key);found!=look_images.end())return found->second;
+                return look_images.emplace(key,decode_tdx(tdx_member(disc,archive,member))).first->second;
+            }
+#endif
+            return decode_tdx(tdx_member(disc,archive,member));
+        };
         const auto load_look_parts=[&](const CharacterAppearance& look,const std::string& label){
             LookParts out;
             auto& npc_parts=out.parts;auto& npc_lod1=out.lod1;auto& npc_pairs=out.pairs;auto& model_keys=out.model_keys;auto& lod1_keys=out.lod1_keys;
@@ -6022,7 +6178,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 Texture image;bool has_image=true;
                 // An image the native TDX decoder rejects is drawn untextured and reported.
                 const auto load_image=[&](const std::vector<std::string>& archive,const std::string& member){
-                    try{image=decode_tdx(tdx_member(disc,archive,member));loaded_part_textures.emplace(texman_key(member),Member{archive,member});}
+                    try{image=look_image(archive,member);loaded_part_textures.emplace(texman_key(member),Member{archive,member});}
                     catch(const std::exception& error){has_image=false;++undecoded_textures;
                         std::cout<<"  "<<label<<" texture "<<archive.back()<<'/'<<member<<": "<<error.what()<<" (drawn untextured)\n";}
                 };
@@ -6038,13 +6194,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Texture, LOD 1: a registered slot 1 (else slot 0's), else the '1' member; absent: LOD 0's image.
                 std::optional<Texture> image1;
                 const auto load_image1=[&](const std::vector<std::string>& archive,const std::string& member){
-                    try{image1=decode_tdx(tdx_member(disc,archive,member));loaded_part_textures.emplace(texman_key(member),Member{archive,member});}
+                    try{image1=look_image(archive,member);loaded_part_textures.emplace(texman_key(member),Member{archive,member});}
                     catch(const std::exception& error){std::cout<<"  "<<label<<" texture "<<archive.back()<<'/'<<member<<": "<<error.what()<<" (LOD 0 image drawn)\n";}
                 };
                 if(slot0&&slot1){if(has_image)load_image1(slot1->archive,slot1->name);}
                 else if(!slot0&&!slot1&&!part.texture.blank&&mantex.count(part.texture.members[1])&&has_image)
                     load_image1(mantex_archive,part.texture.members[1]);
-                npc_parts.push_back({part.mesh.name,decode_skinned_mesh(mesh_bytes)});
+                npc_parts.push_back({part.mesh.name,look_mesh(mesh?mesh->archive:manskm_archive,mesh?mesh->name:part.mesh.members[0],mesh_bytes)});
                 // 00385d40 deforms a part whose cached record carries an SKF (00404060: MORPH.HOG's <stem>.SKF): a face part
                 // by the shape slots over table +2c0c's key count, a hand part (byte 5 '1' / '2') by the grip shapes of
                 // 0038c5e0 / 0038b530 over its hand table's.
@@ -6060,7 +6216,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::vector<std::uint8_t> lod1_bytes;
                 if(mesh1)lod1_bytes=disc.archive_member(mesh1->archive,mesh1->name);
                 else if(!registered1&&!part.mesh.blank&&manskm.count(part.mesh.members[1]))lod1_bytes=disc.archive_member(manskm_archive,part.mesh.members[1]);
-                if(!lod1_bytes.empty()){lod_meshes.push_back(std::make_unique<SkinnedMesh>(decode_skinned_mesh(lod1_bytes)));npc_lod1.push_back(lod_meshes.back().get());}
+                if(!lod1_bytes.empty()){lod_meshes.push_back(std::make_unique<SkinnedMesh>(look_mesh(mesh1?mesh1->archive:manskm_archive,mesh1?mesh1->name:part.mesh.members[1],lod1_bytes)));npc_lod1.push_back(lod_meshes.back().get());}
                 else npc_lod1.push_back(nullptr);
                 model_keys.push_back(mesh?omega::mods::part_key(mesh->archive,mesh->name):omega::mods::part_key(manskm_archive,part.mesh.members[0]));
                 lod1_keys.push_back(mesh1?omega::mods::part_key(mesh1->archive,mesh1->name):!lod1_bytes.empty()?omega::mods::part_key(manskm_archive,part.mesh.members[1]):model_keys.back());
@@ -6081,6 +6237,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // 001ae7d0: +3260 2 takes MALE.SKAS (0x49d068), 1 FEMALE.SKAS (0x49d058); any other value finds no
             // model and leaves the actor without its CoreMotions (+326c), which is not hosted.
             std::vector<AnimatedCharacterPart> npc_parts;NpcFigure figure;figure.label=label;
+            OMEGA_ZONE_LAPS(npc_lap);
             if(look.gender_3260==std::optional<std::uint8_t>{std::uint8_t{2}}){figure.model=&manifest;figure.registry=&motion_registry;}
             else if(look.gender_3260==std::optional<std::uint8_t>{std::uint8_t{1}}){
                 if(!female_manifest)throw std::runtime_error("NPC "+appearance+": 001ae7d0 selects FEMALE.SKAS (+3260 1); pass --female-graph");
@@ -6093,16 +6250,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             npc_parts=std::move(loaded.parts);npc_lod1=std::move(loaded.lod1);npc_pairs=std::move(loaded.pairs);
             model_keys=std::move(loaded.model_keys);lod1_keys=std::move(loaded.lod1_keys);
             figure.images=std::move(loaded.images);figure.textured=std::move(loaded.textured);figure.lod1_images=std::move(loaded.lod1_images);
+            OMEGA_ZONE_LAP(npc_lap,"load.npc_parts");
             std::vector<SkinMatrix> scales;
             if(look.bone_scale_preset!="BONENOSCALE"&&bone_presets.count(look.bone_scale_preset+".BON"))
                 scales=bone_scale_matrices(decode_bone_scales(disc.archive_member(npcskm_archive,look.bone_scale_preset+".BON")));
             const auto npc_skeleton=decode_skeleton(disc.archive_member({"GAMEDATA","COMMON","SKEL.HOG"},look.skeleton));
+            OMEGA_ZONE_LAP(npc_lap,"load.npc_skeleton");
             drawn_parts+=npc_parts.size();
             const std::vector<SkinMatrix> npc_scales=scales;
             const auto bound_faces=std::count_if(npc_parts.begin(),npc_parts.end(),[](const AnimatedCharacterPart& p){return p.binding==CharacterMorphBinding::face;});
             const auto npc_table=appearance_shape_table(look.state);figure.morph_table=npc_table;
             figure.character=std::make_unique<AnimatedCharacter>(npc_skeleton,*figure.model,std::move(npc_parts),
                 morph_tables.configs[npc_table<2?npc_table:0],std::move(scales));
+            OMEGA_ZONE_LAP(npc_lap,"load.npc_character");
             if(bound_faces){
                 // 0038c920: +2bc0 = 1; the key at +50 (all 16 bytes) is looked up in table +2c0c; not found: +2bc0 = 0 and
                 // index 0; strcmp(+50, "SHAPE_BASE" 004bc318) == 0: +2bc0 = 0; +2bc2 = index, +23f0 = 1.0, +2bc1 = 1.
@@ -6128,6 +6288,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             figure.models=omega::mods::character_model_overrides(npc_skeleton,look.skeleton,model_keys,lod1_keys,
                 omega::mods::part_shape_tables(figure.character->parts(),npc_table,morph_tables.faces,morph_tables.hands));
             if(figure.models)omega::mods::attach_model_images(*figure.models,figure.images,figure.textured,figure.lod1_images);
+            OMEGA_ZONE_LAP(npc_lap,"load.npc_faces_mods");
             if(combat){
                 std::vector<HitVolumePart> hit_parts;
                 for(std::size_t i=0;i<figure.character->parts().size();++i){
@@ -6147,6 +6308,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(!hard_bytes.empty()){combat_meshes.push_back(std::make_unique<SkinnedMesh>(decode_skinned_mesh(hard_bytes)));hard_mesh=combat_meshes.back().get();}
                 figure.combat_model=make_combat_actor_model(npc_skeleton,std::move(hit_parts),hard_mesh,npc_scales);
             }
+            OMEGA_ZONE_LAP(npc_lap,"load.npc_combat");
             figure.morph.expressions_enabled=false;
             figure.character->play(motion,MotionInstallMode::reset);
             figure.character->apply_commands(actor_default_channel_commands());   // 001b3460 tail (001b3924): 0018caf0
@@ -6154,6 +6316,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             figure.character->set_anchor_world_placement(SoloActorSimulation::flor_key,
                 RootParentTransform{{0.F,0.F,std::sin(h),std::cos(h)},{position[0],position[1],position[2],1.F}},true);
             figure.character->step(figure.model->graph,clips,{},figure.morph,config.dt);++figure.morph.speech_elapsed_tick;
+            OMEGA_ZONE_LAP(npc_lap,"load.npc_first_step");
             figure.config.start={position[0],position[1],position[2],1};
             figure.config.yaw_degrees=yaw*180.0F/3.14159265F;
             figure.config.dt=config.dt;
@@ -6311,6 +6474,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(std::size_t k=0;k<coop_extra_records.size();++k)if(coop_extra_records[k]==record)return k+1;
             return std::nullopt;};
         if(activate_all||script_npcs){
+#ifdef __vita__
+            look_cache_on=true;
+#endif
             for(const auto& entry:roster){
                 if(entry.role!=2)continue;
                 const auto& npc_pose=entry.spawn;
@@ -6337,6 +6503,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     <<spawn_position[1]<<", "<<spawn_position[2]<<"), held there\n";
                 npcs.push_back(std::move(*figure));
             }
+#ifdef __vita__
+            std::cout<<"NPC parts (port-only, PS Vita): "<<look_meshes.size()<<" meshes and "<<look_images.size()
+                     <<" images decoded once for the roster\n";
+            look_cache_on=false;look_meshes.clear();look_images.clear();
+#endif
+            VITA_LOAD_PHASE(disc,"agent morph, weapons and NPCs");
             std::cout<<(activate_all?"--activate-all (diagnostic): ":"Mission script NPCs: ")<<npcs.size()<<" AI NPCs loaded with "<<drawn_parts
                 <<" parts ("<<blank_textures<<" with the blank texture and "<<undecoded_textures<<" with an undecoded image drawn untextured)"
                 <<"; "<<[&npcs]{std::size_t n=0;for(const auto& f:npcs)for(std::size_t i=0;i<f.lod1.size();++i)n+=f.lod1[i]!=&f.character->parts()[i].mesh;return n;}()
@@ -6974,6 +7146,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(const auto& r:population.point_lights)if(r.skipped[0]!=0xffffffffU&&r.skipped[1]!=0xffffffffU)++links;
             std::cout<<"Colour patches (00377920 -> 00371c30): "<<patch_models.size()<<" models ("<<copies<<" copies, "<<unhosted
                 <<" re-placed from a local copy) with "<<sets<<" sets; "<<slots<<" registered in "<<patched_lights<<" PNT lights' slots\n";
+            VITA_LOAD_PHASE(disc,"NPCs to the PNT link (colour patches, lights)");
             std::cout<<"PNT link pass (001c1470): "<<links<<" of "<<population.point_lights.size()<<" records linked"
                 <<(mission_scripts?" (light deactivated); ":" (not run: no zone tracker without --mission-scripts); ")
                 <<loaded_level_lights.environment_activated.size()<<" light objects activated by the first ENV; "<<spot_on<<" of "
@@ -7977,6 +8150,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             throw std::runtime_error("NIE "+std::to_string(object)+" particle asset "+name+" reset: "+x.what());
                         }
                     };
+                    VITA_LOAD_PHASE(disc,"PNT link to the particle assets");
                     std::cout<<"Particle assets: "<<p->assets.size()<<" NIE kind-2 (004daa10), "<<p->library->size()
                         <<" PAR definitions loaded (00397b20 / 003a58e0), "<<unresolved<<" unresolved\n";
                 }
@@ -8320,6 +8494,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             // PORT-ONLY --unlock-all: the weapons 00332ac0 gives the play's agent (the loadout lists 002bf090).
             std::optional<std::vector<std::int32_t>> cheat_loadout_weapons;
+            VITA_LOAD_PHASE(disc,"particle assets to the combat session (script world hooks)");
             if(combat){
                 // The combat session (combat_play.hpp) before the level start, so the start scripts' SetPlayerWeapons reach it.
                 CombatPlayConfig cc;
@@ -9331,6 +9506,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 std::cout<<"Crates: "<<crates.size()<<" INV: records hosted\n";
             }
+            VITA_LOAD_PHASE(disc,"combat session (weapons, HUD, backpack, hosts)");
             timer_host=std::make_unique<PlayHudTimerHost>();
             timer_host->mission=mission_host.get();
             // Checkpoint 132sx4: 0x00246440..0x00246450: +6d4 / +6bc the description, +6d8 / +6c0 the value (0 when
@@ -9368,6 +9544,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // init::ClientStartLevel / init::StartLevel wait for the state-0x12 done path after its Accept (00168bac).
             if(loadout_screen)mission_host->start_init();
             else mission_host->start();
+            VITA_LOAD_PHASE(disc,"mission start (the init scripts)");
             // Checkpoint 132cp4: game::setFxLightDist (0025e460) writes the manager's +74 + mode * 0x40, the block's
             // point light range +24 (TORONTO1 init::Init: mode 1, 100.0).
             for(std::uint32_t m=0;m<vision_fx.blocks.size();++m)if(const auto d=mission_host->vision_fx_light_distance_74(m)){
@@ -9631,6 +9808,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 else if(ni_events)apply_event_zone_requests(start_requests,*ni_events);
             }
             script_printed={mission_host->calls().size(),mission_host->objectives().outcomes().size(),mission_host->objectives().progression_adds().size()};
+            VITA_LOAD_PHASE(disc,"mission start to the script hooks (hotboxes, pathed objects, zones)");
             std::cout<<"Mission scripts: "<<module_count<<" modules, "<<(loadout_screen?"init::Init run (init::ClientStartLevel / "
                 "init::StartLevel wait for the loadout Accept, 003e1a20 at 00168bac)":"level started")<<"; "
                 <<script_printed.calls<<" native calls ("<<mission_host->deferred()<<" deferred); mission cue "<<mission_cue<<"\n";
@@ -11407,6 +11585,35 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 window.recover_device(std::string("display device lost while the level's renderer was made (")+e.what()+")");
             }
         }
+        VITA_LOAD_PHASE(disc,"mission scripts to the level's renderer");
+#ifdef __vita__
+        {   // 132vt2e (research/VITA.md "Memory"): the level's images are on the GPU now; their CPU pixels go (the
+            // sizes stay), and level_texture decodes one again from its TDX if a lazy draw needs it. The PS Vita has
+            // no device loss, so SceneRenderer::reset_device never re-uploads them.
+            if(render_threaded)render_thread.drain();
+            texture_released.assign(textures.size(),false);
+            std::size_t freed=0,kept_tdx=0;
+            const auto pixels=[](Texture& t){
+                std::size_t n=t.rgba.capacity();for(const auto& m:t.mips)n+=m.capacity();for(const auto& m:t.raw_alpha)n+=m.capacity();
+                std::vector<std::uint8_t>().swap(t.rgba);std::vector<std::vector<std::uint8_t>>().swap(t.mips);
+                std::vector<std::vector<std::uint8_t>>().swap(t.raw_alpha);return n;};
+            for(std::size_t i=0;i<textures.size()&&i<texture_tdx.size();++i){
+                auto& t=textures[i];
+                if(!t.width||t.replacement||t.block_bytes)continue;
+                bool replaced=false;for(const auto& f:t.animation)replaced=replaced||f.replacement||f.block_bytes;
+                if(replaced)continue;
+                freed+=pixels(t);for(auto& f:t.animation)freed+=pixels(f);
+                texture_released[i]=true;
+            }
+            for(std::size_t i=0;i<texture_tdx.size();++i){
+                if(i<texture_released.size()&&texture_released[i])kept_tdx+=texture_tdx[i].size();
+                else std::vector<std::uint8_t>().swap(texture_tdx[i]);
+            }
+            std::cout<<"PS Vita (port-only, 132vt2e): the level's image pixels freed after the upload, "<<(freed>>10)<<" KB ("
+                <<std::count(texture_released.begin(),texture_released.end(),true)<<" of "<<textures.size()<<" images; their TDX kept, "
+                <<(kept_tdx>>10)<<" KB)\n";
+        }
+#endif
         std::uint64_t window_size_serial=window.size_serial();
         window.log_handoff("level "+mission+" play");
         if(!hidden)std::cout<<"Renderer: "<<state.renderer->backend()<<"\n";
@@ -17958,6 +18165,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             // bound to no image) the shards draw with their vertex colour, as untextured scenes do.
                             const bool image=textured&&f.texture>=0&&static_cast<std::size_t>(f.texture)<textures.size()
                                 &&textures[static_cast<std::size_t>(f.texture)].width>0;
+#ifdef __vita__
+                            if(image)level_texture(static_cast<std::size_t>(f.texture));   // 132vt2e: pixels freed after the upload
+#endif
                             particle_draw->set_handle_texture(f.texture,image?&textures[static_cast<std::size_t>(f.texture)]:nullptr);
                         }
                         shatter_triangles+=particle_draw->draw_shatter(d.flushes,d.node);
@@ -17982,8 +18192,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(key>>32){
                         const auto handle=static_cast<std::int32_t>(key&0xffffffff);
                         for(const auto& t:model_first_texture)if(t&&t->handle==handle){
+#ifdef __vita__
+                            const Texture* image=static_cast<std::size_t>(handle)<textures.size()?&level_texture(static_cast<std::size_t>(handle)):nullptr;
+                            if(!image||!image->width)throw std::runtime_error("003781b0: GOB texture "+t->key+" has no decoded image");
+                            corona_draw->set_texture(key,*image,t->psm);
+#else
                             if(!t->image||!t->image->width)throw std::runtime_error("003781b0: GOB texture "+t->key+" has no decoded image");
                             corona_draw->set_texture(key,*t->image,t->psm);
+#endif
                             return;
                         }
                         throw std::runtime_error("003781b0: GOB texture handle "+std::to_string(handle)+" is no model's first texture");
@@ -18529,6 +18745,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             std::sort(slots.begin(),slots.end(),[](auto* a,auto* b){return a->ns>b->ns;});
             std::cerr<<"zones over "<<frame<<" frames (ms/frame, calls/frame):\n";
             std::cerr<<"  terrain light batches kept "<<terrain_memo_kept<<", relit "<<terrain_memo_relit<<" ("<<terrain_memo_vertices<<" vertices)\n";
+            if(gfx::CommandList::merge_contiguous_draws)
+                std::cerr<<"  indexed draws/frame "<<double(gfx::CommandList::indexed_draws.load())/double(frame)<<", merged/frame "
+                    <<double(gfx::CommandList::merged_draws.load())/double(frame)<<"\n";
             for(auto* s:slots)std::cerr<<"  "<<s->name<<" "<<s->ns/1e6/double(frame)<<" x"<<double(s->calls)/double(frame)<<"\n";
         }
 #endif

@@ -174,6 +174,8 @@ void SceneRenderer::initialize(const CollisionMesh& collision, const std::vector
                                         "Create camera buffer");
     vertices_ = buffer(mesh.vertices.data(), mesh.vertices.size() * sizeof(MeshVertex), gfx::bind_vertices, true);
     indices_ = buffer(mesh.indices.data(), mesh.indices.size() * sizeof(std::uint32_t), gfx::bind_indices);
+    if (vertices_) device_->cpu_mirror(*vertices_, mesh_.vertices.data());   // port-only (132vt2e)
+    if (indices_) device_->cpu_mirror(*indices_, mesh_.indices.data());
 
     solid_ = device_->create_raster({false}, "Create solid rasterizer");
     wire_ = device_->create_raster({true}, "Create wireframe rasterizer");
@@ -899,6 +901,8 @@ void SceneRenderer::refresh_geometry() try {
     auto vertices=buffer(mesh_.vertices.data(),mesh_.vertices.size()*sizeof(MeshVertex),gfx::bind_vertices,true);
     auto indices=buffer(mesh_.indices.data(),mesh_.indices.size()*sizeof(std::uint32_t),gfx::bind_indices);
     vertices_=std::move(vertices);indices_=std::move(indices);
+    if (vertices_) device_->cpu_mirror(*vertices_, mesh_.vertices.data());   // port-only (132vt2e)
+    if (indices_) device_->cpu_mirror(*indices_, mesh_.indices.data());
 } catch (const DeviceLost&) {}
 void SceneRenderer::refresh_vertices(std::vector<std::pair<std::size_t, std::size_t>> ranges) {
     if (!vertices_ || !indices_ || vertices_->desc().bytes != mesh_.vertices.size() * sizeof(MeshVertex) ||

@@ -24,6 +24,7 @@
 #include "zone_profile.hpp"
 
 #include <psp2/common_dialog.h>
+#include <psp2/gxm.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/message_dialog.h>
@@ -43,6 +44,9 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+// vitaGL's display depth / stencil surface (source/gxm.c; the library exports it).
+extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
 
 namespace omega::gfx::gxm {
 namespace {
@@ -126,6 +130,9 @@ struct VglBuffer final : Buffer {
     // 132vt2 (research/VITA.md "Memory"): a large vertex / index buffer (the level's scene mesh, 34 MB in TORONTO1)
     // keeps no copy in the heap: it is written and read through vitaGL's own memory (glMapBuffer), `cpu` empty.
     bool gl_only = false;
+    // 132vt2e (Device::cpu_mirror): the owner's copy of a gl_only buffer's bytes in cached RAM; the shadow filter reads
+    // it instead of the GL memory (CDRAM, uncached for the CPU: research/VITA.md "Shadow receivers").
+    const std::uint8_t* mirror = nullptr;
     std::uint8_t pool = pool_unknown;  // where vitaGL placed it (g_placement)
     std::size_t placed = 0;
 };
@@ -135,6 +142,7 @@ constexpr std::size_t gl_only_bytes = 1u << 20;
 // The bytes of a vertex / index buffer (its GL memory when it keeps no heap copy).
 const std::uint8_t* buffer_bytes(const VglBuffer& b) {
     if (!b.gl_only) return b.cpu.data();
+    if (b.mirror) return b.mirror;
     glBindBuffer(GL_ARRAY_BUFFER, b.gl);
     const auto* p = static_cast<const std::uint8_t*>(glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY));
     glUnmapBuffer(GL_ARRAY_BUFFER);
@@ -163,6 +171,7 @@ struct VglTexture final : Texture {
     float clear_value = 1.0F;
     std::uint8_t pool = pool_unknown;  // where vitaGL placed it (g_placement)
     std::size_t placed = 0;
+    std::uint8_t applied_sampler = 0xff;  // 132vt2e: the filter / wrap execute() last set on it (0xff: unknown)
     unsigned rows() const { return layer_rows * std::max(desc_.layers, 1u); }
     std::size_t stride() const { return align_up(std::max(desc_.width, 1u), 8) * 4; }  // vitaGL's linear RGBA rows
     void set_desc(const TextureDesc& d) { desc_ = d; }
@@ -238,6 +247,9 @@ struct GlProgram {
     unsigned vertex_count[2]{}, fragment_count[2]{};
     GLint tex_size = -1, layers = -1, blend_mul = -1, colour = -1, clear = -1, flip = -1;
     int attribute[8]{-1, -1, -1, -1, -1, -1, -1, -1};
+    // 132vt2e: the values last given to each uniform (GL keeps them in the program): an unchanged one is not set again.
+    std::vector<float> sent[10];
+    bool sent_valid[10]{};
 };
 
 // ---- pipeline description of one draw ----
@@ -406,6 +418,28 @@ bool file_exists(const char* path) {
     return sceIoGetstat(path, &st) >= 0;
 }
 
+// research/VITA.md "Depth across scenes": vitaGL begins a GXM scene at each target switch and each copy out of the
+// display, and its depth / stencil surfaces neither load nor store, so every scene starts with a cleared depth buffer:
+// geometry drawn after a mid-frame scene break is not hidden by what was drawn before it (the hardware's see-through
+// walls, 132vt2e). Force load / store keeps the surface's memory across the break.
+void keep_depth(SceGxmDepthStencilSurface* surface) {
+    sceGxmDepthStencilSurfaceSetForceLoadMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+    sceGxmDepthStencilSurfaceSetForceStoreMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+}
+
+// A framebuffer object's depth surface: vitaGL creates it at the object's first scene, inside its framebuffer struct
+// (the object's name is the struct's address; this vitaGL's layout: the surface at +0x38, its pointer at +0x4c, as in
+// source/shared.h and the library's scene_reset). Only a pointer to the struct's own surface is taken.
+void keep_fbo_depth(Framebuffer& f) {
+    auto* base = reinterpret_cast<std::uint8_t*>(static_cast<std::uintptr_t>(f.fbo));
+    auto* const own = reinterpret_cast<SceGxmDepthStencilSurface*>(base + 0x38);
+    SceGxmDepthStencilSurface* surface = nullptr;
+    std::memcpy(&surface, base + 0x4c, sizeof surface);
+    if (surface != own || sceGxmDepthStencilSurfaceGetForceLoadMode(own) == SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED)
+        return;
+    keep_depth(own);
+}
+
 void make_directories(const std::string& path) {
     for (std::size_t k = path.find('/'); k != std::string::npos; k = path.find('/', k + 1))
         sceIoMkdir(path.substr(0, k).c_str(), 0777);
@@ -426,8 +460,16 @@ public:
     // ---- targets and draws ----
     void use_target(const VglTexture* colour, const VglTexture* depth);
     void bind_for_clear(const VglTexture* colour);
-    void execute(Pipeline& p);
+    void execute(Pipeline& p, bool textures_only = false);
     void draw(bool indexed, std::uint32_t count, std::uint32_t first);
+    // 132vt2e: an indexed draw whose only recorded change since the previous one is its textures (the level's
+    // terrain and models: about 400 of TORONTO1's 940 draws a frame): the previous draw's pipeline with the new
+    // textures, its sizes and the range; the rest of the GL state is the same (research/VITA.md "Draw batching").
+    void draw_textures_only(std::uint32_t count, std::uint32_t first);
+    Pipeline last_pipeline_;
+    GlProgram* last_program_ = nullptr;
+    bool textures_only_ready_ = false;
+    std::uint64_t textures_only_draws_ = 0;
     void clear_colour(const VglTexture* target, unsigned layer, const float rgba[4], const Rect* rects, unsigned count);
     void clear_depth(const VglTexture* depth, float value);
     void draw_depth_clear(float value);
@@ -461,6 +503,8 @@ private:
 
     std::map<std::uint32_t, CompiledShader> shaders_;
     std::map<std::tuple<unsigned, unsigned, const GxmAttribute*>, GlProgram> programs_;
+    GlProgram* cached_program_ = nullptr;  // program()'s last result and key
+    std::tuple<unsigned, unsigned, const GxmAttribute*> cached_program_key_{};
     bool compiler_checked_ = false;
     std::map<std::pair<const VglTexture*, const VglTexture*>, Framebuffer> framebuffers_;
     const VglTexture* bound_colour_ = nullptr;
@@ -474,9 +518,43 @@ private:
     std::shared_ptr<VglTexture> back_;
     std::shared_ptr<VglTexture> dummy_;
     unsigned draws_ = 0, targets_ = 0, logged_draws_ = 0, presents_ = 0;
+    // 132vt2e: what separates consecutive indexed draws (the command ops recorded between them, bit 31: the index
+    // ranges continue), logged every 150 presents: the evidence for which state changes keep draws apart.
+    std::uint32_t ops_since_draw_ = ~0u, last_draw_end_ = ~0u;
+    std::map<std::uint32_t, std::uint32_t> draw_breaks_;
+    unsigned break_frames_ = 0;
+    std::vector<std::uint32_t> filter_kept_;  // the shadow filter's kept indices (reused: no allocation per draw)
     // copy_from_display's GPU path: unchecked until its first use, then the row order it matched the read-back with.
     enum class DisplayBlit { unchecked, direct, flipped, failed } display_blit_ = DisplayBlit::unchecked;
     std::uint64_t display_blits_ = 0, display_readbacks_ = 0;
+    // 132vt2e (research/VITA.md "Draw batching"): the GL state execute() last set. vitaGL turns most state calls into
+    // GXM commands, and glUseProgram marks every uniform dirty (a new uniform buffer and a copy per draw), so state
+    // that equals the last draw's is not set again. Any other GL use (a framebuffer bind, texture writes, the
+    // display copy, a present) forgets it; Options::gl_state_cache false forgets it before every draw (the old calls).
+    struct Applied {
+        bool valid = false;
+        GLuint program = 0;
+        GLint viewport[4]{};
+        float depth_range[2]{};
+        bool wireframe = false;
+        bool depth_enabled = false;
+        GLenum depth_func = 0;
+        bool depth_write = false;
+        std::uint8_t mask = 0;
+        bool blend = false;
+        GLenum blend_func[4]{}, blend_op[2]{};
+        GLuint texture[4]{};
+        bool vertices = false;  // the attribute pointers below are set
+        const GlProgram* vertex_program = nullptr;
+        GLuint vertex_buffer = 0;
+        std::size_t vertex_offset = 0;
+        std::uint32_t stride = 0;
+    } applied_;
+    void forget_gl_state() {
+        applied_.valid = false;
+        textures_only_ready_ = false;
+    }
+    void count_state(bool set) { ++(set ? stats.gl_state_set : stats.gl_state_skipped); }
 };
 
 VglBuffer::~VglBuffer() {
@@ -506,6 +584,9 @@ Impl::Impl(const Options& o) : options(o) {
     if (vglInitExtended(0x100000, display_width, display_height, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE))
         throw std::runtime_error("gfx vitagl: the display does not support 960x544");
     vglUseExtraMem(GL_TRUE);
+    if (options.keep_depth) keep_depth(&gxm_depth_stencil_surface);
+    if (options.log) options.log(options.keep_depth ? "vitagl: depth kept across scenes (force load / store)"
+                                                    : "vitagl: depth cleared at every scene (vitaGL's default)");
     if (options.log && file_exists("ux0:data/omega_strain/vita_test_gl_trace.txt")) {
         g_trace_switch = true;
         g_trace_log = options.log;
@@ -614,8 +695,12 @@ const CompiledShader& Impl::shader(bool vertex, unsigned index) {
 
 GlProgram& Impl::program(const Pipeline& p) {
     const auto key = std::make_tuple(p.vertex, p.fragment, p.attributes);
+    if (cached_program_ && key == cached_program_key_) return *cached_program_;  // std::map nodes stay put
     auto found = programs_.find(key);
-    if (found != programs_.end()) return found->second;
+    if (found != programs_.end()) {
+        cached_program_key_ = key;
+        return *(cached_program_ = &found->second);
+    }
     const CompiledShader& vs = shader(true, p.vertex);
     const CompiledShader& fs = shader(false, p.fragment);
     GlProgram g;
@@ -623,6 +708,7 @@ GlProgram& Impl::program(const Pipeline& p) {
     glAttachShader(g.gl, vs.gl);
     glAttachShader(g.gl, fs.gl);
     for (unsigned k = 0; k < p.attribute_count && k < 8; ++k) glBindAttribLocation(g.gl, k, p.attributes[k].name);
+    forget_gl_state();  // glUseProgram below
     glLinkProgram(g.gl);
     GLint linked = 0;
     glGetProgramiv(g.gl, GL_LINK_STATUS, &linked);
@@ -664,13 +750,15 @@ GlProgram& Impl::program(const Pipeline& p) {
                       g.attribute[4], int(g.flip != -1), int(g.colour != -1));
         options.log(text);
     }
-    return programs_.emplace(key, g).first->second;
+    cached_program_key_ = key;
+    return *(cached_program_ = &programs_.emplace(key, g).first->second);
 }
 
 // ---- textures ----
 
 void Impl::write_rows(VglTexture& t, unsigned left, unsigned top, unsigned right, unsigned bottom, unsigned layer,
                       const std::uint8_t* data, unsigned pitch) {
+    forget_gl_state();
     glBindTexture(GL_TEXTURE_2D, t.gl);
     auto* base = static_cast<std::uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
     if (!base) throw std::runtime_error("gfx vitagl: a texture without storage");
@@ -713,6 +801,7 @@ void Impl::write_rows(VglTexture& t, unsigned left, unsigned top, unsigned right
 
 std::shared_ptr<VglTexture> Impl::make_texture(const TextureDesc& desc, const Level* levels) {
     if (desc.samples > 1) throw std::runtime_error("gfx vitagl: multisampled textures are unported");
+    forget_gl_state();
     auto t = std::make_shared<VglTexture>();
     t->set_desc(desc);
     const unsigned layers = std::max(desc.layers, 1u);
@@ -765,6 +854,7 @@ std::shared_ptr<VglTexture> Impl::make_texture(const TextureDesc& desc, const Le
 }
 
 void Impl::forget(const VglTexture* t) {
+    forget_gl_state();  // its name may be bound to a unit
     for (auto it = framebuffers_.begin(); it != framebuffers_.end();) {
         if (it->first.first == t || it->first.second == t) {
             if (bound_ && bound_colour_ == it->first.first && bound_depth_ == it->first.second) {
@@ -793,6 +883,7 @@ void Impl::use_target(const VglTexture* colour, const VglTexture* depth) {
             bound_colour_ = colour;
             bound_depth_ = depth;
             ++targets_;
+            forget_gl_state();
         }
     } else if (!bound_ || bound_colour_ != colour || bound_depth_ != depth) {
         display_bound_ = false;
@@ -833,9 +924,11 @@ void Impl::use_target(const VglTexture* colour, const VglTexture* depth) {
         bound_colour_ = colour;
         bound_depth_ = depth;
         ++targets_;
+        forget_gl_state();
     }
     if (depth) {
         Framebuffer& f = framebuffers_[std::make_pair(colour, depth)];
+        if (options.keep_depth && !display_bound_ && f.fbo) keep_fbo_depth(f);
         if (f.applied_clear != depth->clear_serial) {
             f.applied_clear = depth->clear_serial;
             draw_depth_clear(depth->clear_value);
@@ -853,50 +946,130 @@ void Impl::bind_for_clear(const VglTexture* colour) {
 
 // ---- draws ----
 
-void Impl::execute(Pipeline& p) {
-    GlProgram& g = program(p);
-    glUseProgram(g.gl);
+void Impl::execute(Pipeline& p, bool textures_only) {
+    OMEGA_ZONE_LAPS(lap);
+    textures_only = textures_only && textures_only_ready_ && last_program_ && options.gl_state_cache;
+    textures_only_ready_ = false;
+    GlProgram& g = textures_only ? *last_program_ : program(p);
+    last_program_ = &g;
+    OMEGA_ZONE_LAP(lap, "vgl.program_lookup");
+    if (!options.gl_state_cache) forget_gl_state();
+    const bool all = !applied_.valid;
+    Applied& a = applied_;
+    a.valid = true;
     const Viewport& v = p.viewport;
     const bool display = bound_ && display_bound_;
+    if (!textures_only) {
+    const bool use = all || a.program != g.gl;
+    count_state(use);
+    if (use) {
+        glUseProgram(g.gl);
+        a.program = g.gl;
+    }
     const GLint vy = static_cast<GLint>(std::lround(v.y));
     const GLsizei vh = static_cast<GLsizei>(std::lround(v.height));
     // vitaGL's display viewport is bottom-up (GL); a framebuffer object's is top-down with the flip uniform below.
-    glViewport(static_cast<GLint>(std::lround(v.x)), display ? static_cast<GLint>(display_height) - vy - vh : vy,
-               static_cast<GLsizei>(std::lround(v.width)), vh);
-    glDepthRangef(2.0F * v.min_depth - v.max_depth, v.max_depth);
-    glPolygonMode(GL_FRONT_AND_BACK, p.wireframe ? GL_LINE : GL_FILL);
-    if (p.depth_test || p.depth_write) {
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(p.depth_test ? p.depth_func : GL_ALWAYS);
-        glDepthMask(p.depth_write ? GL_TRUE : GL_FALSE);
-    } else {
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
+    const GLint viewport[4]{static_cast<GLint>(std::lround(v.x)), display ? static_cast<GLint>(display_height) - vy - vh : vy,
+                            static_cast<GLint>(std::lround(v.width)), vh};
+    const bool new_viewport = all || std::memcmp(viewport, a.viewport, sizeof viewport) != 0;
+    count_state(new_viewport);
+    if (new_viewport) {
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        std::memcpy(a.viewport, viewport, sizeof viewport);
     }
-    glColorMask((p.mask & mask_r) ? GL_TRUE : GL_FALSE, (p.mask & mask_g) ? GL_TRUE : GL_FALSE,
-                (p.mask & mask_b) ? GL_TRUE : GL_FALSE, (p.mask & mask_a) ? GL_TRUE : GL_FALSE);
+    const float range[2]{2.0F * v.min_depth - v.max_depth, v.max_depth};
+    const bool new_range = all || range[0] != a.depth_range[0] || range[1] != a.depth_range[1];
+    count_state(new_range);
+    if (new_range) {
+        glDepthRangef(range[0], range[1]);
+        a.depth_range[0] = range[0];
+        a.depth_range[1] = range[1];
+    }
+    const bool new_mode = all || p.wireframe != a.wireframe;
+    count_state(new_mode);
+    if (new_mode) {
+        glPolygonMode(GL_FRONT_AND_BACK, p.wireframe ? GL_LINE : GL_FILL);
+        a.wireframe = p.wireframe;
+    }
+    // GL's depth enable, function and mask are separate state; each is set when it differs.
+    const bool depth_enabled = p.depth_test || p.depth_write;
+    const GLenum depth_func = depth_enabled ? (p.depth_test ? p.depth_func : GL_ALWAYS) : all ? GLenum(~0u) : a.depth_func;
+    const bool depth_write = depth_enabled && p.depth_write;
+    const bool new_depth = all || depth_enabled != a.depth_enabled || (depth_enabled && depth_func != a.depth_func) ||
+                           depth_write != a.depth_write;
+    count_state(new_depth);
+    if (new_depth) {
+        if (depth_enabled) {
+            if (all || !a.depth_enabled) glEnable(GL_DEPTH_TEST);
+            if (all || depth_func != a.depth_func) glDepthFunc(depth_func);
+            if (all || depth_write != a.depth_write) glDepthMask(depth_write ? GL_TRUE : GL_FALSE);
+        } else {
+            if (all || a.depth_enabled) glDisable(GL_DEPTH_TEST);
+            if (all || a.depth_write) glDepthMask(GL_FALSE);
+        }
+        a.depth_enabled = depth_enabled;
+        a.depth_func = depth_func;
+        a.depth_write = depth_write;
+    }
+    const bool new_mask = all || p.mask != a.mask;
+    count_state(new_mask);
+    if (new_mask) {
+        glColorMask((p.mask & mask_r) ? GL_TRUE : GL_FALSE, (p.mask & mask_g) ? GL_TRUE : GL_FALSE,
+                    (p.mask & mask_b) ? GL_TRUE : GL_FALSE, (p.mask & mask_a) ? GL_TRUE : GL_FALSE);
+        a.mask = p.mask;
+    }
     if (p.blend) {
-        glEnable(GL_BLEND);
-        glBlendFuncSeparate(p.colour_src, p.colour_dst, p.alpha_src, p.alpha_dst);
-        glBlendEquationSeparate(p.colour_op, p.alpha_op);
+        const GLenum func[4]{p.colour_src, p.colour_dst, p.alpha_src, p.alpha_dst}, op[2]{p.colour_op, p.alpha_op};
+        const bool new_func = all || std::memcmp(func, a.blend_func, sizeof func) != 0;
+        const bool new_op = all || op[0] != a.blend_op[0] || op[1] != a.blend_op[1];
+        count_state(all || !a.blend || new_func || new_op);
+        if (all || !a.blend) glEnable(GL_BLEND);
+        if (new_func) glBlendFuncSeparate(func[0], func[1], func[2], func[3]);
+        if (new_op) glBlendEquationSeparate(op[0], op[1]);
+        a.blend = true;
+        std::memcpy(a.blend_func, func, sizeof func);
+        a.blend_op[0] = op[0];
+        a.blend_op[1] = op[1];
     } else {
-        glDisable(GL_BLEND);
+        count_state(all || a.blend);
+        if (all || a.blend) glDisable(GL_BLEND);
+        if (all) {  // the functions GL holds are unknown
+            std::fill(std::begin(a.blend_func), std::end(a.blend_func), GLenum(~0u));
+            a.blend_op[0] = a.blend_op[1] = GLenum(~0u);
+        }
+        a.blend = false;
+    }
     }
 
     float tex_size[16];
     float layers[4];
+    bool unit_moved = false;
+    OMEGA_ZONE_LAP(lap, "vgl.fixed_state");
     for (unsigned k = 0; k < 4; ++k) {
         const VglTexture* t = p.textures[k].texture ? p.textures[k].texture : dummy_.get();
         if (t->depth) throw std::runtime_error("gfx vitagl: sampling a depth texture is unported");
         if (t == back_.get()) throw std::runtime_error("gfx vitagl: sampling the swap chain buffer (the display) is unported");
-        glActiveTexture(GL_TEXTURE0 + k);
-        glBindTexture(GL_TEXTURE_2D, t->gl);
         const SamplerDesc& s = p.textures[k].sampler;
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s.filter != Filter::linear ? GL_NEAREST : GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s.filter == Filter::point ? GL_NEAREST : GL_LINEAR);
-        const GLint wrap = s.address == Address::wrap ? GL_REPEAT : GL_CLAMP_TO_EDGE;
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
+        const std::uint8_t sampler = static_cast<std::uint8_t>(unsigned(s.filter) * 2 + (s.address == Address::wrap ? 1 : 0));
+        const bool bind = all || a.texture[k] != t->gl;
+        const bool params = all || t->applied_sampler != sampler;
+        count_state(bind || params);
+        if (bind || params) {
+            glActiveTexture(GL_TEXTURE0 + k);
+            unit_moved = unit_moved || k != 0;
+        }
+        if (bind) {
+            glBindTexture(GL_TEXTURE_2D, t->gl);
+            a.texture[k] = t->gl;
+        }
+        if (params) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, s.filter != Filter::linear ? GL_NEAREST : GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s.filter == Filter::point ? GL_NEAREST : GL_LINEAR);
+            const GLint wrap = s.address == Address::wrap ? GL_REPEAT : GL_CLAMP_TO_EDGE;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
+            const_cast<VglTexture*>(t)->applied_sampler = options.gl_state_cache ? sampler : 0xff;
+        }
         const float w = static_cast<float>(std::max(t->desc().width, 1u)), h = static_cast<float>(t->layer_rows);
         tex_size[4 * k] = w;
         tex_size[4 * k + 1] = h;
@@ -904,53 +1077,87 @@ void Impl::execute(Pipeline& p) {
         tex_size[4 * k + 3] = 1.0F / h;
         layers[k] = static_cast<float>(std::max(t->desc().layers, 1u));
     }
-    glActiveTexture(GL_TEXTURE0);
+    if (all || unit_moved) glActiveTexture(GL_TEXTURE0);
 
-    auto set = [](GLint location, const void* data, std::size_t floats, unsigned declared) {
+    OMEGA_ZONE_LAP(lap, "vgl.textures");
+    const bool cache = options.gl_state_cache;
+    auto set = [&](unsigned slot, GLint location, const void* data, std::size_t floats, unsigned declared) {
         if (location == -1 || location == 0 || !data) return;
         const unsigned n = static_cast<unsigned>(std::min<std::size_t>(floats / 4, declared));
-        if (n) glUniform4fv(location, static_cast<GLsizei>(n), static_cast<const GLfloat*>(data));
+        if (!n) return;
+        std::vector<float>& sent = g.sent[slot];
+        const std::size_t bytes = std::size_t(n) * 16;
+        const bool same = cache && g.sent_valid[slot] && sent.size() == std::size_t(n) * 4 &&
+                          std::memcmp(sent.data(), data, bytes) == 0;
+        count_state(!same);
+        if (same) return;
+        glUniform4fv(location, static_cast<GLsizei>(n), static_cast<const GLfloat*>(data));
+        sent.resize(std::size_t(n) * 4);
+        std::memcpy(sent.data(), data, bytes);
+        g.sent_valid[slot] = cache;
     };
-    for (int k = 0; k < 2; ++k) {
-        set(g.vertex_constants[k], p.vertex_constants[k].data, p.vertex_constants[k].bytes / 4, g.vertex_count[k]);
-        set(g.fragment_constants[k], p.fragment_constants[k].data, p.fragment_constants[k].bytes / 4, g.fragment_count[k]);
+    if (!textures_only) {
+        for (unsigned k = 0; k < 2; ++k) {
+            set(k, g.vertex_constants[k], p.vertex_constants[k].data, p.vertex_constants[k].bytes / 4, g.vertex_count[k]);
+            set(2 + k, g.fragment_constants[k], p.fragment_constants[k].data, p.fragment_constants[k].bytes / 4, g.fragment_count[k]);
+        }
+        const float flip[4]{bound_ && !display ? -1.0F : 1.0F, 0, 0, 0};
+        set(4, g.flip, flip, 4, 1);
+        set(5, g.clear, p.clear, 4, 1);
     }
-    const float flip[4]{bound_ && !display ? -1.0F : 1.0F, 0, 0, 0};
-    set(g.flip, flip, 4, 1);
-    set(g.clear, p.clear, 4, 1);
-    set(g.tex_size, tex_size, 16, 4);
-    set(g.layers, layers, 4, 1);
-    set(g.blend_mul, p.blend_mul, 4, 1);
-    set(g.colour, p.colour, 4, 1);
+    set(6, g.tex_size, tex_size, 16, 4);
+    set(7, g.layers, layers, 4, 1);
+    if (!textures_only) {
+        set(8, g.blend_mul, p.blend_mul, 4, 1);
+        set(9, g.colour, p.colour, 4, 1);
+    }
 
-    glBindBuffer(GL_ARRAY_BUFFER, p.vertex_buffer);
-    unsigned enabled = 0;
-    for (unsigned k = 0; k < p.attribute_count && k < 8; ++k) {
-        const int location = g.attribute[k];
-        if (location < 0) continue;
-        const std::size_t offset = p.vertex_offset + p.attributes[k].offset;
-        const void* pointer = p.vertex_buffer ? reinterpret_cast<const void*>(offset)
-                                              : static_cast<const std::uint8_t*>(p.client_vertices) + offset;
-        glVertexAttribPointer(static_cast<GLuint>(location), p.attributes[k].components, GL_FLOAT, GL_FALSE,
-                              static_cast<GLsizei>(p.stride), pointer);
-        enabled |= 1u << location;
+    // The attribute pointers (vitaGL keeps each one's buffer name and offset): set again when the program, buffer,
+    // offset or stride differ, and always for client vertices.
+    OMEGA_ZONE_LAP(lap, "vgl.uniforms");
+    const bool new_vertices = !textures_only && (all || !a.vertices || !p.vertex_buffer || a.vertex_program != &g ||
+                              a.vertex_buffer != p.vertex_buffer || a.vertex_offset != p.vertex_offset ||
+                              a.stride != p.stride);
+    count_state(new_vertices);
+    if (new_vertices) {
+        glBindBuffer(GL_ARRAY_BUFFER, p.vertex_buffer);
+        unsigned enabled = 0;
+        for (unsigned k = 0; k < p.attribute_count && k < 8; ++k) {
+            const int location = g.attribute[k];
+            if (location < 0) continue;
+            const std::size_t offset = p.vertex_offset + p.attributes[k].offset;
+            const void* pointer = p.vertex_buffer ? reinterpret_cast<const void*>(offset)
+                                                  : static_cast<const std::uint8_t*>(p.client_vertices) + offset;
+            glVertexAttribPointer(static_cast<GLuint>(location), p.attributes[k].components, GL_FLOAT, GL_FALSE,
+                                  static_cast<GLsizei>(p.stride), pointer);
+            enabled |= 1u << location;
+        }
+        for (unsigned k = 0; k < 8; ++k) {
+            const unsigned bit = 1u << k;
+            if ((enabled & bit) && !(enabled_attributes_ & bit)) glEnableVertexAttribArray(k);
+            if (!(enabled & bit) && (enabled_attributes_ & bit)) glDisableVertexAttribArray(k);
+        }
+        enabled_attributes_ = enabled;
+        a.vertices = p.vertex_buffer != 0;
+        a.vertex_program = &g;
+        a.vertex_buffer = p.vertex_buffer;
+        a.vertex_offset = p.vertex_offset;
+        a.stride = p.stride;
     }
-    for (unsigned k = 0; k < 8; ++k) {
-        const unsigned bit = 1u << k;
-        if ((enabled & bit) && !(enabled_attributes_ & bit)) glEnableVertexAttribArray(k);
-        if (!(enabled & bit) && (enabled_attributes_ & bit)) glDisableVertexAttribArray(k);
-    }
-    enabled_attributes_ = enabled;
+    OMEGA_ZONE_LAP(lap, "vgl.attributes");
 
     if (p.indexed) {
+        OMEGA_ZONE("vgl.gl_draw");
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.index_buffer);
         const void* indices = p.index_buffer ? reinterpret_cast<const void*>(std::size_t(p.first) * 4)
                                              : static_cast<const void*>(p.client_indices);
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), GL_UNSIGNED_INT, indices);
     } else {
+        OMEGA_ZONE("vgl.gl_draw");
         glDrawArrays(GL_TRIANGLES, static_cast<GLint>(p.first), static_cast<GLsizei>(p.count));
     }
     ++draws_;
+    stats.triangles_total += p.count / 3;
     if (options.log && logged_draws_ < 16) {
         ++logged_draws_;
         char text[200];
@@ -992,8 +1199,10 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
             throw std::runtime_error("gfx vitagl: an indexed draw past its index buffer");
         p.index_buffer = state_.indices->gl;
     }
-    std::vector<std::uint32_t> kept;
+    std::vector<std::uint32_t>& kept = filter_kept_;
+    kept.clear();
     if (g.cpu_geometry) {
+        OMEGA_ZONE("vgl.shadow_filter");
         const VglBuffer* shadow = state_.geometry_constants[1] ? state_.geometry_constants[1] : state_.vertex_constants[1];
         if (!shadow || shadow->cpu.size() < 112) throw std::runtime_error("gfx vitagl: shadow_receiver without Shadow constants");
         ShadowFilter filter;
@@ -1002,6 +1211,7 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
         const std::uint8_t* vertices = buffer_bytes(*state_.vertices) + state_.offset;
         const auto* source = indexed ? reinterpret_cast<const std::uint32_t*>(buffer_bytes(*state_.indices)) + first : nullptr;
         kept.reserve(count);
+        stats.shadow_tested += count / 3;
         for (std::uint32_t k = 0; k + 2 < count; k += 3) {
             const std::uint32_t i0 = source ? source[k] : first + k, i1 = source ? source[k + 1] : first + k + 1,
                                 i2 = source ? source[k + 2] : first + k + 2;
@@ -1013,6 +1223,7 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
             }
         }
         if (kept.empty()) return;
+        stats.shadow_kept += kept.size() / 3;
         p.indexed = true;
         p.index_buffer = 0;
         p.client_indices = kept.data();
@@ -1038,12 +1249,38 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
     const bool second = g.fragment_alt != ~0U && state_.colour[1];
     for (unsigned pass = 0; pass < (second ? 2u : 1u); ++pass) {
         if (!state_.colour[pass] && !state_.depth) return;
-        use_target(state_.colour[pass], state_.depth);
+        {
+            OMEGA_ZONE("vgl.target");
+            use_target(state_.colour[pass], state_.depth);
+        }
         p.viewport = in_layer(state_.viewport, state_.colour[pass], state_.layer[pass]);
         p.fragment = pass ? g.fragment_alt : g.fragment;
         blend_for(blend.targets[pass && blend.independent ? 1 : 0], state_.factor, p);
+        OMEGA_ZONE("vgl.execute");
         execute(p);
     }
+    if (!second && p.indexed && p.index_buffer && !g.cpu_geometry) {
+        last_pipeline_ = p;
+        textures_only_ready_ = true;
+    }
+}
+
+void Impl::draw_textures_only(std::uint32_t count, std::uint32_t first) {
+    OMEGA_ZONE("vgl.draw");
+    if (!count) return;
+    if (!state_.indices || state_.indices->gl != last_pipeline_.index_buffer ||
+        (std::size_t(first) + count) * 4 > state_.indices->desc().bytes)
+        throw std::runtime_error("gfx vitagl: an indexed draw past its index buffer");
+    Pipeline& p = last_pipeline_;
+    p.first = first;
+    p.count = count;
+    for (unsigned k = 0; k < 4; ++k) p.textures[k].texture = state_.textures[k];
+    {
+        OMEGA_ZONE("vgl.execute");
+        execute(p, true);
+    }
+    ++textures_only_draws_;
+    textures_only_ready_ = true;
 }
 
 // A colour clear: quads drawn with the clear program (as on GXM; vitaGL's glClear honours the scissor mask pass).
@@ -1105,6 +1342,8 @@ void Impl::draw_depth_clear(float value) {
     p.viewport.max_depth = 1.0F;
     execute(p);
     glDepthRangef(-1.0F, 1.0F);
+    applied_.depth_range[0] = -1.0F;
+    applied_.depth_range[1] = 1.0F;
 }
 
 // CopyResource / CopySubresourceRegion: a point-sampled quad drawn into the destination.
@@ -1169,6 +1408,7 @@ void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsign
         ++display_blits_;
         return;
     }
+    forget_gl_state();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     bound_ = display_bound_ = true;
     bound_colour_ = back_.get();
@@ -1199,6 +1439,7 @@ void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsign
 void Impl::blit_from_display(VglTexture& dst, unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w,
                              unsigned h, bool flip) {
     use_target(&dst, nullptr);
+    forget_gl_state();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     const GLint top = static_cast<GLint>(display_height - sy), bottom = top - static_cast<GLint>(h);
     const GLint x0 = static_cast<GLint>(sx), x1 = x0 + static_cast<GLint>(w);
@@ -1222,6 +1463,7 @@ bool Impl::check_display_blit(VglTexture& dst, unsigned sx, unsigned sy, unsigne
     for (const bool flip : {false, true}) {
         blit_from_display(dst, sx, sy, dx, dy, w, h, flip);
         glFinish();
+        forget_gl_state();
         glBindTexture(GL_TEXTURE_2D, dst.gl);
         const auto* base = static_cast<const std::uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
         if (!base) {
@@ -1277,29 +1519,38 @@ void Impl::update_buffer(VglBuffer& b, const void* data, std::size_t bytes, std:
     OMEGA_ZONE("vgl.update_buffer");
     const std::size_t size = b.desc().bytes;
     if (offset > size || bytes > size - offset) throw std::runtime_error("gfx vitagl: a buffer update past its end");
+    stats.buffer_bytes += bytes;
+    const bool whole = !keep_rest || (offset == 0 && bytes == size);
     if (b.gl_only) {
         if (!bytes) return;
         if (b.desc().usage == Usage::dynamic) {
             glBindBuffer(GL_ARRAY_BUFFER, b.gl);
-            if (!keep_rest || (offset == 0 && bytes == size)) {
+            if (whole) {
+                ++stats.buffer_reallocs;
                 glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(align_up(std::max<std::size_t>(size, 16), 16)), nullptr,
                              GL_DYNAMIC_DRAW);
                 placed_buffer(b, b.placed);
                 write_gl_only(b, data, bytes, offset);
             } else {
+                ++stats.buffer_writes;
                 glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(bytes), data);
             }
         } else {
+            ++stats.buffer_writes;
             write_gl_only(b, data, bytes, offset);
         }
         return;
     }
     if (b.cpu.size() < size) b.cpu.resize(size);
     if (bytes) std::memcpy(b.cpu.data() + offset, data, bytes);
-    if (!b.gl || !bytes) return;
+    if (!b.gl || !bytes) {
+        ++stats.buffer_writes;
+        return;
+    }
     glBindBuffer(GL_ARRAY_BUFFER, b.gl);
     // vitaGL gives a buffer the GPU may still read fresh memory (the old freed by its garbage collector).
-    if (!keep_rest || (offset == 0 && bytes == size))
+    ++(whole ? stats.buffer_reallocs : stats.buffer_writes);
+    if (whole)
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(size), b.cpu.data(), GL_DYNAMIC_DRAW);
     else
         glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(bytes), b.cpu.data() + offset);
@@ -1320,6 +1571,7 @@ void Impl::read(const VglTexture& t, unsigned sub,
     const unsigned mips = std::max(t.desc().mips, 1u);
     if (sub % mips) throw std::runtime_error("gfx vitagl: read-back of mip levels above 0 is unported");
     glFinish();
+    forget_gl_state();
     glBindTexture(GL_TEXTURE_2D, t.gl);
     const auto* base = static_cast<const std::uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
     if (!base) throw std::runtime_error("gfx vitagl: read-back of a texture without storage");
@@ -1366,6 +1618,15 @@ const VglTexture* texture_of(const void* p) { return static_cast<const VglTextur
 
 void Impl::submit(CommandList& list) {
     for (const Command& c : list.commands()) {
+        const std::uint32_t between = ops_since_draw_;
+        if (c.op == Command::Op::draw_indexed) {
+            if (ops_since_draw_ != ~0u)
+                ++draw_breaks_[ops_since_draw_ | (c.b == last_draw_end_ ? 0x80000000u : 0u)];
+            ops_since_draw_ = 0;
+            last_draw_end_ = c.b + c.a;
+        } else if (ops_since_draw_ != ~0u) {
+            ops_since_draw_ |= 1u << unsigned(c.op);
+        }
         switch (c.op) {
         case Command::Op::set_targets:
             for (unsigned k = 0; k < 2; ++k) {
@@ -1429,7 +1690,12 @@ void Impl::submit(CommandList& list) {
             break;
         }
         case Command::Op::draw: draw(false, c.a, c.b); break;
-        case Command::Op::draw_indexed: draw(true, c.a, c.b); break;
+        case Command::Op::draw_indexed:
+            if (between == 1u << unsigned(Command::Op::set_textures) && textures_only_ready_ && options.gl_state_cache)
+                draw_textures_only(c.a, c.b);
+            else
+                draw(true, c.a, c.b);
+            break;
         case Command::Op::copy: {
             const VglTexture* dst = texture_of(c.objects[0]);
             const VglTexture* src = texture_of(c.objects[1]);
@@ -1448,6 +1714,7 @@ void Impl::submit(CommandList& list) {
         case Command::Op::reset_state: state_ = State{}; break;
         }
     }
+    ops_since_draw_ = ~0u;  // another list may follow work recorded outside the lists
     list.clear();
 }
 
@@ -1455,6 +1722,7 @@ void Impl::submit(CommandList& list) {
 // (glReadPixels; the bring-up evidence that the picture reached the display buffer).
 SwapChain::Presented Impl::present(unsigned sync_interval) {
     OMEGA_ZONE("vgl.present");
+    forget_gl_state();
     if (options.log && presents_++ % 600 == 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         std::uint8_t px[4][4]{};
@@ -1470,6 +1738,29 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
                       static_cast<unsigned long long>(display_readbacks_));
         options.log(text);
     }
+    if (options.log && (++break_frames_ >= 150 || (break_frames_ >= 3 && draws_ * break_frames_ > 6000)) && !draw_breaks_.empty()) {
+        static const char* const names[]{"targets", "viewport", "clear", "clear_depth", "clear_rects", "raster", "depth",
+                                         "blend", "program", "vertices", "indices", "constants", "textures", "sampler",
+                                         "update_buffer", "update_texture", "draw", "draw_indexed", "copy", "copy_region",
+                                         "flush", "reset"};
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> top(draw_breaks_.begin(), draw_breaks_.end());
+        std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string text = "vitagl draw breaks per frame over " + std::to_string(break_frames_) + " presents (" + std::to_string(textures_only_draws_ / break_frames_) + " drawn with only new textures; the ops between consecutive indexed draws):";
+        textures_only_draws_ = 0;
+        for (std::size_t k = 0; k < top.size() && k < 10; ++k) {
+            char item[40];
+            std::snprintf(item, sizeof item, " %.1f x", top[k].second / double(break_frames_));
+            text += k ? ";" : "";
+            text += item;
+            for (unsigned bit = 0; bit < 22; ++bit)
+                if (top[k].first & (1u << bit)) (text += ' ') += names[bit];
+            if (!(top[k].first & 0x7fffffffu)) text += " none";
+            if (top[k].first & 0x80000000u) text += " (contiguous)";
+        }
+        options.log(text.c_str());
+        draw_breaks_.clear();
+        break_frames_ = 0;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     bound_ = display_bound_ = false;
     bound_colour_ = bound_depth_ = nullptr;
@@ -1483,12 +1774,15 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
     if (options.presented) options.presented();
     stats.scenes_last_frame = targets_;
     stats.draws_last_frame = draws_;
+    stats.scenes_total += targets_;
+    stats.draws_total += draws_;
     targets_ = draws_ = 0;
     snapshot();
     return SwapChain::Presented::ok;
 }
 
 void Impl::message(const std::string& text) {
+    forget_gl_state();
     glFinish();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     bound_ = display_bound_ = false;
@@ -1586,6 +1880,10 @@ public:
     void write(const Buffer& buffer, const void* data, std::size_t bytes, const char*) override {
         std::lock_guard<std::recursive_mutex> lock(g_mutex);
         impl_.update_buffer(const_cast<VglBuffer&>(static_cast<const VglBuffer&>(buffer)), data, bytes, 0, false);
+    }
+    void cpu_mirror(const Buffer& buffer, const void* data) override {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        const_cast<VglBuffer&>(static_cast<const VglBuffer&>(buffer)).mirror = static_cast<const std::uint8_t*>(data);
     }
     void read(const Texture& staging, unsigned subresource,
               const std::function<void(const std::uint8_t* data, unsigned row_pitch)>& reader, const char*) override {

@@ -23,6 +23,7 @@
 #include "gfx_programs.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -167,6 +168,12 @@ struct Command {
 
 class CommandList {
 public:
+    // Port-only (132vt2e): merge contiguous indexed draws (draw_indexed). Off by default (the PC's lists are
+    // unchanged); the PS Vita play host turns it on (research/VITA.md "Draw batching"). With it on, indexed_draws
+    // counts the draw_indexed calls (on a non-empty list) and merged_draws those folded into a previous one.
+    static inline std::atomic<bool> merge_contiguous_draws{false};
+    static inline std::atomic<std::uint64_t> indexed_draws{0}, merged_draws{0};
+
     void clear() {
         commands_.clear();
         arena_.clear();
@@ -282,6 +289,19 @@ public:
         c.b = first;
     }
     void draw_indexed(std::uint32_t count, std::uint32_t first_index) {
+        // Port-only (132vt2e, merge_contiguous_draws): an indexed draw that continues the previous command, itself an
+        // indexed draw with no state recorded between, extends it. Triangle lists (every program) in the same order
+        // under the same state: the same primitives rasterised in the same order, in one backend draw.
+        if (merge_contiguous_draws.load(std::memory_order_relaxed) && !commands_.empty()) {
+            indexed_draws.fetch_add(1, std::memory_order_relaxed);
+            Command& p = commands_.back();
+            if (p.op == Command::Op::draw_indexed && p.a % 3 == 0 && count % 3 == 0 && p.a &&
+                std::uint64_t(p.b) + p.a == first_index) {
+                p.a += count;
+                merged_draws.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
         Command& c = push(Command::Op::draw_indexed);
         c.a = count;
         c.b = first_index;
@@ -373,6 +393,10 @@ public:
     // Port-only diagnostic (--present-probe): waits until the GPU has finished everything submitted; false when the
     // backend cannot tell (no wait made).
     virtual bool wait_idle() = 0;
+    // Port-only (132vt2e): `data` holds the same bytes as `buffer` (the caller keeps it alive and updates it with the
+    // buffer); a backend that reads buffers on the CPU may read it instead (vitaGL: the shadow receivers' triangle
+    // filter, research/VITA.md "Shadow receivers"). Ignored by the other backends.
+    virtual void cpu_mirror(const Buffer& buffer, const void* data) { (void)buffer; (void)data; }
 };
 
 // Port-only (132md9): the device exists and skins replacement parts (Capabilities::gpu_skinning).

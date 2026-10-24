@@ -1444,6 +1444,8 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
     }
     stats.scenes_last_frame = scenes_;
     stats.draws_last_frame = draws_;
+    stats.scenes_total += scenes_;
+    stats.draws_total += draws_;
     stats.transient_bytes = transient_;
     scenes_ = draws_ = 0;
     transient_ = 0;

@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <istream>
+#ifdef __vita__
+#include <memory>
+#endif
 #include <span>
 #include <string>
 #include <vector>
@@ -57,6 +60,15 @@ private:
     void check(Extent extent) const;
     Extent disc_file(const std::vector<std::string>& components);
     std::vector<std::uint8_t> read_disc(Extent extent, bool unlimited);
+#ifdef __vita__
+    // Port-only (132vt2e, research/VITA.md "Load time"): the PS Vita keeps each resolved ISO path's extent and each
+    // HOG's index (shared by copies), so a member read is one seek and read instead of the volume descriptor, every
+    // directory on the path, the archive's header and its index again. The bytes read are unchanged.
+    struct Cache;
+    static std::shared_ptr<Cache> make_cache();
+    std::shared_ptr<Cache> cache_ = make_cache();
+    std::shared_ptr<const std::vector<std::uint8_t>> hog_index(Extent container);
+#endif
 };
 
 Extent hog_member(std::span<const std::uint8_t> index, std::uint64_t total_size,

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -37,6 +38,44 @@ bool identifier(std::span<const std::uint8_t> descriptor) {
     return std::equal(std::begin(expected), std::end(expected), descriptor.begin() + 1);
 }
 
+#ifdef __vita__
+// Port-only (132vt2e): hog_member's checks and answer, comparing the names in place (no string per member).
+Extent hog_member_scan(std::span<const std::uint8_t> index, std::uint64_t total_size, const std::string& requested) {
+    if (index.size() < 20) throw std::runtime_error("Truncated HOG header");
+    const auto count = little(index, 4);
+    const auto table = little(index, 8);
+    const auto names = little(index, 12);
+    const auto data = little(index, 16);
+    if (count == 0 || count > 100000 || table < 20 || table >= names || names > data
+        || data > total_size || data > index.size()
+        || std::uint64_t(table) + (std::uint64_t(count) + 1) * 4 > names)
+        throw std::runtime_error("Invalid HOG index bounds");
+    if (little(index, table) != 0) throw std::runtime_error("HOG first offset is not zero");
+    std::size_t name_offset = names;
+    std::optional<Extent> result;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto start = little(index, table + std::size_t(i) * 4);
+        const auto end = little(index, table + std::size_t(i + 1) * 4);
+        if (start > end || std::uint64_t(data) + end > total_size)
+            throw std::runtime_error("HOG member outside archive");
+        const std::size_t name_start = name_offset;
+        while (name_offset < data && index[name_offset] != 0) {
+            const auto byte = index[name_offset++];
+            if (byte < 32 || byte >= 127) throw std::runtime_error("Invalid HOG member name");
+        }
+        if (name_offset == name_start || name_offset >= data) throw std::runtime_error("Unterminated HOG member name");
+        const std::size_t length = name_offset - name_start;
+        ++name_offset;
+        if (length == requested.size() && std::memcmp(index.data() + name_start, requested.data(), length) == 0) {
+            if (result) throw std::runtime_error("Duplicate HOG member name");
+            result = Extent{std::uint64_t(data) + start, std::uint64_t(end) - start};
+        }
+    }
+    if (!result) throw std::runtime_error("HOG member not found: " + requested);
+    return *result;
+}
+#endif
+
 // Port-only (checkpoint 132md1, research/MODDING.md): the mod-resolved files, process-wide so an extent from one
 // DiscImage reads the same bytes through any other. Slots are never released (extents stay valid); the resolution
 // cache is per mods::install generation.
@@ -65,6 +104,31 @@ std::mutex& stream_mutex() {
 }
 
 }
+
+#ifdef __vita__
+struct DiscImage::Cache {
+    std::mutex mutex;
+    std::map<std::vector<std::string>, Extent> files;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<const std::vector<std::uint8_t>>> indices;
+};
+
+std::shared_ptr<DiscImage::Cache> DiscImage::make_cache() { return std::make_shared<Cache>(); }
+
+std::shared_ptr<const std::vector<std::uint8_t>> DiscImage::hog_index(Extent container) {
+    const auto key = std::make_pair(container.offset, container.size);
+    {
+        std::lock_guard lock(cache_->mutex);
+        if (const auto it = cache_->indices.find(key); it != cache_->indices.end()) return it->second;
+    }
+    if (container.size < 20) throw std::runtime_error("Truncated HOG archive");
+    const auto header = read({container.offset, 20});
+    const auto index_size = little(header, 16);
+    if (index_size < 20 || index_size > container.size) throw std::runtime_error("Invalid HOG header size");
+    auto index = std::make_shared<const std::vector<std::uint8_t>>(read({container.offset, index_size}));
+    std::lock_guard lock(cache_->mutex);
+    return cache_->indices.emplace(key, std::move(index)).first->second;
+}
+#endif
 
 void DiscImage::check(Extent extent) const {
     if (extent.offset >= virtual_base) {
@@ -187,6 +251,12 @@ Extent DiscImage::file(const std::vector<std::string>& components) {
 
 Extent DiscImage::disc_file(const std::vector<std::string>& components) {
     if (components.empty()) throw std::runtime_error("Empty ISO path");
+#ifdef __vita__
+    {
+        std::lock_guard lock(cache_->mutex);
+        if (const auto it = cache_->files.find(components); it != cache_->files.end()) return it->second;
+    }
+#endif
     std::optional<Extent> directory;
     for (std::uint64_t sector = 16; sector < 256 && sector < size_ / sector_size; ++sector) {
         const auto descriptor = read({sector * sector_size, sector_size});
@@ -239,6 +309,10 @@ Extent DiscImage::disc_file(const std::vector<std::string>& components) {
             throw std::runtime_error("Unexpected ISO file/directory kind");
         directory = found;
     }
+#ifdef __vita__
+    std::lock_guard lock(cache_->mutex);
+    cache_->files.emplace(components, *directory);
+#endif
     return *directory;
 }
 
@@ -307,12 +381,16 @@ Extent hog_member(std::span<const std::uint8_t> index, std::uint64_t total_size,
 Extent DiscImage::archive_member_extent(const std::vector<std::string>& archive,
                                         const std::string& member) {
     const auto container = file(archive);
+#ifdef __vita__
+    const auto extent = hog_member_scan(*hog_index(container), container.size, member);
+#else
     if (container.size < 20) throw std::runtime_error("Truncated HOG archive");
     const auto header = read({container.offset, 20});
     const auto index_size = little(header, 16);
     if (index_size < 20 || index_size > container.size) throw std::runtime_error("Invalid HOG header size");
     const auto index = read({container.offset, index_size});
     const auto extent = hog_member(index, container.size, member);
+#endif
     const Extent absolute{container.offset + extent.offset, extent.size};
     check(absolute);
     return absolute;
@@ -335,11 +413,15 @@ std::vector<std::uint8_t> DiscImage::archive_bytes_after(const std::vector<std::
 
 std::vector<std::string> DiscImage::archive_member_names(const std::vector<std::string>& archive) {
     const auto container = file(archive);
+#ifdef __vita__
+    return hog_member_names(*hog_index(container), container.size);
+#else
     if (container.size < 20) throw std::runtime_error("Truncated HOG archive");
     const auto header = read({container.offset, 20});
     const auto index_size = little(header, 16);
     if (index_size < 20 || index_size > container.size) throw std::runtime_error("Invalid HOG header size");
     return hog_member_names(read({container.offset, index_size}), container.size);
+#endif
 }
 
 std::vector<DiscImage::ArchiveMember> DiscImage::archive_members(const std::vector<std::string>& archive) {

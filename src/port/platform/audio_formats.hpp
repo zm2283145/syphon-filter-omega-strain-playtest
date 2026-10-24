@@ -48,7 +48,22 @@ struct PcmClip {
     std::uint32_t channels{};
     std::vector<std::int16_t> samples;  // interleaved, frames * channels
     bool repeat{};                      // VAG: the end frame's repeat bit (flags & 2)
-    std::size_t frames() const { return channels ? samples.size() / channels : 0; }
+    // Port-only (132vt2e, PS Vita, research/VITA.md "Memory"): ring > 0 marks a streamed VPK (VpkProgressive's
+    // stream mode): `total` frames long, frames [0, head frames) kept in `head`, frame f past them at
+    // samples[(f % ring) * channels]. 0: every frame is in `samples`.
+    std::size_t ring{}, total{};
+    std::vector<std::int16_t> head;
+    std::size_t frames() const { return ring ? total : channels ? samples.size() / channels : 0; }
+    std::int16_t at(std::size_t frame, std::size_t channel) const {
+        if (!ring) return samples[frame * channels + channel];
+        const std::size_t h = head.size() / channels;
+        return frame < h ? head[frame * channels + channel] : samples[(frame % ring) * channels + channel];
+    }
+    std::int16_t& slot(std::size_t frame, std::size_t channel) {
+        if (!ring) return samples[frame * channels + channel];
+        const std::size_t h = head.size() / channels;
+        return frame < h ? head[frame * channels + channel] : samples[(frame % ring) * channels + channel];
+    }
 };
 
 struct VagHeader {
@@ -82,11 +97,15 @@ std::size_t stream_bytes(std::span<const std::uint8_t> header);
 class VpkProgressive {
 public:
     using Reader = std::function<std::vector<std::uint8_t>(std::uint64_t offset, std::size_t size)>;
-    VpkProgressive(std::span<const std::uint8_t> header, Reader read);
+    // Port-only (132vt2e, PS Vita): stream = true keeps the first chunk and a ring of four chunks (PcmClip::ring)
+    // rather than the whole clip (TORONTO1's music was 11 MB, the front end's 30 MB); a reader far behind the
+    // decoded frames (a loop or a replay from the start) restarts the decode at chunk 0.
+    VpkProgressive(std::span<const std::uint8_t> header, Reader read, bool stream = false);
     const std::shared_ptr<PcmClip>& clip() const { return clip_; }
     std::size_t decoded_frames() const;
     bool done() const { return done_bytes_ >= header_.channel_bytes; }
-    // Decodes whole chunks until frame rames - 1 holds its samples (or the clip is complete).
+    bool stream() const { return clip_->ring != 0; }
+    // Decodes whole chunks until frame rames - 1 holds its samples (or the clip is complete).
     void decode_to(std::size_t frames);
 
 private:

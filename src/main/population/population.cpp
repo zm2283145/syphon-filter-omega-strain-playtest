@@ -2,6 +2,7 @@
 #include "binary.hpp"
 #include "game_libm.hpp"
 #include "vu_float.hpp"
+#include "zone_profile.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -873,6 +874,7 @@ void terrain_reserve_flush() {
 #endif
 
 void append_terrain(Mesh& dst, CollisionMesh& col, const Mesh& src, const CollisionMesh& source_col) {
+    OMEGA_ZONE("load.append_terrain");  // port-only (132vt2e): the PS Vita's load-time zones
     if (dst.vertices.size() + src.vertices.size() > 10000000 || dst.indices.size() + src.indices.size() > 30000000
         || col.vertices.size() + source_col.vertices.size() > 10000000)
         throw std::runtime_error("Terrain aggregate exceeds supported limits");
