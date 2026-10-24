@@ -894,9 +894,13 @@ void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widge
         break;
     case WidgetClass::scoresequip:
     case WidgetClass::endstats:  // GuiEndGameStatistics (004e1840): +30 is GuiScoresEquip's 0035bf70 (132f11)
-    case WidgetClass::eqmodify:  // GuiEquipmentModify 002c0380: the same 00373670(00535d20), then 0041e470
         // 0035bf70: 00373670(00535d20), the light table only the figure
         // render 0035b390 reads (character_display_draw), then 0041e470.
+        break;
+    case WidgetClass::eqmodify:  // GuiEquipmentModify 002c0380: the same 00373670(00535d20), then 0041e470
+        // 132ws6: in game state 0x12 after the level load, over the level's pools; the level's first world
+        // update reads the last such table.
+        if (light_table_rebuild) light_table_rebuild();
         break;
     case WidgetClass::chardisplay: {  // 00326810: 0041e470, then the +48 callback
         for (const Widget* c : w.children)

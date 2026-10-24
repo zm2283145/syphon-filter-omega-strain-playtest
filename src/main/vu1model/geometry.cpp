@@ -185,6 +185,35 @@ Reference dma_reference(std::span<const std::uint8_t> bytes, std::size_t offset,
     return {begin, begin + size, offset + 16, alpha};
 }
 
+// The strip's later passes (MHSM meshes): one CNT after its two batch packets
+// whose VIF stream holds a 0xd8-byte section per pass k >= 1 at +8 + (k-1)*0xd8,
+// the stride of 00377270's pass loop (00377430). Each section repeats, for the
+// two batch halves (+0 / +0x68), a GIF tag NLOOP 3 EOP A+D with TEX1_1, TEX0_1
+// (patched at load from the pass texture +0x50) and ALPHA_1, then the MSCAL that
+// 00377270 patches from the program table at 00538080 for the pass shader.
+std::vector<std::uint64_t> later_pass_alphas(std::span<const std::uint8_t> bytes, std::size_t offset,
+                                             std::size_t chain_end, std::size_t passes) {
+    const std::size_t qwords = (8 + 0xd8 * (passes - 1) + 15) / 16 - 1;
+    if (offset > chain_end || chain_end - offset < 16 * (qwords + 1) || read_u32(bytes, offset) != (0x10000000 | qwords))
+        throw std::runtime_error("Expected the later-pass render-state DMA packet");
+    std::vector<std::uint64_t> alphas;
+    for (std::size_t k = 1; k < passes; ++k) {
+        const auto at = offset + 8 + (k - 1) * 0xd8;
+        std::optional<std::uint64_t> alpha;
+        for (const std::size_t half : {std::size_t{0}, std::size_t{0x68}}) {
+            const auto s = at + half;
+            if (read_u64(bytes, s + 0x28) != 0x1000000000000003ULL || read_u64(bytes, s + 0x30) != 0xe
+                || read_u64(bytes, s + 0x40) != 0x14 || read_u64(bytes, s + 0x60) != 0x42)
+                throw std::runtime_error("Unsupported later-pass render-state section");
+            const auto value = read_u64(bytes, s + 0x58);
+            if (alpha && *alpha != value) throw std::runtime_error("Later-pass batch halves carry different GS ALPHA");
+            alpha = value;
+        }
+        alphas.push_back(*alpha);
+    }
+    return alphas;
+}
+
 void zeros(std::span<const std::uint8_t> bytes, std::size_t begin, std::size_t end) {
     if (begin > end) throw std::runtime_error("VIF batch exceeds DMA payload");
     const auto padding = checked_bytes(bytes, begin, end - begin);
@@ -295,6 +324,15 @@ Mesh decode_vum(std::span<const std::uint8_t> bytes) {
                     bias, expected_vertices, color_spans);
                 if (part == 0 && strip > 0 && mesh.materials[material].passes.size() == 1) reference.begin = after;
                 else zeros(bytes, after, reference.end);
+            }
+            auto& passes = mesh.materials[material].passes;
+            if (passes.size() > 1) {
+                const auto alphas = later_pass_alphas(bytes, reference.next, chain_end, passes.size());
+                for (std::size_t k = 1; k < passes.size(); ++k) {
+                    if (passes[k].gs_alpha && *passes[k].gs_alpha != alphas[k - 1])
+                        throw std::runtime_error("Material strips carry different later-pass GS ALPHA");
+                    passes[k].gs_alpha = alphas[k - 1];
+                }
             }
         }
         mesh.surfaces.push_back({material, first, static_cast<Word>(mesh.indices.size()) - first});

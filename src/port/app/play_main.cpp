@@ -45,6 +45,7 @@
 #include "level_animation.hpp"
 #include "float_environment.hpp"
 #include "geometry.hpp"
+#include "gs_alpha.hpp"
 #include "material_anim.hpp"
 #include "hud_object.hpp"
 #include "hud_map.hpp"
@@ -2049,6 +2050,11 @@ struct PlayGuiOverlay{
     std::set<std::string> reported;
     std::function<void()> build_stats_figure;   // 0035d430's display actor for slot 0 (built on the first draw)
     bool eqmodify_figure_logged=false;   // the loadout figure's draw (parts and held guns) reported once
+    // Checkpoint 132ws6: camera record 0's +0x100 as the last figure draw 002bfa90 left it (0x3f060a92; it does not
+    // restore it). Cleared at loadout_open: what the load and the front end leave there is not modelled.
+    std::optional<float> gui_camera_theta;
+    // GuiEquipmentModify's 002c0380 -> 00373670(00535d20) over the level's pools (the play host's light table).
+    std::function<void(std::optional<float> theta)> loadout_light_rebuild;
     // Checkpoint 132f6: the loadout screen's figure, 002c1100's display actor (00393ff0) with the player's
     // skeleton, appearance (3927a0(actor, player + 60): the player's --part / --tex parts) and motion set,
     // playing "DATA_ID_CasualStand" (004ac600); drawn by 002c2340 -> 002bfa90.
@@ -2309,6 +2315,7 @@ struct PlayGuiOverlay{
         const RootParentTransform placement{{0.F,0.F,std::sin(h),std::cos(h)},{-0.6F,-5.0F,-2.0F,1.F}};
         const auto drawn=display_figure_draw(out,*figure,&placement,eqmodify_figure_clip_2bfa90(),man_world,
                                              screen.em->preview,guns,0x2bfa90);
+        gui_camera_theta=std::bit_cast<float>(0x3f060a92U);   // 002bfa90: record +0x100 (132ws6)
         if(!eqmodify_figure_logged){
             eqmodify_figure_logged=true;
             std::cout<<"Loadout screen: figure 002c2340 -> 002bfa90 drawn ("<<figure->character->geometry().size()
@@ -2860,6 +2867,7 @@ struct PlayGuiOverlay{
     // 00389a50 (the actor byte +2c3b wait) and 00166190's teardown run before it, at the call (checkpoint 132f8).
     void loadout_open(){
         loadout_pending=true;
+        gui_camera_theta.reset();
         driver.poll();
         gui::Widget* s=rt.factory("GuiEquipmentModify",std::string("eqmodify"));
         if(!s)throw std::runtime_error("00168628: 00418a80 GuiEquipmentModify \"eqmodify\" failed");
@@ -2957,6 +2965,7 @@ struct PlayGuiOverlay{
         if(hud&&host.hud_map)hud->byte_6a9=rt.g.hud_6a9;   // the GUI's g.hud_6a9 is the HUD's one byte +6a9
         const bool map_shown=hud&&hud->map_6a0&&hud->byte_6a9;
         drawer.map_screen_draw=[this](GuiDrawList& out,IeDrawState*,const gui::Widget&){map_draw(out);};
+        drawer.light_table_rebuild=[this]{if(loadout_light_rebuild)loadout_light_rebuild(gui_camera_theta);};
         // Port-only (checkpoint 132ws): the wide aspect's HUD element tags (below).
         // 132ws2: also with the map shown, so the HUD drawn over the map keeps its edge positions.
         const bool wide_hud=hud&&renderer.frame_fit()&&frame_wide(scene.width(),scene.height());
@@ -5345,7 +5354,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 bool extras=layered;
                 if(layered)for(std::size_t k=1;k<material.passes.size();++k){
                     const auto& pass=material.passes[k];
-                    const bool known=pass.shader==10||pass.shader==11||pass.shader==12||pass.shader==14;
+                    // 132ws6: a later program-2 pass draws with its section's ALPHA_1 (fix add / over / subtract).
+                    const bool program2=pass.shader==2&&pass.gs_alpha&&[&]{
+                        const auto blend=gs_blend_state(*pass.gs_alpha).blend;
+                        return blend==GsBlend::fix_add||blend==GsBlend::fix_over||blend==GsBlend::fix_subtract;}();
+                    const bool known=pass.shader==10||pass.shader==11||pass.shader==12||pass.shader==14||program2;
                     const bool image=pass.texture<textures.size()&&textures[pass.texture].width>0;
                     // Reflection passes need the model frame (rotation only).
                     const bool frame=!(pass.shader==10||pass.shader==11)||material.rigid_pose;
@@ -6683,6 +6696,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // pass's game::DarknessDecreaser; the light table the last frame's render built (0013e820 -> 00373670), before
         // the first render the empty level-start table (level_start_light_table).
         bool stealth_wanted=false;std::unique_ptr<StealthLighting> stealth;std::optional<LevelLightTable> stealth_table;
+        // Checkpoint 132ws6: the loadout screen's rebuild (o.loadout_light_rebuild) replaces the level-start table; on
+        // its first frame (no figure draw yet, record +0x100 not modelled) the table is unknown until the next.
+        bool stealth_table_unknown=false;bool loadout_light_logged=false;
         // The particle light sample of 003a1760 (Checkpoint 131c) reads the same manager and table; without the
         // stealth pass the manager is this one.
         bool particle_light_wanted=false;
@@ -9661,7 +9677,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         if(play_particles&&play_particles->system){
             particle_light_wanted=true;
             play_particles->system->game_light=[&](const std::array<float,4>& point){
-                if(!stealth_table)throw std::logic_error("003a1760: no light table");
+                if(!stealth_table)throw std::logic_error(stealth_table_unknown?"003a1760: the light table of the loadout screen's first frame (002c0380 before any figure draw 002bfa90: record +0x100 not modelled)":"003a1760: no light table");
                 if(!stealth)stealth=std::make_unique<StealthLighting>(actors.size());   // the stealth pass sets the thresholds
                 ModelLightGather& m=stealth->manager();
                 take_light_changes(m);
@@ -11538,6 +11554,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"PORT-ONLY --loadout-all-records: 0051ee38 = 1 (002bf090 lists every weapon record of each category)\n";
             }
             o.host.loadout_start=[&o]{o.loadout_pending=false;o.loadout_done_pending=true;o.driver.poll();};
+            // Checkpoint 132ws6: 002c0380's 00373670 in the GUI's orthographic record under the canvas top (level_lights.hpp
+            // loadout_light_camera): the last loadout frame's table is the one the level's first world update reads.
+            o.loadout_light_rebuild=[&](std::optional<float> theta){
+                if(!stealth_wanted&&!particle_light_wanted)return;
+                if(!theta){stealth_table.reset();stealth_table_unknown=true;return;}
+                stealth_table=build_level_light_table(shadow_scene.lights(),loadout_light_view(),loadout_light_camera(*theta));
+                stealth_table_unknown=false;
+                if(!loadout_light_logged){
+                    loadout_light_logged=true;
+                    std::cout<<"Loadout screen: light table 002c0380 -> 00373670 (ortho GUI record, canvas top): "
+                             <<stealth_table->rows.size()<<" entries\n";
+                }
+            };
             o.host.loadout_accepted=[&player_loadout_selection,&partner_loadout_dirty,&coop_extra](const EquipmentLoadoutSelection& s){
                 player_loadout_selection=s;partner_loadout_dirty=true;for(auto& e:coop_extra)e.partner_loadout_dirty=true;};
             // Checkpoint 132f7: 0035d430 (the stats screen's ctor) builds its display actors when the Stats pane
@@ -15959,7 +15988,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         stealth->set_thresholds(StealthThresholds{darkness,90});
                     }else if(darkness!=*stealth_darkness)
                         throw std::runtime_error("Stealth pass: game::DarknessDecreaser changed after the first pass (not hosted)");
-                    if(!stealth_table)throw std::logic_error("Stealth pass: no light table");
+                    if(!stealth_table)throw std::logic_error(stealth_table_unknown?"Stealth pass: the light table of the loadout screen's first frame (002c0380 before any figure draw 002bfa90: record +0x100 not modelled)":"Stealth pass: no light table");
                     {
                         std::vector<StealthActor> sa(actors.size());
                         for(std::size_t a=0;a<actors.size();++a){

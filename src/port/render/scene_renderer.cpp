@@ -687,10 +687,26 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
                 const auto& pass = material.passes[k];
                 float mode = 0;
                 const gfx::BlendState* state = blend_add_half_.get();
+                float factor = 0.5F;
                 switch (pass.shader) {
                 case 10: case 11: mode = 1; break;  // reflection map
                 case 12: mode = 2; break;           // same coordinates
                 case 14: mode = 3; state = blend_subtract_half_.get(); break;  // emboss
+                case 2: {
+                    // 132ws6: a later program-2 pass (VU1 0x156 re-run over the strip, as the base pass) with
+                    // the pass texture and the ALPHA_1 of its section (BELARUS1 NI_BUCKET 0x68 FIX 0x0c..0x11
+                    // Cs*FIX+Cd, MINSK doors' ENV_map 0x64 FIX 0x20 (Cs-Cd)*FIX+Cd).
+                    if (!pass.gs_alpha) throw std::runtime_error("Program-2 material pass without its ALPHA_1");
+                    const auto pass_blend = gs_blend_state(*pass.gs_alpha);
+                    factor = pass_blend.fix;
+                    switch (pass_blend.blend) {
+                    case GsBlend::fix_add: break;
+                    case GsBlend::fix_over: state = blend_fix_over_.get(); break;
+                    case GsBlend::fix_subtract: state = blend_subtract_half_.get(); break;
+                    default: throw std::runtime_error("Unsupported program-2 material pass ALPHA_1");
+                    }
+                    break;
+                }
                 default: throw std::runtime_error("Unsupported material pass shader " + std::to_string(pass.shader));
                 }
                 if (mode == 1 && !material.rigid_pose)
@@ -701,8 +717,8 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
                 data.options.w = mode;
                 data.up = {material.model_up.x, material.model_up.y, material.model_up.z, 0};
                 update();
-                const float half[4]{0.5F, 0.5F, 0.5F, 0.5F};
-                l.set_blend(state, half);
+                const float constant[4]{factor, factor, factor, factor};
+                l.set_blend(state, constant);
                 bind0(pass_image);
                 l.draw_indexed(surface.index_count, surface.first_index);
             }

@@ -286,8 +286,19 @@ float renderer_aspect(int width,int height){                                    
     return fdiv(screens[k-1][0],screens[k-1][1]);                                   // +0xf88 / +0xf8c
 }
 
-ShadowMatrix level_camera_projection(const LevelLightCamera& c){                // 003754a0
-    require(!c.orthographic,"orthographic camera records (00375390) are not supported");
+ShadowMatrix level_camera_projection(const LevelLightCamera& c){                // 003754a0 / 00375390
+    if(c.orthographic){                                                          // 00375390
+        require(std::isfinite(c.width)&&std::isfinite(c.height)&&std::isfinite(c.ortho_near)&&std::isfinite(c.ortho_far)&&
+                std::isfinite(c.scale_x)&&std::isfinite(c.scale_y),"camera values not finite");
+        require(c.width!=0.0F&&c.height!=0.0F&&c.ortho_far!=c.ortho_near,"degenerate orthographic projection");
+        const float depth=sub(c.ortho_far,c.ortho_near);
+        ShadowMatrix p;
+        p.column[0]={fdiv(mul(2.0F,c.scale_x),c.width),0.0F,0.0F,0.0F};
+        p.column[1]={0.0F,fdiv(mul(2.0F,c.scale_y),c.height),0.0F,0.0F};
+        p.column[2]={0.0F,0.0F,fdiv(2.0F,depth),0.0F};
+        p.column[3]={0.0F,0.0F,fdiv(-add(c.ortho_far,c.ortho_near),depth),1.0F};
+        return p;
+    }
     require(std::isfinite(c.half_angle)&&std::isfinite(c.near_plane)&&std::isfinite(c.far_plane)&&std::isfinite(c.aspect),
         "camera values not finite");
     const float t=game_tanf(c.half_angle);
@@ -303,12 +314,14 @@ ShadowMatrix level_camera_projection(const LevelLightCamera& c){                
 
 std::vector<LevelLightTableRow> rebuild_level_light_table(const LevelLights& lights,const ShadowMatrix& view,const LevelLightCamera& camera){
     std::vector<LevelLightTableRow> rows;
-    // 00373670: the clip matrix of the camera test is (P*A)*I (identity view pushed), D = far for perspective.
+    // 00373670: the clip matrix of the camera test (0037d9a0) is (P*A)*I for a perspective record, P*I for an
+    // orthographic one (0037ded8), the identity view pushed; D = far (C+0xfc), or C+0xf8 when C+0x104 is set.
     const ShadowMatrix p=level_camera_projection(camera);
     ShadowMatrix identity;
     for(std::size_t k=0;k<4;++k)identity.column[k][k]=1.0F;
-    const ShadowMatrix clip=shadow_multiply(shadow_multiply(p,shadow_axis_matrix()),identity);
-    const float half=mul(0.5F,camera.far_plane);                                // 00373718
+    const ShadowMatrix clip=camera.orthographic?shadow_multiply(p,identity):shadow_multiply(shadow_multiply(p,shadow_axis_matrix()),identity);
+    require(std::isfinite(camera.half_angle),"camera half angle not finite");
+    const float half=mul(0.5F,camera.orthographic?camera.ortho_far:camera.far_plane);   // 003736f0..00373728
     const float radius=fdiv(half,game_cosf(camera.half_angle));
     const V centre{0.0F,half,0.0F,1.0F};
     const LevelLightPool order[3]={LevelLightPool::point,LevelLightPool::spot,LevelLightPool::directional};
@@ -374,6 +387,26 @@ LevelLightTable level_start_light_table(const LevelLights& lights){
     std::size_t base[4]{};
     flatten_level_light_pools(lights,out,base);
     return out;
+}
+
+LevelLightCamera loadout_light_camera(float theta){
+    LevelLightCamera c;
+    c.half_angle=theta;                                                          // C+0x100 (002bfa90: 0x3f060a92)
+    c.near_plane=std::bit_cast<float>(0x3f800001U);                              // C+0xf4 (002bfa90)
+    c.far_plane=40.0F;                                                           // C+0xfc (002bfa90)
+    c.orthographic=true;                                                         // C+0x104 (00415bb0)
+    c.width=640.0F;c.height=480.0F;                                              // C+8 / C+0xc = renderer +f88 / +f8c
+    c.ortho_near=0.0F;c.ortho_far=1000.0F;                                       // C+0xf0 / C+0xf8 (00415bb0)
+    c.scale_x=1.0F;c.scale_y=1.0F;                                               // renderer +5c / +60 (0037e780, NTSC)
+    return c;
+}
+ShadowMatrix loadout_light_view(){                                              // 00415d28..00415e00: I x S
+    ShadowMatrix s;
+    s.column[0]={1.0F,0.0F,0.0F,0.0F};
+    s.column[1]={0.0F,0.0F,1.0F,0.0F};
+    s.column[2]={0.0F,1.0F,0.0F,0.0F};
+    s.column[3]={0.0F,0.0F,1.0F,1.0F};
+    return s;
 }
 
 LevelLightTable build_level_light_table(const LevelLights& lights,const ShadowMatrix& view,const LevelLightCamera& camera){

@@ -292,6 +292,9 @@ public:
     // Checkpoint 132f14: GuiAgentDisplay's draw 00361e70 after 0041e470: its actor (the agent's +a0
     // packing) through the +50 camera turned by +80..+88 (agent_camera_view). Unset, it throws naming 00361e70.
     std::function<void(GuiDrawList& out, IeDrawState* st, const gui::Widget& display)> agent_display_draw;
+    // Checkpoint 132ws6: GuiEquipmentModify's 002c0380 calls 00373670(00535d20) before 0041e470: the level's light
+    // table rebuilt in the GUI camera (the host's; level_lights.hpp loadout_light_camera). Unset: not rebuilt.
+    std::function<void()> light_table_rebuild;
     // The game screen (GuiGameScreen, vtable 004e1620, HUD +6a4: GAMEGUI's root as 004187c0 makes it) whose
     // +30 is 0045d8d0 instead of 0041e470. Null: no widget takes that draw.
     const gui::Widget* game_screen = nullptr;

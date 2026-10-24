@@ -185,18 +185,33 @@ struct LevelLightCamera {
     float near_plane{2.0F};           // C+0xf4
     float far_plane{};                // C+0xfc
     float aspect{640.0F/480.0F};      // renderer +0xf94: renderer_aspect(640, 448), the NTSC frame buffer (0037f740)
-    bool orthographic{false};         // C+0x104 (not supported)
+    bool orthographic{false};         // C+0x104
+    // Orthographic records (00375390): C+8 / C+0xc, C+0xf0 / C+0xf8, and the scales 00375330 / 00375360 (renderer
+    // +5c / +60 when +1064 is -1, else 1).
+    float width{640.0F},height{480.0F};
+    float ortho_near{0.0F},ortho_far{1000.0F};
+    float scale_x{1.0F},scale_y{1.0F};
 };
-// 003754a0: the renderer perspective for a camera record.
+// 003754a0 (perspective) or 00375390 (orthographic): the renderer projection for a camera record.
 ShadowMatrix level_camera_projection(const LevelLightCamera& camera);
-// 00373670 / 00373940 for a perspective camera: the point pool, then the
-// spot pool, then the directional pool, each in pool order; enabled lights
-// enter as class 1 (type 2), 3 (view position inside the clip volume of
-// projection*axis, the depth bit ignored) or 2 (within R + 0.5*range of the
-// view-space point (0, D/2, 0), R = (D/2)/cosf(theta), D = far). `view` is
-// the frame's view matrix (shadow_rigid_inverse of the camera transform).
-// Throws for an orthographic camera and for a non-directional enabled light
-// whose range method (vcall +0x34) is not one of the two known ones.
+// Checkpoint 132ws6: the camera record and view 00373670 sees in GuiEquipmentModify's draw 002c0380 (the
+// level-start loadout, game state 0x12 after the level load). 00415bb0 (GuiFrontendCanvas) sets C+0xf0 = 0,
+// C+0xf8 = 1000, C+0x104 = 1 and pushes top x S, S columns (1,0,0,0) (0,0,1,0) (0,1,0,0) (0,0,1,1)
+// (00415d28..00415e00; the top below it is the stack[0] identity of 0037e780); C+0..+0xc is renderer +f80..+f8c
+// (0, 0, 640, 480; 00168550 / 002bfa90). theta is C+0x100 as the previous frame's figure draw 002bfa90 left it
+// (0.5236 = 0x3f060a92; it sets +0x100 / +0xf4 / +0xfc and restores only +0xf0 / +0xf8 / +0x104..+0x106).
+LevelLightCamera loadout_light_camera(float theta);
+ShadowMatrix loadout_light_view();
+// 00373670 / 00373940: the point pool, then the spot pool, then the
+// directional pool, each in pool order; enabled lights enter as class 1
+// (type 2), 3 (view position inside the clip volume of projection*axis for
+// a perspective record, of the bare projection for an orthographic one
+// (0037d9a0's branch 0037ded8 skips +e80), the depth bit ignored) or 2
+// (within R + 0.5*range of the view-space point (0, D/2, 0), R =
+// (D/2)/cosf(theta), D = far, or C+0xf8 for an orthographic record). `view`
+// is the matrix stack top at the call (in play the frame's view matrix,
+// shadow_rigid_inverse of the camera transform). Throws for a non-directional
+// enabled light whose range method (vcall +0x34) is not one of the known ones.
 struct LevelLightTableRow { LevelLightRef light; std::uint8_t cls{}; };
 std::vector<LevelLightTableRow> rebuild_level_light_table(const LevelLights& lights,const ShadowMatrix& view,const LevelLightCamera& camera);
 // The table and the light records as build_shadow_frame takes them. The
@@ -212,11 +227,16 @@ struct LevelLightTable {
 LevelLightTable build_level_light_table(const LevelLights& lights,const ShadowMatrix& view,const LevelLightCamera& camera);
 // The table a level's first world update reads, before its first render
 // rebuilds it (the stealth pass 00133768 -> 00133ab0 and the particle light
-// sample 003a1760 run in the world update, 0013e820 -> 00373670 after it):
-// no entries. The manager's +0x4c is 0 at boot and after any front-end
-// rebuild 00373670 over the pools a teardown freed (00374020 zeroes them and
-// leaves +0x4c); the level loader's pool allocations 00374270 and its light
-// enables do not touch it (EE goldens tests/light_table_lifecycle_goldens.hpp).
-// The pools are the level's.
+// sample 003a1760 run in the world update, 0013e820 -> 00373670 after it),
+// when no loadout screen was drawn after the load: no entries. The manager's
+// +0x4c is 0 at boot and after any front-end rebuild 00373670 over the pools
+// a teardown freed (00374020 zeroes them and leaves +0x4c); the level
+// loader's pool allocations 00374270 and its light enables do not touch it
+// (EE goldens tests/light_table_lifecycle_goldens.hpp). The pools are the
+// level's. With the loadout screen (game state 0x12, OmegaStrain.exe's path)
+// its draw 002c0380 rebuilds the table over the level's pools every frame
+// (build_level_light_table(lights, loadout_light_view(),
+// loadout_light_camera(theta)); tests/loadout_light_table_goldens.hpp), and
+// the last such table is the one the first world update reads.
 LevelLightTable level_start_light_table(const LevelLights& lights);
 }

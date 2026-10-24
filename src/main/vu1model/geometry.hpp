@@ -22,7 +22,12 @@ struct MeshVertex {
     // red, green, blue. Zero for every other vertex.
     std::array<float, 3> gore{};
 };
-struct MaterialPass { std::uint32_t texture{}, shader{}; };
+struct MaterialPass {
+    std::uint32_t texture{}, shader{};
+    // Pass k >= 1: ALPHA_1 of its section in the strip's later-pass packet
+    // (00377270 patches the section's TEX0 / MSCAL; ALPHA comes from the file).
+    std::optional<std::uint64_t> gs_alpha;
+};
 struct MeshMaterial {
     std::uint32_t texture{}, flags{}, shader{};
     std::vector<MaterialPass> passes;

@@ -27,7 +27,6 @@ lands. Each update's commit message names the development commit it was taken fr
 
 ## What does not work yet
 
-- **ITALY** currently stops right after it loads when started from the game (a fix is in progress).
 - **Levels still in progress:** ZURICH, YEMEN2, LORELEI, CHECHNYA and MYANMAR load and play part of the way, then
   stop. When the port reaches something that is not ported yet, it stops with an "unhosted …" or "… not ported"
   message naming the original function; it never guesses. Please report where it stopped (see below).
