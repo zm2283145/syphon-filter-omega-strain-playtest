@@ -12,11 +12,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <streambuf>
 #include <thread>
@@ -128,11 +130,19 @@ struct Watch {
     std::chrono::steady_clock::time_point since;
     bool reported = false;
 };
+struct Shutdown {  // port-only (132ws8): arm_shutdown's phase
+    bool armed = false;
+    std::string phase;
+    int exit_code = 0;
+    double seconds = 0;
+    std::chrono::steady_clock::time_point since;
+};
 struct Watchdog {
     std::mutex mutex;
     std::vector<Watch> watches;
     std::uint64_t next_id = 1;
     fs::path fallback = "ux0:data/omega_strain/stalls";
+    Shutdown shutdown;
 };
 Watchdog& watchdog() {
     static Watchdog* w = new Watchdog;
@@ -166,6 +176,28 @@ void watchdog_loop() {
         for (const auto& [name, message] : stalls) {
             log_line("Stall watchdog (port-only, 132mt3): " + message);
             report_stall("the stall watchdog (crash_report.hpp StallWatch: " + name + ")", message, w.fallback);
+        }
+        // Port-only (132ws8): a shutdown phase past its bound ends the process (arm_shutdown), as on the PC.
+        std::optional<Shutdown> late;
+        {
+            std::lock_guard lock(w.mutex);
+            const auto now = std::chrono::steady_clock::now();
+            if (w.shutdown.armed && std::chrono::duration<double>(now - w.shutdown.since).count() >= w.shutdown.seconds) {
+                late = w.shutdown;
+                w.shutdown.armed = false;
+            }
+        }
+        if (late) {
+            const std::string message = "the shutdown phase \"" + late->phase + "\" did not end within " +
+                                        std::to_string(int(late->seconds)) + " s; the process ends with exit code " +
+                                        std::to_string(late->exit_code) + " (the saves were written before the teardown)";
+            log_line("Shutdown watchdog (port-only, 132ws8): " + message);
+            report_stall("the shutdown watchdog (crash_report.hpp arm_shutdown)", message, w.fallback);
+            std::cout.flush();
+            std::cerr.flush();
+            std::fflush(stdout);
+            std::fflush(stderr);
+            std::_Exit(late->exit_code);
         }
     }
 }
@@ -270,6 +302,21 @@ StallWatch::~StallWatch() {
     std::lock_guard lock(w.mutex);
     std::erase_if(w.watches, [&](const Watch& watch) { return watch.id == id_; });
 }
+
+void arm_shutdown(std::string phase, int exit_code, double seconds) {
+    start_stall_watchdog();
+    auto& w = watchdog();
+    std::lock_guard lock(w.mutex);
+    w.shutdown = {true, std::move(phase), exit_code, seconds, std::chrono::steady_clock::now()};
+}
+
+void disarm_shutdown() {
+    auto& w = watchdog();
+    std::lock_guard lock(w.mutex);
+    w.shutdown.armed = false;
+}
+
+int raise_idle_threads() { return 0; }  // the PC's driver threads only
 
 bool test_crash_kind(std::string_view kind) {
     return kind == "throw" || kind == "unported" || kind == "access-violation" || kind == "terminate" ||

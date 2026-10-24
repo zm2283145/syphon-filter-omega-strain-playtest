@@ -144,6 +144,22 @@ void start_loading_screen_thread(bool offscreen) {
     });
 }
 
+void release_loading_screen_device() {
+    std::shared_ptr<HostThread::Completion> made;
+    std::shared_ptr<gfx::Device> device;
+    {
+        std::lock_guard lock(g_offscreen_mutex);
+        made = g_offscreen_made;
+    }
+    if (made) made->wait();
+    {
+        std::lock_guard lock(g_offscreen_mutex);
+        device = std::move(g_offscreen);
+        g_offscreen.reset();
+    }
+    device.reset();
+}
+
 LoadingScreenHost::LoadingScreenHost(std::unique_ptr<LoadingScreenAssets> assets, std::string level,
                                      LoadingHostOptions options)
     : assets_(std::move(assets)), level_(std::move(level)), options_(std::move(options)) {
@@ -292,13 +308,24 @@ void LoadingScreenHost::run() {
                     window->sync_buffers();
                     const float black[4] = {0, 0, 0, 1};
                     gfx::clear_target(*window->gfx(), window->back_buffer(), black);
-                    // Port-only (132ws): the loading screen is one 4:3 picture under the wide aspect (bars or zoom).
-                    for (GuiDrawBatch& b : list.batches) b.port_picture = true;
-                    // A mod's wide background ("loading.<level>", 132md12) beside the barred picture (not zoomed).
-                    if (frame_wide(window->width(), window->height()) && !frame_movie_zoom_setting())
-                        renderer->draw_wide_background("loading." + level_, window->back_buffer(), window->width(),
-                                                       window->height());
+                    // Port-only (132ws8, research/FRONTEND.md "Checkpoint 132ws8"): under the wide aspect the loading
+                    // screen (the level's briefing) is drawn as the front end's wide menus (132ws5): its art extended
+                    // to the window's edges, the text centred, the side fill only when nothing was extended; a mod's
+                    // wide background ("loading.<level>", 132md12) replaces both. movie_fill=zoom keeps 132ws's one
+                    // 4:3 picture scaled to the width; every other aspect draws as before.
+                    const bool wide_menu = frame_wide(window->width(), window->height()) && !frame_movie_zoom_setting();
+                    if (!wide_menu)
+                        for (GuiDrawBatch& b : list.batches) b.port_picture = true;
+                    const bool wide_background =
+                        wide_menu && renderer->draw_wide_background("loading." + level_, window->back_buffer(),
+                                                                    window->width(), window->height());
+                    renderer->set_wide_edge_extend(wide_menu && !wide_background);
+                    renderer->set_wide_menu(wide_menu);
                     renderer->draw(list, window->back_buffer(), window->width(), window->height());
+                    renderer->set_wide_menu(false);
+                    renderer->set_wide_edge_extend(false);
+                    if (wide_menu && !wide_background && !list.batches.empty() && renderer->wide_edge_images() == 0)
+                        renderer->draw_wide_fill(window->back_buffer(), window->width(), window->height());
                     if (frames_ == options_.capture_frame && !options_.capture_dir.empty()) {
                         std::filesystem::create_directories(options_.capture_dir);
                         if (window->capture(capture_path())) std::cout << "Loading screen capture (port-only) at loading frame " << frames_ << "\n";

@@ -639,6 +639,7 @@ int run(int argc, wchar_t** argv, int (*play)(int, wchar_t**)) {
         crash::install({fs::absolute("local") / "crashes", g_dialogs});
         g_active = true;
         const int code = play(int(storage.size()), pointers.data());
+        crash::disarm_shutdown();  // 132ws8 (port-only): the play's teardown ended; a dialog below may wait on the user
         g_active = false;
         std::cout << "Launcher (port-only): session ended (exit " << code << ")\n";
         if (code != 0 && !g_failure_shown)

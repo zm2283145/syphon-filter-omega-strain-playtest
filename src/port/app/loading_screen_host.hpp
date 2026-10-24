@@ -88,6 +88,10 @@ struct LoadingHostOptions {
 // creation) then waits, and 132mt2's hand-off joined a thread doing exactly those. Call it early (play_main does,
 // before the front end); a LoadingScreenHost starts it itself otherwise (no offscreen device: made per screen).
 void start_loading_screen_thread(bool offscreen);
+// Port-only (132ws8, research/FRONTEND.md "Shutdown (132ws8)"): releases start_loading_screen_thread's offscreen device
+// (after its creation finished) on the calling thread; play_main's teardown calls it after the last LoadingScreenHost,
+// so no device is left to the static destructors at the process exit. A later hidden screen makes its own.
+void release_loading_screen_device();
 
 class LoadingScreenHost {
 public:

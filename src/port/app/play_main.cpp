@@ -4848,6 +4848,32 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         DiscImage disc(stream,OMEGA_ISO_SIZE);
         std::unique_ptr<LoadingScreenHost> loading_host;
         std::unique_ptr<FrontendApp> frontend_app;   // kept for the level end (00335830) and the resume after it
+        // Checkpoint 132ws8 (port-only, research/FRONTEND.md "Shutdown (132ws8)"): the session's bounded teardown on
+        // every exit from here (each return, a throw). Destroyed before frontend_app, loading_host, save_placement and
+        // host_window, it writes the window placement first, raises the driver's idle-priority threads, then releases
+        // the front end and the loading screens' session device in order, each phase timed and under the shutdown
+        // watchdog (crash_report.hpp arm_shutdown: 20 s a phase), which stays armed for the rest (host_window, the
+        // threads); the top-level catch disarms it before its dialogs.
+        struct ShutdownOrder{
+            std::function<void()> f;
+            ~ShutdownOrder(){try{if(f)f();}catch(...){}}
+        } shutdown_order{[&]{
+            const int code=std::uncaught_exceptions()>0?1:0;
+            save_placement.f();save_placement.f=nullptr;
+            const int raised=omega::crash::raise_idle_threads();
+            const auto phase=[&](const char* what,const std::function<void()>& release){
+                omega::crash::arm_shutdown(std::string("the session's teardown: ")+what,code,20);
+                const auto t0=std::chrono::steady_clock::now();
+                release();
+                std::cout<<"Shutdown (port-only, 132ws8): "<<what<<" in "<<std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now()-t0).count()<<" ms\n";
+            };
+            std::cout<<"Shutdown (port-only, 132ws8): "<<raised<<" idle-priority threads raised to normal\n";
+            phase("the front end released",[&]{frontend_app.reset();});
+            phase("the loading screen released",[&]{loading_host.reset();release_loading_screen_device();});
+            std::cout.flush();
+            omega::crash::arm_shutdown("the session's teardown: the host window, the threads and the rest",code,20);
+        }};
         lan::LanNetCore* lan_net=nullptr;   // port-only (132ln5e): the LAN network game's DME.cc game side (the front end's)
         std::chrono::steady_clock::time_point lan_timer_at{};   // port-only (132ln5e): the last in-level TIM0 catch-up
         if(frontend){
@@ -18701,6 +18727,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         }   // the level loop
         return 0;
     }catch(const std::exception& e){
+        omega::crash::disarm_shutdown();   // 132ws8: the teardown is over; the dialogs below wait on the user
         std::cerr<<"omega_play failed: "<<e.what()<<'\n';
         // Checkpoint 132win12 (port-only): with the crash reporter installed (the launcher, --crash-dir) the failure
         // leaves a report naming the throw address; the launcher's dialog (else the reporter's) names its files.
@@ -18719,11 +18746,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
 #ifdef _WIN32
 int wmain(int argc,wchar_t** argv){
     omega::enable_per_monitor_dpi_awareness();   // port-only (132win14 HiDPI, host_window.hpp): before any window
-    if(omega::launcher::is_launcher_executable(omega::launcher::module_path())||omega::launcher::is_launch(argc,argv))return omega::launcher::run(argc,argv,&play_main);
-    return play_main(argc,argv);
+    const int code=omega::launcher::is_launcher_executable(omega::launcher::module_path())||omega::launcher::is_launch(argc,argv)
+        ?omega::launcher::run(argc,argv,&play_main):play_main(argc,argv);
+    // Port-only (132ws8, research/FRONTEND.md "Shutdown (132ws8)"): the static destructors and the exit are bounded too.
+    std::cout.flush();std::cerr.flush();
+    omega::crash::arm_shutdown("the process exit",code,20);
+    return code;
 }
 #else
 // Port-only (132vt2, research/VITA.md "The play host"): the PS Vita app (vita_main.cpp) runs the play host with the
 // launcher's argument list after its own disc check.
-int omega_play_entry(int argc,wchar_t** argv){return play_main(argc,argv);}
+int omega_play_entry(int argc,wchar_t** argv){
+    const int code=play_main(argc,argv);
+    omega::crash::disarm_shutdown();   // 132ws8: the Vita app's own error screen may follow
+    return code;
+}
 #endif

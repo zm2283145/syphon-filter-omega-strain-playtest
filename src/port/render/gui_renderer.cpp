@@ -312,6 +312,18 @@ std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiVie
     std::vector<GuiTriangleVertex> out;
     out.reserve(b.vertices.size());
     const auto& m = b.matrix;
+    // 132ws8: VU1 program 2 (00538080 entry 2 = 0x156, microcode set 0) runs a 00371200 batch in clip mode 2
+    // (0037c870 sets VU data 0.x bit 0 for 00371200's flag 0x40000; the common setup 0x00..0xb8 then skips the
+    // batch cull and stores mode 2 at TOP+6.w). Mode 2 (0x0c98) runs clipw.xyz per vertex against the frame block
+    // (data 5..8 = renderer +0xec0, the camera record's projection), and fcand 0x3ffff over the last three judgments
+    // sets XYZ2's ADC bit (0x7fff + 1), so the GS draws no triangle with any vertex outside the clip volume. Under
+    // the HUD / front-end orthographic record (003e7670 at 003e780c / 003e7814, front end 00415bb0: near 0, far
+    // 1000.0) that drops each triangle with a vertex at z < 0 or z > 1000: the speaker callout (hud_callouts) whose
+    // speaker is behind the camera (its element z negated) is never drawn. The guard band's x / y bound (+0xec0's
+    // scaled rows) lies far outside the screen and is not modelled.
+    const bool ortho_cull = b.flush == 0x371200 && !b.clip && !b.perspective;
+    bool outside = false;
+    std::size_t corner = 0;
     for (const GuiVertex& v : b.vertices) {
         std::array<float, 4> p{};
         for (int c = 0; c < 4; ++c)
@@ -338,6 +350,14 @@ std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiVie
         t.uv = textured ? std::array<float, 2>{v.uv[0] - 2048.0F, v.uv[1] - 2048.0F} : std::array<float, 2>{0.0F, 0.0F};
         t.colour = host_colour(v.colour);
         out.push_back(t);
+        if (ortho_cull) {
+            outside = outside || p[2] < 0.0F || p[2] > 1000.0F;
+            if (++corner == 3) {
+                if (outside) out.resize(out.size() - 3);
+                outside = false;
+                corner = 0;
+            }
+        }
     }
     return out;
 }
@@ -921,13 +941,14 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 return out;
             };
             auto menu_bounds = bounds_of();
-            // A batch that spreads, of an element that does not, gets a tag of its own (gui_wide_menu_spreads).
+            // A batch that spreads, of an element that does not, gets a tag of its own (gui_wide_menu_spreads),
+            // marked menu_split_tag: in the header band it moves only with a partner (132ws8, gui_wide_menu_shifts).
             bool split = false;
             for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
                 WideRange& r = wide_ranges[i];
                 if (r.menu == 0 || r.anchor != 0 || r.kind != wide_frame) continue;
                 if (gui_wide_menu_spreads(menu_bounds[r.menu]) || !gui_wide_menu_spreads(range_bounds(r))) continue;
-                r.menu = 0x80000000U | static_cast<std::uint32_t>(i);
+                r.menu = menu_split_tag | static_cast<std::uint32_t>(i);
                 split = true;
             }
             if (split) menu_bounds = bounds_of();
@@ -1371,7 +1392,13 @@ std::map<std::uint32_t, float> gui_wide_menu_shifts(const std::map<std::uint32_t
             float x0 = row[i].x0, x1 = row[i].x1;
             for (; j < row.size() && row[j].x0 - x1 < menu_spread_gap; ++j) x1 = std::max(x1, row[j].x1);
             const float shift = 0.5F * (x0 + x1) * k;
-            for (std::size_t m = i; m < j; ++m) out[row[m].tag] = shift;
+            // 132ws8: in the header band a group of split batches alone (no element of its own spreading) stays: the
+            // title menu's NEW AGENT, the top item of its list reaching up into the band, keeps its column. The
+            // legend's split icons and labels (a legend element's rows) spread as before.
+            bool partnered = !header;
+            for (std::size_t m = i; m < j; ++m) partnered = partnered || (row[m].tag & menu_split_tag) == 0;
+            if (partnered)
+                for (std::size_t m = i; m < j; ++m) out[row[m].tag] = shift;
             i = j;
         }
     }

@@ -144,7 +144,11 @@ std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& 
 // in proportion to the target's width. Everything else (the centred content) does not move. Returns tag -> shift.
 // The draw gives a batch lying in a band its own tag when its element does not spread (gui_wide_menu_spreads false:
 // ACNTLOGN's "Accept" label is part of the login form's element while its Square icon is an element of its own;
-// ONLIPREF's d-pad icon the other way round), so a label and its icon move together.
+// ONLIPREF's d-pad icon the other way round), so a label and its icon move together. Such a tag carries
+// menu_split_tag, and in the header band a group of split tags alone does not move (132ws8: the title menu's NEW
+// AGENT, the top item of the list element reaching up into the band, stays in its column; DOSSIER's "Agent:" label
+// moves with the name). The legend's split icons and labels spread alone as before.
+inline constexpr std::uint32_t menu_split_tag = 0x80000000U;
 inline constexpr float menu_header_y = 168.0F;
 inline constexpr float menu_legend_y = -165.0F;
 inline constexpr float menu_spread_width = 360.0F;

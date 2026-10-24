@@ -88,6 +88,20 @@ private:
     std::uint64_t id_ = 0;
 };
 
+// Port-only (checkpoint 132ws8, research/FRONTEND.md "Shutdown (132ws8)"): the bounded shutdown. arm_shutdown starts
+// (or replaces) a deadline for one named teardown phase on the stall watchdog's thread (made early, see above); when
+// the phase is still running after `seconds` (no later arm_shutdown or disarm_shutdown), the watchdog logs the phase,
+// writes a stall report (every thread's stack) and ends the process with `exit_code` after flushing the standard
+// streams (TerminateProcess on the PC: no DLL detach). Arm it only after the saves are written; disarm it before a
+// dialog waits on the user.
+void arm_shutdown(std::string phase, int exit_code, double seconds);
+void disarm_shutdown();
+// Port-only (132ws8): raises every thread of this process below normal priority to normal and answers how many (the
+// Vita: none). The teardown calls it before the devices' release: the final release of a D3D11 device waits in the
+// NVIDIA driver for its helper threads, which run at idle priority and, on a PC whose cores are all busy, starve for
+// minutes (research/THREADING.md "The loading-screen hang"); the process's own idle work is over by then.
+int raise_idle_threads();
+
 // Port-only tests (--test-crash / --frontend-test-crash <kind> <frame>): "throw" (a std::runtime_error), "unported"
 // (a "... (00214920) is not ported" error), "access-violation" (a write through a null pointer: the SEH filter),
 // "terminate" (an exception escaping a std::thread) or "invalid-parameter" (checkpoint 132pc1: _close of an invalid

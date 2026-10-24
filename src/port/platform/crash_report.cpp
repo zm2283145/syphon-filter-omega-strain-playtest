@@ -980,11 +980,19 @@ struct Watch {
     std::chrono::steady_clock::time_point since;
     bool reported = false;
 };
+struct Shutdown {  // port-only (132ws8): arm_shutdown's phase
+    bool armed = false;
+    std::string phase;
+    int exit_code = 0;
+    double seconds = 0;
+    std::chrono::steady_clock::time_point since;
+};
 struct Watchdog {
     std::mutex mutex;
     std::vector<Watch> watches;
     std::uint64_t next_id = 1;
     fs::path fallback = fs::absolute("local") / "stalls";
+    Shutdown shutdown;
 };
 Watchdog& watchdog() {
     static Watchdog* w = new Watchdog;  // never destroyed: its thread runs to the process end
@@ -1020,6 +1028,27 @@ void watchdog_loop() {
             log_line("Stall watchdog (port-only, 132mt3): " + message);
             report_stall("the stall watchdog (crash_report.hpp StallWatch: " + name + ")", message, w.fallback);
         }
+        // Port-only (132ws8): a shutdown phase past its bound ends the process (arm_shutdown).
+        std::optional<Shutdown> late;
+        {
+            std::lock_guard lock(w.mutex);
+            const auto now = std::chrono::steady_clock::now();
+            if (w.shutdown.armed && std::chrono::duration<double>(now - w.shutdown.since).count() >= w.shutdown.seconds) {
+                late = w.shutdown;
+                w.shutdown.armed = false;
+            }
+        }
+        if (late) {
+            const std::string message = "the shutdown phase \"" + late->phase + "\" did not end within " +
+                                        std::to_string(int(late->seconds)) + " s; the process ends with exit code " +
+                                        std::to_string(late->exit_code) + " (the saves were written before the teardown)";
+            log_line("Shutdown watchdog (port-only, 132ws8): " + message);
+            report_stall("the shutdown watchdog (crash_report.hpp arm_shutdown)", message, w.fallback);
+            flush_streams();
+            // TerminateProcess, not ExitProcess: no DLL detach (a driver's detach could stall the same way).
+            TerminateProcess(GetCurrentProcess(), UINT(late->exit_code));
+            for (;;) Sleep(INFINITE);
+        }
     }
 }
 
@@ -1053,6 +1082,40 @@ StallWatch::~StallWatch() {
     auto& w = watchdog();
     std::lock_guard lock(w.mutex);
     std::erase_if(w.watches, [&](const Watch& watch) { return watch.id == id_; });
+}
+
+void arm_shutdown(std::string phase, int exit_code, double seconds) {
+    start_stall_watchdog();
+    auto& w = watchdog();
+    std::lock_guard lock(w.mutex);
+    w.shutdown = {true, std::move(phase), exit_code, seconds, std::chrono::steady_clock::now()};
+}
+
+void disarm_shutdown() {
+    auto& w = watchdog();
+    std::lock_guard lock(w.mutex);
+    w.shutdown.armed = false;
+}
+
+int raise_idle_threads() {
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    const DWORD pid = GetCurrentProcessId();
+    int raised = 0;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof te;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        const int priority = GetThreadPriority(h);
+        if (priority != THREAD_PRIORITY_ERROR_RETURN && priority < THREAD_PRIORITY_NORMAL &&
+            SetThreadPriority(h, THREAD_PRIORITY_NORMAL))
+            ++raised;
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+    return raised;
 }
 
 void show_message(const Written& w, std::string_view message) {

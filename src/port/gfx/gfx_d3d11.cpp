@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -152,6 +153,17 @@ public:
         : device_(std::move(device)), context_(std::move(context)), name_(std::move(name)) {
         if (!device_ || !context_) throw std::runtime_error("gfx d3d11: no device");
         context_.As(&context1_);  // ClearView (the 4:3 bar mask) needs D3D11.1; without it the mask is skipped
+    }
+    // Port-only (132ws8, research/FRONTEND.md "Shutdown (132ws8)"): the device is released with no GPU work in flight.
+    // ClearState unbinds every view and state, Flush submits what is queued, then an event query is polled for at
+    // most 2 s (a removed device ends the wait at once). The play-test exit hang was the NVIDIA driver's final device
+    // release waiting in the user-mode driver (minutes, under GPU load); the members then release in reverse order
+    // (the programs, layouts and query before the context, the context before the device).
+    ~D3D11Device() override {
+        try {
+            drain_before_release();
+        } catch (...) {
+        }
     }
     const std::string& name() const override { return name_; }
     Capabilities capabilities() const override { return {.gpu_skinning = true, .block_textures = true}; }   // 132md9, 132md11
@@ -447,6 +459,28 @@ public:
     }
 
     bool removed() const override { return device_->GetDeviceRemovedReason() != S_OK; }
+
+    // Port-only (132ws8): ~D3D11Device's bounded drain; false when the GPU was still busy after `limit_ms`.
+    bool drain_before_release(unsigned limit_ms = 2000) {
+        if (!context_) return true;
+        context_->ClearState();
+        context_->Flush();
+        Ptr<ID3D11Query> query;
+        const D3D11_QUERY_DESC qd{D3D11_QUERY_EVENT, 0};
+        if (FAILED(device_->CreateQuery(&qd, query.GetAddressOf()))) return true;
+        context_->End(query.Get());
+        const auto start = std::chrono::steady_clock::now();
+        for (;;) {
+            const HRESULT r = context_->GetData(query.Get(), nullptr, 0, 0);
+            if (r != S_FALSE) return true;
+            if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(limit_ms)) {
+                std::cerr << "gfx d3d11 (port-only, 132ws8): " << name_ << ": the GPU was still busy " << limit_ms
+                          << " ms after the release's flush; released anyway\n";
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
 
     bool wait_idle() override {
         if (!query_) {

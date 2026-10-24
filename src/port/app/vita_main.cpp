@@ -2078,13 +2078,21 @@ void App::loading_screen(DiscImage& disc, const std::string& level, int frames) 
             ++vblanks;
         }
         list = loading_frame(*assets, state, static_cast<std::uint64_t>(vblanks * 100000 * 1001 / 60000));
-        // Port-only (132ws): one 4:3 picture under wide (bars or zoom), as loading_screen_host.cpp; a mod's wide
-        // background ("loading.<level>") beside the barred picture.
-        for (GuiDrawBatch& b : list.batches) b.port_picture = true;
+        // Port-only (132ws8): under wide the loading screen is drawn as the front end's wide menus, as
+        // loading_screen_host.cpp (its art extended to the screen's edges; a mod's "loading.<level>" background
+        // replaces that); movie_fill=zoom keeps the one 4:3 picture scaled to the width.
+        const bool wide_menu = frame_wide(960, 544) && !frame_movie_zoom_setting();
+        if (!wide_menu)
+            for (GuiDrawBatch& b : list.batches) b.port_picture = true;
         auto back = begin_frame();
-        if (frame_wide(960, 544) && !frame_movie_zoom_setting())
-            renderer.draw_wide_background("loading." + level, back.get(), 960, 544);
+        const bool wide_background = wide_menu && renderer.draw_wide_background("loading." + level, back.get(), 960, 544);
+        renderer.set_wide_edge_extend(wide_menu && !wide_background);
+        renderer.set_wide_menu(wide_menu);
         renderer.draw(list, back.get(), 960, 544);
+        renderer.set_wide_menu(false);
+        renderer.set_wide_edge_extend(false);
+        if (wide_menu && !wide_background && !list.batches.empty() && renderer.wide_edge_images() == 0)
+            renderer.draw_wide_fill(back.get(), 960, 544);
         if (frame == 60 || frame == 400) capture(back.get(), "capture_loading_" + level + "_f" + std::to_string(frame));
         end_frame(started);
     }
