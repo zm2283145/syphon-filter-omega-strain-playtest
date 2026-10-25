@@ -21,6 +21,17 @@ inline constexpr const char* vita_data_root = "ux0:data/omega_strain";
 // The file's size (sceIoGetstat), or -1 when it does not exist.
 std::int64_t vita_file_size(const std::string& path);
 
+// Port-only (132vl1, research/VITA.md "Load time (132vl1)"): the SceIo reads every VitaFileBuf made (sceIoRead calls,
+// bytes, seconds inside sceIoLseek + sceIoRead), for the level load's phase lines. With verify on (the test switch
+// vita_test_load_verify.txt), each xsgetn's bytes are read again from a second descriptor of the same file, straight
+// (no buffer), and compared: `verified` reads, `mismatches` that differed (0 expected).
+struct VitaIoStats {
+    std::uint64_t reads = 0, bytes = 0, verified = 0, mismatches = 0;
+    double seconds = 0.0;
+};
+VitaIoStats vita_io_stats();
+void vita_io_verify(bool on);
+
 class VitaFileBuf final : public std::streambuf {
 public:
     VitaFileBuf() = default;
@@ -38,8 +49,15 @@ protected:
     std::streamsize xsgetn(char* s, std::streamsize n) override;
 
 private:
+    int fill(std::int64_t at, std::size_t size);
+    std::streamsize read_direct(std::int64_t at, char* s, std::streamsize n);
+    void verify(std::int64_t at, const char* s, std::streamsize n);
+
     int fd_ = -1;
+    int verify_fd_ = -1;
+    std::string path_;
     std::int64_t buffer_start_ = 0;  // file offset of eback()
+    std::int64_t read_end_ = -1;     // file offset after the last sceIoRead (a read starting there is sequential)
     std::vector<char> buffer_ = std::vector<char>(64 * 1024);
 };
 

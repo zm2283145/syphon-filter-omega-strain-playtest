@@ -66,7 +66,7 @@ std::uint8_t apply_bullet_hit(const BulletHitVictim& victim,const std::optional<
     if(sc&&!sc->player_54&&sc->aim_target!=victim.object){
         if(!host.random)throw std::runtime_error("Bullet hit: no game RNG");
         const float draw=game_int_to_float(static_cast<std::int32_t>(host.random()))/2147483648.0F;
-        passes=!(draw<=0.3F);                                    // 0048a2b8
+        passes=!(draw<=host.innocent_chance);                    // 00188938 c.ole.s with *0048a2b8
     }
     BulletHitVolumes volumes;
     if(!passes){

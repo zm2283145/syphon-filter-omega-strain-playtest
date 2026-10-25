@@ -25,6 +25,7 @@
 #include <memory>
 #ifdef __vita__
 #include <mutex>
+#include <set>
 #endif
 #include <string>
 #include <vector>
@@ -113,6 +114,12 @@ public:
     void zeus_release(std::int32_t slot);
     // The ZEUS pictures, the archive-0 MANTEX.HOG pictures and the PORT-ONLY agent preview by slot.
     const std::map<std::uint32_t, Texture>& zeus_images() const { return zeus_images_; }
+    // Port-only (132vp1, research/VITA.md "Playability, memory and coverage"): the PS Vita's level hand-off drops
+    // the decoded ZEUS / MANTEX pictures and the decorator assets' (GuiDecorAssets::release_images); a released
+    // picture is decoded again on its stem's next load or by restore_images (the front end's resume). The agent
+    // figure's and the weapon display's slots stay. release_images answers the bytes freed.
+    std::size_t release_images();
+    void restore_images();
 
     // Checkpoint 132cc4b: GuiAgentModify's services. The part cache 0055dda0 as frontCharacter
     // (0022a220) fills it from GAMEDATA/FRONTEND (built once, on the first call); archive 0's
@@ -157,6 +164,9 @@ private:
     std::map<std::string, std::int32_t> zeus_slots_;
     std::map<std::int32_t, ZeusSlot> zeus_by_slot_;
     std::map<std::uint32_t, Texture> zeus_images_;
+    std::map<std::int32_t, std::pair<std::vector<std::string>, std::string>> zeus_sources_;  // slot_load's slots
+    std::set<std::int32_t> zeus_released_;
+    void zeus_restore(std::int32_t slot);
     std::int32_t zeus_next_ = 0;
     std::vector<std::string> mantex_members_;
     std::unique_ptr<AgentPartCache> agent_parts_;

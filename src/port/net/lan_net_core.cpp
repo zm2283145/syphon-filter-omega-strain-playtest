@@ -91,6 +91,9 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // PORT-ONLY: the characters' stand-ins (the header). The character list 0x004ffd44 is a nonzero block that
     // 0040b6d0 / 0040b790 identify; the game's list is not mirrored.
     m.write(kHumanVtable + 0x20, 4, kFnNop);
+    // 132ln5h14c: the human's virtual +0x18 (00184cc0: networked), as 0x004da690's: 002c6b70's 003cc990(.., 0)
+    // sends the remote human's health message.
+    m.write(kHumanVtable + 0x18, 4, 0x184cc0);
     m.write(kComponentVtable + 0xc, 4, kFnNop);
     m.write(kComponentVtable + 0x58, 4, kFnNop);
     m.write(kRemoteControllerVtable + 0x88, 4, kFnRemote);
@@ -179,6 +182,25 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4de260 + 0x8, 4, 0x220350);
     m.write(0x4de260 + 0xc, 4, 0x2d15c0);
     m.write(0x4de260 + 0x10, 4, 0x2d1790);
+    // 132ln5h14c: the health message vtable 0x004e0ee0 (+8 the destructor 003cc670, +0xc the clone 00431960, +0x10
+    // the serialiser 00431bc0; .data).
+    m.write(0x4e0ee0 + 0x8, 4, 0x3cc670);
+    m.write(0x4e0ee0 + 0xc, 4, 0x431960);
+    m.write(0x4e0ee0 + 0x10, 4, 0x431bc0);
+    // 132ln5h14c: the damage message MSGLIB_DAMAGE_REQUEST vtable 0x004e08a0 (+8 the destructor 001880e0, +0xc the
+    // clone 00407f40, +0x10 the serialiser 004083d0; .data). PORT-ONLY: the damage virtual +0x100 (003ccb00) of the
+    // objects 004081e0 reaches (the players, the remote humans, the NPC blocks, the proxy) is kFnDamage (the play's).
+    m.write(0x4e08a0 + 0x8, 4, 0x1880e0);
+    m.write(0x4e08a0 + 0xc, 4, 0x407f40);
+    m.write(0x4e08a0 + 0x10, 4, 0x4083d0);
+    // 132ln5h14c: the death action vtable 0x004e01e0 (+8 the destructor 00184eb0, +0xc the clone 003e7370, +0x10 the
+    // serialiser 003e6270; .data).
+    m.write(0x4e01e0 + 0x8, 4, 0x184eb0);
+    m.write(0x4e01e0 + 0xc, 4, 0x3e7370);
+    m.write(0x4e01e0 + 0x10, 4, 0x3e6270);
+    m.write(0x4da690 + 0x100, 4, kFnDamage);
+    m.write(kHumanVtable + 0x100, 4, kFnDamage);
+    m.write(kProxyVtable + 0x100, 4, kFnDamage);
     m.write(kGeneratorVtable + 0x18, 4, 0x222870);
     for (const auto& [vtable, entries] : {std::pair{0x4d9380U, std::array<std::uint32_t, 5>{0x12f370, 0x15b7e0, 0x1535d0, 0x1489c0, 0x157a40}},
                                           std::pair{0x4de2a0U, std::array<std::uint32_t, 5>{0x2d2a90, 0x2d2aa0, 0x2d2b20, 0x2d2a80, 0x157a40}}}) {
@@ -669,6 +691,116 @@ std::vector<LanNetCore::RemoteDespawn> LanNetCore::take_remote_despawns() {
     return out;
 }
 
+// 132ln5h14c (the header).
+void LanNetCore::set_health_003cc990(std::uint32_t c, std::int32_t hp) {
+    const auto human = npc_block(c);
+    const auto caller = sp_;
+    sp_ -= 0x200;
+    try {
+        health_set_003cc990(memory_, *this, human, static_cast<std::uint32_t>(hp), 0, caller);
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+    if (memory_.read(dme::kNetworkGame, 1)) ++healths_sent_;
+}
+
+std::vector<LanNetCore::RemoteHealth> LanNetCore::take_remote_healths() {
+    std::vector<RemoteHealth> out;
+    out.swap(remote_healths_);
+    return out;
+}
+
+// 132ln5h14c (the header): 003ccb00's / 00187b58's 003c9420(msg, actor, 0) of a DamageMsg.
+bool LanNetCore::send_damage_message(const DamageSend& d) {
+    auto& m = memory_;
+    std::uint32_t victim = 0;
+    if (d.victim_key == local_player_key()) victim = kLocalPlayer;
+    for (const auto& [key, human] : remote_keys_)
+        if (key == d.victim_key) victim = human;
+    if (!victim) {
+        const auto npc = npc_blocks_.find(d.victim_key);
+        if (npc == npc_blocks_.end()) unhosted(0x3ccb00, "a DamageMsg to an object of no LAN key (0x" + hex8(d.victim_key) + ")");
+        victim = npc->second;
+    }
+    // PORT-ONLY: the message's +0x28 is the source object; the serialiser sends its +0xc (the LAN key here).
+    m.write(kDamageSource + 0xc, 4, d.source_key);
+    const auto caller = sp_;
+    sp_ -= 0x200;
+    const auto msg = sp_ + 0x40;
+    damage_queued_ = false;
+    sending_damage_ = true;
+    try {
+        call(m, 0x3c9e30, {msg, 0x5716f0});
+        m.write(msg, 4, 0x4e08a0);
+        m.write(msg + 0x1c, 4, d.word_1c);
+        m.write(msg + 0x20, 1, d.flags_20);
+        m.write(msg + 0x24, 4, static_cast<std::uint32_t>(d.value));
+        m.write(msg + 0x28, 4, kDamageSource);  // PORT-ONLY: always an object (004083d0 reads its +c)
+        m.write(msg + 0x2c, 1, d.type_2c);
+        m.write(msg + 0x2d, 1, d.category_2d);
+        m.write(msg + 0x2e, 1, d.byte_2e);
+        call(m, 0x3c9420, {msg, victim, 0});
+        m.write(msg, 4, 0x4e08a0);
+        call(m, 0x3c9d60, {msg, 0});
+    } catch (...) {
+        sending_damage_ = false;
+        sp_ = caller;
+        throw;
+    }
+    sending_damage_ = false;
+    sp_ = caller;
+    if (!damage_queued_) ++damages_sent_;
+    return damage_queued_;
+}
+
+// 132ln5h14c (the header): 00186e04..00186e58's death action, 003c9420(msg, actor, 1).
+void LanNetCore::send_death_action(std::uint32_t key, std::int32_t code) {
+    auto& m = memory_;
+    std::uint32_t actor = 0;
+    if (key == local_player_key()) actor = kLocalPlayer;
+    for (const auto& [k, human] : remote_keys_)
+        if (k == key) actor = human;
+    if (!actor) {
+        const auto npc = npc_blocks_.find(key);
+        if (npc == npc_blocks_.end()) unhosted(0x186e58, "the death action of an object of no LAN key (0x" + hex8(key) + ")");
+        actor = npc->second;
+    }
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto msg = sp_ + 0x40;
+    try {
+        call(m, 0x3c9e30, {msg, 0x55d480});
+        m.write(msg, 4, 0x4e01e0);
+        m.write(msg + 0x24, 4, 0x42);
+        m.write(msg + 0x28, 1, 2);
+        m.write(msg + 0x2c, 4, static_cast<std::uint32_t>(code));
+        m.write(msg + 0x1c, 4, 0x40);
+        m.write(msg + 0x20, 1, 4);  // PORT-ONLY: the constructor's 5 less bit 1 (delivered here by the play)
+        call(m, 0x3c9420, {msg, actor, 1});
+        m.write(msg, 4, 0x4e0840);
+        call(m, 0x3c9d60, {msg, 0});
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+    ++deaths_sent_;
+}
+
+std::vector<LanNetCore::RemoteDeath> LanNetCore::take_remote_deaths() {
+    std::vector<RemoteDeath> out;
+    out.swap(remote_deaths_);
+    return out;
+}
+
+std::vector<LanNetCore::RemoteDamage> LanNetCore::take_remote_damages() {
+    std::vector<RemoteDamage> out;
+    out.swap(remote_damages_);
+    return out;
+}
+
 // 132ln5h13 (the header): 00157c44..00157c9c / 002d4554..
 void LanNetCore::send_generator_release(std::uint32_t c, std::uint32_t word_150) {
     auto& m = memory_;
@@ -871,6 +1003,7 @@ std::uint32_t LanNetCore::human_constructor_001b8130(LevelLoadMemory& m, const s
     const auto controller = call(m, 0x36b180, {0, 0x200, 0, 0});
     m.write(human, 4, kHumanVtable);
     m.write(human + 0xc, 4, key);  // the base constructors' +0xc: the key (001b2e90 takes the client from it)
+    m.write(human + 0x10, 4, key);  // 132ln5h14c: +0x10 too (003c9420's 003fb020 / 003fb340 key, as the NPC blocks')
     m.write(human + 0x50, 4, kRemoteComponent);
     m.write(human + 0x58, 4, controller);
     m.write(controller, 4, kRemoteControllerVtable);
@@ -1251,7 +1384,8 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x3ca0e0: return queue_message_003ca0e0(m, arg(3));
     case 0x3c9420: {  // an actor message: the locomotion message natively; PORT-ONLY: else an action as a RemoteAction
         if (m.read(arg(0)) == 0x4e0100 || m.read(arg(0)) == 0x4de240 || m.read(arg(0)) == 0x4db600 ||
-            m.read(arg(0)) == 0x4de260) {  // 132ln5h12 / h13 / h14
+            m.read(arg(0)) == 0x4de260 || m.read(arg(0)) == 0x4e0ee0 || m.read(arg(0)) == 0x4e08a0 ||
+            m.read(arg(0)) == 0x4e01e0) {  // 132ln5h12 / h13 / h14 / h14c
             Frame f(sp_);
             return actor_message_send_003c9420(m, *this, arg(0), arg(1), arg(2), f.caller);
         }
@@ -1419,6 +1553,21 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x2d15c0: { Frame f(sp_); return despawn_message_clone_002d15c0(m, *this, arg(0)); }
     case 0x2d1790: { Frame f(sp_); return despawn_message_serialise_002d1790(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
     case 0x2d1810: { Frame f(sp_); ++despawns_received_; return despawn_message_receive_002d1810(m, *this, arg(3), f.caller); }
+    // 132ln5h14c: the health message (vtable 0x004e0ee0) and its receive (00431b10 registers 00431a70 for 0x00582748).
+    case 0x3cc670: { Frame f(sp_); return health_message_destroy_003cc670(m, *this, arg(0), arg(1)); }
+    case 0x431960: { Frame f(sp_); return health_message_clone_00431960(m, *this, arg(0)); }
+    case 0x431bc0: { Frame f(sp_); return health_message_serialise_00431bc0(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x431a70: { Frame f(sp_); ++healths_received_; return health_message_receive_00431a70(m, *this, arg(3), f.caller); }
+    // 132ln5h14c: the damage message (vtable 0x004e08a0) and its receive (net_registrations: 004081e0 for 0x005716f8).
+    case 0x1880e0: { Frame f(sp_); return damage_message_destroy_001880e0(m, *this, arg(0), arg(1)); }
+    case 0x407f40: { Frame f(sp_); return damage_message_clone_00407f40(m, *this, arg(0)); }
+    case 0x4083d0: { Frame f(sp_); return damage_message_serialise_004083d0(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x4081e0: { Frame f(sp_); ++damages_received_; return damage_message_receive_004081e0(m, *this, arg(3), f.caller); }
+    // 132ln5h14c: the death action (vtable 0x004e01e0) and its receive (net_registrations: 003e4f70 for 0x0055a220).
+    case 0x184eb0: { Frame f(sp_); return death_action_destroy_00184eb0(m, *this, arg(0), arg(1)); }
+    case 0x3e7370: { Frame f(sp_); return death_action_clone_003e7370(m, *this, arg(0)); }
+    case 0x3e6270: { Frame f(sp_); return death_action_serialise_003e6270(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x3e4f70: { Frame f(sp_); ++deaths_received_; return death_action_receive_003e4f70(m, *this, arg(3), f.caller); }
     // 132ln5h13: the "Generator Message" (vtable 0x004db600) and the "GeneratorBase Message" receive.
     case 0x157d20: { Frame f(sp_); return generator_release_message_destroy_00157d20(m, *this, arg(0), arg(1)); }
     case 0x222410: { Frame f(sp_); return generator_release_message_clone_00222410(m, *this, arg(0)); }
@@ -1448,9 +1597,24 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x1b2e90: { Frame f(sp_, 0x400); return human_left_check_001b2e90(m, *this, arg(0), f.caller); }
     case 0x1b2d20: { Frame f(sp_); human_weapon_sync_001b2d20(m, *this, arg(0)); return 0; }
     case 0x140e10: case 0x1535d0: return 0;  // the controllers' virtual +0x58 / +0x5c (jr ra; move v0, zero)
-    case 0x3cc990: {  // 003cc990(human, hp, a2): +0x40 = cvt.s.w(hp); PORT-ONLY: a2 == 0's health message is not sent
-        m.write(arg(0) + 0x40, 4, std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<std::int32_t>(arg(1)))));
-        if (arg(2) == 1) pending_health_ = static_cast<std::int32_t>(arg(1));
+    case 0x3cc990: {  // 003cc990(human, hp, a2)
+        // In 001b1710's section (a2 1: the owner's health on a non-owner) the play applies it (pending_health_).
+        if (section_human_) {
+            m.write(arg(0) + 0x40, 4, std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<std::int32_t>(arg(1)))));
+            if (arg(2) == 1) pending_health_ = static_cast<std::int32_t>(arg(1));
+            return 0;
+        }
+        // 132ln5h14c: natively (a2 0 in a network game sends the health message); a2 1 outside a section is the
+        // health message's receive 00431a70 (0040c540's object): kept for the play.
+        Frame f(sp_);
+        health_set_003cc990(m, *this, arg(0), arg(1), arg(2), f.caller);
+        if (arg(2) == 1) {
+            RemoteHealth h;
+            h.local_player = arg(0) == kLocalPlayer;
+            h.key = h.local_player ? local_player_key() : human_key(arg(0)) ? human_key(arg(0)) : m.read(arg(0) + 0xc);
+            h.hp = static_cast<std::int32_t>(arg(1));
+            remote_healths_.push_back(h);
+        }
         return 0;
     }
     case 0x128aa8: {  // snprintf(a0, a1, a2): the texts it gets here have no conversions
@@ -1557,6 +1721,19 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         for (std::uint32_t c = 0; c < 3; ++c) m.write(arg(0) + c * 4, 4, std::bit_cast<std::uint32_t>(p[c]));
         m.write(arg(0) + 12, 4, std::bit_cast<std::uint32_t>(1.0F));
         return arg(0);
+    }
+    case kFnDamage: {  // PORT-ONLY: the damage virtual +0x100 (003ccb00) from 004081e0: the play's actor takes it
+        if (arg(4) || arg(5) != 1 || arg(6))
+            unhosted(0x3ccb00, "a damage virtual +0x100 other than 004081e0's (t0 0, quiet 1, t2 0)");
+        RemoteDamage d;
+        d.local_player = arg(0) == kLocalPlayer;
+        d.victim_key = lan_id(m, arg(0));
+        d.source_key = lan_id(m, arg(1));
+        d.category = static_cast<std::uint8_t>(arg(2));
+        d.type = static_cast<std::uint8_t>(arg(3));
+        d.amount = std::bit_cast<float>(arg(7));
+        remote_damages_.push_back(d);
+        return 0;
     }
     case kFnGenEnable:
     case kFnGenDisable: {  // PORT-ONLY: the generator's virtual +0x28 (00220e60) / +0x2c (00220d00): the play's
@@ -1921,6 +2098,36 @@ std::uint32_t LanNetCore::queue_message_003ca0e0(LevelLoadMemory& m, std::uint32
         if (m.read(m.read(clone + 4)) != m.read(0x51f068))  // 003c9c20, lw (v0): 002216dc
             unhosted(0x221610, "a message of vtable 0x004de260 whose type is not 0x0051f068");
         remote_despawns_.push_back({found->first, m.read(clone + 0x2c), m.read(clone + 0x30)});
+        m.write(clone + 8, 4, 0);
+        call(m, m.read(m.read(clone) + 8), {clone, 0xffffffffU});
+        call(m, 0x36b130, {0, clone, 0x4bd118, 0x132});
+        return 0;
+    }
+    if (m.read(clone) == 0x4e01e0) {  // 132ln5h14c: a received death action (003e4f70's 003c9350, transport 0)
+        RemoteDeath death;
+        death.code = static_cast<std::int32_t>(m.read(clone + 0x2c));
+        if (m.read(clone + 0x24) != 0x42) unhosted(0x3e4f70, "an action message of vtable 0x004e01e0 other than the death action 0x42");
+        if (target == kLocalPlayer) {
+            death.local_player = true;
+            death.key = local_player_key();
+        }
+        for (const auto& [k, human] : remote_keys_)
+            if (human == target) death.key = k;
+        for (const auto& [k, block] : npc_blocks_)
+            if (block == target) death.key = k;
+        if (!death.key) unhosted(0x3e4f70, "a death action to an object of no LAN key");
+        remote_deaths_.push_back(death);
+        m.write(clone + 8, 4, 0);
+        call(m, m.read(m.read(clone) + 8), {clone, 0xffffffffU});
+        call(m, 0x36b130, {0, clone, 0x4bd118, 0x132});
+        return 0;
+    }
+    if (m.read(clone) == 0x4e08a0) {  // 132ln5h14c: a DamageMsg queued here (the target's handler, the play's)
+        // send_damage_message's own 003c9420 (003ccb00's flags 2 on the host, a replica to an object this console
+        // owns): the play queues its ai_notification. Else 004081e0's 003c9350 of a notice (+0x2e 1) to the
+        // sender's figure here: PORT-ONLY, the remote figure's handler is not the play's (counted, dropped).
+        if (sending_damage_) damage_queued_ = true;
+        else ++damage_notices_dropped_;
         m.write(clone + 8, 4, 0);
         call(m, m.read(m.read(clone) + 8), {clone, 0xffffffffU});
         call(m, 0x36b130, {0, clone, 0x4bd118, 0x132});

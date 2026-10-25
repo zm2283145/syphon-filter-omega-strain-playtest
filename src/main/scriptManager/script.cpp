@@ -193,15 +193,19 @@ Value pop(std::vector<Value>& stack) {
     return value;
 }
 
+// cvt.w.s truncates toward zero and saturates (EE goldens).
+std::int32_t cvt_w_s(double value) {
+    if (value >= 2147483648.0) return std::numeric_limits<std::int32_t>::max();
+    if (value <= -2147483648.0) return std::numeric_limits<std::int32_t>::min();
+    return static_cast<std::int32_t>(value);
+}
+
+// 003df660..003df680 (opcode 62) and 003dfca0..003dfcb8 (Reschedule): binary32
+// 1000 * delay, then cvt.w.s (EE goldens tools/ee/gen_script_schedule_delay.py).
 std::int32_t delay_ticks(const Value& value) {
     const float ticks = finite_float(value) * 1000.0F;
-    const double exact = ticks;
-    // Admit only conversions independent of unresolved PS2 rounding behavior.
-    if (!std::isfinite(ticks) || std::trunc(exact) != exact ||
-        exact < std::numeric_limits<std::int32_t>::min() ||
-        exact > std::numeric_limits<std::int32_t>::max())
-        throw std::runtime_error("Non-integral or out-of-range schedule delay is unsupported");
-    return static_cast<std::int32_t>(ticks);
+    if (!std::isfinite(ticks)) throw std::runtime_error("Exceptional PS2 floating-point semantics are unsupported");
+    return cvt_w_s(ticks);
 }
 
 }
@@ -797,14 +801,8 @@ std::optional<Value> Vm::execute(const Function& function, const std::vector<Val
             }
             case 45: stack.push_back(float_bits(static_cast<float>(word_signed(number(pop(stack)))))); break;
             case 46: {
-                // 003df218: pop (003dffb0), cvt.w.s, push (003e0020). cvt.w.s
-                // truncates toward zero and saturates (EE goldens).
-                const double value = finite_float(pop(stack));
-                std::int32_t result;
-                if (value >= 2147483648.0) result = std::numeric_limits<std::int32_t>::max();
-                else if (value <= -2147483648.0) result = std::numeric_limits<std::int32_t>::min();
-                else result = static_cast<std::int32_t>(value);
-                stack.push_back(static_cast<Word>(result));
+                // 003df218: pop (003dffb0), cvt.w.s, push (003e0020).
+                stack.push_back(static_cast<Word>(cvt_w_s(finite_float(pop(stack)))));
                 break;
             }
             case 52: {

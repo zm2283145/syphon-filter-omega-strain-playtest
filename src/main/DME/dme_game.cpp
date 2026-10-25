@@ -3328,6 +3328,216 @@ std::uint32_t despawn_message_receive_002d1810(LevelLoadMemory& m, LevelLoadHost
     return 0x10;
 }
 
+// ---- the health message (vtable 0x004e0ee0; checkpoint 132ln5h14c; NET_INLEVEL.md 4.26) ------------------------
+namespace {
+constexpr std::uint32_t kHealthMessage = 0x4e0ee0, kHealthType = 0x582750, kHealthSerialType = 0x582748;
+}  // namespace
+
+void health_set_003cc990(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t human, std::uint32_t hp, std::uint32_t a2,
+                         std::uint32_t stack) {
+    w32(m, human + 0x40, std::bit_cast<std::uint32_t>(static_cast<float>(static_cast<std::int32_t>(hp))));
+    if (!r8(m, kNetworkGame) || a2) return;
+    const auto msg = stack - 0x60 + 0x30;
+    host.call(m, 0x3c9e30, {msg, kHealthType});
+    w8(m, msg + 0x24, 0);
+    w32(m, msg, kHealthMessage);
+    w32(m, msg + 0x28, r32(m, human + 0xc));
+    w8(m, msg + 0x20, 4);
+    w32(m, msg + 0x2c, hp);
+    host.call(m, 0x3c9420, {msg, human, 0});
+    w32(m, msg, kHealthMessage);
+    host.call(m, 0x3c9d60, {msg, 0});
+}
+
+std::uint32_t health_message_destroy_003cc670(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                              std::uint32_t flag) {
+    return generator_message_destroy(m, host, msg, flag, kHealthMessage);
+}
+
+std::uint32_t health_message_clone_00431960(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x30, 0x4bfc10, 0x1a});
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, kHealthMessage);
+        w8(m, copy + 0x24, r8(m, msg + 0x24));
+        w32(m, copy + 0x28, r32(m, msg + 0x28));
+        w32(m, copy + 0x2c, r32(m, msg + 0x2c));
+    }
+    return copy;
+}
+
+std::uint32_t health_message_serialise_00431bc0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                                std::uint32_t buf) {
+    if (cap < 0x14 || !buf) return 0xffffffffU;
+    message_header_003c9ca0(m, host, msg, key, cap, buf);
+    w8(m, buf + 8, r8(m, msg + 0x24));
+    w32(m, buf + 0xc, r32(m, msg + 0x28));
+    w32(m, buf + 0x10, r32(m, msg + 0x2c));
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, kHealthSerialType));
+    return 0x14;
+}
+
+std::uint32_t health_message_receive_00431a70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
+                                              std::uint32_t stack) {
+    const auto sp = stack - 0x30;
+    busy_enter(m);
+    if (r8(m, kInLevel) && !r8(m, buf + 8)) {
+        w32(m, sp + 0x28, r32(m, buf + 0xc));
+        if (const auto object = host.call(m, 0x40c540, {sp + 0x28})) host.call(m, 0x3cc990, {object, r32(m, buf + 0x10), 1});
+    }
+    w8(m, kBusy, 0);
+    return 0x14;
+}
+
+// ---- the damage message MSGLIB_DAMAGE_REQUEST (vtable 0x004e08a0; checkpoint 132ln5h14c; NET_INLEVEL.md 4.27) ------
+namespace {
+constexpr std::uint32_t kDamageMessage = 0x4e08a0, kDamageType = 0x5716f0, kDamageSerialType = 0x5716f8;
+}  // namespace
+
+std::uint32_t damage_message_destroy_001880e0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag) {
+    return generator_message_destroy(m, host, msg, flag, kDamageMessage);
+}
+
+std::uint32_t damage_message_clone_00407f40(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x30, 0x4be9f0, 0x20});
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, kDamageMessage);
+        w32(m, copy + 0x24, r32(m, msg + 0x24));
+        w32(m, copy + 0x28, r32(m, msg + 0x28));
+        w8(m, copy + 0x2c, r8(m, msg + 0x2c));
+        w8(m, copy + 0x2d, r8(m, msg + 0x2d));
+        w8(m, copy + 0x2e, r8(m, msg + 0x2e));
+    }
+    return copy;
+}
+
+std::uint32_t damage_message_serialise_004083d0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                                std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf) {
+    if (cap < 0x18 || !buf) return 0xffffffffU;
+    message_header_003c9ca0(m, host, msg, key, cap, buf);
+    w8(m, buf + 8, r8(m, msg + 0x2e));
+    w32(m, buf + 0xc, r32(m, r32(m, msg + 0x28) + 0xc));
+    w16(m, buf + 0x10, r8(m, msg + 0x2d));
+    w16(m, buf + 0x14, r32(m, msg + 0x24) & 0xffffU);
+    w16(m, buf + 0x12, r8(m, msg + 0x2c));
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, kDamageSerialType));
+    return 0x18;
+}
+
+std::uint32_t damage_message_receive_004081e0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack) {
+    const auto sp = stack - 0x80;
+    busy_enter(m);
+    if (r8(m, kInLevel)) {
+        const auto msg = sp + 0x40;
+        host.call(m, 0x3c9e30, {msg, kDamageType});
+        w32(m, msg, kDamageMessage);
+        w32(m, sp + 0x74, r32(m, buf + 0xc));
+        const auto source = host.call(m, 0x40c540, {sp + 0x74});
+        w32(m, msg + 0x28, source);
+        w8(m, msg + 0x2d, r16(m, buf + 0x10) & 0xffU);
+        w32(m, msg + 0x24, r16(m, buf + 0x14));
+        w8(m, msg + 0x2c, r16(m, buf + 0x12) & 0xffU);
+        std::uint32_t victim = 0;
+        if (const auto entry = host.call(m, 0x3fbb10, {r32(m, buf + 4)})) {
+            victim = r32(m, entry);
+        } else {
+            w32(m, sp + 0x78, r32(m, buf + 4));
+            victim = host.call(m, 0x40c540, {sp + 0x78});
+        }
+        if (victim && r32(m, msg + 0x28)) {
+            if (r8(m, buf + 8)) {
+                host.call(m, 0x3c9350, {msg, victim, 0, 0});
+            } else {
+                bool player = false;
+                if (const auto controller = r32(m, victim + 0x58)) player = host.call(m, r32(m, r32(m, controller) + 0x54), {controller}) != 0;
+                if (!(player && r8(m, victim + 0x14) && r32(m, r32(m, msg + 0x28) + 0x38) == 0x80)) {
+                    const auto category = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(r8(m, msg + 0x2d))));
+                    const auto type = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(r8(m, msg + 0x2c))));
+                    const float amount = static_cast<float>(static_cast<std::int32_t>(r32(m, msg + 0x24)));
+                    host.call(m, r32(m, r32(m, victim) + 0x100),
+                              {victim, r32(m, msg + 0x28), category, type, 0, 1, 0, std::bit_cast<std::uint32_t>(amount)});
+                }
+            }
+        }
+        w32(m, msg, kDamageMessage);
+        host.call(m, 0x3c9d60, {msg, 0});
+    }
+    w8(m, kBusy, 0);
+    return 0x18;
+}
+
+// ---- the death action message (vtable 0x004e01e0 over the action message 0x004e0840, type 0x0055d480; 132ln5h14c) -
+namespace {
+constexpr std::uint32_t kDeathActionMessage = 0x4e01e0, kDeathActionSerialType = 0x55a220;
+}  // namespace
+
+std::uint32_t death_action_destroy_00184eb0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag) {
+    if (!msg) return msg;
+    w32(m, msg, kDeathActionMessage);
+    w32(m, msg, kActionMessage);
+    host.call(m, 0x3c9d60, {msg, 0});
+    if (static_cast<std::int16_t>(flag & 0xffffU) > 0) host.call(m, 0x100740, {msg, 0});  // $a1 still 003c9d60's 0
+    return msg;
+}
+
+std::uint32_t death_action_clone_003e7370(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x30, 0x4bde68, 0x1df});
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, kActionMessage);
+        w32(m, copy + 0x24, r32(m, msg + 0x24));
+        w8(m, copy + 0x28, r8(m, msg + 0x28));
+        w32(m, copy, kDeathActionMessage);
+        w32(m, copy + 0x2c, r32(m, msg + 0x2c));
+    }
+    return copy;
+}
+
+std::uint32_t death_action_serialise_003e6270(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                              std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf) {
+    if (cap < 0x10 || !buf) return 0xffffffffU;
+    action_header_003ff330(m, host, msg, key, 0, cap, buf);
+    wf(m, buf + 0xc, static_cast<float>(static_cast<std::int32_t>(r32(m, msg + 0x2c))));
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, kDeathActionSerialType));
+    return 0x10;
+}
+
+std::uint32_t death_action_receive_003e4f70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack) {
+    const auto sp = stack - 0x60, msg = sp + 0x20;
+    busy_enter(m);
+    if (r8(m, kInLevel)) {
+        message_construct_received_003c9db0(m, host, msg, kActionType, buf);
+        w32(m, msg, kActionMessage);
+        w32(m, msg + 0x24, r8(m, buf + 8));
+        w8(m, msg + 0x28, r8(m, buf + 9));
+        w32(m, msg, kDeathActionMessage);
+        w32(m, msg + 0x2c, cvt_w_s(std::bit_cast<float>(r32(m, buf + 0xc))));
+        if (const auto entry = host.call(m, 0x3fbb10, {r32(m, buf + 4)}))
+            host.call(m, 0x3c9350, {msg, r32(m, entry), 0, 0});
+        w32(m, msg, kActionMessage);
+        host.call(m, 0x3c9d60, {msg, 0});
+    }
+    w8(m, kBusy, 0);
+    return 0x10;
+}
+
 // ---- the generator message "Generator Message" (vtable 0x004db600; checkpoint 132ln5h13; NET_INLEVEL.md 4.23) -----
 namespace {
 constexpr std::uint32_t kGeneratorReleaseMessage = 0x4db600, kGeneratorMessageBase = 0x4db660;

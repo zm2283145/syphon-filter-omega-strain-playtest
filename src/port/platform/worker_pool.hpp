@@ -32,6 +32,11 @@ public:
 
     unsigned workers() const { return static_cast<unsigned>(threads_.size()); }
     void for_each(std::size_t count, const std::function<void(std::size_t)>& fn);
+    // Port-only (132vl1, research/VITA.md "Load time (132vl1)"): for_each, with `first` run on the calling thread
+    // while the workers start on the indices (the PS Vita's level load reads the next members from the disc while
+    // this batch decodes); the caller then joins the indices. With no workers: the indices, then first(). An
+    // exception of an index is rethrown before one of first().
+    void for_each_beside(std::size_t count, const std::function<void(std::size_t)>& fn, const std::function<void()>& first);
 
     // The worker count `--worker-threads -1` / the setting's "auto" picks: one less than the hardware threads (the
     // caller works too), at most 7, 0 on a single core. PS Vita: the 3 user cores (hardware_concurrency is not

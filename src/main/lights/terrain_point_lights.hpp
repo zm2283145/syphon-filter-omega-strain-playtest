@@ -62,6 +62,10 @@ constexpr std::uint32_t terrain_point_light_mask=4U;
 // values and a listed light whose range method is unknown.
 std::vector<TerrainPointLight> terrain_point_lights(const LevelLights& lights,const LevelLightTable& table,
     const ShadowVector& minimum,const ShadowVector& maximum,std::uint32_t mask=terrain_point_light_mask);
+// The same list into `list` (port-only, 132vs1: its scratch is kept between calls, so the per-instance calls of a
+// frame allocate nothing once grown).
+void terrain_point_lights(std::vector<TerrainPointLight>& list,const LevelLights& lights,const LevelLightTable& table,
+    const ShadowVector& minimum,const ShadowVector& maximum,std::uint32_t mask=terrain_point_light_mask);
 // The VU1 batch test for one light: true when the light reaches the batch.
 bool terrain_batch_reached(const TerrainPointLight& light,const MeshBatch& batch);
 // The VU1 light pass over one batch: `colours` are the batch's vertex colour

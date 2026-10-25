@@ -137,6 +137,7 @@ void NpcAiController::set_remote(SoloActorSimulation& actor){
     component_.flags_141=install.flags_141;
     component_.radius_squared_98=install.radius_squared_98;
     remote_=install.state;
+    actor.set_byte_14(0);                                                      // 132ln5h14c: another console owns it (+14 0)
     if(actor.eligible())remote_activate(actor);                                // virtual +48 = 002d40a0
 }
 void NpcAiController::make_fresh_ai(SoloActorSimulation& actor){
@@ -146,6 +147,7 @@ void NpcAiController::make_fresh_ai(SoloActorSimulation& actor){
     const float r=game_int_to_float(static_cast<std::int32_t>(combat_.random?combat_.random():next_game_random(*random_state_)));
     destroy_component(actor);
     remote_.reset();
+    actor.set_byte_14(1);                                                      // 132ln5h14c: this console's again (+14 1)
     fresh_component();
     aggressiveness_6c_=0.25F+0.5F*(r/2147483648.0F);
     component_.aggressiveness_6c=aggressiveness_6c_;

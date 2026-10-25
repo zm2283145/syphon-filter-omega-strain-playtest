@@ -211,6 +211,8 @@ struct SoloActorSimulation::Impl {
     // navigation block +30ac..+30e0 and the inputs of 001a80e0.
     SoloActorController controller;
     bool player() const{return controller.ai==nullptr;}
+    ActorDamageController damage_controller() const{
+        return player()?ActorDamageController{true,false,false}:controller.ai->damage_predicates();}
     ActorNavigationTarget navigation;
     std::array<std::uint32_t,3> control_3030{};              // +3030/+3034/+3038
     std::uint8_t latch_303c{};                               // +303c
@@ -349,7 +351,7 @@ struct SoloActorSimulation::Impl {
     // the tracker), a hotbox event from a box to the actor and an interaction
     // trigger (0021b790) to a box link.
     struct QueuedMessage {
-        enum class Kind {component,action,box,actor_hotbox,trigger,respawn,checkpoint,object_action,object_code,ai_notification,link,notify_checkpoint,death,carry_pickup,        turn_on_weapon_pickup,out_of_ammo,weapon_vis_change,running_jump} kind{};
+        enum class Kind {component,action,box,actor_hotbox,trigger,respawn,checkpoint,object_action,object_code,ai_notification,link,notify_checkpoint,death,carry_pickup,        turn_on_weapon_pickup,out_of_ammo,weapon_vis_change,running_jump,box_trigger} kind{};
                 std::int32_t code{};                               // kind out_of_ammo: the item (+24); weapon_vis_change: the value (+24)
         std::size_t box{};std::uint8_t payload{};std::uint32_t word{};
         ActorJumpZoneMessage jump_zone;
@@ -361,6 +363,7 @@ struct SoloActorSimulation::Impl {
         std::uint64_t object{};                            // kind object_code (code = the CAS code); carry_pickup: the body (payload +28)
         ActorAiNotification notification;                 // kind ai_notification
         bool enable{};                                     // kind link: EnableMsg / DisableMsg
+        HotboxType3Trigger box_trigger;                    // kind box_trigger
     };
     std::vector<QueuedMessage> queue;
     std::vector<QueuedMessage> pump_snapshot;              // the pump's snapshot of queue
@@ -391,10 +394,14 @@ struct SoloActorSimulation::Impl {
     SoloActorSimulation::NativeTriggerReceiver native_trigger_receiver;
     SoloActorSimulation::ObjectCodeReceiver object_code_receiver;
     bool multiplayer_host{};                               // port-only: 005721c8 / 005721c0 (132ob3)
+    bool network_game{},network_host{};                    // 132ln5h14c: 005721c8 / 005721c0 for 003ccb00
+    std::function<bool(const ActorDamageEvent&)> network_damage;   // 132ln5h14c: 003c9420 of a network damage message
     bool port_ladder_arrival_at_end{};                     // port-only: the partner's ladder arrival (132ob5)
     SoloActorSimulation::AiNotificationScriptFilter ai_notification_filter;
     SoloActorSimulation::HotboxLinkSink link_sink;
     SoloActorSimulation::LinkMessageScriptFilter link_filter;
+    SoloActorSimulation::HotboxTriggerSink trigger_sink;
+    SoloActorSimulation::BoxTriggerScriptFilter box_trigger_filter;
     SoloActorSimulation::ObjectExists object_exists;
     SoloActorSimulation::ObjectTrigger object_trigger;
     void deliver_link_message(bool enable);
@@ -1124,8 +1131,9 @@ void SoloActorSimulation::Impl::receive_motion_effect(const MotionEffect& effect
 // damage, with the actor itself as the source (0019f450 passes a0 twice).
 void SoloActorSimulation::Impl::apply_fall_damage(std::int32_t type,float amount){
     ActorDamageInput in;in.actor=handle;
-    in.controller=player()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+    in.controller=damage_controller();
     in.byte_14=player()||actions.byte_14!=0;in.source={handle,in.controller};
+    in.network=network_game;in.host_console=network_host;
     in.category=1;in.type=static_cast<std::uint8_t>(type);in.amount=amount;
     damage(in,std::nullopt);
 }
@@ -1219,8 +1227,13 @@ ActorDamageResult SoloActorSimulation::Impl::damage(const ActorDamageInput& in,s
     for(const auto& e:events){
         using K=ActorDamageEvent::Kind;
         if(e.kind==K::damage_message){
-            // The replica 00187b58 (+2e 0, +20 8) needs actor +14 clear: a remotely owned actor.
-            if(e.flags_20!=5||e.byte_2e!=1)throw std::runtime_error("Solo actor: the replica DamageMsg (00187b58) is not hosted");
+            if(e.flags_20!=5||e.byte_2e!=1){
+                // 132ln5h14c: a network game's DamageMsg (003ccb00's +20 2, the replica 00187b58's +20 8) goes through
+                // 003c9420 to the network; only one 003c9420 queued here too reaches the pump.
+                if(!network_game||!network_damage)
+                    throw std::runtime_error("Solo actor: a network DamageMsg (003ccb00 +20 2 / the replica 00187b58) outside a network game");
+                if(!network_damage(e))continue;
+            }
             QueuedMessage m;m.kind=QueuedMessage::Kind::ai_notification;
             m.notification.key=actor_damage_message_key;m.notification.object=e.object;m.notification.value=e.value;
             m.notification.type_2c=e.type_2c;m.notification.category_2d=e.category_2d;
@@ -1241,6 +1254,11 @@ ActorDamageResult SoloActorSimulation::Impl::damage(const ActorDamageInput& in,s
             }else controller.ai->death_notice_7c(*owner,ActorDeathNotice{e.value,e.object,e.category_2d,e.type_2c});
         }else if(e.kind==K::controller_hit){
             if(!player())controller.ai->hit_notice_78(*owner,e.object,e.value);   // the player's +78 is 0016f9f0 (nothing)
+        }else if(e.kind==K::death_message&&e.immediate&&network_game){
+            // 132ln5h14c: the kill's 003c9420(msg, actor, 1) of the death action (flags 5): delivered here at once
+            // (death_action above) and, in a network game, sent to every console (+20 bit 4, 003fb020).
+            if(!network_damage)throw std::runtime_error("Solo actor: the network death action (003c9420 +20 4) is not hosted");
+            network_damage(e);
         }else if(e.kind==K::death_message&&!e.immediate){
             // Type 7 (00187c40..00187cb8): action 0x42 kind 2 code e.value to
             // self with transport 0; the next pump runs 001a92a0 -> 0018a950.
@@ -1281,7 +1299,7 @@ ActorDamageResult SoloActorSimulation::Impl::damage(const ActorDamageInput& in,s
 // Action 0x42 kind 2 delivered at once (transport 1): 001a92a0 -> 0018a950.
 void SoloActorSimulation::Impl::death_action(std::int32_t code){
     if(!model)throw std::runtime_error("Solo actor: the death action needs an animation model");
-    ActorDeathActor a;a.controller_is_player=player();a.byte_14=true;a.byte_326b=actions.byte_326b;a.physical_present=true;
+    ActorDeathActor a;a.controller_is_player=player();a.byte_14=actions.byte_14!=0;a.byte_326b=actions.byte_326b;a.physical_present=true;
     a.secondary_present=true;                                        // 001b5560 allocates +3314 for every activated actor
     // Root object bytes: +2c = 1 and +2e = 0 from the constructor (003cf120,
     // 003cf130), +2d = 1 from the activation (001b53d0 -> 00392940 -> 003ce980).
@@ -1660,6 +1678,12 @@ void SoloActorSimulation::Impl::deliver_queued(){
                 if(!link_sink)throw std::runtime_error("Solo actor: hotbox link message to "+std::to_string(l.receiver)+" without a link sink");
                 link_sink(l);
             }
+            // 00172598: a type-3 box's enter sends each link a GOBJTriggerEventMsg (transport 0).
+            if(m.payload==0&&hotbox_world.boxes.at(m.box).record.type==3)
+                for(const auto& t:hotbox_type3_enter_triggers(hotbox_world,m.box)){
+                    if(!trigger_sink)throw std::runtime_error("Solo actor: GOBJTriggerEventMsg (00172598) to "+std::to_string(t.receiver)+" without a hotbox trigger sink");
+                    trigger_sink(t);
+                }
             if(const auto e=receive_hotbox_event(hotbox_world,m.box,m.payload)){
                 QueuedMessage a;a.kind=K::actor_hotbox;a.code=static_cast<std::int32_t>(e->code);a.payload=e->payload;a.word=e->word_2c;
                 queue.push_back(a);                        // transport 0: the next pump delivers it
@@ -1698,6 +1722,13 @@ void SoloActorSimulation::Impl::deliver_queued(){
         if(m.kind==K::object_action){deliver_object_action(m.object_action);continue;}
         if(m.kind==K::object_code){deliver_object_code(m.object,m.code);continue;}
         if(m.kind==K::link){deliver_link_message(m.enable);continue;}
+        if(m.kind==K::box_trigger){                        // 003c8de0: filter +0x38 (003cc850) first
+            if(player())throw std::runtime_error("Solo actor: a type-3 hotbox's GOBJTriggerEventMsg to the player actor is not hosted");
+            const bool handled=box_trigger_filter&&box_trigger_filter(m.box_trigger);
+            // Not handled: 001b3b60 -> 003cea10 -> 003caca0 over the empty child list +0x20 (dropped).
+            if(current)current->box_triggers.push_back({m.box_trigger,handled});
+            continue;
+        }
         if(m.kind==K::death){                             // 001a92a0 case 0x42 -> 0018a950 (the queued type-7 death)
             if(current){current->delivered_actions.push_back(0x42);current->death_code=m.code;}
             death_action(m.code);
@@ -3037,6 +3068,16 @@ void SoloActorSimulation::run_frame(std::span<SoloActorSimulation* const> actors
     OMEGA_ZONE_LAP(actor_laps,"actor.frame_event");
 }
 
+void SoloActorSimulation::replace_in_step(SoloActorSimulation& old,SoloActorSimulation& rebuilt,SoloActorFrame& frame,
+    const SoloActorFrameInput& input){
+    auto& o=*old.impl_;auto& s=*rebuilt.impl_;
+    if(o.executing)throw std::runtime_error("Actor world: an actor rebuilt during its own phase (001b8130 from its own handler) is not hosted");
+    if(o.current!=&frame)throw std::runtime_error("Actor world: the rebuilt actor's frame is not its traversal slot");
+    if(s.config.dt!=o.config.dt)throw std::runtime_error("Actor world: every actor steps with the world's elapsed time");
+    o.current=nullptr;
+    frame=SoloActorFrame{};s.current=&frame;if(!s.footsteps.materials)s.lead_foot_31dd=input.lead_foot_31dd;
+}
+
 SoloActorSimulation::SoloActorSimulation(SoloCollisionWorld world,const SoloActorConfig& config,
     SoloActorAnimation* animation,std::optional<ActorAnimationTuning> tuning,SoloActorControlFields initial)
     :SoloActorSimulation(SoloActorWorldLink{std::make_shared<const SoloCollisionWorld>(std::move(world))},
@@ -3118,6 +3159,7 @@ SoloActorFrame SoloActorSimulation::step(const SoloActorFrameInput& input){
 std::uint64_t SoloActorSimulation::handle() const{return impl_->handle;}
 std::uint64_t SoloActorSimulation::controller_handle() const{return impl_->controller_handle;}
 bool SoloActorSimulation::player_controller() const{return impl_->player();}
+ActorDamageController SoloActorSimulation::damage_controller() const{return impl_->damage_controller();}
 bool SoloActorSimulation::eligible() const{return impl_->byte_2c&&impl_->byte_2d&&!impl_->byte_2e;}
 std::uint8_t SoloActorSimulation::byte_2d() const{return impl_->byte_2d;}
 void SoloActorSimulation::set_step_dt(float dt){
@@ -3126,6 +3168,11 @@ void SoloActorSimulation::set_step_dt(float dt){
 }
 float SoloActorSimulation::step_dt() const{return impl_->config.dt;}
 std::uint8_t SoloActorSimulation::byte_14() const{return impl_->actions.byte_14;}
+void SoloActorSimulation::set_byte_14(std::uint8_t value){impl_->actions.byte_14=value;}
+void SoloActorSimulation::set_network_game(bool network,bool host,std::function<bool(const ActorDamageEvent&)> send){
+    impl_->network_game=network;impl_->network_host=host;impl_->network_damage=std::move(send);
+}
+bool SoloActorSimulation::network_game() const{return impl_->network_game;}
 bool SoloActorSimulation::in_water_346d() const{return impl_->in_water_346d;}
 // The physical component +3310 as its constructor 001eb990 leaves it, linked
 // by 001b5560: +11 set so the first 001e9980 runs 001e9380 (001b5560 also runs
@@ -3458,6 +3505,12 @@ void SoloActorSimulation::queue_link_message(bool enable){
     impl_->queue.push_back(std::move(m));
 }
 void SoloActorSimulation::set_link_message_filter(LinkMessageScriptFilter filter){impl_->link_filter=std::move(filter);}
+void SoloActorSimulation::set_hotbox_trigger_sink(HotboxTriggerSink sink){impl_->trigger_sink=std::move(sink);}
+void SoloActorSimulation::queue_box_trigger(const HotboxType3Trigger& trigger){
+    Impl::QueuedMessage m;m.kind=Impl::QueuedMessage::Kind::box_trigger;m.box_trigger=trigger;
+    impl_->queue.push_back(std::move(m));
+}
+void SoloActorSimulation::set_box_trigger_filter(BoxTriggerScriptFilter filter){impl_->box_trigger_filter=std::move(filter);}
 void SoloActorSimulation::set_notify_checkpoint_filter(NotifyCheckpointScriptFilter filter){impl_->notify_checkpoint_filter=std::move(filter);}
 void SoloActorSimulation::queue_out_of_ammo(std::int32_t item){
     if(!player_controller())throw std::runtime_error("Solo actor: cOutOfAmmoMsg (004ea150) to an actor without a player controller");
@@ -3465,6 +3518,10 @@ void SoloActorSimulation::queue_out_of_ammo(std::int32_t item){
     impl_->queue.push_back(m);
 }
 void SoloActorSimulation::set_out_of_ammo_filter(OutOfAmmoScriptFilter filter){impl_->out_of_ammo_filter=std::move(filter);}
+void SoloActorSimulation::queue_network_death(std::int32_t code){
+    Impl::QueuedMessage m;m.kind=Impl::QueuedMessage::Kind::death;m.code=code;
+    impl_->queue.push_back(m);
+}
 void SoloActorSimulation::queue_respawn(){
     Impl::QueuedMessage m;m.kind=Impl::QueuedMessage::Kind::respawn;
     impl_->queue.push_back(m);
@@ -3809,8 +3866,9 @@ SoloDamageOutcome SoloActorSimulation::apply_damage(const SoloDamageRequest& r){
     if(!in_frame)s.current=&out.record;
     ActorDamageInput in;in.actor=s.handle;
     // +58 virtuals +54/+58/+5c: player component 1/0/0; AI 0/1/0 (0012f370, 0015b7e0, 001535d0).
-    in.controller=s.player()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+    in.controller=s.damage_controller();
     in.byte_14=s.actions.byte_14!=0;
+    in.network=s.network_game;in.host_console=s.network_host;
     in.source={r.source,r.source_controller};
     in.category=r.category;in.type=r.type;in.penetration=r.penetration;in.quiet=r.quiet;in.hit_point=r.hit_point;in.amount=r.amount;
     std::optional<RootVector> source_position;

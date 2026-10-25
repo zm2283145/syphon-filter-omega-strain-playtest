@@ -73,18 +73,44 @@ target_link_libraries(omega_gfx_gxm PUBLIC omega_core omega_vita_platform ${omeg
     SceGxm_stub SceDisplay_stub SceSysmodule_stub SceCommonDialog_stub SceAppMgr_stub SceKernelDmacMgr_stub
     SceIofilemgr_stub SceLibKernel_stub m)
 
-# One function per package: vita_create_vpk is a macro that accumulates its flags in the calling scope.
-# Extra FILE pairs (source, path in the package) after the LiveArea images.
+# Extra pairs (source, path in the package) after the LiveArea images.
+# VitaSDK's vita_create_vpk builds its vita-pack-vpk flags as one string and splits it on spaces, which breaks on a
+# source or build path with spaces (the repo's own checkout folder): the same two commands (param.sfo, then the vpk)
+# and the same outputs (<target>.vpk_param.sfo, <target>.vpk.out copied to <target>.vpk) as list arguments instead.
 function(omega_vita_package target title_id name livearea)
     vita_create_self(${target}.self ${target} UNSAFE)
-    vita_create_vpk(${target}.vpk ${title_id} ${target}.self
-        VERSION ${OMEGA_VITA_VERSION}
-        NAME "${name}"
-        FILE ${livearea}/icon0.png sce_sys/icon0.png
-             ${livearea}/bg.png sce_sys/livearea/contents/bg.png
-             ${livearea}/startup.png sce_sys/livearea/contents/startup.png
-             ${livearea}/template.xml sce_sys/livearea/contents/template.xml
-             ${ARGN})
+    set(bin "${CMAKE_CURRENT_BINARY_DIR}")
+    set(self "${bin}/${target}.self")
+    set(sfo "${bin}/${target}.vpk_param.sfo")
+    set(out "${bin}/${target}.vpk.out")
+    set(pairs "${livearea}/icon0.png" sce_sys/icon0.png
+              "${livearea}/bg.png" sce_sys/livearea/contents/bg.png
+              "${livearea}/startup.png" sce_sys/livearea/contents/startup.png
+              "${livearea}/template.xml" sce_sys/livearea/contents/template.xml
+              ${ARGN})
+    set(pack_args)
+    set(resources)
+    while(pairs)
+        list(POP_FRONT pairs source dest)
+        get_filename_component(source "${source}" ABSOLUTE)
+        list(APPEND resources "${source}")
+        list(APPEND pack_args -a "${source}=${dest}")
+    endwhile()
+    add_custom_command(OUTPUT "${sfo}"
+        COMMAND ${VITA_MKSFOEX} -s APP_VER=${OMEGA_VITA_VERSION} -s TITLE_ID=${title_id} "${name}" "${sfo}"
+        DEPENDS "${self}"
+        COMMENT "Generating param.sfo for ${target}.vpk"
+        VERBATIM)
+    add_custom_command(OUTPUT "${out}"
+        COMMAND ${VITA_PACK_VPK} ${pack_args} -s "${sfo}" -b "${self}" "${out}"
+        DEPENDS "${sfo}" "${self}" ${resources}
+        COMMENT "Building vpk ${target}.vpk"
+        VERBATIM)
+    add_custom_target(${target}.vpk-vpk ALL
+        DEPENDS "${out}"
+        COMMAND ${CMAKE_COMMAND} -E copy "${out}" "${bin}/${target}.vpk"
+        BYPRODUCTS "${bin}/${target}.vpk"
+        VERBATIM)
 endfunction()
 
 function(omega_vita_livearea out title subtitle)

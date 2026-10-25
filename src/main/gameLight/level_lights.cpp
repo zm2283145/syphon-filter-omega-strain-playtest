@@ -23,6 +23,7 @@ float fdiv(float a,float b){
     return ftz(a/b);
 }
 void require(bool ok,const std::string& what){if(!ok)throw std::runtime_error("level lights: "+what);}
+void require(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string("level lights: ")+what);}   // 132vs1: no string unless it fails
 std::string hex(std::uint32_t v){
     static const char* digits="0123456789abcdef";
     std::string s(8,'0');
@@ -73,10 +74,10 @@ std::vector<Registered> find_objects(const LevelLights& lights,std::uint32_t cat
 const LevelLightObject& light_object(const LevelLights& lights,std::uint32_t id){
     const LevelLightObject* found=nullptr;
     for(const auto& o:lights.objects)if(o.id==id){
-        require(found==nullptr,"two light objects with id "+hex(id));
+        if(found!=nullptr)require(false,"two light objects with id "+hex(id));
         found=&o;
     }
-    require(found!=nullptr,"no light object with id "+hex(id));
+    if(found==nullptr)require(false,"no light object with id "+hex(id));
     return *found;
 }
 // Light vcall +0x2c / +0x30 on a light object's light: PNT 00371b00 / 00371a60 (the patch slots, then
@@ -367,6 +368,9 @@ namespace {
 void flatten_level_light_pools(const LevelLights& lights,LevelLightTable& out,std::size_t (&base)[4]){
     out.set.any_lists=!lights.directional.empty()||!lights.point.empty()||!lights.spot.empty();   // manager +0x14/+0x18/+0x1c
     const LevelLightPool order[3]={LevelLightPool::point,LevelLightPool::spot,LevelLightPool::directional};
+    const std::size_t total=lights.point.size()+lights.spot.size()+lights.directional.size();   // 132vs1: one allocation each
+    out.set.lights.reserve(out.set.lights.size()+total);
+    out.lights.reserve(out.lights.size()+total);
     for(const LevelLightPool pool:order){
         base[static_cast<std::size_t>(pool)]=out.set.lights.size();
         const auto& entries=lights.pool(pool);
@@ -419,6 +423,7 @@ LevelLightTable build_level_light_table(const LevelLights& lights,const ShadowMa
         if(l.type==0x10)require(row.light.pool==LevelLightPool::spot,"spot-typed light outside the spot pool in the table");
         if(l.type==2)require(row.light.pool!=LevelLightPool::point,"directional light in the point pool in the table");
         ShadowLightTableEntry e=shadow_light_table_entry(out.set.lights,base[static_cast<std::size_t>(row.light.pool)]+row.light.index);   // 00373ae8..00373b70
+        if(out.set.table.empty())out.set.table.reserve(out.rows.size());
         out.set.table.push_back(e);
     }
     return out;

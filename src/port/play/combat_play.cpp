@@ -1973,6 +1973,7 @@ CombatPlaySession::CombatPlaySession(ActorWorld& world,const WeaponDatabase& dat
                                  [self](std::size_t a,float dt){self->throws->air_taser_update(a,dt);},
                                  [self](std::size_t a){self->throws->air_taser_release(a);}});
     }
+    if(s.config.innocent_hit_chance)s.combat->set_innocent_hit_chance(s.config.innocent_hit_chance);
     PadCombatHooks hooks;
     hooks.targeting=[self](PadCombatFields& f){self->targeting_stage(f);};
     hooks.weapon=[self](PadCombatFields& f){self->weapon_stage(f);};

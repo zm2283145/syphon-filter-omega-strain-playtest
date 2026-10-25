@@ -73,9 +73,18 @@ void WorkerPool::loop() {
 }
 
 void WorkerPool::for_each(std::size_t count, const std::function<void(std::size_t)>& fn) {
-    if (count == 0) return;
-    if (threads_.empty() || count == 1) {
+    for_each_beside(count, fn, {});
+}
+
+void WorkerPool::for_each_beside(std::size_t count, const std::function<void(std::size_t)>& fn,
+                                 const std::function<void()>& first) {
+    if (count == 0 || threads_.empty()) {
         for (std::size_t i = 0; i < count; ++i) fn(i);  // the single-threaded path (the first throw ends it)
+        if (first) first();
+        return;
+    }
+    if (count == 1 && !first) {
+        fn(0);
         return;
     }
     Job job;
@@ -89,6 +98,12 @@ void WorkerPool::for_each(std::size_t count, const std::function<void(std::size_
         items_ += count;
     }
     wake_.notify_all();
+    std::exception_ptr first_error;
+    if (first) try {
+            first();
+        } catch (...) {
+            first_error = std::current_exception();
+        }
     work(job);
     {
         std::unique_lock lock(mutex_);
@@ -97,6 +112,7 @@ void WorkerPool::for_each(std::size_t count, const std::function<void(std::size_
     }
     if (job.done.load() != count) throw std::logic_error("WorkerPool: a job index did not run");
     if (job.error) std::rethrow_exception(job.error);
+    if (first_error) std::rethrow_exception(first_error);
 }
 
 void HostThread::Completion::wait() {

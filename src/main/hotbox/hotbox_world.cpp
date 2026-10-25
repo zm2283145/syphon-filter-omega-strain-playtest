@@ -282,12 +282,10 @@ std::optional<HotboxActorEvent> receive_hotbox_event(const HotboxWorld& w,std::s
             return HotboxActorEvent{type,0,w.boxes[b.links[0]].record.id};
         }
         if(type==17)return std::nullopt;                                   // table 0049c8e0: 00172908
-        // 00172598 (3) with links: hotbox_type3_enter_triggers, to an NPC actor.
-        if(type==3&&!b.link_keys.empty())
-            throw std::runtime_error("Type-3 hotbox enter with links (00172598): the GOBJTriggerEventMsg to actor "+
-                                     std::to_string(b.link_keys.front())+" is not hosted (receipt by 001b3b60 not analysed)");
         // 00172450 (1, 6; reads the occupant's player index for the
-        // messages), 00172598 (3), 00172908 (7): no links, nothing sent.
+        // messages), 00172598 (3), 00172908 (7): nothing for the actor. A
+        // type-3 box's links get the GOBJTriggerEventMsgs of
+        // hotbox_type3_enter_triggers (sent by the caller, transport 0).
         if(link_message_type(type))return std::nullopt;
     }else if(payload==2){                                                  // 00171ed0
         if(type==9||type==15||type==16)return HotboxActorEvent{type,2,b.record.parameter}; // 00172288

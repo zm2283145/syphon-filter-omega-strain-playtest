@@ -111,6 +111,12 @@ public:
 
     std::int32_t page() const { return page_; }
     void set_page(std::int32_t p);
+    // Port-only (Vita): false hides the PC rows: the keyboard ones (the PLAY KEYS / MENU KEYS pages, INPUT's
+    // RESET KEYS, DISPLAY's OVERLAY KEY) and the mouse ones (INPUT's MOUSE LOOK, SENSITIVITY, INVERT Y). The PAGE
+    // row then cycles DISPLAY, INPUT, MODS. A hidden page is left for DISPLAY.
+    void set_pc_rows(bool shown);
+    bool pc_rows() const { return pc_rows_; }
+    bool page_shown(std::int32_t p) const;
     std::int32_t rows_on_page() const;
     PortSettingsStore& store() { return *store_; }
     // Checkpoint 132md4: the MODS page's folder: set (play's --mods <folder>), else the settings' mods_folder= or
@@ -133,6 +139,10 @@ private:
     bool feed_number(std::uint8_t vk);  // a typed value's key; true when the entry ended
     void commit(PortSettings& s, const std::string& what);
     void bind_key(std::uint8_t vk);
+    std::int32_t step_page(bool forward) const;   // the next / previous shown page
+    std::size_t row_id(std::size_t r) const;      // a shown row's place in its page's full row list
+
+    bool pc_rows_ = true;
 
     const std::vector<mods::ModListing>& mod_list() const;  // 132md4: the MODS page's mods (cached)
     std::int32_t mod_rows() const;                         // the MODS page's mod rows (MORE MODS included)

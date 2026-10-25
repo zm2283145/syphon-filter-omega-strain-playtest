@@ -167,7 +167,7 @@ void ActorWorldCombat::damage(std::size_t victim,std::optional<std::size_t> shoo
     if(shooter){
         auto& s=world_.actor(*shooter);
         r.source=s.handle();
-        r.source_controller=s.player_controller()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+        r.source_controller=s.damage_controller();
         r.source_position=s.published_position();
     }
     r.category=category;r.type=type;r.penetration=penetration;r.amount=amount;   // 00188780: quiet 0, hit point null
@@ -191,7 +191,7 @@ void ActorWorldCombat::damage_without_penetration(std::size_t victim,std::option
     if(shooter){
         auto& s=world_.actor(*shooter);
         r.source=s.handle();
-        r.source_controller=s.player_controller()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+        r.source_controller=s.damage_controller();
         // An actor without a frame yet (a script Kill of a deactivated NPC, SEWER's CompleteDeathSquad) reads its
         // load placement; one whose step had no response store (0x001e4dd8) the model step's translation.
         r.source_position=s.published_position();
@@ -203,7 +203,7 @@ void ActorWorldCombat::damage_request(std::size_t victim,const SoloDamageRequest
     damage_.emplace_back(victim,world_.actor(victim).apply_damage(request));
 }
 ActorDamageController ActorWorldCombat::damage_controller(std::size_t actor){
-    return world_.actor(actor).player_controller()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+    return world_.actor(actor).damage_controller();
 }
 
 std::optional<BulletStaticHit> ActorWorldCombat::static_hit(const RootVector& start,const RootVector& displacement,std::uint64_t excluded){

@@ -223,6 +223,9 @@ public:
     };
     void set_air_taser(AirTaser taser){air_taser_=std::move(taser);}
     const AirTaser& air_taser() const{return air_taser_;}
+    // The bullet rule's game::HitInnocentNpcChance (*0048a2b8, read per hit at
+    // 00188918). Empty: its boot value 0.3.
+    void set_innocent_hit_chance(std::function<float()> chance){innocent_chance_=std::move(chance);}
 private:
     WeaponDischargeHost discharge_host(std::size_t actor,std::vector<CombatEvent>& events);
     BulletPoolHost pool_host(std::vector<CombatEvent>& events);
@@ -246,6 +249,7 @@ private:
     std::map<std::uint64_t,BulletObjectShooter> object_shooters_;   // request_bullet's shooters (132uk6)
     BulletEffects effects_;
     AirTaser air_taser_;
+    std::function<float()> innocent_chance_;
     const std::vector<BulletEvent>* updating_bullets_{};
     std::size_t last_bullet_hits_{};
 };

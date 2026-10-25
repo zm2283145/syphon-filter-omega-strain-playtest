@@ -98,6 +98,8 @@ struct BulletHitHost {
     std::function<std::uint8_t()> life_state; // victim virtual +108
     // Victim virtual +100 (00187360 for actors); it may change the penetration.
     std::function<void(std::uint8_t category,std::uint8_t type,std::int32_t& penetration,float amount)> damage;
+    // 00188918 lwc1 of *0048a2b8: game::HitInnocentNpcChance (boot 0.3; YEMEN2's Startup writes 0.01).
+    float innocent_chance=0.3F;
 };
 // 00188780: returns the category (0 miss, 1 body, 2 head, 3 armored torso, 4 part 0x14).
 std::uint8_t apply_bullet_hit(const BulletHitVictim& victim,const std::optional<BulletHitShooter>& shooter,BulletHitRequest& request,

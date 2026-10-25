@@ -486,6 +486,12 @@ struct SoloActorFrame {
         enum class Effect {none,activated,deactivated} effect{};
     };
     std::vector<LinkMessageEvent> link_messages;
+    // The GOBJTriggerEventMsgs a type-3 box's enter (00172598) sent this
+    // actor that this step's pump delivered, and whether a script handler
+    // took each one (unhandled: 001b3b60 and 003cea10 have no branch for key
+    // 004f5440, so 003caca0 walks the empty +0x20 child list: dropped).
+    struct BoxTriggerEvent {HotboxType3Trigger trigger;bool script_handled{};};
+    std::vector<BoxTriggerEvent> box_triggers;
     // Camera +cf8 bits of 00247800 (called by the pad at 0024ec14, after the
     // movement message): 0x400 for selector 4 inside a crawl zone with
     // headroom, 0x800 for selector 4 crouched (+3204 bit 4) with physical
@@ -691,6 +697,9 @@ public:
     // AI controller's word +114 = 0.
     virtual void clear_action_114(){
         throw std::runtime_error("Actor AI controller: the dead landing's +114 store (0019e978) is not hosted");}
+    // The controller's virtuals +54 / +58 / +5c the damage path reads: an AI controller (0012f370, 0015b7e0, 001535d0)
+    // answers 0 / 1 / 0.
+    virtual ActorDamageController damage_predicates() const{return {false,true,false};}
 };
 // The actor's +58 component: the player component (pad producer 0024b5d0,
 // virtual +54 = 1; ai == nullptr) or an AI component (virtual +54 = 0012f370
@@ -1087,6 +1096,23 @@ public:
     void queue_link_message(bool enable);
     using LinkMessageScriptFilter=std::function<bool(bool enable)>;
     void set_link_message_filter(LinkMessageScriptFilter filter);
+    // The enter of a type-3 box with links (MakeNPCInteractable's run-time
+    // box) sends each link a GOBJTriggerEventMsg (00172598,
+    // hotbox_type3_enter_triggers) with transport 0 during the pump; the sink
+    // routes each one to its receiver's actor (queue_box_trigger). Without a
+    // sink such a message throws.
+    using HotboxTriggerSink=std::function<void(const HotboxType3Trigger&)>;
+    void set_hotbox_trigger_sink(HotboxTriggerSink sink);
+    // 003c9420(trigger, actor, 0): delivered by the next pump. The actor's
+    // script filter (003cc850 -> 003e1aa0, type GOBJTriggerEventMsg) first;
+    // unhandled, 001b3b60 (no branch for key 004f5440) passes it to 003cea10
+    // (none either: only 0055d4b8 / 0055d498 / 0055d4d8 / 0055d4e0), whose
+    // 003caca0 walks the actor's +0x20 child list, empty for actors (see
+    // set_ai_notification_filter): dropped, recorded in box_triggers. The
+    // player actor (its filter is not hosted) throws.
+    void queue_box_trigger(const HotboxType3Trigger& trigger);
+    using BoxTriggerScriptFilter=std::function<bool(const HotboxType3Trigger&)>;
+    void set_box_trigger_filter(BoxTriggerScriptFilter filter);
     // The revive's MSGGAME_NOTIFY_CHECKPOINT (queued at 00189dd8 ahead of CAS
     // 0x11): the controller's script filter (00175fd0 -> 003e1aa0, type
     // NotifyCheckpointMsg) when the pump delivers it. Without a filter, or
@@ -1107,6 +1133,9 @@ public:
     // MSGGAME_RESPAWN (key 004f7940, +24 = 0) queued to this actor: game::ReSpawn 0022e1d0 sends it as the
     // fade poll 00177c60 does; delivery is 001b45dc (revive 001898f0, or a live player's dead state 001a3780).
     void queue_respawn();
+    // 132ln5h14c: a death action (action 0x42 kind 2) another console sent (003e4f70's 003c9350, transport 0):
+    // delivered at the next pump, 001a92a0 case 0x42 -> 0018a950(code).
+    void queue_network_death(std::int32_t code);
     using OutOfAmmoScriptFilter=std::function<bool(std::int32_t item)>;
     void set_out_of_ammo_filter(OutOfAmmoScriptFilter filter);
     // cWeaponVisChangeMsg (key 00583968, vtable 004e1140, byte +20 = 2, word
@@ -1343,6 +1372,9 @@ void fire_ignite();
     std::uint64_t handle() const;
     std::uint64_t controller_handle() const;
     bool player_controller() const;
+    // The +58 controller's +54 / +58 / +5c as the damage path reads them: the player component's 1 / 0 / 0, else the
+    // AI controller's (ActorAiController::damage_predicates).
+    ActorDamageController damage_controller() const;
     // Root object bytes +2c, +2d (present) and +2e; the frame traversals run
     // actor logic and the model/physical phase only when +2c and +2d are set
     // and +2e is clear (0x00133420, 0040f3e0).
@@ -1412,6 +1444,14 @@ void fire_ignite();
     void set_footstep_hooks(FootstepHooks hooks);
     // Actor +14 (1 for every locally constructed actor, 003cb0e0).
     std::uint8_t byte_14() const;
+    // Checkpoint 132ln5h14c: a network game's actor +14 (0 while another console owns the actor: the remote NPC
+    // controller's install 001b3d98 / a remote human's).
+    void set_byte_14(std::uint8_t value);
+    // Checkpoint 132ln5h14c: a network game (005721c8; host: 005721c0) for the damage path 003ccb00. Its damage messages
+    // other than the single player's (+20 5) go through `send` (003c9420 to the network), which answers whether
+    // 003c9420 queued the message on this console too (003ca0e0); a queued one reaches the actor's pump as before.
+    void set_network_game(bool network,bool host,std::function<bool(const ActorDamageEvent&)> send);
+    bool network_game() const;
     // Actor byte +346d: the water support flag 001e5cf0 publishes (001e5ea8).
     bool in_water_346d() const;
     // Actor virtual +5c (001b53d0): 001b5560,
@@ -1513,6 +1553,12 @@ private:
     // (003c9160..003c919c), while both traversals and the frame-update event
     // skip it.
     struct AppendedActor{SoloActorSimulation* actor{};SoloActorFrame* frame{};const SoloActorFrameInput* input{};};
+    // Checkpoint 132ws9: ResetNpc's rebuild 001b8130 from a script native that the pump runs (the revive's
+    // NotifyCheckpointMsg -> ITALY / KYRGSTAN m::ReStartLevel). The new object takes the old one's place in this
+    // frame's traversal (the original rebuilds at the same address, which the traversal then reaches): its frame
+    // slot, empty again, and its input. The old actor must not be the one whose phase runs.
+    static void replace_in_step(SoloActorSimulation& old,SoloActorSimulation& rebuilt,SoloActorFrame& frame,
+        const SoloActorFrameInput& input);
     static void run_frame(std::span<SoloActorSimulation* const> actors,std::span<const SoloActorFrameInput> inputs,
         std::span<SoloActorFrame> frames,const std::function<void()>& services={},
         const std::function<void()>& after_first_traversal={},

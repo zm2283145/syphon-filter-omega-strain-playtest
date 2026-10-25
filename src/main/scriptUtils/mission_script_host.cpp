@@ -936,6 +936,14 @@ bool MissionScriptHost::deliver_beam(Word object) {
     return context_.deliver(receiver, ScriptContext::Message{"BeamMsg", {{"Who", Value(objects_.objects.resolve(objects_.player | 0x80000000U))}}});
 }
 
+bool MissionScriptHost::deliver_human_seen(Word object) {
+    if (!started_) throw std::runtime_error("HumanSeenMsg before the mission scripts started");
+    const auto [label, receiver] = objects_.receiver(object);
+    if (label != "event_object") throw std::runtime_error("HumanSeenMsg to a record that is not an NIE: object: " + std::to_string(object));
+    const StageScope scope(stage_, "HumanSeenMsg -> " + std::to_string(object));
+    // 0017e310..0017e388: +24 the seen actor, byte +20; no getters are hosted (ZURICH's handler reads none).
+    return context_.deliver(receiver, ScriptContext::Message{"HumanSeenMsg", {}});
+}
 bool MissionScriptHost::deliver_spawned_npc(Word generator, std::optional<Word> npc) {
     if (!started_) throw std::runtime_error("SpawnedNPCMsg before the mission scripts started");
     const auto [label, receiver] = objects_.receiver(generator);
@@ -980,6 +988,19 @@ bool MissionScriptHost::deliver_link_message(Word npc, bool enable) {
     const char* type = enable ? "EnableMsg" : "DisableMsg";
     const StageScope scope(stage_, std::string(type) + " -> " + std::to_string(npc));
     return context_.deliver(receiver, ScriptContext::Message{type, {}});
+}
+
+bool MissionScriptHost::deliver_box_trigger(Word npc, Word action, Word data, Word box) {
+    if (!started_) throw std::runtime_error("GOBJTriggerEventMsg before the mission scripts started");
+    const auto [label, receiver] = objects_.receiver(npc);
+    if (label != "ai") throw std::runtime_error("Type-3 hotbox trigger to a record without an AI component: " + std::to_string(npc));
+    const StageScope scope(stage_, "GOBJTriggerEventMsg " + std::to_string(action) + " (box " + std::to_string(box) + ") -> " +
+                                       std::to_string(npc) + " (ai)");
+    // Who reads +30 as for deliver_trigger: here the box's key.
+    ScriptContext::Message message{"GOBJTriggerEventMsg", {{"Action", Value(Word{action})},
+                                                           {"Who", Value(objects_.objects.resolve(box | 0x80000000U))},
+                                                           {"Data", Value(Word{data})}}};
+    return context_.deliver(receiver, std::move(message));
 }
 
 bool MissionScriptHost::deliver_generator_link_message(Word generator, bool enable) {
@@ -2626,7 +2647,10 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             if (section != objects_.sections.end() && section->second == "node")
                 applied = look ? npcs->request_look_at_node(handle->id, node_index(1), duration)
                                : npcs->request_facial_node(handle->id, node_index(1), duration);
-            else if (section != objects_.sections.end() && section->second == "object" && objects_.objects.alive(*object))
+            // Checkpoint 132ms6: an NIE: as well (vtable 004dc050, the same +c0 0014d340 -> +e4 003cd260;
+            // YEMEN2's yemen_palace::StartFiring faces the chopper NI_CHOPR08 732650).
+            else if (section != objects_.sections.end() && (section->second == "object" || section->second == "event_object") &&
+                     objects_.objects.alive(*object))
                 applied = look ? npcs->request_look_at_object(handle->id, object->id, duration)
                                : npcs->request_facial_object(handle->id, object->id, duration);   // a GOB: +c0 0014d340
             else if (section != objects_.sections.end() && section->second == "hotbox" && objects_.objects.alive(*object))

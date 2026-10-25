@@ -1043,6 +1043,9 @@ public:
     // 004dcf30; +24 the player's actor, +20 = 1) offered to the NIE: object's
     // script filter (003c8de0); Who answers the player. True when handled.
     bool deliver_beam(Word object);
+    // Checkpoint 132ms2: the kind-5 camera's HumanSeenMsg (key 004ee930, vtable 004da310; +24 the seen
+    // actor, +20 = 1) offered to the NIE: object's script filter (003c8de0); no getters. True when handled.
+    bool deliver_human_seen(Word object);
     // SpawnedNPCMsg (003c9e30 key 004a4a80, vtable 004db640; +24 the actor)
     // to its generator, offered to the script filter first (the generator's
     // native receiver 00221610 takes it with no effect). GetNPC (0021d060,
@@ -1067,6 +1070,11 @@ public:
     // 003e1aa0 with the NPC projected to its AI component; no getter is
     // answered. true when a handler was selected (TORONTO1 has none).
     bool deliver_link_message(Word npc, bool enable);
+    // A type-3 box's GOBJTriggerEventMsg (00172598: 0021b790, vtable 004daf10)
+    // to the NPC it links: through 003e1aa0 with the NPC projected to its AI
+    // component; Action = the +24 byte, Data = the +28 word, Who = the +30
+    // key (the box object). True when a handler was selected.
+    bool deliver_box_trigger(Word npc, Word action, Word data, Word box);
     // The same EnableMsg / DisableMsg sent to a generator, offered to its script
     // filter first (003c8de0); unhandled, the native receiver 00221610 takes it
     // (generator_receive_link_message). No getter is answered.

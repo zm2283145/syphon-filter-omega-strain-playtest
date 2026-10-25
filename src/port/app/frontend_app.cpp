@@ -1000,6 +1000,9 @@ void FrontendApp::Impl::open_output() {
         screen_generation = host->device_generation();
         screen_movie_serial = 0;
     }
+#ifdef __vita__
+    data->restore_images();  // 132vp1: dropped at the hand-off (release_output)
+#endif
     uploaded.clear();
     for (const auto& [slot, image] : data->fonts().images) {
         upload(slot, image);
@@ -1104,6 +1107,12 @@ void FrontendApp::Impl::release_output() {
     sound.reset();
     screen.reset();
     if (host) host->drop_target();
+#ifdef __vita__
+    // Port-only (132vp1, research/VITA.md "Playability, memory and coverage"): the level's heap; decoded again at
+    // the resume (open_output).
+    const std::size_t freed = data->release_images();
+    std::cout << "Front end: " << (freed >> 10) << " KB of decoded pictures and HOG copies dropped for the level (PS Vita)\n";
+#endif
 }
 
 void FrontendApp::Impl::capture(const std::string& name) {
@@ -1194,7 +1203,7 @@ void FrontendApp::Impl::step(std::uint16_t held) {
         }
     } else if (s.gui_drawn()) {
         FrontendProfileScope scope(profile, "draw_list");
-        shown.batches.clear();
+        shown.recycle();   // 132vf1: keeps the batches' storage (as the Vita loop)
         drawer->draw_canvas(shown, s.runtime(), s.now_ms());
         if (!shown.batches.empty()) last_render_mode = shown.batches.back().render_mode;
         sync_zeus();  // the part textures the agent model draw took this frame

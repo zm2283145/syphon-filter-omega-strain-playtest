@@ -48,16 +48,30 @@ RootVector position_of(const ActorDamageHost& h,std::uint64_t object){
     if(!h.position_e4)throw std::runtime_error("Actor damage: object position (virtual +e4) is not hosted");
     return h.position_e4(object);
 }
-// 003ccb00 in single player: returns life state == 3.
+// 003ccb00: returns life state == 3. In a network game (005721c8) the MSGLIB_DAMAGE_REQUEST takes +20 = 2.
 bool base_damage(ActorHealthState& s,const ActorDamageInput& in,std::uint64_t source,std::uint8_t type,
     float amount,const ActorDamageHost& h,std::vector<ActorDamageEvent>& out){
     if(source==0)return false;                                         // 003ccb40
-    if(check(s.health_40)<=0.0F)return life(s,h)==3;                   // 003ccb5c (c.ole.s)
-    s.health_40=sub(s.health_40,amount);                               // 003ccbac
+    if(check(s.health_40)<=0.0F){                                      // 003ccb5c (c.ole.s)
+        if(in.network&&!in.host_console&&!in.controller&&!in.quiet){   // 003ccd28: a client's actor without +58
+            auto m=event(ActorDamageEvent::Kind::damage_message);
+            m.value=trunc_word(amount);m.object=source;m.type_2c=type;m.category_2d=in.category;m.byte_2e=0;m.flags_20=2;
+            out.push_back(m);                                          // 003ccdb8, transport 0
+        }
+        return life(s,h)==3;
+    }
+    // 003ccb68: a network game's controller whose virtual +5c answers (the remote NPC 0x004de2a0) keeps +40.
+    if(!(in.network&&in.controller&&in.controller->virtual_5c))
+        s.health_40=sub(s.health_40,amount);                           // 003ccbac
     const std::int32_t whole=trunc_word(amount);                       // 003ccbc8
     auto m=event(ActorDamageEvent::Kind::damage_message);
     m.value=whole;m.object=source;m.type_2c=type;m.category_2d=in.category;m.byte_2e=1;m.flags_20=5;
-    out.push_back(m);                                                  // 003ccc90, transport 0
+    if(!in.network)out.push_back(m);                                   // 003ccc90, transport 0
+    else if(!in.controller||in.byte_14){                               // 003ccc0c..003ccc78
+        m.flags_20=2;
+        if(!in.controller&&!in.quiet)m.byte_2e=0;
+        out.push_back(m);
+    }
     if(trunc_word(s.health_40)<=0){                                    // 003ccca8
         s.health_40=0.0F;
         ActorKillInput k;k.actor=in.actor;k.controller=in.controller;k.byte_14=in.byte_14;k.amount=whole;

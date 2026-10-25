@@ -81,13 +81,13 @@ void ActorWorldBlastObjects::damage(const ExplosionDamageCall& call){
     const auto victim=actor_index(call.victim);
     if(!victim)fail("blast damage on an object that is neither an actor nor a host object (its +100 is not hosted)");
     auto& s=world_.actor(*victim);
-    const ActorDamageController self=s.player_controller()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+    const ActorDamageController self=s.damage_controller();
     std::optional<ActorDamageController> source_controller;
     std::optional<RootVector> source_position;
     if(call.source!=0){
         if(const auto a=actor_index(call.source)){
             const auto& src=world_.actor(*a);
-            source_controller=src.player_controller()?ActorDamageController{true,false,false}:ActorDamageController{false,true,false};
+            source_controller=src.damage_controller();
             source_position=src.published_position();
         }else{
             bool found=false;

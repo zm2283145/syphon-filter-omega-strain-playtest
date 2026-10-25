@@ -93,6 +93,9 @@ struct GuiViewProjection {
 };
 // Throws for a perspective batch without `view`.
 std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& batch, const GuiViewProjection* view = nullptr);
+// Port-only (132vf1, research/VITA.md "Front-end speed (132vf1)"): the same triangles appended to `out` (the
+// renderer's per-frame scratch, so a frame's draw allocates nothing once it has grown).
+void gui_triangles_append(const GuiDrawBatch& batch, const GuiViewProjection* view, std::vector<GuiTriangleVertex>& out);
 
 // Port-only (checkpoint 132win4): a flat (no perspective record, no camera clip), untextured 00371200
 // batch whose GUI-space bounds cover the whole 640 x 448 frame (x -320..320, y -224..224). The
@@ -125,6 +128,13 @@ struct GuiEdgeVertex {
 // (a triangle narrower than it, an end bracket or a thin line, is not mirrored).
 std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>& triangles, float half_width,
                                                 float max_overhang = 1e30F, float min_width = 0.0F);
+// 132vf1: the same images appended to `out`.
+void gui_wide_edge_images_append(const std::vector<GuiEdgeVertex>& triangles, float half_width, float max_overhang,
+                                 float min_width, std::vector<GuiEdgeVertex>& out);
+// Port-only (checkpoint 132ws9): the parts of the triangles inside (rows y0..y1) or outside that band, triangulated;
+// and the triangles with each point's u, v moved to the texel the triangle maps at (x, y): the row y stretched.
+std::vector<GuiEdgeVertex> gui_edge_rows(const std::vector<GuiEdgeVertex>& triangles, float y0, float y1, bool inside);
+std::vector<GuiEdgeVertex> gui_edge_sample_row(std::vector<GuiEdgeVertex> triangles, float y);
 
 // Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the wide menu draw's trim of a batch's
 // triangles (flat GUI units, w 1): a triangle that crosses the 4:3 frame's left or right edge by at most `overhang`
@@ -136,6 +146,9 @@ std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>
 // meets its mirror image without a dark seam). Returns triangles (three vertices each).
 std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& triangles, float overhang,
                                               float reach = 0.0F);
+// 132vf1: the same triangles appended to `out`.
+void gui_wide_menu_trim_append(const std::vector<GuiEdgeVertex>& triangles, float overhang, float reach,
+                               std::vector<GuiEdgeVertex>& out);
 // Port-only (checkpoint 132ws5): the wide menu draw's spread of a screen's header and legend. `bounds`: each screen
 // element's (GuiDrawBatch::port_menu) x0, x1, y0, y1 (flat GUI units, y up). An element lying in the header band
 // (y0 >= menu_header_y) or the legend band (y1 <= menu_legend_y), narrower than menu_spread_width and not reaching a
@@ -207,8 +220,17 @@ public:
     std::uint32_t record_flags(std::int32_t index) override;
     bool record_flags_known() const override { return false; }
     const std::map<std::uint32_t, Texture>& images() const { return images_; }
+    // Port-only (132vp1, research/VITA.md "Playability, memory and coverage"): the PS Vita's front end drops its
+    // decoded pictures and HOG copies at the level hand-off (its renderer is released there too); a slot keeps its
+    // number and is decoded again from its HOG on its stem's next load or by restore_images (the front end's
+    // resume). release_images answers the bytes freed.
+    std::size_t release_images();
+    void restore_images();
 
 private:
+    std::vector<std::uint8_t> read_hog(const std::string& name);
+    const std::vector<std::uint8_t>& hog(const std::string& name);
+    void restore_slot(std::uint32_t slot);
     DiscImage& disc_;
     std::map<std::string, std::unique_ptr<IeFile>> files_;
     std::map<std::string, std::vector<std::uint8_t>> hogs_;  // IE name -> its HOG
@@ -216,6 +238,8 @@ private:
     std::string current_name_;
     std::map<std::string, std::int32_t> slots_;
     std::map<std::uint32_t, Texture> images_;
+    std::map<std::uint32_t, std::pair<std::string, std::string>> sources_;  // slot -> (IE name, TDX member)
+    std::set<std::uint32_t> released_;
 };
 
 // Checkpoint 126c: the textures of an IE read from one mounted HOG (the

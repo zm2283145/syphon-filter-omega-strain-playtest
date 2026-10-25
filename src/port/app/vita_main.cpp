@@ -109,6 +109,66 @@ FILE* g_log = nullptr;
 std::string g_log_path;
 double g_log_reopen_seconds = 2.0;   // 0 with vita_test_log_lines.txt (every line reaches Vita3K's host file)
 
+// Writes `lines` (whole lines) and flushes; Vita3K holds a guest file's writes in a host buffer until it is closed, so
+// the file is reopened at most every g_log_reopen_seconds so a killed emulator keeps the log.
+void write_log_lines(const char* lines, std::size_t size, double t) {
+    if (!g_log) return;
+    std::fwrite(lines, 1, size, g_log);
+    std::fflush(g_log);
+    static double reopened = 0.0;
+    if (t - reopened >= g_log_reopen_seconds && !g_log_path.empty()) {
+        reopened = t;
+        std::fclose(g_log);
+        g_log = std::fopen(g_log_path.c_str(), "a");
+    }
+}
+
+// Port-only (132vs1, research/VITA.md "Log writer"): each flushed log line costs the handheld about 5 ms (the
+// vt2e log's consecutive lines are 4-7 ms apart), 2 lines a frame in-level and about 1600 a session. log() queues the
+// line and this thread writes the queue (the lines a write found waiting in one write), so the simulation, render
+// and loading threads no longer wait for the memory card. With vita_test_log_lines.txt (Vita3K: every line reaches
+// the host file before an emulator abort) log() writes the line itself, as before.
+struct LogWriter {
+    std::mutex mutex;  // the queue, `running` and the file
+    std::condition_variable wake;
+    std::string queue;
+    bool running = false, stopping = false;
+    std::thread thread;
+
+    void start() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (running || g_log_reopen_seconds <= 0.0) return;
+        running = true;
+        thread = std::thread([this] {
+            enter_thread_role(ThreadRole::worker, "log writer");
+            std::string batch;
+            std::unique_lock<std::mutex> lock(mutex);
+            for (;;) {
+                wake.wait(lock, [this] { return stopping || !queue.empty(); });
+                if (queue.empty()) break;
+                batch.swap(queue);
+                lock.unlock();
+                write_log_lines(batch.data(), batch.size(), double(sceKernelGetProcessTimeWide()) * 1e-6);
+                batch.clear();
+                lock.lock();
+            }
+        });
+    }
+    // Writes what is queued and ends the thread (the exit path, before the file closes).
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!running) return;
+            stopping = true;
+        }
+        wake.notify_one();
+        thread.join();
+        std::lock_guard<std::mutex> lock(mutex);
+        running = false;
+    }
+};
+LogWriter g_log_writer;
+
 void log(const char* format, ...) {
     char text[1024];
     va_list args;
@@ -116,20 +176,17 @@ void log(const char* format, ...) {
     std::vsnprintf(text, sizeof text, format, args);
     va_end(args);
     const double t = double(sceKernelGetProcessTimeWide()) * 1e-6;
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-    if (g_log) {
-        std::fprintf(g_log, "[%9.3f] %s\n", t, text);
-        std::fflush(g_log);
-        // Vita3K holds a guest file's writes in a host buffer until it is closed: reopen at most every 2 s so a
-        // killed emulator keeps the log.
-        static double reopened = 0.0;
-        if (t - reopened >= g_log_reopen_seconds && !g_log_path.empty()) {
-            reopened = t;
-            std::fclose(g_log);
-            g_log = std::fopen(g_log_path.c_str(), "a");
-        }
+    char line[1100];
+    const int n = std::snprintf(line, sizeof line, "[%9.3f] %s\n", t, text);
+    const std::size_t size = n < 0 ? 0 : std::min<std::size_t>(std::size_t(n), sizeof line - 1);
+    std::unique_lock<std::mutex> lock(g_log_writer.mutex);
+    if (g_log_writer.running) {
+        g_log_writer.queue.append(line, size);
+        lock.unlock();
+        g_log_writer.wake.notify_one();
+        return;
     }
+    write_log_lines(line, size, t);
 }
 
 // std::cout / std::cerr (the play host's and the shared code's log) into the log file, a line at a time.
@@ -166,24 +223,46 @@ private:
 // Port-only diagnostic (research/VITA.md "Front-end speed"): the C++ heap allocations (the replaced operator new below),
 // for the per-frame allocation numbers.
 std::uint32_t g_mallocs = 0;
+thread_local std::uint32_t t_mallocs = 0;   // this thread's (the zones' allocation counts, 132vs1)
 
 // Port-only diagnostic: the simulation thread's frame split into parts (lap(i) charges the time since the last lap to
 // part i), logged every 120 frames as mean / max ms, with the allocations and disc reads per frame.
-// The shared code's OMEGA_ZONE slots (zone_profile.hpp), heaviest first, then reset.
+// The shared code's OMEGA_ZONE slots (zone_profile.hpp), heaviest first, then reset: ms, calls and (132vs1) heap
+// allocations per frame, on as many lines as they take (a log line holds 1023 characters).
 template <class Log> void zone_report(Log&& out, int frames) {
     std::vector<omega::zone::Slot*> slots;
     for (auto* s = omega::zone::Slot::head().load(); s; s = s->next)
         if (s->calls) slots.push_back(s);
     std::sort(slots.begin(), slots.end(), [](auto* a, auto* b) { return a->ns > b->ns; });
-    char text[1200];
-    int n = std::snprintf(text, sizeof text, "zones (ms/frame, calls/frame):");
+    char text[1000];
+    const char* head = "zones (ms/frame, calls/frame, allocations/frame):";
+    int n = std::snprintf(text, sizeof text, "%s", head);
     for (auto* s : slots) {
-        if (n > int(sizeof text) - 80) break;
-        n += std::snprintf(text + n, sizeof text - n, " %s %.2f x%.1f;", s->name, s->ns / 1e6 / frames,
-                           double(s->calls) / frames);
+        if (n > int(sizeof text) - 100) {
+            out(text);
+            n = std::snprintf(text, sizeof text, "zones (more):");
+        }
+        n += std::snprintf(text + n, sizeof text - n, " %s %.2f x%.1f a%.0f;", s->name, s->ns / 1e6 / frames,
+                           double(s->calls) / frames, double(s->allocs) / frames);
     }
-    for (auto* s = omega::zone::Slot::head().load(); s; s = s->next) s->ns = 0, s->calls = 0;
+    for (auto* s = omega::zone::Slot::head().load(); s; s = s->next) s->ns = 0, s->calls = 0, s->allocs = 0;
     if (!slots.empty()) out(text);
+    // Port-only (132vf1, research/VITA.md "Front-end speed (132vf1)"): once, what one zone costs (its two clock reads
+    // and the slot update), to read the zone lines net of their own overhead.
+    static bool overhead_logged = false;
+    if (!overhead_logged && !slots.empty()) {
+        overhead_logged = true;
+        static omega::zone::Slot probe{"zone.overhead"};
+        constexpr int n_probe = 2000;
+        const double t0 = now_seconds();
+        for (int i = 0; i < n_probe; ++i) {
+            omega::zone::Scope scope{probe};
+        }
+        const double t1 = now_seconds();
+        probe.ns = 0, probe.calls = 0;
+        std::snprintf(text, sizeof text, "zones: one zone costs %.2f us (%d timed)", (t1 - t0) * 1e6 / n_probe, n_probe);
+        out(text);
+    }
 }
 
 struct FrameParts {
@@ -858,6 +937,13 @@ int App::play(DiscImage& disc, const std::string& iso) {
             double(g.buffer_bytes - bytes) / 1024.0 / frames, double(g_mallocs - mallocs) / frames,
             process_memory_line().c_str());
         zone_report([](const char* text) { log("%s", text); }, int(frames));
+        // 132vp1 (VITA.md "Playability, memory and coverage"): once a level is in (heap in use past 96 MB), one longer
+        // report of the heap's holders, for the per-mission memory table.
+        static bool level_report = false;
+        if (!level_report && mallinfo().uordblks > (96 << 20)) {
+            level_report = true;
+            heap_profile::report("in the level", 32);
+        }
         std::fill(std::begin(sum), std::end(sum), 0.0);
         peak = 0.0;
         started = now_seconds();
@@ -2008,7 +2094,7 @@ std::string App::front_end(DiscImage& disc, const std::string& iso, int frames) 
                 append_subtitles(shown, data.fonts(), *track, session.movie_subtitle_colour(), last_render_mode);
             }
         } else if (session.gui_drawn()) {
-            shown.batches.clear();
+            shown.recycle();   // 132vf1: keeps the batches' storage for this frame's draw
             drawer.draw_canvas(shown, session.runtime(), session.now_ms());
             if (!shown.batches.empty()) last_render_mode = shown.batches.back().render_mode;
             sync_images();
@@ -2370,6 +2456,7 @@ void report(const char* when, int top = 24) {
 
 [[gnu::noinline]] void* operator new(std::size_t size) {
     __atomic_fetch_add(&g_mallocs, 1, __ATOMIC_RELAXED);
+    ++t_mallocs;
     const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
     void* raw = std::malloc(size + sizeof(heap_profile::Header));
     if (!raw || size >= (4u << 20)) {
@@ -2421,7 +2508,13 @@ int main() {
     // Port-only test switch (research/VITA.md "Vita3K"): vita_test_log_lines.txt reopens the log after every line, so
     // an emulator abort keeps the last line before it.
     if (vita_file_size(std::string(vita_data_root) + "/vita_test_log_lines.txt") >= 0) g_log_reopen_seconds = 0.0;
+    g_log_writer.start();
+    omega::zone::thread_allocations = [] { return t_mallocs; };
+    omega::crash::vita_before_exit = [] { g_log_writer.stop(); };
     log("Omega Strain native port, PS Vita (checkpoint 132vt1)");
+    // 132vp1: the heap profile's caller addresses are runtime ones; log_memory's runtime address against its ELF
+    // address (arm-vita-eabi-nm -C omega_vita | findstr log_memory) gives the load offset for addr2line.
+    log("code: log_memory at %p", reinterpret_cast<const void*>(&log_memory));
     // research/VITA.md "Threads and cores": the clocks at their highest user settings, then this (the simulation)
     // thread on core 0.
     const int arm = scePowerSetArmClockFrequency(444), bus = scePowerSetBusClockFrequency(222),
@@ -2485,6 +2578,7 @@ int main() {
         log("FATAL: %s", e.what());
     }
     log("exit");
+    g_log_writer.stop();
     if (g_log) std::fclose(g_log);
     sceKernelExitProcess(0);
     return 0;

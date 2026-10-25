@@ -197,6 +197,7 @@ void watchdog_loop() {
             std::cerr.flush();
             std::fflush(stdout);
             std::fflush(stderr);
+            if (vita_before_exit) vita_before_exit();
             std::_Exit(late->exit_code);
         }
     }

@@ -581,8 +581,15 @@ Impl::Impl(const Options& o) : options(o) {
     vglSetupRuntimeShaderCompiler(SHARK_OPT_DEFAULT, GL_FALSE, GL_FALSE, GL_FALSE);
     // RAM pool: the free user memory less 8 MB (thread stacks, audio, the kernel); all free CDRAM (VITA.md "Memory").
     // vglInitExtended returns GL_TRUE only when it fell back to a smaller display resolution.
-    if (vglInitExtended(0x100000, display_width, display_height, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE))
+    // 132vp1: Vita3K has more free memory than the hardware, so its pools are larger (CDRAM 112 / RAM 56 MB against
+    // the 132vt2e unit's 96 / 25 MB; both have the 26 MB phycont). vita_test_hw_pools.txt sizes them as the hardware's,
+    // so a level that would not fit there spills (and fails) here too (VITA.md "Playability, memory and coverage").
+    const bool hw_pools = file_exists("ux0:data/omega_strain/vita_test_hw_pools.txt");
+    if (hw_pools ? vglInitWithCustomSizes(0x100000, display_width, display_height, 25 * 1024 * 1024, 96 * 1024 * 1024,
+                                          26 * 1024 * 1024, 0, SCE_GXM_MULTISAMPLE_NONE)
+                 : vglInitExtended(0x100000, display_width, display_height, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE))
         throw std::runtime_error("gfx vitagl: the display does not support 960x544");
+    if (hw_pools && options.log) options.log("vitagl: the hardware's pool sizes (vita_test_hw_pools.txt)");
     vglUseExtraMem(GL_TRUE);
     if (options.keep_depth) keep_depth(&gxm_depth_stencil_surface);
     if (options.log) options.log(options.keep_depth ? "vitagl: depth kept across scenes (force load / store)"
@@ -613,10 +620,14 @@ Impl::Impl(const Options& o) : options(o) {
     back_->set_desc(back);
     back_->layer_rows = display_height;
     if (options.log) {
-        char text[200];
-        std::snprintf(text, sizeof text, "vitagl: initialised (VRAM %u KB free of %u KB, RAM %u KB free of %u KB)",
+        char text[260];
+        std::snprintf(text, sizeof text,
+                      "vitagl: initialised (VRAM %u KB free of %u KB, RAM %u KB free of %u KB, phycont %u KB free of %u KB, "
+                      "cdlg %u KB free of %u KB)",
                       unsigned(vglMemFree(VGL_MEM_VRAM) >> 10), unsigned(vglMemTotal(VGL_MEM_VRAM) >> 10),
-                      unsigned(vglMemFree(VGL_MEM_RAM) >> 10), unsigned(vglMemTotal(VGL_MEM_RAM) >> 10));
+                      unsigned(vglMemFree(VGL_MEM_RAM) >> 10), unsigned(vglMemTotal(VGL_MEM_RAM) >> 10),
+                      unsigned(vglMemFree(VGL_MEM_PHYCONT) >> 10), unsigned(vglMemTotal(VGL_MEM_PHYCONT) >> 10),
+                      unsigned(vglMemFree(VGL_MEM_BUDGET) >> 10), unsigned(vglMemTotal(VGL_MEM_BUDGET) >> 10));
         options.log(text);
     }
 }

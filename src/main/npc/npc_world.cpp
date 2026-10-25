@@ -398,6 +398,10 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
 void NpcAiController::set_combat_link(NpcCombatLink link){
     combat_=std::move(link);
     attack_.reset();
+    // 00158bc0 (00158dd8: sb 1, 0x99(actor +3524)): the AI init sets the actor's inventory +99, the
+    // infinite reserve the reload 0013fb90 and the throw 00141ea0 keep the spare rounds by. The port's
+    // inventory exists only once the combat link names it (it is built after the AI component).
+    if(combat_.inventory)if(auto* inv=combat_.inventory())inv->infinite_reserve_99=true;
     if(combat_.fire_notice_hook)combat_.fire_notice_hook([this](std::uint64_t target,bool continuation){fire_notice(target,continuation);});
 }
 void NpcAiController::fire_notice(std::uint64_t target,bool continuation){

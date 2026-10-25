@@ -1,9 +1,12 @@
 #include "ie_draw.hpp"
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -253,11 +256,31 @@ int ie_draw_element(GuiDrawList& out, IeDrawState& st, IeScreen& screen, int nod
 }
 
 void ie_draw_child(GuiDrawList& out, IeDrawState& st, IeScreen& screen, int node) {
+    if (node == st.port_edge_band_node) {  // port-only (132ws9): tag the node's batches
+        const std::size_t from = out.batches.size();
+        st.port_edge_band_node = -1;
+        ie_draw_child(out, st, screen, node);
+        st.port_edge_band_node = node;
+        for (std::size_t k = from; k < out.batches.size(); ++k) out.batches[k].port_edge_band = st.port_edge_band;
+        return;
+    }
     const auto& n = screen.node(node);
     if (n.has_parent && !n.elements.empty()) {
         st.push();
         node_matrix(st, n);
-        const std::vector<int> list = n.elements;
+        // A copy of the element list (the body may touch the screen's nodes); port-only (132vf1): short lists stay on
+        // the stack.
+        const std::vector<int>& elements = n.elements;
+        std::array<int, 32> small{};
+        std::vector<int> large;
+        std::span<const int> list;
+        if (elements.size() <= small.size()) {
+            std::copy(elements.begin(), elements.end(), small.begin());
+            list = std::span<const int>(small.data(), elements.size());
+        } else {
+            large = elements;
+            list = large;
+        }
         for (const int e : list) {
             const IeElement el = screen.element_at(e);
             if (!el.shown) continue;
@@ -291,7 +314,7 @@ void ie_draw_node(GuiDrawList& out, IeDrawState& st, IeScreen& screen, int node,
     if (!n.triangles.empty()) {
         // The batch open (003ed8c0..003ed99c, 0025cd10).
         const bool textured = (st.mode & 1) != 0;
-        GuiDrawBatch b;
+        GuiDrawBatch b = out.take();
         b.flush = 0x371200;
         b.prim = textured ? 3 : 2;
         b.strip_max = (textured ? 0x41u : 0x62u) & ~1u;
@@ -301,12 +324,16 @@ void ie_draw_node(GuiDrawList& out, IeDrawState& st, IeScreen& screen, int node,
         std::int32_t open = 0;     // V+1040
         std::int32_t nbreak = 0;   // V+1044
         // The scratch colours and uvs (0x70000000).
-        std::vector<std::array<float, 4>> col(n.colours.size());
+        // Port-only (132vf1): the scratch keeps its storage across nodes and frames (filled before the recursion).
+        thread_local std::vector<std::array<float, 4>> col;
+        thread_local std::vector<std::array<float, 2>> uv;
+        col.resize(n.colours.size());
+        uv.resize(n.uvs.size());
+        b.vertices.reserve(n.triangles.size() * 3);
         for (std::size_t i = 0; i < n.colours.size(); ++i)
             for (int k = 0; k < 4; ++k)
                 col[i][static_cast<std::size_t>(k)] =
                     fmul(fmul(k_inv255, static_cast<float>(n.colours[i][static_cast<std::size_t>(k)])), c[static_cast<std::size_t>(k)]);
-        std::vector<std::array<float, 2>> uv(n.uvs.size());
         for (std::size_t i = 0; i < n.uvs.size(); ++i)
             for (int k = 0; k < 2; ++k) {
                 const float x = fsub(fadd(n.uvs[i][static_cast<std::size_t>(k)], n.uv_off[static_cast<std::size_t>(k)]), 0.5F);
@@ -365,7 +392,19 @@ void ie_draw_node(GuiDrawList& out, IeDrawState& st, IeScreen& screen, int node,
             out.batches.push_back(std::move(b));
         }
     }
-    const std::vector<int> children = screen.node(node).children;
+    // A copy of the child list (the draw may touch the screen's nodes); port-only (132vf1): short lists stay on the
+    // stack.
+    const std::vector<int>& kids = screen.node(node).children;
+    std::array<int, 32> small{};
+    std::vector<int> large;
+    std::span<const int> children;
+    if (kids.size() <= small.size()) {
+        std::copy(kids.begin(), kids.end(), small.begin());
+        children = std::span<const int>(small.data(), kids.size());
+    } else {
+        large = kids;
+        children = large;
+    }
     if (node == st.port_anchor_root && st.port_anchor == 0) {  // port-only (132ws): tag each HUD element's batches
         for (const int child : children) {
             const std::size_t from = out.batches.size();

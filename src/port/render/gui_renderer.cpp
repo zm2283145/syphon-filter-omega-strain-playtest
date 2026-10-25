@@ -9,7 +9,9 @@
 #include "texture_replacement.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -98,27 +100,33 @@ std::optional<std::vector<std::uint8_t>> hog_sub(const std::vector<std::uint8_t>
 }
 }  // namespace
 
+std::vector<std::uint8_t> GuiDecorAssets::read_hog(const std::string& name) {
+    const std::vector<std::string> ntsc{"GAMEDATA", "FRONTEND", "NTSC.HOG"};
+    const auto front = disc_.archive_member_names(ntsc);
+    if (const auto stored = member_named(front, name + ".HOG")) return disc_.archive_member(ntsc, *stored);
+    try {
+        return disc_.read(disc_.file({"GAMEDATA", "COMMON", name + ".HOG"}));
+    } catch (const std::exception& e) {
+        throw std::runtime_error("unhosted(0x413124): IE file " + name + ".IE (" + e.what() + ")");
+    }
+}
+
+const std::vector<std::uint8_t>& GuiDecorAssets::hog(const std::string& name) {
+    auto it = hogs_.find(name);
+    if (it == hogs_.end()) it = hogs_.emplace(name, read_hog(name)).first;  // dropped by release_images
+    return it->second;
+}
+
 std::optional<GuiDecoIe> GuiDecorAssets::resolve(const std::string& name) {
     auto f = files_.find(name);
     if (f == files_.end()) {
-        const std::vector<std::string> ntsc{"GAMEDATA", "FRONTEND", "NTSC.HOG"};
-        const auto front = disc_.archive_member_names(ntsc);
-        std::vector<std::uint8_t> hog;
-        if (const auto stored = member_named(front, name + ".HOG"))
-            hog = disc_.archive_member(ntsc, *stored);
-        else {
-            try {
-                hog = disc_.read(disc_.file({"GAMEDATA", "COMMON", name + ".HOG"}));
-            } catch (const std::exception& e) {
-                throw std::runtime_error("unhosted(0x413124): IE file " + name + ".IE (" + e.what() + ")");
-            }
-        }
+        auto hog = read_hog(name);
         const auto ie = hog_sub(hog, name + ".IE", name + ".HOG");
         if (!ie) throw std::runtime_error("unhosted(0x413124): " + name + ".HOG has no " + name + ".IE");
         hogs_[name] = std::move(hog);
         f = files_.emplace(name, std::make_unique<IeFile>(decode_ie(*ie))).first;
     }
-    current_ = &hogs_.at(name);
+    current_ = &hog(name);
     current_name_ = name;
     return GuiDecoIe{f->second.get(), this};
 }
@@ -134,14 +142,52 @@ std::int32_t GuiDecorAssets::load(const std::string& name) {
     for (char& c : stem)
         if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 0x20);
     const auto it = slots_.find(stem);
-    if (it != slots_.end()) return it->second;
+    if (it != slots_.end()) {
+        if (released_.count(static_cast<std::uint32_t>(it->second))) restore_slot(static_cast<std::uint32_t>(it->second));
+        return it->second;
+    }
     if (!current_) throw std::runtime_error("unhosted(0x380a40): texture " + name + " outside an IE load");
     const auto bytes = hog_sub(*current_, name, current_name_ + ".HOG");
     if (!bytes) throw std::runtime_error("unhosted(0x380a40): texture " + name + " is not in " + current_name_ + ".HOG");
     const std::int32_t slot = first_slot + static_cast<std::int32_t>(slots_.size());
     images_.emplace(static_cast<std::uint32_t>(slot), decode_tdx(*bytes));
     slots_.emplace(stem, slot);
+    sources_.emplace(static_cast<std::uint32_t>(slot), std::make_pair(current_name_, name));
     return slot;
+}
+
+void GuiDecorAssets::restore_slot(std::uint32_t slot) {
+    const auto& [ie, member] = sources_.at(slot);
+    const auto bytes = hog_sub(hog(ie), member, ie + ".HOG");
+    if (!bytes) throw std::runtime_error("GUI assets: " + member + " is no longer in " + ie + ".HOG");
+    images_.emplace(slot, decode_tdx(*bytes));
+    released_.erase(slot);
+}
+
+std::size_t GuiDecorAssets::release_images() {
+    std::size_t bytes = 0;
+    for (auto it = images_.begin(); it != images_.end();) {
+        if (!sources_.count(it->first)) { ++it; continue; }
+        const auto count = [](const Texture& t) {
+            std::size_t n = t.rgba.size();
+            for (const auto& m : t.mips) n += m.size();
+            for (const auto& a : t.raw_alpha) n += a.size();
+            return n;
+        };
+        bytes += count(it->second);
+        for (const auto& f : it->second.animation) bytes += count(f);
+        released_.insert(it->first);
+        it = images_.erase(it);
+    }
+    for (const auto& [name, h] : hogs_) bytes += h.size();
+    hogs_.clear();
+    current_ = nullptr;
+    current_name_.clear();
+    return bytes;
+}
+
+void GuiDecorAssets::restore_images() {
+    while (!released_.empty()) restore_slot(*released_.begin());
 }
 
 std::uint32_t GuiDecorAssets::record_flags(std::int32_t index) {
@@ -280,6 +326,12 @@ std::vector<GuiQuad> gui_quads(const GuiDrawList& list) {
 }
 
 std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiViewProjection* view) {
+    std::vector<GuiTriangleVertex> out;
+    gui_triangles_append(b, view, out);
+    return out;
+}
+
+void gui_triangles_append(const GuiDrawBatch& b, const GuiViewProjection* view, std::vector<GuiTriangleVertex>& out) {
     if (!is_ie_batch(b)) throw std::runtime_error("gui_triangles: not a 00371200 batch");
     if (b.perspective && !view)
         throw std::runtime_error("00371200 batch under the perspective camera record (+61, 003ed240) without its projection");
@@ -288,9 +340,8 @@ std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiVie
     // checkpoint 132ln4: GuiMissionList's selection bar, a four-vertex strip; 132on2h: GuiNetMessageArray's row bar
     // 00347b40 (the same instructions as 002ab2a0)
     if (b.source == 0x2ab2a0 || b.source == 0x347b40) {
-        if (b.vertices.size() != 4 || b.strips != std::vector<std::int32_t>{4} || b.clip || b.perspective)
+        if (b.vertices.size() != 4 || b.strips.size() != 1 || b.strips[0] != 4 || b.clip || b.perspective)
             throw std::runtime_error("002ab2a0 / 00347b40 selection bar batch of an unexpected shape");
-        std::vector<GuiTriangleVertex> out;
         for (const int k : {0, 1, 2, 1, 2, 3}) {
             const GuiVertex& v = b.vertices[static_cast<std::size_t>(k)];
             GuiTriangleVertex t;
@@ -299,7 +350,7 @@ std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiVie
             t.colour = host_colour(v.colour);
             out.push_back(t);
         }
-        return out;
+        return;
     }
     if (b.vertices.size() % 3 != 0) throw std::runtime_error("00371200 batch with a partial triangle");
     std::size_t total = 0;
@@ -309,8 +360,7 @@ std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiVie
     }
     if (total != b.vertices.size()) throw std::runtime_error("GUI batch strip counts disagree with its vertices");
     const bool textured = (b.render_mode & 1) != 0;
-    std::vector<GuiTriangleVertex> out;
-    out.reserve(b.vertices.size());
+    out.reserve(out.size() + b.vertices.size());
     const auto& m = b.matrix;
     // 132ws8: VU1 program 2 (00538080 entry 2 = 0x156, microcode set 0) runs a 00371200 batch in clip mode 2
     // (0037c870 sets VU data 0.x bit 0 for 00371200's flag 0x40000; the common setup 0x00..0xb8 then skips the
@@ -359,7 +409,6 @@ std::vector<GuiTriangleVertex> gui_triangles(const GuiDrawBatch& b, const GuiVie
             }
         }
     }
-    return out;
 }
 
 bool gui_batch_covers_frame(const std::vector<GuiTriangleVertex>& triangles) {
@@ -588,7 +637,14 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     };
     std::vector<HostVertex>& vertices = frame_vertices_;
     vertices.clear();
-    std::vector<Segment> segments;
+    // Port-only (132vf1, research/VITA.md "Front-end speed (132vf1)"): the frame's lists keep their storage from frame
+    // to frame (the draw is not re-entered), so a front-end frame makes no allocation here once they have grown.
+    thread_local std::vector<Segment> segment_scratch;
+    std::vector<Segment>& segments = segment_scratch;
+    segments.clear();
+    thread_local std::vector<GuiTriangleVertex> triangle_scratch;
+    thread_local std::vector<GuiEdgeVertex> edge_source, edge_out;
+    thread_local std::vector<GuiQuad> quad_scratch;
     // Port-only (checkpoint 132ws): the wide aspect (frame_fit.hpp frame_wide). The frame's vertex ranges are recorded
     // with their HUD element tag (GuiDrawBatch::port_anchor) and kind, then mapped from the fitted 4:3 rectangle to the
     // whole target on the CPU (wide_map below) and drawn with the whole viewport.
@@ -602,7 +658,9 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         MovieFit fit = MovieFit::bars;   // a picture's: movies= for a movie, movie_fill (fill / bars) otherwise
         std::uint32_t menu = 0;          // 132ws5: the wide menu draw's screen element (GuiDrawBatch::port_menu)
     };
-    std::vector<WideRange> wide_ranges;
+    thread_local std::vector<WideRange> wide_range_scratch;
+    std::vector<WideRange>& wide_ranges = wide_range_scratch;
+    wide_ranges.clear();
     std::uint32_t wide_anchor = 0, wide_menu_tag = 0;
     const bool wide_menu = wide && wide_menu_;
     bool wide_pict = false, cover_run = false, wide_free = false, wide_movie = false;
@@ -651,7 +709,8 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         if (!wide || !wide_edge_extend_ || b.perspective || b.clip || b.port_anchor || b.port_picture || b.port_free) return;
         if (wide_menu && b.port_text) return;  // 132ws5: no mirrored glyphs
         if (first >= vertices.size()) return;
-        std::vector<GuiEdgeVertex> source;
+        std::vector<GuiEdgeVertex>& source = edge_source;
+        source.clear();
         source.reserve(vertices.size() - first);
         for (std::size_t k = first; k < vertices.size(); ++k) {
             const HostVertex& v = vertices[k];
@@ -659,8 +718,22 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             source.push_back({v.x, v.y, v.u, v.v, v.r, v.g, v.b, v.a});
         }
         // 132ws5: under the wide menu draw a triangle still crossing the edge (after menu_trim) is drawn past it as is.
-        const auto images = gui_wide_edge_images(source, frame_wide_half_width(width, height), wide_menu ? 0.5F : 1e30F,
-                                                 wide_menu ? menu_extend_span : 0.0F);
+        const float half_width = frame_wide_half_width(width, height);
+        const float overhang = wide_menu ? 0.5F : 1e30F, span = wide_menu ? menu_extend_span : 0.0F;
+        std::vector<GuiEdgeVertex>& images = edge_out;
+        images.clear();
+        gui_wide_edge_images_append(source, half_width, overhang, span, images);
+        if (const auto& band = b.port_edge_band; band.y1 > band.y0 && !images.empty()) {
+            // 132ws9: the band's images (the loading screen's ticker line) sample the art's rows on its edges: its
+            // upper half the row at y1, its lower half the row at y0, so the names are not mirrored.
+            const float mid = (band.y0 + band.y1) / 2.0F;
+            auto rows = gui_edge_rows(source, band.y0, band.y1, false);
+            for (const auto& [lo, hi, at] : {std::array<float, 3>{mid, band.y1, band.y1}, {band.y0, mid, band.y0}}) {
+                const auto part = gui_edge_sample_row(gui_edge_rows(source, lo, hi, true), at);
+                rows.insert(rows.end(), part.begin(), part.end());
+            }
+            images = gui_wide_edge_images(rows, half_width, overhang, span);
+        }
         if (images.empty()) return;
         const std::size_t at = vertices.size();
         for (const GuiEdgeVertex& e : images) vertices.push_back({e.x, e.y, e.u, e.v, e.r, e.g, e.b, e.a});
@@ -680,7 +753,8 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     const auto menu_trim = [&](const GuiDrawBatch& b, std::size_t first) {
         if (!wide_menu || b.perspective || b.clip || b.port_anchor || b.port_picture || b.port_free) return;
         if (first >= vertices.size()) return;
-        std::vector<GuiEdgeVertex> source;
+        std::vector<GuiEdgeVertex>& source = edge_source;
+        source.clear();
         source.reserve(vertices.size() - first);
         bool over = false;
         float x0 = 1e30F, x1 = -1e30F;
@@ -694,7 +768,9 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         }
         if (!over) return;
         const bool spans = x0 <= -320.0F + menu_edge_reach && x1 >= 320.0F - menu_edge_reach;
-        const auto cut = gui_wide_menu_trim(source, spans ? menu_trim_overhang : menu_edge_reach, menu_edge_reach);
+        std::vector<GuiEdgeVertex>& cut = edge_out;
+        cut.clear();
+        gui_wide_menu_trim_append(source, spans ? menu_trim_overhang : menu_edge_reach, menu_edge_reach, cut);
         vertices.resize(first);
         for (const GuiEdgeVertex& e : cut) vertices.push_back({e.x, e.y, e.u, e.v, e.r, e.g, e.b, e.a});
     };
@@ -729,7 +805,9 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 const std::size_t at = vertices.size();
                 wide_anchor = g.port_anchor;
                 wide_menu_tag = wide_menu ? g.port_menu : 0;
-                for (const GuiTriangleVertex& t : gui_triangles(g, view))
+                triangle_scratch.clear();
+                gui_triangles_append(g, view, triangle_scratch);
+                for (const GuiTriangleVertex& t : triangle_scratch)
                     vertices.push_back({t.pos[0], t.pos[1], t.uv[0], t.uv[1], t.colour[0], t.colour[1], t.colour[2],
                                         t.colour[3], t.depth[0], t.depth[1]});
                 add(textured ? view_of(g.slot) : white_view_.get(), false, !textured || (g.filter & 0x20) != 0, at);
@@ -777,7 +855,9 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                     push(tv, linear, 0, count, buffer);
                     continue;
                 }
-                const auto host = gui_triangles(g, view);
+                std::vector<GuiTriangleVertex>& host = triangle_scratch;
+                host.clear();
+                gui_triangles_append(g, view, host);
                 const auto& m = g.matrix;
                 const std::size_t at = vertices.size();
                 for (std::size_t k = 0; k < host.size(); ++k) {
@@ -797,12 +877,16 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 const gfx::Texture* view = nullptr;
                 bool linear = true;
             };
-            std::vector<Triangle> run;
+            thread_local std::vector<Triangle> run_scratch;
+            std::vector<Triangle>& run = run_scratch;
+            run.clear();
             for (; index < batches.size() && batches[index].flush == 0x3836b0; ++index) {
                 const GuiDrawBatch& g = batches[index];
                 if (g.perspective) throw std::runtime_error("003836b0 batch under a perspective camera record");
                 const bool textured = (g.render_mode & 1) != 0;
-                const auto tv = gui_triangles(g, view);
+                std::vector<GuiTriangleVertex>& tv = triangle_scratch;
+                tv.clear();
+                gui_triangles_append(g, view, tv);
                 const auto& m = g.matrix;
                 for (std::size_t k = 0; k < tv.size(); k += 3) {
                     Triangle t;
@@ -846,7 +930,9 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         }
         if (is_ie_batch(b)) {
             const bool textured = (b.render_mode & 1) != 0;
-            const auto tv = gui_triangles(b, view);
+            std::vector<GuiTriangleVertex>& tv = triangle_scratch;
+            tv.clear();
+            gui_triangles_append(b, view, tv);
             for (const GuiTriangleVertex& t : tv)
                 vertices.push_back({t.pos[0], t.pos[1], t.uv[0], t.uv[1], t.colour[0], t.colour[1], t.colour[2], t.colour[3],
                                     t.depth[0], t.depth[1]});
@@ -879,7 +965,8 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                             !textured || (b.filter & 0x20) != 0);
             continue;
         }
-        std::vector<GuiQuad> quads;
+        std::vector<GuiQuad>& quads = quad_scratch;
+        quads.clear();
         append_quads(b, quads);
         for (const GuiQuad& q : quads) {
             // Left edge: the first vertex's colour; right edge: the second's.
@@ -899,6 +986,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     const gfx::Viewport fitted = viewport(width, height, true), whole = viewport(width, height, false);
     std::map<std::uint32_t, float> wide_shift;  // 132ws: each tagged HUD element's x shift (GUI units)
     if (wide) {
+        OMEGA_ZONE("gr.wide");
         std::map<std::uint32_t, std::array<float, 2>> bounds;
         for (const WideRange& r : wide_ranges) {
             if (r.anchor == 0 || r.kind != wide_frame) continue;
@@ -1055,7 +1143,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
 
 const gfx::Buffer* GuiRenderer::retained_vertices(const GuiDrawBatch& b, std::uint32_t& count) {
     const auto& source = b.shared_vertices;
-    if (source->size() % 3 != 0 || b.strips != std::vector<std::int32_t>{static_cast<std::int32_t>(source->size())}
+    if (source->size() % 3 != 0 || b.strips.size() != 1 || b.strips[0] != static_cast<std::int32_t>(source->size())
         || !b.vertices.empty() || b.clip)
         throw std::runtime_error("003836b0 shared batch (132md7) of an unexpected shape");
     RetainedBatch& r = retained_[source.get()];
@@ -1275,11 +1363,84 @@ GuiWideMap gui_wide_map(unsigned width, unsigned height) {
     return m;
 }
 
+namespace {
+// 132vf1: a triangle cut by one or two lines (at most five vertices), kept off the heap.
+struct EdgePoly {
+    std::array<GuiEdgeVertex, 8> v{};
+    std::size_t n = 0;
+    void push_back(const GuiEdgeVertex& p) { v[n++] = p; }
+    std::size_t size() const { return n; }
+    const GuiEdgeVertex& operator[](std::size_t i) const { return v[i]; }
+    GuiEdgeVertex& operator[](std::size_t i) { return v[i]; }
+    const GuiEdgeVertex* begin() const { return v.data(); }
+    const GuiEdgeVertex* end() const { return v.data() + n; }
+    GuiEdgeVertex* begin() { return v.data(); }
+    GuiEdgeVertex* end() { return v.data() + n; }
+};
+}  // namespace
+
+std::vector<GuiEdgeVertex> gui_edge_rows(const std::vector<GuiEdgeVertex>& triangles, float y0, float y1, bool inside) {
+    std::vector<GuiEdgeVertex> out;
+    const auto lerp = [](const GuiEdgeVertex& p, const GuiEdgeVertex& q, float t) {
+        const auto l = [t](float a, float b) { return a + (b - a) * t; };
+        return GuiEdgeVertex{l(p.x, q.x), l(p.y, q.y), l(p.u, q.u), l(p.v, q.v), l(p.r, q.r), l(p.g, q.g), l(p.b, q.b), l(p.a, q.a)};
+    };
+    // One Sutherland-Hodgman pass keeping s * (y - bound) >= 0.
+    const auto clip = [&](const std::vector<GuiEdgeVertex>& poly, float bound, float s) {
+        std::vector<GuiEdgeVertex> kept;
+        for (std::size_t i = 0; i < poly.size(); ++i) {
+            const GuiEdgeVertex& p = poly[i];
+            const GuiEdgeVertex& q = poly[(i + 1) % poly.size()];
+            const float dp = s * (p.y - bound), dq = s * (q.y - bound);
+            if (dp >= 0.0F) kept.push_back(p);
+            if ((dp < 0.0F) != (dq < 0.0F)) kept.push_back(lerp(p, q, dp / (dp - dq)));
+        }
+        return kept;
+    };
+    const auto emit = [&](const std::vector<GuiEdgeVertex>& poly) {
+        for (std::size_t i = 1; i + 1 < poly.size(); ++i) out.insert(out.end(), {poly[0], poly[i], poly[i + 1]});
+    };
+    for (std::size_t k = 0; k + 2 < triangles.size(); k += 3) {
+        const std::vector<GuiEdgeVertex> tri(triangles.begin() + static_cast<std::ptrdiff_t>(k),
+                                             triangles.begin() + static_cast<std::ptrdiff_t>(k + 3));
+        if (inside) {
+            emit(clip(clip(tri, y0, 1.0F), y1, -1.0F));
+        } else {
+            emit(clip(tri, y0, -1.0F));
+            emit(clip(tri, y1, 1.0F));
+        }
+    }
+    return out;
+}
+
+std::vector<GuiEdgeVertex> gui_edge_sample_row(std::vector<GuiEdgeVertex> triangles, float y) {
+    for (std::size_t k = 0; k + 2 < triangles.size(); k += 3) {
+        GuiEdgeVertex* t = &triangles[k];
+        // d/dy of u and v over the triangle (affine): the texel at (x, y) is (u, v) + (y - vertex y) * that.
+        const float x1 = t[1].x - t[0].x, y1 = t[1].y - t[0].y, x2 = t[2].x - t[0].x, y2 = t[2].y - t[0].y;
+        const float det = x1 * y2 - x2 * y1;
+        if (std::fabs(det) < 1e-6F) continue;
+        const float du = (x1 * (t[2].u - t[0].u) - x2 * (t[1].u - t[0].u)) / det;
+        const float dv = (x1 * (t[2].v - t[0].v) - x2 * (t[1].v - t[0].v)) / det;
+        for (int i = 0; i < 3; ++i) {
+            t[i].u += (y - t[i].y) * du;
+            t[i].v += (y - t[i].y) * dv;
+        }
+    }
+    return triangles;
+}
+
 std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>& triangles, float half_width,
                                                 float max_overhang, float min_width) {
     std::vector<GuiEdgeVertex> out;
+    gui_wide_edge_images_append(triangles, half_width, max_overhang, min_width, out);
+    return out;
+}
+
+void gui_wide_edge_images_append(const std::vector<GuiEdgeVertex>& triangles, float half_width, float max_overhang,
+                                 float min_width, std::vector<GuiEdgeVertex>& out) {
     const float extra = half_width - 320.0F;
-    if (!(extra > 0.0F)) return out;
+    if (!(extra > 0.0F)) return;
     const auto lerp = [](const GuiEdgeVertex& p, const GuiEdgeVertex& q, float t) {
         const auto l = [t](float a, float b) { return a + (b - a) * t; };
         return GuiEdgeVertex{l(p.x, q.x), l(p.y, q.y), l(p.u, q.u), l(p.v, q.v), l(p.r, q.r), l(p.g, q.g), l(p.b, q.b), l(p.a, q.a)};
@@ -1294,7 +1455,7 @@ std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>
             if (!(nearest <= 0.5F) || nearest < -max_overhang) continue;
             if (std::max({t[0].x, t[1].x, t[2].x}) - std::min({t[0].x, t[1].x, t[2].x}) < min_width) continue;
             // The part inside the frame (depth >= 0): one Sutherland-Hodgman pass.
-            std::vector<GuiEdgeVertex> poly;
+            EdgePoly poly;
             for (std::size_t i = 0; i < 3; ++i) {
                 const GuiEdgeVertex& p = t[i];
                 const GuiEdgeVertex& q = t[(i + 1) % 3];
@@ -1308,7 +1469,7 @@ std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>
             if (period < 0.5F) continue;
             const int images = std::min(64, static_cast<int>(std::ceil(extra / period)));
             for (int n = 1; n <= images; ++n) {
-                std::vector<GuiEdgeVertex> img = poly;
+                EdgePoly img = poly;
                 for (GuiEdgeVertex& p : img) {
                     const float d = std::max(depth(p), 0.0F);
                     const float out_by = (n % 2 != 0) ? static_cast<float>(n - 1) * period + d : static_cast<float>(n) * period - d;
@@ -1318,12 +1479,17 @@ std::vector<GuiEdgeVertex> gui_wide_edge_images(const std::vector<GuiEdgeVertex>
             }
         }
     }
-    return out;
 }
 
 std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& triangles, float overhang, float reach) {
     std::vector<GuiEdgeVertex> out;
-    out.reserve(triangles.size());
+    gui_wide_menu_trim_append(triangles, overhang, reach, out);
+    return out;
+}
+
+void gui_wide_menu_trim_append(const std::vector<GuiEdgeVertex>& triangles, float overhang, float reach,
+                               std::vector<GuiEdgeVertex>& out) {
+    out.reserve(out.size() + triangles.size());
     const auto lerp = [](const GuiEdgeVertex& p, const GuiEdgeVertex& q, float t) {
         const auto l = [t](float a, float b) { return a + (b - a) * t; };
         return GuiEdgeVertex{l(p.x, q.x), l(p.y, q.y), l(p.u, q.u), l(p.v, q.v), l(p.r, q.r), l(p.g, q.g), l(p.b, q.b), l(p.a, q.a)};
@@ -1346,11 +1512,12 @@ std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& 
                 }
             continue;
         }
-        std::vector<GuiEdgeVertex> poly(t, t + 3);
+        EdgePoly poly;
+        for (int i = 0; i < 3; ++i) poly.push_back(t[i]);
         for (const float s : {-1.0F, 1.0F}) {
             if ((s < 0.0F ? left : right) <= 0.0F) continue;
             const auto depth = [s](const GuiEdgeVertex& p) { return (p.x - 320.0F * s) * -s; };
-            std::vector<GuiEdgeVertex> cut;
+            EdgePoly cut;
             for (std::size_t i = 0; i < poly.size(); ++i) {
                 const GuiEdgeVertex& p = poly[i];
                 const GuiEdgeVertex& q = poly[(i + 1) % poly.size()];
@@ -1358,11 +1525,10 @@ std::vector<GuiEdgeVertex> gui_wide_menu_trim(const std::vector<GuiEdgeVertex>& 
                 if (dp >= 0.0F) cut.push_back(p);
                 if ((dp < 0.0F) != (dq < 0.0F)) cut.push_back(lerp(p, q, dp / (dp - dq)));
             }
-            poly = std::move(cut);
+            poly = cut;
         }
         for (std::size_t i = 1; i + 1 < poly.size(); ++i) out.insert(out.end(), {poly[0], poly[i], poly[i + 1]});
     }
-    return out;
 }
 
 bool gui_wide_menu_spreads(const std::array<float, 4>& b) {

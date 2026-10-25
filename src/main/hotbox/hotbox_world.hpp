@@ -235,10 +235,10 @@ struct HotboxActorEvent {
 // queues either way), and so does 0x12 (table 0049c8e0 entry 18: 001726b0);
 // 15/16 send their code with +0x2c = the +0x0c key of
 // the first linked object (read without a count check: a box without links
-// throws); 1, 3, 6, 7 (no links) and 17 send nothing. A type-3 box with
-// links (a run-time box) throws on enter: its GOBJTriggerEventMsg
-// (hotbox_type3_enter_triggers) goes to the NPC actor, whose receipt
-// (001b3b60, base 003cea10) is not analysed. Exit: 8, 12, 13, 0x12 (00172220, table 0049c890),
+// throws); 1, 3, 6, 7 and 17 send the actor nothing. A type-3 box with
+// links (MakeNPCInteractable's run-time box) sends each link the
+// GOBJTriggerEventMsg of hotbox_type3_enter_triggers instead (the caller
+// routes it: SoloActorSimulation's hotbox trigger sink). Exit: 8, 12, 13, 0x12 (00172220, table 0049c890),
 // 9, 15 and 16 send payload 2 with the parameter; 1, 3, 6, 7 and 17 nothing.
 // This is the box's native receiver (+0x0c); the pump calls it only when no
 // script handler took the event.

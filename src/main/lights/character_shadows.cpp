@@ -556,12 +556,17 @@ bool add_shadow_projector(ShadowFrame& frame,std::size_t cap,const ShadowReceive
     return true;
 }
 std::vector<std::size_t> shadow_light_order(const std::vector<float>& keys){
-    std::vector<Candidate> c;
-    for(std::size_t i=0;i<keys.size();++i)c.push_back({i,keys[i]});
-    game_qsort(c,0,static_cast<Index>(c.size()));
     std::vector<std::size_t> order;
-    for(const Candidate& x:c)order.push_back(x.light);
+    shadow_light_order(keys.data(),keys.size(),order);
     return order;
+}
+void shadow_light_order(const float* keys,std::size_t count,std::vector<std::size_t>& order){
+    thread_local std::vector<Candidate> c;   // port-only (132vs1): kept between calls (no allocation once grown)
+    c.clear();
+    for(std::size_t i=0;i<count;++i)c.push_back({i,keys[i]});
+    game_qsort(c,0,static_cast<Index>(c.size()));
+    order.clear();
+    for(const Candidate& x:c)order.push_back(x.light);
 }
 std::vector<ShadowBatch> shadow_receiver_batches(const ShadowReceiverRecord& receiver){
     std::vector<ShadowBatch> b;

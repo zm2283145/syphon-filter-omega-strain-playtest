@@ -160,17 +160,60 @@ std::vector<PortSettingsPage::Binding> PortSettingsPage::bindings_on(std::int32_
     return out;
 }
 
+namespace {
+// Port-only (Vita): the PC rows set_pc_rows(false) hides, by their place in the page's full row list.
+constexpr std::array<std::size_t, 1> display_pc_rows{5};           // OVERLAY KEY
+constexpr std::array<std::size_t, 4> input_pc_rows{0, 1, 2, 4};    // MOUSE LOOK, SENSITIVITY, INVERT Y, RESET KEYS
+}  // namespace
+
 std::int32_t PortSettingsPage::rows_on_page() const {
     switch (static_cast<Page>(page_)) {
-    case Page::display: return 1 + static_cast<std::int32_t>(display_rows.size());
-    case Page::input: return 1 + static_cast<std::int32_t>(input_rows.size());
+    case Page::display:
+        return 1 + static_cast<std::int32_t>(display_rows.size() - (pc_rows_ ? 0 : display_pc_rows.size()));
+    case Page::input:
+        return 1 + static_cast<std::int32_t>(input_rows.size() - (pc_rows_ ? 0 : input_pc_rows.size()));
     case Page::mods: return 2 + mod_rows();
     default: return 1 + static_cast<std::int32_t>(bindings_on(page_).size());
     }
 }
 
+bool PortSettingsPage::page_shown(std::int32_t p) const {
+    if (p < 0 || p >= page_count) return false;
+    return pc_rows_ || bindings_on(p).empty();
+}
+
+std::int32_t PortSettingsPage::step_page(bool forward) const {
+    auto p = static_cast<std::size_t>(page_);
+    do p = step<page_count>(p, forward);
+    while (!page_shown(static_cast<std::int32_t>(p)));
+    return static_cast<std::int32_t>(p);
+}
+
+std::size_t PortSettingsPage::row_id(std::size_t r) const {
+    if (pc_rows_) return r;
+    auto skip = [r](const auto& hidden) {
+        std::size_t id = 0;
+        for (std::size_t shown = 0;; ++id) {
+            if (std::find(hidden.begin(), hidden.end(), id) != hidden.end()) continue;
+            if (shown++ == r) return id;
+        }
+    };
+    if (page_ == static_cast<std::int32_t>(Page::display)) return skip(display_pc_rows);
+    if (page_ == static_cast<std::int32_t>(Page::input)) return skip(input_pc_rows);
+    return r;
+}
+
+void PortSettingsPage::set_pc_rows(bool shown) {
+    if (shown == pc_rows_) return;
+    pc_rows_ = shown;
+    capture_.reset();
+    if (!page_shown(page_)) page_ = static_cast<std::int32_t>(Page::display);
+    ++revision_;
+}
+
 void PortSettingsPage::set_page(std::int32_t p) {
     if (p < 0 || p >= page_count) throw std::out_of_range("port settings page: page out of range");
+    if (!page_shown(p)) throw std::out_of_range("port settings page: page hidden (no PC rows)");
     if (p == page_) return;
     page_ = p;
     capture_.reset();
@@ -184,7 +227,7 @@ std::string PortSettingsPage::title() const { return "PORT SETTINGS"; }
 std::string PortSettingsPage::label(std::int32_t row) const {
     if (row < 0 || row >= rows_max || row >= rows_on_page()) return {};
     if (row == 0) return "PAGE";
-    const auto r = static_cast<std::size_t>(row - 1);
+    const auto r = row_id(static_cast<std::size_t>(row - 1));
     switch (static_cast<Page>(page_)) {
     case Page::display: return display_rows[r];
     case Page::input: return input_rows[r];
@@ -237,10 +280,18 @@ std::string PortSettingsPage::keys_text(const std::vector<std::uint8_t>& keys) {
 
 std::string PortSettingsPage::value(std::int32_t row) const {
     if (row < 0 || row >= rows_max || row >= rows_on_page()) return {};
-    if (row == 0) return std::string(page_names[static_cast<std::size_t>(page_)]) + "  " + std::to_string(page_ + 1) + "/" +
-                         std::to_string(page_count);
+    if (row == 0) {
+        std::int32_t at = 0, shown = 0;
+        for (std::int32_t p = 0; p < page_count; ++p) {
+            if (!page_shown(p)) continue;
+            ++shown;
+            if (p <= page_) at = shown;
+        }
+        return std::string(page_names[static_cast<std::size_t>(page_)]) + "  " + std::to_string(at) + "/" +
+               std::to_string(shown);
+    }
     const PortSettings s = store_->read();
-    const auto r = static_cast<std::size_t>(row - 1);
+    const auto r = row_id(static_cast<std::size_t>(row - 1));
     switch (static_cast<Page>(page_)) {
     case Page::display: {
         const auto d = display_settings(s);
@@ -315,18 +366,18 @@ bool PortSettingsPage::holds_input(bool input_down) {
 
 bool PortSettingsPage::act(std::int32_t row, Action a) {
     if (a == Action::page_previous || a == Action::page_next) {
-        set_page(static_cast<std::int32_t>(step<page_count>(static_cast<std::size_t>(page_), a == Action::page_next)));
+        set_page(step_page(a == Action::page_next));
         return true;
     }
     if (row < 0 || row >= rows_on_page()) return false;
     if (capture_) return false;  // the hosts give the GUI no buttons while a key is awaited
     const bool forward = a != Action::previous;
     if (row == 0) {
-        set_page(static_cast<std::int32_t>(step<page_count>(static_cast<std::size_t>(page_), forward)));
+        set_page(step_page(forward));
         return true;
     }
     PortSettings s = store_->read();
-    const auto r = static_cast<std::size_t>(row - 1);
+    const auto r = row_id(static_cast<std::size_t>(row - 1));
     auto start_capture = [&](Binding b, bool append = false) {
         capture_ = Capture{std::move(b), std::nullopt, append, std::nullopt};
         ++revision_;

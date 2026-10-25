@@ -81,7 +81,23 @@ void loading_screen_progress(LoadingScreen& s, float p) {
 void loading_screen_update(LoadingScreen& s, float dt) { s.screen.update(dt); }
 
 void loading_screen_draw(GuiDrawList& out, IeDrawState& st, LoadingScreen& s) {
+    // Port-only (132ws9, research/FRONTEND.md "Checkpoint 132ws9"): every level's backdrop ("backgroundbitmap", the
+    // level's <level>background.TDX) has the same ticker line baked in at rows 372..383 of 448 (the speaker's and the
+    // faction's names), starting 44 units from the left edge (TRAINING) and ending 32 from the right (UKRAINE). Its
+    // batches are tagged so that the wide draw's edge images stretch the text-free rows 369 and 387 over rows
+    // 369..387: the names are not mirrored into the side areas. No other effect (unused by every other aspect).
+    const auto saved_node = st.port_edge_band_node;
+    const auto saved_band = st.port_edge_band;
+    const auto& nodes = s.screen.nodes();
+    for (std::size_t k = 0; k < nodes.size(); ++k)
+        if (nodes[k].name == "backgroundbitmap") {
+            st.port_edge_band_node = static_cast<int>(k);
+            st.port_edge_band = {224.0F - 387.0F, 224.0F - 369.0F};  // image rows 387..369, y up
+            break;
+        }
     hud_screen_draw_003e7670(out, st, s.screen, HudScreenDrawGlobals{});
+    st.port_edge_band_node = saved_node;
+    st.port_edge_band = saved_band;
 }
 
 void loading_screen_show_continue(LoadingScreen& s, std::uint8_t v) {

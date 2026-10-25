@@ -4,13 +4,32 @@
 #include "morph_host.hpp"
 #include "morph_resources.hpp"
 #include "actor_attachment_runtime.hpp"
+#include <memory>
+#include <optional>
 
 namespace omega {
 enum class CharacterMorphBinding { none, face, hand0, hand1 };
+// Port-only (132vp1, memory: research/VITA.md "Playability, memory and coverage"): a part's decoded morph shapes,
+// read only, so the parts bound to the same SKF can share one decode. Reads like the std::optional<MorphData> it
+// replaces.
+class SharedMorphData {
+public:
+    SharedMorphData() = default;
+    SharedMorphData(std::nullopt_t) {}
+    SharedMorphData(MorphData data) : data_(std::make_shared<const MorphData>(std::move(data))) {}
+    SharedMorphData(std::shared_ptr<const MorphData> data) : data_(std::move(data)) {}
+    bool has_value() const { return data_ != nullptr; }
+    explicit operator bool() const { return has_value(); }
+    const MorphData& operator*() const { return *data_; }
+    const MorphData* operator->() const { return data_.get(); }
+    const std::shared_ptr<const MorphData>& shared() const { return data_; }
+private:
+    std::shared_ptr<const MorphData> data_;
+};
 struct AnimatedCharacterPart {
     std::string name;
     SkinnedMesh mesh;
-    std::optional<MorphData> morph;
+    SharedMorphData morph;
     CharacterMorphBinding binding{CharacterMorphBinding::none};
 };
 struct AnimatedCharacterGeometry {

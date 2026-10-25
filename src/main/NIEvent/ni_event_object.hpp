@@ -30,14 +30,16 @@
 // model_draw() (Checkpoint 132p), the kind-3 billboard model with its
 // camera-facing world 0023e180 too (Checkpoint 132o), the kind-6 beam model
 // the same way as kind 1 with its beam (0023a6f4 -> 00239ff0, the player
-// box test and the BeamMsg, Checkpoint 132sx11); the submission 003ce650 is
-// not drawn; asset bounds (0023a250) come from the
+// box test and the BeamMsg, Checkpoint 132sx11), the kind-5 security camera's
+// preupdate (0017e1b0: the view test 0017a1e0 and the HumanSeenMsg,
+// Checkpoint 132ms2); the submission 003ce650 is not drawn; asset bounds (0023a250) come from the
 // host's asset_bounds hook for the kind-1 / kind-3 model assets (Checkpoint
 // 132zf9) and throw for other kinds when a position needs them.
 #include "animation_root.hpp"
 #include "gobj_damage.hpp"
 #include "level_lights.hpp"
 #include "population.hpp"
+#include "target_visibility.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -131,6 +133,30 @@ NiBeam ni_beam_segment(const std::array<RootVector, 2>& bounds, const NiMatrix& 
 // (d * (plane - p0).axis) * Q with Q = 1 / d.axis (vdiv, vmulx, vmaddq),
 // tested against the other two axes (c.ole.s). True: a hit.
 bool ni_beam_box_hit(const std::array<RootVector, 2>& box, const RootVector& p0, const RootVector& p1);
+// Checkpoint 132ms2: the kind-5 security camera (interpreter goldens, tools/ee/gen_ni_camera.py). 0023c858
+// builds the asset +140 with 0017f9f0 (the 0xcf0-byte camera object, vtable 004da580: vt +48 = 0017e1b0,
+// vt +94 = 003cde00; +60 = 0.5 * 0x3f91361e, +30 = 0, +ce0 = 0, +ce8 = the NIE at 0017ff98) and sets its
+// +ce4 = 1 (0023c944). 0023a2d0 (the NIE's vt +120) gives the camera's +50 component (asset vt +94 ->
+// component vt +c) the NIE's node world with the rows permuted (0023a3a0..0023a470: 00131fd0 row 0,
+// 00131fa0 row 1 = -row 2 (xyz negated, w kept), 00131f70 row 2 = row 1, row 3 kept).
+NiMatrix ni_camera_matrix(const NiMatrix& node);
+// 0017a1e0(camera, actor) up to the LOS request: the renderer's camera record (index *00538c60) gets
+// +100 = the half fov, +f4 = 2.0, +fc = 12.0 + environment +64 (add.s; *(*004ffbd4 + c), the current
+// environment), the matrix stack (*00538c64, renderer +a80) the camera's rigid inverse (00133190 ->
+// 00133200); 00379ea0 -> 0037d9a0 makes the clip matrix (P x the y / z swap) x view and tests the actor's
+// vt +e4 point (the VU ACC chain, all four lanes): inside iff for x, y, z, v <= |w| && !(v < -|w|).
+// Outside: nullopt. Inside: the request (class 005435a0, vtable 004d9180): d = point - camera row 3
+// (vsub.xyzw), len = sqrt(dx^2 + dy^2 + dz^2) (vmul.xyz, the ACC chain, vsqrt), origin = row 3 +
+// (d * 2.0) * (1.0 / len) (div.s: 0 gives the largest float), +30 the origin (w overwritten by +3c =
+// 1.0), +40 d (w overwritten by +4c = 0.0), +50 the actor, +54 0, +58 4, +5c 0 (answered at once).
+// The visible answer is the result byte +0 being 0 (no hit). The record's fov / near / far stay
+// modified and the dirty byte 00538c68 is set (the next frame setup 00132e60 rewrites them).
+std::optional<LosServiceRequest> ni_camera_view_request(float half_fov, float environment_64, const NiMatrix& camera,
+                                                        const RootVector& point, std::uint64_t actor);
+// A player slot the camera tests (0017e298..0017e2fc): `actor` the host's handle for the controller's
+// actor (+30, the LOS request's excluded object and the message's +24), `position_e4` its vt +e4.
+struct NiCameraPlayer { std::uint64_t actor{}; RootVector position_e4{}; };
+struct NiHumanSeenRecord { std::uint32_t object{}; std::uint64_t actor{}; bool handled{}; };
 
 // A drawn kind-1 model object (Checkpoint 132p). `cull` is the NIE's own
 // transform component (+50, matrix +10: its world), the culler 003c8990's
@@ -214,6 +240,20 @@ struct NiEventWorldHost {
     std::function<std::optional<NiBeamPlayer>(int slot)> beam_player;
     std::function<std::uint32_t(std::uint64_t actor, const RootVector& origin, const RootVector& direction)> beam_hit;
     std::function<bool(std::uint32_t object, std::uint64_t actor)> beam;
+    // Checkpoint 132ms2: the kind-5 camera's preupdate 0017e1b0 (asset vt +48, called by 0023a5cc while the
+    // switch +dc is on): with the camera present (+2d, mirrored from the NIE by the present walks' asset
+    // vt +5c / +60 = 003ce980 / 003ce790; +2c 1 and +2e 0 from 003cf0e0) and +ce4 set, a nonzero countdown
+    // +ce0 is decremented; at 0 each slot 0..3 (camera_player: 003fb8d0 filtered as the beam's) is tested
+    // by 0017a1e0 (the environment term *(*(*004ffbd4 + c) + 64): the light manager's current environment
+    // +64, lights above; camera_los: 003caa50(004ffb50, 004ea0b0) vt +c); a visible one queues the HumanSeenMsg (key 004ee930, vtable 004da310, +24 the
+    // actor, byte +20 1 in single player) to +ce8 (the NIE; 003c9420 a2 = 0) and sets +ce0 = 15; the loop
+    // goes on to the later slots. human_seen: the message at the next pump, offered to the scripts
+    // (003c8de0; 0023b7d0 -> 0023e890 -> 003cea10); true: handled. The preupdate's atan2 of row 1 into
+    // +64 (read by nothing found) and its submission 003ce650 (not drawn) are not modelled. Empty: a
+    // camera that reaches the slot loop throws.
+    std::function<std::optional<NiCameraPlayer>(int slot)> camera_player;
+    std::function<LosServiceResult(const LosServiceRequest&)> camera_los;
+    std::function<bool(std::uint32_t object, std::uint64_t actor)> human_seen;
 };
 class NiEventWorld {
 public:
@@ -312,6 +352,7 @@ public:
     std::vector<NiLightRecord> take_lights();
     std::vector<NiBlastRecord> take_blasts();
     std::vector<NiBeamRecord> take_beams();
+    std::vector<NiHumanSeenRecord> take_human_seen();
     // The light manager, once the level's lights exist (after construction).
     void set_lights(LevelLights* lights) { host_.lights = lights; }
 private:
@@ -346,8 +387,14 @@ private:
         std::array<float, 3> colour{};                  // NIL +144..+14c
         bool byte_150{}, byte_151{};
         std::optional<std::size_t> light_140;           // NIL +140: the point pool entry
+        // Checkpoint 132ms2: the kind-5 camera asset (0017f9f0): its +50 component's matrix (0023a2d0's
+        // permuted node world), +ce0 the countdown and +ce4 (0023c944 sets 1).
+        NiMatrix camera{};
+        std::array<bool, 4> camera_rows{};
+        std::int32_t camera_ce0{};
+        bool camera_ce4{true};
     };
-    struct Message { int node{}; bool notice{}; int mode{}; bool byte_20{}; std::int32_t value_24{}; bool beam{}; std::uint64_t actor{}; std::uint32_t flags{}; };
+    struct Message { int node{}; bool notice{}; int mode{}; bool byte_20{}; std::int32_t value_24{}; bool beam{}; std::uint64_t actor{}; std::uint32_t flags{}; bool human_seen{}; };
     int find(std::uint32_t id) const;
     int need(std::uint32_t id, const char* what) const;
     void queue_shuttle(int node, int mode, bool byte_20);
@@ -355,11 +402,12 @@ private:
     void receive(const Message& message);
     void step(int n, float dt);
     void fire(int n, std::size_t event);
-    void node_update(int n);                            // virtual +120 = 0023dda0
+    void node_update(int n);                            // virtual +120: 0023a2d0 (NIE) / 0023dda0 (NIL)
     void world(int n, NiMatrix& out, std::array<bool, 4>& rows, std::string& reason) const;
     void update_node(int n, float dt);
     void end_state_node(int n);
     void update_beam(int n);
+    void update_camera(int n);
     void update_light(int n);
     void release_light(int n);
     std::vector<Node> nodes_;
@@ -371,6 +419,7 @@ private:
     std::vector<NiLightRecord> lights_;
     std::vector<NiBlastRecord> blasts_;
     std::vector<NiBeamRecord> beams_;
+    std::vector<NiHumanSeenRecord> human_seen_;
     std::size_t autoplay_{};
 };
 

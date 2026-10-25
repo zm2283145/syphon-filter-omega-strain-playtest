@@ -62,6 +62,14 @@ struct Candidate { LevelLightRef light; float key{}; };
 
 std::vector<TerrainPointLight> terrain_point_lights(const LevelLights& lights,const LevelLightTable& table,
                                                     const ShadowVector& minimum,const ShadowVector& maximum,std::uint32_t mask){
+    std::vector<TerrainPointLight> list;
+    terrain_point_lights(list,lights,table,minimum,maximum,mask);
+    return list;
+}
+
+void terrain_point_lights(std::vector<TerrainPointLight>& list,const LevelLights& lights,const LevelLightTable& table,
+                          const ShadowVector& minimum,const ShadowVector& maximum,std::uint32_t mask){
+    list.clear();
     require(mask==terrain_point_light_mask,"only the terrain mask 4 is hosted");
     require(table.rows.size()==table.set.table.size(),"light table rows and entries differ");
     const std::size_t n=table.set.table.size();
@@ -73,7 +81,11 @@ std::vector<TerrainPointLight> terrain_point_lights(const LevelLights& lights,co
     for(std::size_t i=0;i<4;++i)centre[i]=vu0.mul(vu0.add(minimum[i],maximum[i]),0.5F);
     // 00183380 (vsub maximum - centre), 00183350 (vmul, ACC sum, vsqrt).
     const float radius=vu0.r(vu::sqrt(vu0.sum_squares(vu0.sub(maximum[0],centre[0]),vu0.sub(maximum[1],centre[1]),vu0.sub(maximum[2],centre[2]))));
-    std::vector<Candidate> candidates;
+    // Port-only (132vs1): the scratch vectors are kept between calls (once per terrain instance a frame).
+    thread_local std::vector<Candidate> candidates;
+    thread_local std::vector<float> keys;
+    thread_local std::vector<std::size_t> order;
+    candidates.clear();
     for(std::size_t k=0;k<n;++k){
         const ShadowLightTableEntry& e=table.set.table[k];
         if((mask&e.flags)==0)continue;
@@ -90,18 +102,12 @@ std::vector<TerrainPointLight> terrain_point_lights(const LevelLights& lights,co
         if(!(vu0.r(raw)<0.0F))continue;
         candidates.push_back({table.rows[k].light,vu0.mul(d2,e.weight)});              // vmulw.x
     }
-    if(!candidates.empty()){                                                            // 001273c8 with 00373ba0
-        std::vector<float> keys;
-        keys.reserve(candidates.size());
-        for(const Candidate& c:candidates)keys.push_back(c.key);
-        const std::vector<std::size_t> order=shadow_light_order(keys);
-        std::vector<Candidate> sorted;
-        sorted.reserve(order.size());
-        for(std::size_t i:order)sorted.push_back(candidates[i]);
-        candidates=std::move(sorted);
-    }
-    std::vector<TerrainPointLight> list;
-    for(const Candidate& c:candidates){                                                 // 00372548
+    if(candidates.empty())return;
+    keys.clear();                                                                       // 001273c8 with 00373ba0
+    for(const Candidate& c:candidates)keys.push_back(c.key);
+    shadow_light_order(keys.data(),keys.size(),order);
+    for(const std::size_t k:order){                                                     // 00372548
+        const Candidate& c=candidates[k];
         const LevelLight& l=lights.light(c.light);
         if((mask&l.type)==0)continue;                                                   // light +0x1e
         if(list.size()>=6)continue;                                                     // +0x2130 < 6
@@ -116,7 +122,6 @@ std::vector<TerrainPointLight> terrain_point_lights(const LevelLights& lights,co
         require(std::isfinite(r.a[3])&&std::isfinite(r.b[3]),"light range not finite");
         list.push_back(r);
     }
-    return list;
 }
 
 namespace {

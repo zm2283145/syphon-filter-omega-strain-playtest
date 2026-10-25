@@ -255,6 +255,7 @@ BulletPoolHost CombatWorld::pool_host(std::vector<CombatEvent>& events){
         }
         BulletHitHost hh;
         hh.random=[this]{return next_game_random(random_);};
+        if(innocent_chance_)hh.innocent_chance=innocent_chance_();
         hh.hit_volumes=[this,v](const RootVector& origin,const RootVector& direction,std::int32_t mode,float volume){
             return actors_.hit_volumes(*v,origin,direction,mode,volume);};
         hh.life_state=[this,v]{return actors_.life_state(*v);};

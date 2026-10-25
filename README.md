@@ -15,19 +15,19 @@ lands. Each update's commit message names the development commit it was taken fr
 | Area | State |
 | --- | --- |
 | Front end | Boot movies, title, options, agent profiles and memory card, command centre, loadout, loading screens, debriefs |
-| Levels that play to their end | **15 of 18:** TRAINING, TORONTO1, TORONTO2, TORONTO3, BELARUS1, BELARUS2, UKRAINE, MNTNEGR1, TOKYO, YEMEN1, ITALY, KYRGSTAN, MINSK, LORELEI, CHECHNYA |
+| Levels that play to their end | **17 of 18:** TRAINING, TORONTO1, TORONTO2, TORONTO3, BELARUS1, BELARUS2, UKRAINE, MNTNEGR1, TOKYO, YEMEN1, YEMEN2, ITALY, KYRGSTAN, MINSK, ZURICH, LORELEI, CHECHNYA |
 | Widescreen | True 16:9 (and wider) in levels and menus: a wider view with the HUD, headers and button hints anchored to the screen edges. 4:3, pillarbox and stretch options |
 | Controls | Gamepads and keyboard / mouse |
 | Port Settings page | Display, control and port options inside the game's own Options menu |
 | CPU co-op partners (port-only) | 1–3 CPU agents that follow, fight and climb, and take orders from a command menu (D-pad Up). They do the co-op objectives in TORONTO1–3, BELARUS2 and UKRAINE |
 | Mods (port-only) | Replace any disc file, texture (PNG / DDS, any resolution), character, gun or level model (glTF 2.0) without touching your disc ([docs/MODDING.md](docs/MODDING.md)) |
-| LAN Play (port-only) | **LAN PLAY** on the Offline / Online screen: host, browse and join on the local network (peer to peer, no server). Players and enemies are synced in the level |
+| LAN Play (port-only) | **Play LAN** on the Offline / Online screen: host, browse and join on the local network (peer to peer, no server). Players and enemies are synced in the level |
 | Online (port-only server) | `omega_server`: accounts, lobby, game list, create / join, chat, contacts, stats, admin tools, relay and UPnP ([docs/ONLINE_DEPLOY.md](docs/ONLINE_DEPLOY.md)) |
 | PS Vita | Boot, intro movies and all menus run on real hardware in 16:9. The first in-level build (TORONTO1 / TRAINING) is being tested |
 
 ## What does not work yet
 
-- **Levels still in progress:** ZURICH, YEMEN2 and MYANMAR load and play part of the way, then
+- **Level still in progress:** MYANMAR loads and plays part of the way, then
   stop. When the port reaches something that is not ported yet, it stops with an "unhosted …" or "… not ported"
   message naming the original function; it never guesses. Please report where it stopped (see below).
 - **CPU partners:** they don't use lifts yet, BELARUS1's co-op objective "save all 7 workers" is not escorted, and

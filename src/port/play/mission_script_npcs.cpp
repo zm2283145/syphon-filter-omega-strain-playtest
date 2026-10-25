@@ -58,6 +58,9 @@ void ActorWorldScriptNpcs::connect_one(Word npc, const Entry& e) {
         return host.deliver_ai_notification(id, n.key, n.node);
     });
     world_.actor(e.actor).set_link_message_filter([&host, id](bool enable) { return host.deliver_link_message(id, enable); });
+    world_.actor(e.actor).set_box_trigger_filter([&host, id](const HotboxType3Trigger& t) {
+        return host.deliver_box_trigger(id, t.action_24, t.word_28, t.key_30);
+    });
     world_.actor(e.actor).set_notify_checkpoint_filter([&host, id] { return host.deliver_notify_checkpoint(id); });
     world_.actor(e.actor).set_trigger_script_filter(
         [&host, id](const HotboxTrigger& t) { return host.deliver_trigger(t.receiver, t.action_24, id, t.word_28); });
@@ -107,6 +110,9 @@ void ActorWorldScriptNpcs::route_link_message(const HotboxLinkMessage& message) 
 void ActorWorldScriptNpcs::connect_hotbox_links(SoloActorSimulation& box_owner, OtherLinkReceiver other) {
     other_link_receiver_ = std::move(other);
     box_owner.set_hotbox_link_sink([this](const HotboxLinkMessage& m) { route_link_message(m); });
+    // 00172598's GOBJTriggerEventMsg to a type-3 box's link (MakeNPCInteractable: the NPC actor).
+    box_owner.set_hotbox_trigger_sink(
+        [this](const HotboxType3Trigger& t) { world_.actor(entry(t.receiver).actor).queue_box_trigger(t); });
     for (const auto& m : box_owner.hotbox_load_link_messages()) route_link_message(m);
 }
 

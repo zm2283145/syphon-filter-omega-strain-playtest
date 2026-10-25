@@ -125,22 +125,26 @@ std::size_t append_batch(Mesh& mesh, std::span<const std::uint8_t> bytes, std::s
         batch.header_maximum[lane] = std::bit_cast<float>(read_u32(header, 16 + lane * 4));
     }
     mesh.batch_spans.push_back(batch);
+    // 132vl1 (research/VITA.md "Load time (132vl1)"): the attribute ranges were bounds-checked by input.attribute
+    // (take), so the vertices read them unchecked; the arithmetic is unchanged.
+    const std::uint8_t* const b = bytes.data();
+    const auto u16 = [b](std::size_t at) { return Word(b[at]) | (Word(b[at + 1]) << 8); };
     for (Word i = 0; i < count; ++i) {
         const auto p = positions + std::size_t(i) * 6;
         MeshVertex vertex;
         vertex.position = {
-            std::bit_cast<float>(0x47000000U + read_u16(bytes, p)) + bias.x,
-            std::bit_cast<float>(0x47000000U + read_u16(bytes, p + 2)) + bias.y,
-            std::bit_cast<float>(0x47000000U + read_u16(bytes, p + 4)) + bias.z
+            std::bit_cast<float>(0x47000000U + u16(p)) + bias.x,
+            std::bit_cast<float>(0x47000000U + u16(p + 2)) + bias.y,
+            std::bit_cast<float>(0x47000000U + u16(p + 4)) + bias.z
         };
         const auto n = normals + std::size_t(i) * 3;
-        vertex.normal = {(float(bytes[n]) - 128) / 128, (float(bytes[n + 1]) - 128) / 128,
-                         (float(bytes[n + 2]) - 128) / 128};
+        vertex.normal = {(float(b[n]) - 128) / 128, (float(b[n + 1]) - 128) / 128,
+                         (float(b[n + 2]) - 128) / 128};
         const auto uv = uvs + std::size_t(i) * 4;
-        vertex.uv = {std::bit_cast<float>(0x45000000U + read_u16(bytes, uv)) - 2048,
-                     std::bit_cast<float>(0x45000000U + read_u16(bytes, uv + 2)) - 2048};
+        vertex.uv = {std::bit_cast<float>(0x45000000U + u16(uv)) - 2048,
+                     std::bit_cast<float>(0x45000000U + u16(uv + 2)) - 2048};
         const auto c = colors + std::size_t(i) * 3;
-        vertex.color = {float(bytes[c]) / 128, float(bytes[c + 1]) / 128, float(bytes[c + 2]) / 128, 1};
+        vertex.color = {float(b[c]) / 128, float(b[c + 1]) / 128, float(b[c + 2]) / 128, 1};
         mesh.vertices.push_back(vertex);
     }
     for (Word i = 2; i < count; ++i) {
@@ -256,6 +260,8 @@ Mesh decode_vum(std::span<const std::uint8_t> bytes) {
         throw std::runtime_error("Unsupported VUMS DMA boundary");
     const auto bias = read_vec3(bytes, 32);
     Mesh mesh;
+    // 132vl1: room for the declared vertices up front (each takes at least 16 input bytes), not regrown per batch.
+    mesh.vertices.reserve(std::min<std::size_t>(expected_vertices, bytes.size() / 16));
     std::vector<ColorSpan> color_spans;
     mesh.declared_bounds = {read_vec3(bytes, 48), read_vec3(bytes, 64)};
     mesh.header_flags = read_u32(bytes, 4);
@@ -417,6 +423,8 @@ CollisionMesh decode_col(std::span<const std::uint8_t> bytes) {
     checked_bytes(bytes, triangles_at, std::size_t(triangle_count) * 16);
     checked_bytes(bytes, vertices_at, std::size_t(vertex_count) * 16);
     CollisionMesh collision;
+    collision.vertices.reserve(vertex_count);      // 132vl1: both counts' bytes were checked above
+    collision.triangles.reserve(triangle_count);
     for (Word i = 0; i < vertex_count; ++i)
         collision.vertices.push_back(read_vec3(bytes, vertices_at + std::size_t(i) * 16));
     for (Word i = 0; i < triangle_count; ++i) {

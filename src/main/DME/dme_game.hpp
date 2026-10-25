@@ -759,6 +759,62 @@ std::uint32_t despawn_message_serialise_002d1790(LevelLoadMemory& m, LevelLoadHo
 std::uint32_t despawn_message_receive_002d1810(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
                                                std::uint32_t stack);
 
+// ---- the health message (vtable 0x004e0ee0, type 0x00582750, serial type 0x00582748; 132ln5h14c, 4.26) ----------
+// 003cc990(human, hp, a2): +0x40 = cvt.s.w(hp); in a network game with a2 == 0 the message (003c9e30 type 0x00582750
+// at sp+0x30, the vtable, byte +0x24 = 0, +0x28 the human's +0xc, byte +0x20 = 4, +0x2c hp) to the human
+// (003c9420(msg, human, 0)), then 003c9d60. Frame 0x60.
+void health_set_003cc990(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t human, std::uint32_t hp, std::uint32_t a2,
+                         std::uint32_t stack);
+// 003cc670(msg, flag): the destructor (+8). 00431960(msg): the clone (+0xc; 0x30 bytes, 0x004bfc10 line 0x1a).
+std::uint32_t health_message_destroy_003cc670(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                              std::uint32_t flag);
+std::uint32_t health_message_clone_00431960(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+// 00431bc0(msg, key, typeptr, .., cap t1, buf t2): the 0x14-byte record: 003c9ca0's header, byte +8 the message's
+// +0x24, +0xc the key +0x28, +0x10 the health +0x2c; -1 for cap < 0x14 or no buf; without typeptr written and -1.
+std::uint32_t health_message_serialise_00431bc0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                                std::uint32_t buf);
+// 00431a70(.., buf a3) (00431b10 registers it): in the level, with the record's byte +8 clear, the object of the key
+// +0xc (0040c540) takes the health +0x10 (003cc990(object, hp, 1): no message back); 0x14. Frame 0x30.
+std::uint32_t health_message_receive_00431a70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
+                                              std::uint32_t stack);
+
+// ---- the damage message MSGLIB_DAMAGE_REQUEST (vtable 0x004e08a0, type 0x005716f0, serial type 0x005716f8;
+// 132ln5h14c, 4.27). 003ccb00 (the human's +0x100) builds it with 003c9e30: +0x24 the amount (word), +0x28 the
+// source, byte +0x2c the type, +0x2d the category, +0x2e the "already applied" byte (1: a notice, 0: a request).
+// 001880e0(msg, flag): the destructor (+8). 00407f40(msg): the clone (+0xc; 0x30 bytes, 0x004be9f0 line 0x20).
+std::uint32_t damage_message_destroy_001880e0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag);
+std::uint32_t damage_message_clone_00407f40(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+// 004083d0(msg, key, typeptr, .., cap t1, buf t2): the 0x18-byte record: 003c9ca0's header, byte +8 the message's
+// +0x2e, +0xc the source's key (+0x28's +0xc), halfwords +0x10 the category, +0x12 the type, +0x14 the amount; -1 for
+// cap < 0x18 or no buf; without typeptr written and -1.
+std::uint32_t damage_message_serialise_004083d0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                                std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf);
+// 004081e0(.., buf a3): in the level, a message (003c9e30 type 0x005716f0 at sp+0x40) with the source of the key +0xc
+// (0040c540); the victim is 003fbb10(key +4)'s entry or 0040c540(key +4). With both: byte +8 set -> 003c9350(msg,
+// victim, 0, 0) (a notice to the victim's handler); else unless (the victim's controller +0x54 && victim +0x14 &&
+// source +0x38 == 0x80) the victim's +0x100(victim, source, category, type, 0, quiet 1, 0, f12 = cvt.s.w(amount)).
+// 003c9d60 destroys it; 0x18. Frame 0x80.
+std::uint32_t damage_message_receive_004081e0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack);
+
+// ---- the death action message (vtable 0x004e01e0, an action message 0x004e0840 of type 0x0055d480; 132ln5h14c) -----
+// The kill 00186e04..00186e58 builds it (action +0x24 0x42, kind +0x28 2, the death code +0x2c, +0x1c 0x40, flags +0x20
+// the constructor's 5) and sends it with 003c9420(msg, actor, 1): delivered at once and, in a network game, to every
+// console (+0x20 bit 4: 003fb020 of the actor's +0x10 key). NET_INLEVEL.md 4.28.
+// 00184eb0(msg, flag): vtable 0x004e01e0, then 0x004e0840, 003c9d60(msg, 0); 00100740 when (short) flag > 0.
+std::uint32_t death_action_destroy_00184eb0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag);
+// 003e7370(msg): a 0x30-byte copy (0036b180(0, 0x30, 0x004bde68, 0x1df) in the heap guard): the base +4..+0x20, the
+// action +0x24 / +0x28, the code +0x2c; 0 when the allocation fails.
+std::uint32_t death_action_clone_003e7370(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+// 003e6270(msg, key, typeptr, .., cap t1, buf t2): -1 below 0x10 bytes or without a buffer; 003ff330's action header
+// (with no typeptr), buf+0xc = cvt.s.w(+0x2c); *typeptr = *0x0055a220 and 0x10, or -1 without typeptr.
+std::uint32_t death_action_serialise_003e6270(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                              std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf);
+// 003e4f70(.., buf a3) (net_registrations: type 0x0055a220): in the level, the received message (003c9db0 type
+// 0x0055d480 at sp+0x20), the action byte buf+8, the kind buf+9, the code cvt.w.s(buf+0xc); 003c9350(msg, entry, 0,
+// 0) to 003fbb10(key +4)'s object; 003c9d60. Busy flag 0x005723c8 around it; 0x10. Frame 0x60.
+std::uint32_t death_action_receive_003e4f70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack);
+
 // ---- the generator message "Generator Message" (vtable 0x004db600, type 0x004a4a68; 132ln5h13, 4.23) -----------
 // The AI's Deactivate (00157c3c) and the remote NPC controller's (002d4554) send it to the generator of +150: +0x24
 // the actor, byte +0x28 = 1 (00221610: GenInfo 0043b190). The base vtable is 0x004db660 (cGeneratorMessageBase).

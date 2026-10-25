@@ -72,6 +72,10 @@ struct IeDrawState {
     // draw's batches otherwise; -1 (the default) tags nothing.
     int port_anchor_root = -1;
     std::uint32_t port_anchor = 0;
+    // Port-only (checkpoint 132ws9): the batches ie_draw_child draws for this node (and its subtree) get
+    // GuiDrawBatch::port_edge_band = port_edge_band; -1 (the default) tags nothing.
+    int port_edge_band_node = -1;
+    GuiDrawBatch::PortEdgeBand port_edge_band;
 
     std::array<float, 16>& top();
     void push();  // 003ed290

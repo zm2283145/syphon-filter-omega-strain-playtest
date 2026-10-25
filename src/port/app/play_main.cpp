@@ -161,6 +161,7 @@
 #include <windowsx.h>
 #else
 #include "win32_vita.hpp"   // port-only (132vt2): the PS Vita's fixed screen as the window
+#include "vita_file.hpp"    // port-only (132vl1): the load's card read counters and test switches
 #endif
 
 #include <algorithm>
@@ -192,6 +193,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#ifdef __vita__
+#include <mutex>
+#include "frontend_disc.hpp"
+#endif
 
 namespace {
 namespace fs=std::filesystem;
@@ -201,24 +206,37 @@ using namespace omega;
 // Port-only (132vt2e, research/VITA.md "Load time"): the level load's phases on the PS Vita, each logged with its
 // seconds, the disc reads made in it and the zones (zone_profile.hpp: the load.* decoders among them) it ran, so a
 // hardware log shows what the load spends its time on.
+// 132vl1 (research/VITA.md "Load time (132vl1)"): with each phase's card reads (vita_io_stats: the sceIoRead calls under
+// the disc reads, their bytes and seconds) and, with the test switch vita_test_load_verify.txt, the checks of the load's
+// port-only read paths and caches (`verify`: each one compares its bytes with a plain read's; 0 mismatches expected).
 struct VitaLoadPhases{
     std::chrono::steady_clock::time_point begun{},last{};
-    DiscImage::ReadStats disc{};
-    static void reset_zones(){for(auto* s=omega::zone::Slot::head().load();s;s=s->next)s->ns=0,s->calls=0;}
-    void begin(const DiscImage& d){begun=last=std::chrono::steady_clock::now();disc=d.read_stats();reset_zones();}
+    DiscImage::ReadStats disc{};VitaIoStats io{};
+    bool verify=false;std::uint64_t checks=0,mismatches=0;
+    static void reset_zones(){for(auto* s=omega::zone::Slot::head().load();s;s=s->next)s->ns=0,s->calls=0,s->allocs=0;}
+    void begin(const DiscImage& d){
+        verify=vita_file_size(std::string(vita_data_root)+"/vita_test_load_verify.txt")>=0;vita_io_verify(verify);
+        begun=last=std::chrono::steady_clock::now();disc=d.read_stats();io=vita_io_stats();reset_zones();
+    }
+    void check(bool same){++checks;if(!same)++mismatches;}
     void mark(const DiscImage& d,const char* phase){
-        const auto now=std::chrono::steady_clock::now();const auto& s=d.read_stats();
+        const auto now=std::chrono::steady_clock::now();const auto& s=d.read_stats();const auto c=vita_io_stats();
         std::vector<omega::zone::Slot*> slots;
         for(auto* z=omega::zone::Slot::head().load();z;z=z->next)if(z->calls)slots.push_back(z);
         std::sort(slots.begin(),slots.end(),[](auto* a,auto* b){return a->ns>b->ns;});
-        char text[900];
-        int n=std::snprintf(text,sizeof text,"Load phase (port-only, PS Vita): %s %.2f s (%.1f s from the hand-off); disc %llu reads, %.2f MB in %.2f s",
+        char text[1000];
+        int n=std::snprintf(text,sizeof text,"Load phase (port-only, PS Vita): %s %.2f s (%.1f s from the hand-off); disc %llu reads, %.2f MB in %.2f s"
+            " (card %llu reads, %.2f MB in %.2f s)",
             phase,std::chrono::duration<double>(now-last).count(),std::chrono::duration<double>(now-begun).count(),
-            static_cast<unsigned long long>(s.reads-disc.reads),double(s.bytes-disc.bytes)/1048576.0,s.seconds-disc.seconds);
+            static_cast<unsigned long long>(s.reads-disc.reads),double(s.bytes-disc.bytes)/1048576.0,s.seconds-disc.seconds,
+            static_cast<unsigned long long>(c.reads-io.reads),double(c.bytes-io.bytes)/1048576.0,c.seconds-io.seconds);
+        if(verify)n+=std::snprintf(text+n,sizeof text-n,"; verify: %llu card reads compared, %llu differ; %llu load checks, %llu differ",
+            static_cast<unsigned long long>(c.verified),static_cast<unsigned long long>(c.mismatches),
+            static_cast<unsigned long long>(checks),static_cast<unsigned long long>(mismatches));
         for(std::size_t k=0;k<slots.size()&&k<8&&n<int(sizeof text)-90;++k)
             n+=std::snprintf(text+n,sizeof text-n,"%s %s %.0f ms x%u",k?",":"; zones",slots[k]->name,slots[k]->ns/1e6,slots[k]->calls);
         std::cout<<text<<"\n";
-        reset_zones();last=std::chrono::steady_clock::now();disc=d.read_stats();
+        reset_zones();last=std::chrono::steady_clock::now();disc=d.read_stats();io=vita_io_stats();
     }
 };
 VitaLoadPhases vita_load_phases;
@@ -510,6 +528,7 @@ struct ScriptStep{unsigned frames{};float x{},y{},p10{},p11{},rx{},ry{},cross{},
     std::array<float,4> dpad{};   // Up, Down, Left, Right (sp+fb0..fbc)
     std::uint32_t pad{};          // the PAD column (checkpoint 132f)
     std::optional<std::array<float,4>> teleport;
+    std::optional<float> rise;    // 132ws9 "rise H" (port-only soak aid, tools\run_soak.ps1): the test teleport H above the player
     bool wait_peer{},wait_left{},quit{};};
 // --dt-trace: one world dt per frame as the IEEE-754 bits in hex (for example
 // 3d08a4b2, as read from the emulator's 005383d0), '#' comments allowed.
@@ -539,6 +558,11 @@ std::vector<ScriptStep> read_script(const fs::path& path){
             std::string op;std::array<float,4> v{};fields>>op;
             for(auto& value:v)if(!(fields>>value))throw std::runtime_error("Script teleport needs X Y Z YAW: "+line);
             s.teleport=v;steps.push_back(s);continue;
+        }
+        if(line.rfind("rise ",0)==0){
+            std::string op;float h=0;fields>>op;
+            if(!(fields>>h)||!std::isfinite(h))throw std::runtime_error("Script rise needs a height: "+line);
+            s.rise=h;steps.push_back(s);continue;
         }
         if(line=="waitpeer"){s.wait_peer=true;steps.push_back(s);continue;}
         if(line=="waitleft"){s.wait_left=true;steps.push_back(s);continue;}
@@ -627,6 +651,23 @@ std::vector<ScriptStep> read_script(const fs::path& path){
 //   waitnpc N ID X0 Y0 X1 Y1            (checkpoint 132ms1) stand still until the --combat actor ID is inside the
 //                                       horizontal rectangle X0..X1 by Y0..Y1 (to pass a patrol behind its back);
 //                                       stops the run after N frames
+//   strike N RANGE ID [PRESSES]           (checkpoint 132ms2) walk toward the --combat actor ID until within RANGE
+//                                       (horizontal), turn the body onto it and press Square (no L1: the held melee
+//                                       item's swing) for 2 frames, 30 apart; done PRESSES (default 1) presses and
+//                                       30 frames later, when the actor is dead, or after N frames
+//   waitbeam N ID HEIGHT                 (checkpoint 132ms2) wait until the kind-6 beam NIE ID (its world segment, as
+//                                       0023a6f4 places it) passes at least HEIGHT above the player's feet at the
+//                                       player's horizontal position, having been below it the frame before (an
+//                                       upward crossing, so a wait begun near the top waits a cycle): a sweeping laser's crossing,
+//                                       timed as a player watches it; the run stops after N frames
+//   waitbeamrise N ID HEIGHT             (checkpoint 132ms2) as waitbeam, but done as soon as the beam is at least
+//                                       HEIGHT above the feet and still rising (no crossing needed, so a wait begun
+//                                       just after the crossing goes at once)
+//   waitbeamoff N ID                     (checkpoint 132ms2) wait until the blinking beam NIE ID switches off (its
+//                                       switch +dc on in the previous frame, off now); the run stops after N frames
+//   waitbeamend N ID X Y R               (checkpoint 132ms2) wait until the beam NIE ID's start point (a swinging
+//                                       laser's free end) comes within R of (X, Y) horizontally while approaching it
+//                                       (closer than the previous frame); the run stops after N frames
 //   hold's optional 18th value presses Select (checkpoint 132uk6).
 //   npcwatch R PERIOD                   (checkpoint 132ms8d) from now on, every PERIOD frames (0: off), print each
 //                                       present --combat actor within R (horizontal) with its position, floor-root heading
@@ -641,8 +682,31 @@ std::vector<ScriptStep> read_script(const fs::path& path){
 //   is kept until it dies.
 //   (Checkpoint 132uk6e) An aim or hunt token uF aims F units above the head node (14), and sN
 //   spaces the Square presses at least N frames apart (single shots whose recoil has settled).
+//   (Checkpoint 132ms6) An aim or hunt token hK (K >= 0) holds still K frames after a kill with the R1
+//   lock-on instead of 300 (h0: none; for waves whose spawns schedule no call on their AI). A token d
+//   with listed IDs and gG ends the command once every listed ID is dead (the gG spawns are only
+//   shot meanwhile, nearest first); with gG only (one or more), once any listed generator has spawned and
+//   none of their spawns is alive (a straggler sweep between scripted targets). A token l fires only with
+//   the lock's aim meter full (no unlocked shot at a target within 30 units: it goes the body's way level,
+//   and a scoped weapon's rounds are scarce); lN (N > 0) does so only for a target N units away or more: a
+//   nearer one (a straggler closing in, whose angular speed keeps the meter low) is fired at once locked,
+//   or unlocked as without l. A token rN (N > 0) leaves out a gG spawn more than N units away (level), as
+//   if not alive (turning the body to a far one walks it off its spot). A token v presses unlocked only at
+//   a target within 3 units of the player's floor (not one on a ladder or the ground below a balcony, which
+//   the level shot misses; an NPC's published position stands about 3.2 units above the player's on the
+//   same floor). A token a (anchor) keeps the player on the spot the command started at: turning in place
+//   to a target far off moves the body (behind a pillar, out of the lock's sight), so away more than 0.8
+//   units without a lock held, the player walks back (to 0.3) before turning or firing again. It suits a
+//   target in front (one at the player's back keeps the turn stepping the body off the spot: leave a out
+//   there); a target within 30 units (the unlocked shot's range) is fought where the player stands.
+//   A token tID (till) ends the command once the NPC ID is present (activated by its script, as waitactive),
+//   so a wave's sweep hands over to a scripted target the wave's end brings on while the generators still
+//   spawn. A token pN (N > 0, near first) makes the nearest listed target in the player's sight within N
+//   units win over the R1 lock already held on another (a straggler closing in from behind while a far one
+//   is locked).
 // A goto, face or seek that runs past its frame budget stops the run with a message.
-struct PilotCommand{std::string op;std::vector<float> args;std::vector<double> wide;std::string text;std::vector<std::uint32_t> generators;unsigned cover=0;float up=0;unsigned spacing=0;};   // wide: exact actor IDs (above 2^24)
+struct PilotCommand{std::string op;std::vector<float> args;std::vector<double> wide;std::string text;std::vector<std::uint32_t> generators;unsigned cover=0;float up=0;unsigned spacing=0;
+    unsigned kill_hold=300;bool ids_done=false;bool lock_only=false;bool level_only=false;float generator_range=0;bool anchor=false;double until_active=0;float near_first=0;float lock_close=0;};   // wide: exact actor IDs (above 2^24)
 std::vector<PilotCommand> read_pilot(const fs::path& path){
     std::ifstream in(path);if(!in)throw std::runtime_error("Cannot read pilot file");
     std::vector<PilotCommand> out;std::string line;
@@ -653,7 +717,16 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
         while(f>>token){
             std::size_t used=0;
             try{
-                if(token.size()>1&&token[0]=='g'){const auto g=std::stoul(token.substr(1),&used);++used;c.generators.push_back(static_cast<std::uint32_t>(g));}
+                if(token=="d"){c.ids_done=true;used=1;}
+                else if(token=="l"){c.lock_only=true;used=1;}
+                else if(token=="v"){c.level_only=true;used=1;}
+                else if(token=="a"){c.anchor=true;used=1;}
+                else if(token.size()>1&&token[0]=='l'){c.lock_only=true;c.lock_close=static_cast<float>(std::stod(token.substr(1),&used));++used;if(c.lock_close<=0)used=0;}
+                else if(token.size()>1&&token[0]=='t'){c.until_active=std::stod(token.substr(1),&used);++used;if(c.until_active<=0)used=0;}
+                else if(token.size()>1&&token[0]=='p'){c.near_first=static_cast<float>(std::stod(token.substr(1),&used));++used;if(c.near_first<=0)used=0;}
+                else if(token.size()>1&&token[0]=='r'){c.generator_range=static_cast<float>(std::stod(token.substr(1),&used));++used;if(c.generator_range<=0)used=0;}
+                else if(token.size()>1&&token[0]=='h'){c.kill_hold=static_cast<unsigned>(std::stoul(token.substr(1),&used));++used;}
+                else if(token.size()>1&&token[0]=='g'){const auto g=std::stoul(token.substr(1),&used);++used;c.generators.push_back(static_cast<std::uint32_t>(g));}
                 else if(token.size()>1&&token[0]=='c'){c.cover=static_cast<unsigned>(std::stoul(token.substr(1),&used));++used;if(c.cover==0)used=0;}
                 else if(token.size()>1&&token[0]=='u'){c.up=std::stof(token.substr(1),&used);++used;}
                 else if(token.size()>1&&token[0]=='s'){c.spacing=static_cast<unsigned>(std::stoul(token.substr(1),&used));++used;if(c.spacing==0)used=0;}
@@ -661,11 +734,11 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
             }catch(const std::exception&){used=0;}
             if(used!=token.size())throw std::runtime_error("Pilot command arguments: "+line);
         }
-        if((!c.generators.empty()||c.cover||c.up!=0||c.spacing)&&c.op!="aim"&&c.op!="hunt")throw std::runtime_error("Pilot command arguments: "+line);
-        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch")throw std::runtime_error("Unknown pilot command: "+line);
+        if((!c.generators.empty()||c.cover||c.up!=0||c.spacing||c.kill_hold!=300||c.ids_done||c.lock_only||c.level_only||c.anchor||c.generator_range>0||c.until_active>0||c.near_first>0)&&c.op!="aim"&&c.op!="hunt")throw std::runtime_error("Pilot command arguments: "+line);
+        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch"&&c.op!="strike"&&c.op!="waitbeam"&&c.op!="waitbeamrise"&&c.op!="waitbeamoff"&&c.op!="waitbeamend")throw std::runtime_error("Unknown pilot command: "+line);
         if(c.op=="clear"){c.cover=20;if(c.args.size()<4||std::any_of(c.args.begin()+4,c.args.end(),[](float v){return v>=0;}))throw std::runtime_error("Pilot command arguments: "+line);}
-        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
-            (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6)||(c.op=="npcwatch"&&(c.args.size()!=2||c.args[1]<0)))
+        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
+            (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6)||(c.op=="npcwatch"&&(c.args.size()!=2||c.args[1]<0))||(c.op=="strike"&&c.args.size()!=3&&c.args.size()!=4))
             throw std::runtime_error("Pilot command arguments: "+line);
         out.push_back(std::move(c));
     }
@@ -4795,6 +4868,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }catch(const std::exception& e){std::cerr<<"Port Settings page (port-only): "<<e.what()<<"\n";}
         };
         PortSettingsPage settings_page(settings_store,page_hooks);
+#ifdef __vita__
+        settings_page.set_pc_rows(false);   // the Vita has no keyboard or mouse: no binding or mouse rows
+#endif
         if(mods_flag)settings_page.set_mods_folder(*mods_flag);   // 132md4: the MODS page lists --mods <folder>
         if(!port_settings_test_keys.empty()){
             settings_page.queue_test_keys(port_settings_test_keys);
@@ -4973,7 +5049,32 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // a change made in the front end between levels applies to the next level.
         const bool coop_forced=coop_partner;
         unsigned level_pass=0;   // 0: the first level; 1..: the levels the front end handed off after a level end
+        std::optional<std::uint8_t> resume_state;   // 132vp1: 001690f0's next state, the front end resumes here
         for(;;){
+        if(resume_state){
+            host_window->log_handoff("level end ("+mission+") released, front end resume");
+            const auto r=frontend_app->resume_after_level(*resume_state,0x14);
+            resume_state.reset();
+            if(!r.level){std::cout<<"Front end: ended ("<<r.frames<<" frames, "<<r.captures.size()<<" captures)\n";break;}
+            std::cout<<"Front end: hand-off to the "<<*r.level<<" play setup (the next level, in this process; "<<r.frames<<" frames, "
+                <<r.captures.size()<<" captures)\n";
+            apply_mods_at_level_boundary(*frontend_app,*r.level);
+            mission=*r.level;
+            captures=next_level_captures;
+            if(!next_level_script_path.empty())script_path=next_level_script_path;
+            if(next_level_frames)max_frames=next_level_frames;
+            if(next_level_god)god_from=next_level_god;
+            if(!output.empty()){
+                output=output.parent_path()/(output.filename().string()+"_"+mission);
+                if(fs::exists(output))throw std::runtime_error("The next level's output folder "+output.string()+" must be new");
+            }
+            host_window->log_handoff("front end hand-off to "+mission+" (loading screen)");
+            LoadingHostOptions loading_options;loading_options.hidden=frontend_hidden;
+            loading_options.capture_dir=frontend_capture;loading_options.host=frontend_hidden?nullptr:host_window.get();
+            loading_options.test_device_lost_sweep=loading_sweep_frame;loading_options.capture_frame=loading_capture_frame;
+            loading_host=std::make_unique<LoadingScreenHost>(build_loading_screen(disc,mission),mission,loading_options);
+            ++level_pass;
+        }
 #ifdef __vita__
         vita_load_phases.begin(disc);
 #endif
@@ -5103,16 +5204,26 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         terrain_reserve_begin(mission,terrain,terrain_collision);   // 132vt2 (research/VITA.md "Memory")
         // Port-only (132vt2e, research/VITA.md "Load time"): the next few members' VUM / COL decoded across the worker
         // cores (both decoders are pure in their bytes; the disc reads stay on this thread), then used in order below.
+        // 132vl1 ("Load time (132vl1)"): the window after is read from the disc while this one decodes (for_each_beside).
         struct VumAhead{std::vector<std::vector<std::uint8_t>> data;std::vector<Mesh> vum;std::vector<CollisionMesh> col;std::size_t first=0;
+            std::vector<std::vector<std::uint8_t>> next_data;std::vector<std::string> next_names;std::size_t next_first=SIZE_MAX;
             bool has(std::size_t at)const{return at>=first&&at<first+vum.size();}};
         const auto decode_ahead=[&](VumAhead& ahead,std::size_t at,std::size_t total,const std::function<std::pair<std::vector<std::uint8_t>,std::string>(std::size_t)>& read){
             constexpr std::size_t window=6;
             const auto n=std::min(window,total-at);
-            ahead.first=at;ahead.data.assign(n,{});ahead.vum.assign(n,{});ahead.col.assign(n,{});
             std::vector<std::string> names(n);
-            for(std::size_t k=0;k<n;++k){auto r=read(at+k);ahead.data[k]=std::move(r.first);names[k]=std::move(r.second);}
-            workers.for_each(n,[&](std::size_t k){ahead.vum[k]=decode_vum(nested(ahead.data[k],names[k]+".VUM"));
-                ahead.col[k]=decode_col(nested(ahead.data[k],names[k]+".COL"));});
+            if(ahead.next_first==at&&ahead.next_data.size()==n){ahead.data=std::move(ahead.next_data);names=std::move(ahead.next_names);}
+            else{
+                ahead.data.assign(n,{});
+                for(std::size_t k=0;k<n;++k){auto r=read(at+k);ahead.data[k]=std::move(r.first);names[k]=std::move(r.second);}
+            }
+            ahead.first=at;ahead.vum.assign(n,{});ahead.col.assign(n,{});
+            const auto next=at+n,m=std::min(window,total-next);
+            ahead.next_first=SIZE_MAX;ahead.next_data.assign(m,{});ahead.next_names.assign(m,{});
+            workers.for_each_beside(n,[&](std::size_t k){ahead.vum[k]=decode_vum(nested(ahead.data[k],names[k]+".VUM"));
+                ahead.col[k]=decode_col(nested(ahead.data[k],names[k]+".COL"));},[&]{
+                for(std::size_t k=0;k<m;++k){auto r=read(next+k);ahead.next_data[k]=std::move(r.first);ahead.next_names[k]=std::move(r.second);}
+                ahead.next_first=next;});
         };
         VumAhead terrain_ahead;
 #endif
@@ -5181,22 +5292,38 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         for(const auto& o:population.objects)if(o.kind==3)for(const auto& r:o.references)
             if(r[0]<0x100&&r[1]<0x10000&&r[0]!=9&&r[0]!=0xa&&r[0]!=0xb)lift_linked.insert((r[0]<<16)|r[1]);
 #ifdef __vita__
+        // 132vl1 (research/VITA.md "Load time (132vl1)"): each distinct object model read and decoded once (TORONTO1: 326
+        // objects with a model, 50 models), in first-use order through decode_ahead; an object takes a copy of its model's
+        // decoded VUM / COL (the decoders are pure in their bytes), the last one the model itself.
+        struct ObjectModel{std::vector<std::uint8_t> data;Mesh vum;CollisionMesh col;std::size_t left=0;bool ready=false;};
         VumAhead object_ahead;
-        std::vector<std::size_t> object_order;   // the objects with a model, in population order
-        if(objects)for(std::size_t k=0;k<population.objects.size();++k)if(population.objects[k].asset!="no_vum")object_order.push_back(k);
-        std::size_t object_at=0;
+        std::vector<std::string> object_stems;std::map<std::string,ObjectModel> object_models;std::size_t object_decoded=0;
+        if(objects)for(const auto& o:population.objects)if(o.asset!="no_vum"){
+            const auto stem=uppercase_asset(o.asset.substr(0,o.asset.size()-4));
+            if(object_models[stem].left++==0)object_stems.push_back(stem);
+        }
 #endif
         if(objects)for(std::size_t k=0;k<population.objects.size();++k){
             const auto& object=population.objects[k];
             if(object.asset=="no_vum")continue;
             const auto name=uppercase_asset(object.asset.substr(0,object.asset.size()-4));
 #ifdef __vita__
-            const auto at=object_at++;
-            if(!object_ahead.has(at))decode_ahead(object_ahead,at,object_order.size(),[&](std::size_t j){
-                const auto& o=population.objects[object_order[j]];const auto stem=uppercase_asset(o.asset.substr(0,o.asset.size()-4));
-                return std::make_pair(disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},stem+".HOG"),stem);});
-            const auto& data=object_ahead.data[at-object_ahead.first];
-            auto vum=std::move(object_ahead.vum[at-object_ahead.first]);auto col_mesh=std::move(object_ahead.col[at-object_ahead.first]);
+            auto& model=object_models.at(name);
+            if(!model.ready){
+                if(object_decoded>=object_stems.size()||object_stems[object_decoded]!=name)throw std::logic_error("object models out of first-use order");
+                decode_ahead(object_ahead,object_decoded,object_stems.size(),[&](std::size_t j){
+                    return std::make_pair(disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},object_stems[j]+".HOG"),object_stems[j]);});
+                for(std::size_t j=0;j<object_ahead.vum.size();++j){
+                    auto& m=object_models.at(object_stems[object_ahead.first+j]);
+                    m.data=std::move(object_ahead.data[j]);m.vum=std::move(object_ahead.vum[j]);m.col=std::move(object_ahead.col[j]);m.ready=true;
+                }
+                object_decoded+=object_ahead.vum.size();
+            }
+            const auto& data=model.data;
+            if(vita_load_phases.verify)vita_load_phases.check(disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},name+".HOG")==data);
+            Mesh vum;CollisionMesh col_mesh;
+            if(--model.left==0){vum=std::move(model.vum);col_mesh=std::move(model.col);}
+            else{vum=model.vum;col_mesh=model.col;}
 #else
             const auto data=disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},name+".HOG");
             auto vum=decode_vum(nested(data,name+".VUM"));auto col_mesh=decode_col(nested(data,name+".COL"));
@@ -5240,6 +5367,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(object.kind==2||object.kind==3||lift_linked.count(object.id))pathed_collision[object.id]=world.cols.size();
             ++object_count;
         }
+#ifdef __vita__
+        object_models.clear();object_ahead={};
+#endif
         // Checkpoint 132p: the NIE: kind-1 model objects (the NI_* sequences' pieces, e.g. NI_WaterKit's kits in
         // the EQ room). 0023c610 -> 0023c3c0 opens "<group>.HOG" (sprintf 004a6fb8 "%s.HOG", 0036e1b0) in the
         // level's object archive and loads the asset as a GOB's model (00395e40, vt +44 = 003951b0: the asset's
@@ -5266,6 +5396,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<NiCollisionSlot> ni_collision;std::size_t ni_cols_absent=0,ni_cols_empty=0;
         if(objects&&mission_scripts){
             std::map<std::string,std::vector<std::uint8_t>> ni_hogs;
+#ifdef __vita__
+            std::map<std::pair<std::string,std::string>,Mesh> ni_decoded;
+#endif
             for(std::size_t k=0;k<population.event_objects.size();++k){
                 const auto& e=population.event_objects[k];
                 if(e.kind!=1&&e.kind!=3&&e.kind!=6)continue;
@@ -5276,7 +5409,25 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(hog==ni_hogs.end())hog=ni_hogs.emplace(group,disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},group)).first;
                 const auto& data=hog->second;
                 const auto name=uppercase_asset(e.asset.substr(0,e.asset.size()-4));
+#ifdef __vita__
+                // 132vl1: the NIE models decoded ahead across the worker cores, once per (group, name), then copied here.
+                if(ni_decoded.empty()){
+                    std::vector<std::pair<std::string,std::string>> keys;
+                    for(const auto& f:population.event_objects){
+                        if(f.kind!=1&&f.kind!=3&&f.kind!=6)continue;
+                        if(f.asset.size()<4||uppercase_asset(f.asset.substr(f.asset.size()-4))!=".VUM")break;
+                        const auto g=uppercase_asset(f.group)+".HOG";
+                        if(!ni_hogs.count(g))ni_hogs.emplace(g,disc.archive_member({"GAMEDATA",mission,"OBJECTS.HOG"},g));
+                        std::pair<std::string,std::string> key{g,uppercase_asset(f.asset.substr(0,f.asset.size()-4))};
+                        if(!ni_decoded.count(key)){ni_decoded[key];keys.push_back(std::move(key));}
+                    }
+                    workers.for_each(keys.size(),[&](std::size_t j){
+                        ni_decoded.at(keys[j])=decode_vum(nested(ni_hogs.at(keys[j].first),keys[j].second+".VUM"));});
+                }
+                auto vum=ni_decoded.at({group,name});
+#else
                 auto vum=decode_vum(nested(data,name+".VUM"));
+#endif
                 replace_static_model({"GAMEDATA",mission,"OBJECTS.HOG",group},name+".VUM",vum);
                 ni_model_bounds.emplace(e.id,vum_declared_bounds(nested(data,name+".VUM")));
                 if(e.kind==6){
@@ -5423,8 +5574,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             TextureBinder binder;
             binder.set_error_texture(disc.read(disc.file({"GAMEDATA","COMMON","ERROR.TDX"})));
             const std::vector<std::string> tex_archive{"GAMEDATA",mission,"TEX.HOG"};
+#ifdef __vita__
+            // 132vl1 (research/VITA.md "Load time (132vl1)"): TEX.HOG read whole once (TORONTO1 2.75 MB in one read
+            // instead of 640 small ones), each member served as its slice of it; with the load verify switch each
+            // slice is compared with the member read alone.
+            const auto tex_container=disc.file(tex_archive);
+            std::vector<std::uint8_t> tex_whole;
+            if(tex_container.size<=16u*1024u*1024u)tex_whole=disc.read(tex_container);
+            const auto tex_member=[&](const std::string& member)->std::vector<std::uint8_t>{
+                const auto at=disc.archive_member_extent(tex_archive,member);
+                if(tex_whole.empty()||at.offset<tex_container.offset||at.offset-tex_container.offset>tex_whole.size()
+                   ||at.size>tex_whole.size()-(at.offset-tex_container.offset))return disc.archive_member(tex_archive,member);
+                const auto from=tex_whole.begin()+static_cast<std::ptrdiff_t>(at.offset-tex_container.offset);
+                std::vector<std::uint8_t> bytes(from,from+static_cast<std::ptrdiff_t>(at.size));
+                if(vita_load_phases.verify)vita_load_phases.check(bytes==disc.archive_member(tex_archive,member));
+                return bytes;
+            };
+            const TextureBinder::Container tex_hog{"TEX.HOG",disc.archive_member_names(tex_archive),tex_member};
+#else
             const TextureBinder::Container tex_hog{"TEX.HOG",disc.archive_member_names(tex_archive),
                 [&](const std::string& member){return disc.archive_member(tex_archive,member);}};
+#endif
             std::vector<std::int32_t> bound(terrain.textures.size(),TextureBinder::absent);
             for(const auto& model:model_textures){
                 const std::vector<std::string> names(terrain.textures.begin()+static_cast<std::ptrdiff_t>(model.first),
@@ -5442,6 +5612,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             for(auto& model:model_textures)model.hog.reset();
             model_hogs.clear();
+#ifdef __vita__
+            std::vector<std::uint8_t>().swap(tex_whole);
+#endif
             std::vector<Texture> decoded;std::vector<std::uint32_t> remap;
             std::size_t from_tex_hog=0,from_objects=0,undecodable=0;
             {
@@ -5743,6 +5916,31 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // 00404060 / 00385d40: a MORPH.HOG part whose "<stem>.SKF" member exists deforms: byte 5 '1' a hand-1 part (the
         // grips of +2414, hand table 1), '2' a hand-0 part (+2410, hand table 0), any other a face part over table +2c0c's
         // shapes. A table past 1 (004067e0's BODY result) reads past 005712f0 / 005712f8 and is not hosted.
+#ifdef __vita__
+        // 132vl1 (research/VITA.md "Load time (132vl1)"): while the NPC roster loads, each SKF is read once (the roster's
+        // face and hand parts name the same few); the load verify switch re-reads a cached one and compares the bytes.
+        bool skf_cache_on=false;std::map<std::string,std::vector<std::uint8_t>> skf_cache;
+#endif
+        const auto skf_member=[&](const std::string& skf)->std::vector<std::uint8_t>{
+#ifdef __vita__
+            if(skf_cache_on){
+                if(const auto found=skf_cache.find(skf);found!=skf_cache.end()){
+                    if(vita_load_phases.verify)vita_load_phases.check(disc.archive_member(morph_hog,skf)==found->second);
+                    return found->second;
+                }
+                return skf_cache.emplace(skf,disc.archive_member(morph_hog,skf)).first->second;
+            }
+#endif
+            return disc.archive_member(morph_hog,skf);
+        };
+        // 132vp1 (port-only, memory): one decode per SKF, kind and counts, shared by every part bound to it (BELARUS2
+        // bound 309 NPC parts, 13 MB of shapes in 240k blocks before; research/VITA.md "Playability, memory and coverage").
+        std::map<std::tuple<std::string,MorphKind,std::uint32_t,std::uint32_t>,std::shared_ptr<const MorphData>> morph_decodes;
+        const auto shared_morph=[&](const std::string& skf,MorphKind kind,std::uint32_t shapes,std::uint32_t chunks){
+            auto& slot=morph_decodes[{skf,kind,shapes,chunks}];
+            if(!slot)slot=std::make_shared<const MorphData>(decode_morph(skf_member(skf),kind,shapes,chunks));
+            return slot;
+        };
         const auto bind_morph_part=[&](AnimatedCharacterPart& part,const std::string& member,std::uint8_t table){
             if(member.size()<6||!member.ends_with(".SKM"))return;
             auto skf=member;skf.replace(skf.size()-4,4,".SKF");
@@ -5752,10 +5950,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             const auto chunks=static_cast<std::uint32_t>(part.mesh.chunks.size());
             if(member[5]=='1'||member[5]=='2'){
                 const unsigned h=member[5]=='1'?1:0;
-                part.morph=decode_morph(disc.archive_member(morph_hog,skf),MorphKind::hand,static_cast<std::uint32_t>(morph_tables.hands[table][h].size()),chunks);
+                part.morph=shared_morph(skf,MorphKind::hand,static_cast<std::uint32_t>(morph_tables.hands[table][h].size()),chunks);
                 part.binding=h?CharacterMorphBinding::hand1:CharacterMorphBinding::hand0;
             }else{
-                part.morph=decode_morph(disc.archive_member(morph_hog,skf),MorphKind::face,static_cast<std::uint32_t>(morph_tables.faces[table].size()),chunks);
+                part.morph=shared_morph(skf,MorphKind::face,static_cast<std::uint32_t>(morph_tables.faces[table].size()),chunks);
                 part.binding=CharacterMorphBinding::face;
             }
         };
@@ -5982,7 +6180,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         }
         if(std::find(object_dump_ids.begin(),object_dump_ids.end(),0U)!=object_dump_ids.end()){   // "all" (132uk6)
             object_dump_ids.clear();for(const auto& o:population.objects)object_dump_ids.push_back(o.id);
-            for(const auto& h:population.hotboxes)object_dump_ids.push_back(h.id);for(const auto& n:population.npcs)object_dump_ids.push_back(n.id);}
+            for(const auto& h:population.hotboxes)object_dump_ids.push_back(h.id);for(const auto& n:population.npcs)object_dump_ids.push_back(n.id);
+            for(const auto& e:population.event_objects)object_dump_ids.push_back(e.id);}
         for(const auto id:object_dump_ids){   // --object-dump (diagnostic)
             bool found=false;
             for(const auto& o:population.objects)if(o.id==id){found=true;
@@ -5998,6 +6197,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"Object dump: generator "<<id<<" '"<<g.manifest<<"' health "<<g.health<<" alive cap "<<g.alive_cap
                     <<" total "<<g.total<<" interval "<<g.interval<<" enabled "<<int(g.enabled)<<" spawn nodes";
                 for(const auto node:g.spawn_nodes)std::cout<<' '<<node;
+                std::cout<<"\n";}
+            for(const auto& e:population.event_objects)if(e.id==id){found=true;   // NIE: records (132ms2)
+                std::cout<<"Object dump: nie "<<id<<" kind "<<e.kind<<" asset '"<<e.asset<<"' group '"<<e.group<<"' children";
+                for(const auto& c:e.children)std::cout<<' '<<c[0]<<':'<<c[1];
                 std::cout<<"\n";}
             if(!found)std::cout<<"Object dump: no object "<<id<<"\n";
         }
@@ -6149,13 +6352,39 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         bool look_cache_on=false;std::map<std::string,SkinnedMesh> look_meshes;std::map<std::string,Texture> look_images;
         const auto look_key=[](const std::vector<std::string>& archive,const std::string& member){
             std::string key;for(const auto& a:archive){key+=a;key+='/';}return key+member;};
+        // 132vl1 (research/VITA.md "Load time (132vl1)"): a member whose mesh is already decoded is not read again (the
+        // decode is all that its bytes serve); its bytes' FNV-1a hash is kept so the load verify switch can re-read and
+        // compare them. The figures' skeletons and bone-scale presets likewise decoded once per name.
+        std::map<std::string,std::uint64_t> look_hashes;
+        std::map<std::string,SkeletonDefinition> look_skeletons;
+        std::map<std::string,std::vector<SkinMatrix>> look_scales;
+        const auto look_hash=[](const std::vector<std::uint8_t>& bytes){
+            std::uint64_t h=1469598103934665603ULL;for(const auto b:bytes){h^=b;h*=1099511628211ULL;}return h;};
 #endif
+        // A part's mesh member: true with its bytes in `bytes` (on the PS Vita, while the roster loads, true with no bytes
+        // when the member's mesh is already decoded); false when it is empty.
+        const auto look_read=[&](const std::vector<std::string>& archive,const std::string& member,std::vector<std::uint8_t>& bytes)->bool{
+#ifdef __vita__
+            if(look_cache_on){
+                const auto key=look_key(archive,member);
+                if(look_meshes.count(key)){
+                    if(vita_load_phases.verify)vita_load_phases.check(look_hash(disc.archive_member(archive,member))==look_hashes.at(key));
+                    return true;
+                }
+                bytes=disc.archive_member(archive,member);
+                return !bytes.empty();
+            }
+#endif
+            bytes=disc.archive_member(archive,member);
+            return !bytes.empty();
+        };
         const auto look_mesh=[&]([[maybe_unused]] const std::vector<std::string>& archive,[[maybe_unused]] const std::string& member,
                                  const std::vector<std::uint8_t>& bytes)->SkinnedMesh{
 #ifdef __vita__
             if(look_cache_on){
                 const auto key=look_key(archive,member);
                 if(const auto found=look_meshes.find(key);found!=look_meshes.end())return found->second;
+                look_hashes[key]=look_hash(bytes);
                 return look_meshes.emplace(key,decode_skinned_mesh(bytes)).first->second;
             }
 #endif
@@ -6180,10 +6409,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Mesh, LOD 0 (00404750): a registered key serves the request.
                 bool registered=false;const Member* mesh=nullptr;
                 for(const auto& m:mesh_cache)if(const auto slot=appearance_preregistered_slot(part.mesh,m.name)){registered=true;if(*slot==0)mesh=&m;}
-                std::vector<std::uint8_t> mesh_bytes;
-                if(mesh)mesh_bytes=disc.archive_member(mesh->archive,mesh->name);
-                else if(!registered&&!part.mesh.blank&&manskm.count(part.mesh.members[0]))mesh_bytes=disc.archive_member(manskm_archive,part.mesh.members[0]);
-                if(mesh_bytes.empty())continue;   // no mesh for this part
+                std::vector<std::uint8_t> mesh_bytes;bool has_mesh=false;
+                if(mesh)has_mesh=look_read(mesh->archive,mesh->name,mesh_bytes);
+                else if(!registered&&!part.mesh.blank&&manskm.count(part.mesh.members[0]))has_mesh=look_read(manskm_archive,part.mesh.members[0],mesh_bytes);
+                if(!has_mesh)continue;   // no mesh for this part
                 // Texture, LOD 0 (00403a20).
                 const Member* slot0=nullptr;const Member* slot1=nullptr;
                 for(const auto& m:texture_cache)if(const auto slot=appearance_preregistered_texture_slot(part.texture,m.name)){if(*slot==0)slot0=&m;else slot1=&m;}
@@ -6225,13 +6454,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Mesh, LOD 1 (00404750): a registered key in slot 1, else the '1' member; absent: LOD 0's.
                 bool registered1=false;const Member* mesh1=nullptr;
                 for(const auto& m:mesh_cache)if(const auto slot=appearance_preregistered_slot(part.mesh,m.name)){registered1=true;if(*slot==1)mesh1=&m;}
-                std::vector<std::uint8_t> lod1_bytes;
-                if(mesh1)lod1_bytes=disc.archive_member(mesh1->archive,mesh1->name);
-                else if(!registered1&&!part.mesh.blank&&manskm.count(part.mesh.members[1]))lod1_bytes=disc.archive_member(manskm_archive,part.mesh.members[1]);
-                if(!lod1_bytes.empty()){lod_meshes.push_back(std::make_unique<SkinnedMesh>(look_mesh(mesh1?mesh1->archive:manskm_archive,mesh1?mesh1->name:part.mesh.members[1],lod1_bytes)));npc_lod1.push_back(lod_meshes.back().get());}
+                std::vector<std::uint8_t> lod1_bytes;bool has_lod1=false;
+                if(mesh1)has_lod1=look_read(mesh1->archive,mesh1->name,lod1_bytes);
+                else if(!registered1&&!part.mesh.blank&&manskm.count(part.mesh.members[1]))has_lod1=look_read(manskm_archive,part.mesh.members[1],lod1_bytes);
+                if(has_lod1){lod_meshes.push_back(std::make_unique<SkinnedMesh>(look_mesh(mesh1?mesh1->archive:manskm_archive,mesh1?mesh1->name:part.mesh.members[1],lod1_bytes)));npc_lod1.push_back(lod_meshes.back().get());}
                 else npc_lod1.push_back(nullptr);
                 model_keys.push_back(mesh?omega::mods::part_key(mesh->archive,mesh->name):omega::mods::part_key(manskm_archive,part.mesh.members[0]));
-                lod1_keys.push_back(mesh1?omega::mods::part_key(mesh1->archive,mesh1->name):!lod1_bytes.empty()?omega::mods::part_key(manskm_archive,part.mesh.members[1]):model_keys.back());
+                lod1_keys.push_back(mesh1?omega::mods::part_key(mesh1->archive,mesh1->name):has_lod1?omega::mods::part_key(manskm_archive,part.mesh.members[1]):model_keys.back());
                 if(!mesh&&!registered)register_loaded_mesh(part.mesh,part.mesh.members[0],
                     !registered1&&manskm.count(part.mesh.members[1])?std::optional<std::string>(part.mesh.members[1]):std::nullopt);
                 npc_pairs.push_back(static_cast<std::size_t>(&part-look.parts.data()));
@@ -6264,9 +6493,36 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             figure.images=std::move(loaded.images);figure.textured=std::move(loaded.textured);figure.lod1_images=std::move(loaded.lod1_images);
             OMEGA_ZONE_LAP(npc_lap,"load.npc_parts");
             std::vector<SkinMatrix> scales;
+#ifdef __vita__
+            // A cached decode's source bytes re-read and compared by hash under the load verify switch.
+            const auto cached_bytes=[&](const std::string& key,const std::vector<std::string>& archive,const std::string& member,bool cached){
+                std::vector<std::uint8_t> bytes;
+                if(!cached||vita_load_phases.verify)bytes=disc.archive_member(archive,member);
+                if(!cached)look_hashes[key]=look_hash(bytes);
+                else if(vita_load_phases.verify)vita_load_phases.check(look_hash(bytes)==look_hashes.at(key));
+                return bytes;
+            };
+            if(look.bone_scale_preset!="BONENOSCALE"&&bone_presets.count(look.bone_scale_preset+".BON")){
+                if(!look_cache_on)scales=bone_scale_matrices(decode_bone_scales(disc.archive_member(npcskm_archive,look.bone_scale_preset+".BON")));
+                else{
+                    auto found=look_scales.find(look.bone_scale_preset);
+                    const auto bytes=cached_bytes("BON/"+look.bone_scale_preset,npcskm_archive,look.bone_scale_preset+".BON",found!=look_scales.end());
+                    if(found==look_scales.end())found=look_scales.emplace(look.bone_scale_preset,bone_scale_matrices(decode_bone_scales(bytes))).first;
+                    scales=found->second;
+                }
+            }
+            const auto npc_skeleton=[&]{
+                if(!look_cache_on)return decode_skeleton(disc.archive_member({"GAMEDATA","COMMON","SKEL.HOG"},look.skeleton));
+                auto found=look_skeletons.find(look.skeleton);
+                const auto bytes=cached_bytes("SKEL/"+look.skeleton,{"GAMEDATA","COMMON","SKEL.HOG"},look.skeleton,found!=look_skeletons.end());
+                if(found==look_skeletons.end())found=look_skeletons.emplace(look.skeleton,decode_skeleton(bytes)).first;
+                return found->second;
+            }();
+#else
             if(look.bone_scale_preset!="BONENOSCALE"&&bone_presets.count(look.bone_scale_preset+".BON"))
                 scales=bone_scale_matrices(decode_bone_scales(disc.archive_member(npcskm_archive,look.bone_scale_preset+".BON")));
             const auto npc_skeleton=decode_skeleton(disc.archive_member({"GAMEDATA","COMMON","SKEL.HOG"},look.skeleton));
+#endif
             OMEGA_ZONE_LAP(npc_lap,"load.npc_skeleton");
             drawn_parts+=npc_parts.size();
             const std::vector<SkinMatrix> npc_scales=scales;
@@ -6313,11 +6569,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // The hard mesh (slot 2, 00405940) through the part-mesh cache like a part's LOD 0.
                 bool registered_hard=false;const Member* hard=nullptr;
                 for(const auto& m:mesh_cache)if(const auto slot=appearance_preregistered_slot(look.hard_mesh,m.name)){registered_hard=true;if(*slot==0)hard=&m;}
-                std::vector<std::uint8_t> hard_bytes;
-                if(hard)hard_bytes=disc.archive_member(hard->archive,hard->name);
-                else if(!registered_hard&&!look.hard_mesh.blank&&manskm.count(look.hard_mesh.members[0]))hard_bytes=disc.archive_member(manskm_archive,look.hard_mesh.members[0]);
+                std::vector<std::uint8_t> hard_bytes;bool has_hard=false;
+                if(hard)has_hard=look_read(hard->archive,hard->name,hard_bytes);
+                else if(!registered_hard&&!look.hard_mesh.blank&&manskm.count(look.hard_mesh.members[0]))has_hard=look_read(manskm_archive,look.hard_mesh.members[0],hard_bytes);
                 const SkinnedMesh* hard_mesh=nullptr;
-                if(!hard_bytes.empty()){combat_meshes.push_back(std::make_unique<SkinnedMesh>(decode_skinned_mesh(hard_bytes)));hard_mesh=combat_meshes.back().get();}
+                if(has_hard){combat_meshes.push_back(std::make_unique<SkinnedMesh>(look_mesh(hard?hard->archive:manskm_archive,hard?hard->name:look.hard_mesh.members[0],hard_bytes)));hard_mesh=combat_meshes.back().get();}
                 figure.combat_model=make_combat_actor_model(npc_skeleton,std::move(hit_parts),hard_mesh,npc_scales);
             }
             OMEGA_ZONE_LAP(npc_lap,"load.npc_combat");
@@ -6487,7 +6743,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             return std::nullopt;};
         if(activate_all||script_npcs){
 #ifdef __vita__
-            look_cache_on=true;
+            look_cache_on=true;skf_cache_on=true;
 #endif
             for(const auto& entry:roster){
                 if(entry.role!=2)continue;
@@ -6518,7 +6774,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
 #ifdef __vita__
             std::cout<<"NPC parts (port-only, PS Vita): "<<look_meshes.size()<<" meshes and "<<look_images.size()
                      <<" images decoded once for the roster\n";
-            look_cache_on=false;look_meshes.clear();look_images.clear();
+            look_cache_on=false;look_meshes.clear();look_images.clear();look_hashes.clear();look_skeletons.clear();look_scales.clear();
+            skf_cache_on=false;skf_cache.clear();
 #endif
             VITA_LOAD_PHASE(disc,"agent morph, weapons and NPCs");
             std::cout<<(activate_all?"--activate-all (diagnostic): ":"Mission script NPCs: ")<<npcs.size()<<" AI NPCs loaded with "<<drawn_parts
@@ -6905,6 +7162,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             set_npc_team(r.figure->ai->component(),0);
             port_set_perception_ignored(actors.actor(r.figure->actor),true);
             r.figure->ai->port_remote_controlled(true);
+            actors.actor(r.figure->actor).set_byte_14(0);   // 132ln5h14c: another console's human (+14 clear)
             lan_remotes.push_back(r);
         }
         // The figure of a remote human's key (its peer: the key's top byte - 1).
@@ -6976,6 +7234,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::unique_ptr<audio::Mixer> sound_mixer;std::unique_ptr<SoundIopHost> sound_host;std::unique_ptr<GameSoundManager> game_sound;
         std::unique_ptr<audio::WavWriter> sound_wav;double sound_carry=0;std::vector<std::int16_t> sound_pcm;
         std::unique_ptr<audio::Device> sound_device;
+#ifdef __vita__
+        // Port-only (132vs1, research/VITA.md "Audio"): the level's mix on the app's sound pump (the audio core, pulled
+        // by the output) as the play host's front end has it; gameSound reaches the host through the pump's lock.
+        // Declared after the device and the host: the pump stops first.
+        std::recursive_mutex sound_lock;std::unique_ptr<GameSoundHost> locked_sound_host;
+        std::unique_ptr<VitaMovieHooks::SoundPumpHandle> sound_pump;
+#endif
         // Checkpoint 122d: the NIE kind-2 particle assets (vtable 004daa10), their PAR library (00397b20) and the
         // emitter runtime (003a2dd0 / 003a2400 / 003a0050). Declared before ni_events, whose hooks use it.
         struct PlayParticles{
@@ -7172,6 +7437,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // with (empty: the base colours) and whether that is still current; a batch whose list is unchanged keeps
         // its colours (the pass is a function of the list and the base colours), so it is neither relit nor uploaded.
         std::vector<std::vector<TerrainPointLight>> terrain_light_memo;std::vector<std::uint8_t> terrain_light_memo_valid;
+        // Port-only (132vs1): the pass's working lists, kept between frames so a frame's pass allocates nothing once
+        // they have grown: the (batch, instance list) pairs, the instance lists (the first terrain_lit_list_count in
+        // use), the batches to relight, and one batch's positions, colours and reaching lights.
+        std::vector<std::pair<std::size_t,std::size_t>> terrain_lit;std::vector<std::vector<TerrainPointLight>> terrain_lit_lights;
+        std::vector<TerrainPointLight> terrain_instance_lights;std::vector<std::size_t> terrain_touched;
+        std::vector<std::array<float,3>> terrain_light_positions;std::vector<std::array<std::uint8_t,3>> terrain_light_colours;
+        std::vector<TerrainPointLight> terrain_batch_lights;
 #if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
         std::uint64_t terrain_memo_kept=0,terrain_memo_relit=0,terrain_memo_vertices=0;
 #endif
@@ -7669,6 +7941,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         std::cout<<"LAN: generator "<<gr.generator<<" received the Generator Message 0x004a4a68 of +c 0x"<<std::hex<<gr.c
                             <<std::dec<<" (00221610: +28 1, GenInfo 0043b190) at frame "<<frame<<"\n";
                     }
+                    // 132ln5h14c: the health messages (vtable 0x004e0ee0) the other consoles sent (003cc990(.., 0)):
+                    // their receive 00431a70 ran 003cc990(0040c540(key), hp, 1); the play's actor takes +0x40. The local
+                    // player's key too: a joiner's 002c6b70 builds this console's character with 003cc990(.., +3398, 0)
+                    // (NetCreateCharacterMsg +0x20), so in the original every arrival sets the player's health to it.
+                    for(const auto& h:lan_net->take_remote_healths()){
+                        std::uint32_t actor=0;bool found=false;
+                        if(h.local_player){actor=0;found=true;}
+                        for(const auto& [k,sp]:spawned_npcs)if(!found&&sp.c==h.key&&!actors.destroyed(k)&&actors.traversed(k)){actor=k;found=true;}
+                        for(const auto& r:lan_remotes)if(!found&&!r.gone&&r.figure&&r.key==h.key){actor=static_cast<std::uint32_t>(r.figure->actor);found=true;}
+                        if(found)actors.actor(actor).set_health_40(static_cast<float>(h.hp));
+                        std::cout<<"LAN (132ln5h14c): health message 0x004e0ee0 received for +c 0x"<<std::hex<<h.key<<std::dec
+                            <<": 00431a70 -> 003cc990(.., "<<h.hp<<", 1)"<<(found?(actor==0?std::string(" on the local player"):" on actor "+std::to_string(actor)):
+                            std::string(" (no actor of the key here)"))<<" at frame "<<frame<<"\n";
+                    }
                 }
                 generator_world->tick(generator_dt,prelogic,[&](GeneratorState& s){
                     GeneratorSpawnHost host;
@@ -7917,6 +8203,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(!combat_session)throw std::runtime_error("0023af08: the beam's hit volumes 00188140 need --combat");
                     return combat_session->actors().hit_volumes(static_cast<std::size_t>(actor),origin,direction,0,0.25F).flags;};
                 nh.beam=[&mission_host](std::uint32_t object,std::uint64_t){return mission_host->deliver_beam(object);};
+                // Checkpoint 132ms2: the kind-5 camera (0017e1b0): slot 0 as the beam's (the player controller is
+                // never filtered), its actor's vt +e4 (00132860) and handle (the LOS request's +50); the LOS
+                // service 004ea0b0 vt +c (0013a480) through the player's collision world (as 002207d0's request).
+                nh.camera_player=[&actors](int slot)->std::optional<NiCameraPlayer>{
+                    if(slot!=0)return std::nullopt;
+                    return NiCameraPlayer{actors.actor(0).handle(),actors.actor(0).position_e4()};};
+                nh.camera_los=[&actors](const LosServiceRequest& q){return answer_los_request(actors.actor(0).world(),q);};
+                nh.human_seen=[&mission_host](std::uint32_t object,std::uint64_t){return mission_host->deliver_human_seen(object);};
                 // Checkpoint 132vo2: 00239780 -> 0020f990(msg, the event's +10 descriptor, the NIE), +20 = 1,
                 // 003c9420(msg, 004ffb50, 1). The descriptor is 002397f0's 001ca010(type, name, NIE, 0) with
                 // +180 = 0 and +186 = 0; the NIE is the owner (its view in the owner hooks below).
@@ -8283,6 +8577,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 sound_mixer=std::make_unique<audio::Mixer>();
                 SoundIopHostConfig sound_config;sound_config.level=mission;
                 sound_host=std::make_unique<SoundIopHost>(disc,sound_config,*sound_mixer);
+#ifdef __vita__
+                if(vita_movie_hooks().locked_host&&vita_movie_hooks().sound_pump){
+                    locked_sound_host=vita_movie_hooks().locked_host(*sound_host,sound_lock);
+                    game_sound=std::make_unique<GameSoundManager>(*locked_sound_host);
+                }else
+#endif
                 game_sound=std::make_unique<GameSoundManager>(*sound_host);
                 sound_host->attach(*game_sound);
                 sound_host->schedule=[&mission_host](std::int32_t delay,std::function<void()> event){mission_host->events().enqueue(delay,std::move(event));};
@@ -8486,7 +8786,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // Checkpoint 132win7: with no output device (or "0:absent") it starts silently and opens one when it appears.
                     const bool muted=!test_audio_device.empty();
                     const bool absent=muted&&audio::starts_absent(audio::parse_audio_device_events(test_audio_device));
-                    sound_device=std::make_unique<audio::Device>(0.2,muted,absent);
+                    double sound_latency=0.2;
+#ifdef __vita__
+                    if(locked_sound_host)sound_latency=0.064;   // 132vs1: as the front end's (primes below the pump's 4096 queued frames)
+#endif
+                    sound_device=std::make_unique<audio::Device>(sound_latency,muted,absent);
+#ifdef __vita__
+                    if(locked_sound_host){
+                        sound_pump=vita_movie_hooks().sound_pump(*sound_host,sound_lock,*sound_device);
+                        std::cout<<"Sound: the level's mix runs on the sound pump (the audio core, port-only, 132vs1)\n";
+                    }
+#endif
                     std::cout<<"Sound: real-time output on the default device (XAudio2)"<<(muted?", muted for --test-audio-device (port-only test)":"")
                              <<(absent?", no device at startup (simulated, port-only test)":"")<<"\n";
                     for(const auto& line:sound_device->take_log())std::cout<<line<<" at startup\n";}
@@ -8791,6 +9101,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                     cc.throws=std::move(tc);
                 }
+                // 00188918: the bullet rule's lwc1 of *0048a2b8 (game::HitInnocentNpcChance; YEMEN2 writes 0.01).
+                cc.innocent_hit_chance=[&mission_host]{
+                    if(!mission_host)return 0.3F;
+                    return std::bit_cast<float>(std::get<Word>(mission_host->context().engine_variable("game::HitInnocentNpcChance")));};
                 // 0x0024f928: the pad producer's 00241ec0 on the HUD *004ffc2c: the reticle switch (+8c) over the
                 // reticle elements; t0 is the goggles record while +346f is set (its +130, crosshair_stage).
                 if(hud_object)cc.crosshair_hud=[&hud_object,&hud_frame,overlay_on=gui_overlay,first=true](bool aim_1e0,bool far_200,const std::optional<HudCrosshairRecord>& held,
@@ -8997,7 +9311,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     std::cout<<"EquipGoggles: actor "<<a<<" value "<<on<<", slot 6 "<<(record?"held":"empty")
                              <<(r.requested?(r.accepted?", switch_on_ir accepted":", switch_on_ir refused"):"")<<"\n";
                 });
-                for(auto& npc:npcs)if(npc.ai)npc.ai->set_combat_link(combat_session->npc_combat_link(npc.actor));
+                for(auto& npc:npcs)if(npc.ai){
+                    npc.ai->set_combat_link(combat_session->npc_combat_link(npc.actor));
+                    // A CPU partner or a LAN remote figure stands for a human agent, whose inventory keeps +99 clear
+                    // (COOP.md "Rounds"; the AI init's 00158dd8 is an NPC's).
+                    if(coop_partner_index_of(npc.record)||lan_remote_slot_of(npc.record))combat_session->combat().inventory(npc.actor).infinite_reserve_99=false;
+                }
                 // Kill 0014b370: the victim's damage virtual +100 with itself as the source (t0..t2 = 0: quiet, no hit
                 // point, no penetration).
                 if(script_npcs_host)script_npcs_host->set_damage_host([&combat_session](std::size_t victim,std::uint8_t category,
@@ -9559,7 +9878,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             });
             // Checkpoint 132f6: with the loadout screen the level load runs only 003e20a0 (init::Init); 003e1a20's
             // init::ClientStartLevel / init::StartLevel wait for the state-0x12 done path after its Accept (00168bac).
-            if(loadout_screen)mission_host->start_init();
+            // Checkpoint 132ms6: a --loadout without the screen is that screen's Accept, so 003e1a20 runs after it
+            // too (below): YEMEN2's init::ClientStartLevel StealPlayerWeapons took the slots before the Accept
+            // filled them, and the player kept the loadout's pistol.
+            if(loadout_screen||loadout)mission_host->start_init();
             else mission_host->start();
             VITA_LOAD_PHASE(disc,"mission start (the init scripts)");
             // Checkpoint 132cp4: game::setFxLightDist (0025e460) writes the manager's +74 + mode * 0x40, the block's
@@ -9589,6 +9911,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"Loadout accept (002bcb50"<<(fresh_profile_loadout(*loadout)?", a fresh profile's lists":
                     cheat_loadout_weapons?", from the lists 00332ac0 gives after the PORT-ONLY --unlock-all (every unlock row)":
                     ", all-weapons list mode (host test convenience)")<<"): "<<text<<"\n";
+                if(!loadout_screen&&!mission_host->started())mission_host->start_level_entries();   // 003e1a20 after the Accept (00168bac)
             }
             if(goggles_item)std::cout<<"Goggles item (port-only --goggles-item, 00143df0(inv, "<<*goggles_item<<", 1, 0, 1, 0)): "
                                     <<combat_session->add_player_item(*goggles_item)<<"\n";
@@ -10023,11 +10346,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
 
         std::vector<ScriptStep> script;if(!script_path.empty())script=read_script(script_path);
         std::vector<PilotCommand> pilot;if(!pilot_path.empty())pilot=read_pilot(pilot_path);
-        std::size_t pilot_index=0;unsigned pilot_frames=0,pilot_aim_frames=0,pilot_off_aim=0,pilot_release=0,pilot_next_fire=0,pilot_spaced=0;float pilot_prev_yaw_error=0,pilot_prev_pitch_error=0;
+        std::size_t pilot_index=0;unsigned pilot_frames=0,pilot_aim_frames=0,pilot_off_aim=0,pilot_release=0,pilot_next_fire=0,pilot_spaced=0;float pilot_prev_yaw_error=0,pilot_prev_pitch_error=0;std::optional<float> pilot_prev_beam_height;
             float pilot_watch_radius=0;unsigned pilot_watch_period=0;
         float pilot_prev_h=0,pilot_prev_x=0,pilot_prev_y=0,pilot_prev_distance=0;bool pilot_have_prev=false;std::vector<std::int32_t> pilot_dead;unsigned pilot_kill_pause=0;
         // aim / hunt cK: a target that took no damage from K presses in tolerance is behind cover (passed over in this command).
         std::set<std::int32_t> pilot_covered;std::map<std::int32_t,std::array<float,4>> pilot_clear_covered;std::int32_t pilot_shot_target=-1;float pilot_shot_health=0;unsigned pilot_dry_shots=0;
+        std::optional<std::array<float,3>> pilot_anchor;   // aim / hunt a: the spot the command started at, and whether walking back
         std::set<std::uint32_t> pilot_reached_backpacks;std::optional<std::uint32_t> pilot_backpack;   // pilot "pickup"
         PilotRecorder recorder;if(!record_path.empty()){recorder.out.open(record_path);if(!recorder.out)throw std::runtime_error("Cannot write --record");}
         // The overlay holds the player's parts first, then each drawn NPC's.
@@ -11259,12 +11583,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 combat_session->reset_actor(at.actor,at.combat_model,entry->item_words,make_secondary_motion_registry(at.model->graph,clips));
                 if(combat_figures.at(at.actor)!=&at)throw std::runtime_error("002c6b70 -> 001b8130: the combat figures do not follow the actor world");
                 at.ai->set_combat_link(combat_session->npc_combat_link(at.actor));
+                combat_session->combat().inventory(at.actor).infinite_reserve_99=false;   // a human agent's (COOP.md "Rounds")
                 if(perception_world)at.ai->set_perception_link(combat_session->npc_perception_link(*perception_world));
             }
             if(stealth)stealth->reset_actor(at.actor);
             set_npc_team(at.ai->component(),0);
             port_set_perception_ignored(actors.actor(at.actor),true);
             at.ai->port_remote_controlled(true);
+            actors.actor(at.actor).set_byte_14(0);   // 132ln5h14c: another console's human (+14 clear)
             if(script_npcs_host)script_npcs_host->replace_controller(at.actor_id,*at.ai);
             npc_figures_added=true;
             std::cout<<"LAN (132ln5h8): 002c6b70 -> 001b8130 for key "<<std::hex<<slot.key<<std::dec<<": "<<at.label<<" rebuilt in place as actor "
@@ -11529,6 +11855,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         <<(out.owner?"the owner's (+14 set): its cNetHuman written from the actor":"another console's (+14 clear): the actor follows its cNetHuman")
                         <<(out.linked?"":" (no cNetHuman yet)")<<"\n";
                 seen.seen=true;seen.owner=out.owner;
+                // 132ln5h14c: the section's ownership is the actor's +14 (003ccb00 / 00186c58 read it: the owner's actor
+                // takes the damage, another console's sends the replica DamageMsg 00187b58 to the owner).
+                if(out.owner!=(a.byte_14()!=0))a.set_byte_14(out.owner?1:0);
                 if(out.claimed)std::cout<<"LAN (132ln5h14b): 001b1710: "<<who()<<" claims its cNetHuman (002d1d80: +28 set) at frame "<<frame<<"\n";
                 if(out.released)std::cout<<"LAN (132ln5h14b): 001b1710: "<<who()<<" releases its cNetHuman (002d2110: +28 clear) at frame "<<frame<<"\n";
                 if(out.owner||!out.linked)continue;
@@ -11562,6 +11891,106 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     seen.bits=bits;
                     if(out.health)seen.health=*out.health;
                 }
+            }
+        };
+        // 132ln5h14c (research/NET_INLEVEL.md 4.27): the LAN key of a play actor (the local player's, a spawned NPC's +c,
+        // another console's human); 0 when it has none (PORT-ONLY: the level's script NPCs are not networked).
+        const auto lan_actor_key=[&](std::size_t actor)->std::uint32_t{
+            if(actor==0)return lan_net->local_player_key();
+            if(const auto sp=spawned_npcs.find(static_cast<std::uint32_t>(actor));sp!=spawned_npcs.end())return sp->second.c;
+            for(const auto& r:lan_remotes)if(!r.gone&&r.figure&&r.figure->actor==actor)return r.key;
+            return 0;
+        };
+        const auto lan_actor_of_key=[&](std::uint32_t key,bool local_player)->std::optional<std::size_t>{
+            if(local_player||key==lan_net->local_player_key())return std::size_t{0};
+            for(const auto& [k,sp]:spawned_npcs)if(sp.c==key&&!actors.destroyed(k)&&actors.traversed(k))return std::size_t{k};
+            for(const auto& r:lan_remotes)if(!r.gone&&r.figure&&r.key==key)return r.figure->actor;
+            return std::nullopt;
+        };
+        std::set<std::size_t> lan_damage_unkeyed;
+        std::vector<std::size_t> lan_deaths_queued;   // logged once delivered (the actor's next pump)
+        unsigned lan_hook_frame=0;
+        // A network game's 003ccb00 / 00187b58 (005721c8 set, 005721c0 the host flag) and their DamageMsg's 003c9420.
+        const auto lan_network_actors=[&](unsigned frame){
+            const bool host=lan_net->host_console();
+            lan_hook_frame=frame;
+            for(std::size_t i=0;i<actors.size();++i){
+                if(actors.destroyed(i)||actors.actor(i).network_game())continue;
+                actors.actor(i).set_network_game(true,host,[&,i](const ActorDamageEvent& e)->bool{
+                    const auto victim_key=lan_actor_key(i);
+                    if(e.kind==ActorDamageEvent::Kind::death_message){   // the kill's death action (research/NET_INLEVEL.md 4.28)
+                        if(!victim_key){
+                            if(lan_damage_unkeyed.insert(i).second)
+                                std::cout<<"LAN (PORT-ONLY, 132ln5h14c): actor "<<i<<" has no LAN key (a script NPC, not networked):"
+                                    " its death action 0x004e01e0 stays on this console\n";
+                            return false;
+                        }
+                        lan_net->send_death_action(victim_key,e.value);
+                        std::cout<<"LAN (132ln5h14c): death action 0x42 code "<<e.value<<" of actor "<<i<<" (+c 0x"<<std::hex<<victim_key
+                            <<std::dec<<") 003c9420 +20 4: sent at frame "<<lan_hook_frame<<"\n";
+                        return false;
+                    }
+                    if(!victim_key){
+                        if(lan_damage_unkeyed.insert(i).second)
+                            std::cout<<"LAN (PORT-ONLY, 132ln5h14c): actor "<<i<<" has no LAN key (a script NPC, not networked):"
+                                " its DamageMsg 0x004e08a0 (+20 "<<int(e.flags_20)<<") stays on this console\n";
+                        return true;
+                    }
+                    std::uint32_t source_key=0;
+                    for(std::size_t s=0;s<actors.size();++s)
+                        if(!actors.destroyed(s)&&actors.actor(s).handle()==e.object){source_key=lan_actor_key(s);break;}
+                    lan::LanNetCore::DamageSend d;
+                    d.victim_key=victim_key;d.source_key=source_key;d.word_1c=e.word_1c;d.flags_20=e.flags_20;
+                    d.type_2c=e.type_2c;d.category_2d=e.category_2d;d.byte_2e=e.byte_2e;d.value=e.value;
+                    const bool queued=lan_net->send_damage_message(d);
+                    std::cout<<"LAN (132ln5h14c): damage message 0x004e08a0 of actor "<<i<<" (+c 0x"<<std::hex<<victim_key
+                        <<", source 0x"<<source_key<<std::dec<<", +20 "<<int(e.flags_20)<<", +2e "<<int(e.byte_2e)<<", "<<e.value
+                        <<") 003c9420: "<<(queued?"queued on this console":"sent")<<"\n";
+                    return queued;
+                });
+            }
+        };
+        // The DamageMsgs the other consoles sent: their receive 004081e0 ran the damage virtual +100 of the object of
+        // the key (source, category, type, 0, 1, 0, amount): quiet, no penetration, no hit point.
+        const auto lan_damages=[&](unsigned frame){
+            lan_network_actors(frame);
+            for(const auto a:lan_deaths_queued)if(!actors.destroyed(a))
+                std::cout<<"LAN (132ln5h14c): the received death action delivered to actor "<<a<<" (001a92a0 -> 0018a950): life state "
+                    <<int(actors.actor(a).life_state())<<" at frame "<<frame<<"\n";
+            lan_deaths_queued.clear();
+            for(const auto& d:lan_net->take_remote_damages()){
+                const auto victim=lan_actor_of_key(d.victim_key,d.local_player);
+                std::ostringstream line;   // one line: the damage below may log the network messages it sends
+                line<<"LAN (132ln5h14c): damage message 0x004e08a0 received for +c 0x"<<std::hex<<d.victim_key<<" (source 0x"
+                    <<d.source_key<<std::dec<<", category "<<int(d.category)<<", type "<<int(d.type)<<", "<<d.amount<<")";
+                if(!victim){
+                    std::cout<<line.str()<<": no actor of the key here (PORT-ONLY: dropped) at frame "<<frame<<"\n";
+                    continue;
+                }
+                if(!combat_session)throw std::runtime_error("Damage message 0x004e08a0: the damage virtual +100 needs --combat");
+                SoloDamageRequest r;
+                if(d.source_key)if(const auto src=lan_actor_of_key(d.source_key,false)){
+                    auto& s=actors.actor(*src);
+                    r.source=s.handle();r.source_controller=s.damage_controller();r.source_position=s.published_position();
+                }
+                if(!r.source)r.source=actors.actor(*victim).handle();   // PORT-ONLY: a source of no actor here
+                r.category=d.category;r.type=d.type;r.quiet=true;r.amount=d.amount;
+                combat_session->actors().damage_request(*victim,r);
+                std::cout<<line.str()<<": 004081e0 -> the virtual +100 of actor "<<*victim<<" (health now "
+                    <<actors.actor(*victim).health().health_40<<") at frame "<<frame<<"\n";
+            }
+            // The death actions the other consoles sent (003e4f70 -> 003c9350 transport 0): the actor's 001a92a0 runs
+            // 0018a950(code) at its next pump.
+            for(const auto& d:lan_net->take_remote_deaths()){
+                const auto actor=d.local_player?std::nullopt:lan_actor_of_key(d.key,false);
+                std::cout<<"LAN (132ln5h14c): death action 0x42 code "<<d.code<<" received for +c 0x"<<std::hex<<d.key<<std::dec;
+                if(!actor){
+                    std::cout<<": no actor of the key here (PORT-ONLY: dropped) at frame "<<frame<<"\n";
+                    continue;
+                }
+                actors.actor(*actor).queue_network_death(d.code);
+                lan_deaths_queued.push_back(*actor);
+                std::cout<<": queued to actor "<<*actor<<" (life state "<<int(actors.actor(*actor).life_state())<<") at frame "<<frame<<"\n";
             }
         };
         if(lan_net&&!lan_net->level_loaded()){
@@ -11659,6 +12088,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // single-threaded order: the window's display unwrapped.
         const bool render_threaded=display.render_thread;   // fixed for the level
         gfx::RenderThread render_thread(render_threaded);
+#ifdef __vita__
+        // 132vp1 (research/VITA.md "Playability, memory and coverage"): overlay_images copies the parts' images
+        // (part_images, the NPCs', the guns', the thermal ones: they stay, and a rebuild copies them again); once the
+        // copies are on the GPU their pixels go (the sizes stay). The PS Vita has no device loss, so
+        // SceneRenderer::reset_device never re-uploads them.
+        const auto drop_overlay_pixels=[&]{
+            if(render_threaded)render_thread.drain();
+            for(auto& t:overlay_images){
+                if(t.replacement||t.block_bytes||!t.animation.empty())continue;
+                std::vector<std::uint8_t>().swap(t.rgba);std::vector<std::vector<std::uint8_t>>().swap(t.mips);
+                std::vector<std::vector<std::uint8_t>>().swap(t.raw_alpha);
+            }};
+#else
+        const auto drop_overlay_pixels=[]{};
+#endif
         // 132md7 (port-only, MODDING.md "Speed"): a large queued write (a mod's HD overlay) copied across the worker pool.
         if(workers.workers())render_thread.set_bulk_copy([&workers](std::uint8_t* to,const std::uint8_t* from,std::size_t bytes){
             constexpr std::size_t piece=std::size_t{1}<<20;
@@ -12176,7 +12620,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }else throw std::runtime_error("002797c0: blood probe hit COL "+std::to_string(geometry)+" without a hosted owner");
             return h;};
         if(textured)state.renderer->set_untextured_materials(untextured);
-        state.renderer->set_overlay_textures(overlay_images);
+        state.renderer->set_overlay_textures(overlay_images);drop_overlay_pixels();
         state.renderer->set_overlay(&actor_mesh);
         state.renderer->set_overlay_skins(&overlay_skins);   // 132md8
         if(const auto* set=omega::mods::active();set&&set->has_models()&&!mods_cpu_skinning){
@@ -12237,6 +12681,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // Port-only (checkpoint 132win10): the frame-time overlay (frame_overlay.hpp): on from the settings / --frame-overlay,
         // toggled for the session by its key (frame_overlay_key, F3 by default; --test-overlay-key posts it at frames).
         bool frame_overlay_on=display.frame_overlay;FrameOverlay frame_overlay;unsigned overlay_logged=~0u;
+        bool overlay_l3_was=false;   // 132vp1: the Vita's toggle (L3, below)
         struct PresentProbe{std::uint64_t frames=0,present_stalls=0,
             gpu_stalls=0,lines_shown=0;double max_present=0,max_gpu=0,present_total=0,gpu_total=0;} probe;   // --present-probe (132win10)
         // Checkpoint 132win3: a loss seen by any D3D call of the frame (device_lost.hpp) comes here too, before
@@ -12514,6 +12959,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(script_index<script.size()&&script[script_index].teleport&&script_teleported!=script_index){
                 script_teleported=script_index;test_teleport(*script[script_index].teleport);
                 const auto& t=*script[script_index].teleport;recorder.teleport({t[0],t[1],t[2],t[3]});}   // --record keeps the prefix's teleports
+            if(script_index<script.size()&&script[script_index].rise&&script_teleported!=script_index){
+                // 132ws9 (port-only soak aid): the same test teleport, H above the player's floor root, its heading kept.
+                script_teleported=script_index;const auto p=sim.floor_root_placement();
+                const std::array<float,4> t{p.position[0],p.position[1],p.position[2]+*script[script_index].rise,
+                    2.0F*std::atan2(p.orientation[2],p.orientation[3])*57.29578F};
+                test_teleport(t);recorder.teleport({t[0],t[1],t[2],t[3]});}
         };
         std::uint32_t last_found_ledge=0;
         int last_view_rotation=0;       // the aim-view +d90 angle diagnostic (0.5 degree steps, printed on change)
@@ -12694,6 +13145,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_print_log();
                     lan_place_remotes(frame);
                     lan_npc_sections(frame);
+                    lan_damages(frame);
                     // Port-only (132on2d): the online game's lobby frame (004536b0 state 10 -> 004446e0(1)); 132on2f:
                     // its connection-path notice on the HUD ticker.
                     if(frontend_app)
@@ -12789,6 +13241,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 if(gui_overlay_draw){gui_overlay_draw->rt.g.pad_state=pad_state_shown;gui_overlay_draw->driver.ready=pad_state_shown==6;}
             }
+#if defined(__vita__)
+            // 132vp1 (VITA.md "Controls"): the Vita has no F3. L3 (a touch on a panel's lower-left quarter; the game
+            // reads no L3) toggles the frame-time overlay.
+            {const bool l3=pad&&state.focused&&(pad->pad.held&ds2::l3);
+                if(l3&&!overlay_l3_was){
+                    frame_overlay_on=!frame_overlay_on;
+                    std::cout<<"Frame overlay (port-only): "<<(frame_overlay_on?"on":"off")<<" (L3) at frame "<<frame<<"\n";
+                }
+                overlay_l3_was=l3;}
+#endif
             if(script.empty()){
                 if(!state.focused)pad.reset();
                 if(pad_removed){
@@ -12893,7 +13355,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             const auto& c=pilot[pilot_index];
                             auto finish=[&](){std::cout<<"Pilot: \""<<c.text<<"\" done at frame "<<frame<<" ("<<here.position[0]<<", "<<here.position[1]<<", "
                                 <<here.position[2]<<") heading "<<h<<"\n";++pilot_index;pilot_frames=0;pilot_aim_frames=0;pilot_off_aim=0;pilot_release=0;pilot_next_fire=0;pilot_spaced=0;
-                                pilot_covered.clear();pilot_shot_target=-1;pilot_dry_shots=0;pilot_kill_pause=0;};
+                                pilot_covered.clear();pilot_shot_target=-1;pilot_dry_shots=0;pilot_kill_pause=0;pilot_anchor.reset();};
                             auto steer=[&](float target,bool walk,float start_window=5.0F){
                                 const float delta=std::remainder(target-h,360.0F);
                                 const float coast=delta*omega>0?std::abs(omega)*8.0F:0.0F;
@@ -12961,6 +13423,46 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 if(within){finish();continue;}
                                 if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitnear timed out: "+c.text);
                                 ++pilot_frames;done=true;
+                            }else if(c.op=="waitbeam"||c.op=="waitbeamrise"){
+                                // waitbeam BUDGET ID HEIGHT: a sweeping laser's crossing, timed as a player watches it.
+                                if(!ni_events)throw std::runtime_error("Pilot: waitbeam needs --mission-scripts: "+c.text);
+                                const auto id=static_cast<std::uint32_t>(c.wide[1]);
+                                const auto node=ni_events->node_world(id);
+                                const auto bounds=ni_asset_bounds.find(id);
+                                if(!node||bounds==ni_asset_bounds.end())throw std::runtime_error("Pilot: waitbeam on a beam NIE without a node world / asset: "+c.text);
+                                const NiBeam s=ni_beam_segment(bounds->second,*node);
+                                const float dx=s.end[0]-s.start[0],dy=s.end[1]-s.start[1],run=dx*dx+dy*dy;
+                                const float t=run>0?std::clamp(((here.position[0]-s.start[0])*dx+(here.position[1]-s.start[1])*dy)/run,0.0F,1.0F):0.0F;
+                                const float height=s.start[2]+t*(s.end[2]-s.start[2])-here.position[2];
+                                // An upward crossing of HEIGHT, so a wait begun near the sweep's top waits a whole cycle.
+                                const bool crossing=pilot_prev_beam_height&&(c.op=="waitbeamrise"?*pilot_prev_beam_height<height:*pilot_prev_beam_height<c.args[2]);
+                                pilot_prev_beam_height=height;
+                                if(height>=c.args[2]&&crossing){pilot_prev_beam_height.reset();finish();continue;}
+                                if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitbeam timed out: "+c.text);
+                                ++pilot_frames;done=true;
+                            }else if(c.op=="waitbeamoff"){
+                                if(!ni_events)throw std::runtime_error("Pilot: waitbeamoff needs --mission-scripts: "+c.text);
+                                const auto id=static_cast<std::uint32_t>(c.wide[1]);
+                                if(!ni_events->contains(id))throw std::runtime_error("Pilot: waitbeamoff on an unknown NIE: "+c.text);
+                                const float on=ni_events->switched_on(id)?1.0F:0.0F;
+                                const bool switched_off=pilot_prev_beam_height&&*pilot_prev_beam_height>0&&on==0;
+                                pilot_prev_beam_height=on;
+                                if(switched_off){pilot_prev_beam_height.reset();finish();continue;}
+                                if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitbeamoff timed out: "+c.text);
+                                ++pilot_frames;done=true;
+                            }else if(c.op=="waitbeamend"){
+                                if(!ni_events)throw std::runtime_error("Pilot: waitbeamend needs --mission-scripts: "+c.text);
+                                const auto id=static_cast<std::uint32_t>(c.wide[1]);
+                                const auto node=ni_events->node_world(id);
+                                const auto bounds=ni_asset_bounds.find(id);
+                                if(!node||bounds==ni_asset_bounds.end())throw std::runtime_error("Pilot: waitbeamend on a beam NIE without a node world / asset: "+c.text);
+                                const NiBeam s=ni_beam_segment(bounds->second,*node);
+                                const float distance=std::hypot(s.start[0]-c.args[2],s.start[1]-c.args[3]);
+                                const bool approaching=pilot_prev_beam_height&&distance<*pilot_prev_beam_height;
+                                pilot_prev_beam_height=distance;
+                                if(distance<=c.args[4]&&approaching){pilot_prev_beam_height.reset();finish();continue;}
+                                if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitbeamend timed out: "+c.text);
+                                ++pilot_frames;done=true;
                             }else if(c.op=="aimat"){
                                 if(!aim_view_camera_matrix)throw std::runtime_error("Pilot: aimat needs --combat: "+c.text);
                                 if(pilot_frames>=static_cast<unsigned>(c.args[0])){finish();continue;}
@@ -12997,8 +13499,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     const auto g=combat_generator.find(combat_ids[k]);
                                     return g!=combat_generator.end()&&std::find(c.generators.begin(),c.generators.end(),g->second)!=c.generators.end();
                                 };
+                                const auto in_range=[&](std::size_t k){
+                                    if(c.generator_range<=0)return true;
+                                    const auto p=actors.actor(k).published_position();
+                                    return std::hypot(p[0]-here.position[0],p[1]-here.position[1])<=c.generator_range;
+                                };
                                 for(std::size_t k=0;k<combat_ids.size()&&k<actors.size();++k){
-                                    const bool generated=by_generator(k);generator_spawned=generator_spawned||generated;
+                                    const bool spawned=by_generator(k);generator_spawned=generator_spawned||spawned;
+                                    const bool generated=spawned&&in_range(k);
                                     if(clear){
                                         if(k==0||!actors.actor(k).eligible()||std::find(c.wide.begin()+4,c.wide.end(),-static_cast<double>(combat_ids[k]))!=c.wide.end())continue;
                                         const auto p=actors.actor(k).published_position();
@@ -13014,8 +13522,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                             // stays drawn (a dead generator NPC is deactivated when not drawn and deleted 1 s later)
                                             // until a call its handlers scheduled on its AI fires: on a deleted NPC that call goes
                                             // through freed memory (TOKYO's ResendNewAwarenessMessage, 3 to 7 s after awareness).
-                                            if(!clear&&c.args[1]==0&&pilot_frames>0){pilot_kill_pause=300;
-                                                std::cout<<"Pilot: "<<combat_ids[k]<<" dead at frame "<<frame<<": holding still 300 frames\n";}
+                                            if(!clear&&c.args[1]==0&&pilot_frames>0&&c.kill_hold>0){pilot_kill_pause=c.kill_hold;
+                                                std::cout<<"Pilot: "<<combat_ids[k]<<" dead at frame "<<frame<<": holding still "<<c.kill_hold<<" frames\n";}
                                         }
                                         continue;
                                     }
@@ -13046,22 +13554,28 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     }
                                     if(target==actors.size()||d<best){target=k;best=d;}
                                 }
+                                const bool near_seen=c.near_first>0&&target<actors.size()&&best<=c.near_first;
                                 if(target==actors.size()&&!clear)target=unseen;
                                 if(target==actors.size()&&!clear)target=covered;
                                 // aim / hunt with R1 lock-on: the game picks the lock itself, so a lock already on a living
-                                // listed target is followed instead of the nearest one.
-                                if(!clear&&c.args[1]==0&&target<actors.size()&&combat_session&&combat_session->pad().lock_c0)
+                                // listed target is followed instead of the nearest one (with pN, not over one seen within N).
+                                if(!clear&&c.args[1]==0&&target<actors.size()&&!near_seen&&combat_session&&combat_session->pad().lock_c0)
                                     for(std::size_t k=0;k<combat_ids.size()&&k<actors.size();++k)
-                                        if(static_cast<std::int64_t>(combat_ids[k])==static_cast<std::int64_t>(combat_session->pad().lock_id_c4)&&(by_generator(k)
+                                        if(static_cast<std::int64_t>(combat_ids[k])==static_cast<std::int64_t>(combat_session->pad().lock_id_c4)&&((by_generator(k)&&in_range(k))
                                             ||std::find(c.wide.begin()+static_cast<std::ptrdiff_t>(first_id),c.wide.end(),static_cast<double>(combat_ids[k]))!=c.wide.end())
                                            &&actors.actor(k).life_state()!=2&&actors.actor(k).life_state()!=3)target=k;
                                 const bool listed_alive=target<actors.size();
                                 const auto positive_ids=std::count_if(c.wide.begin()+static_cast<std::ptrdiff_t>(first_id),c.wide.end(),[](double v){return v>0;});
                                 const bool lone_generator=positive_ids==0&&c.generators.size()==1;
-                                if(pilot_frames>=static_cast<unsigned>(c.args[0])||(clear&&!listed_alive)||(!listed_alive&&pilot_frames>0&&c.generators.empty()&&positive_ids==1)
-                                   ||(c.generators.empty()&&positive_ids>1&&std::all_of(c.wide.begin()+static_cast<std::ptrdiff_t>(first_id),c.wide.end(),[&](double v){
-                                          return v<0||std::any_of(pilot_dead.begin(),pilot_dead.end(),[v](std::int32_t d){return static_cast<double>(d)==v;});}))
-                                   ||(!listed_alive&&lone_generator&&generator_spawned)){finish();continue;}
+                                bool until_present=false;
+                                if(c.until_active>0)for(std::size_t k=0;k<combat_ids.size()&&k<actors.size();++k)
+                                    if(static_cast<double>(combat_ids[k])==c.until_active&&actors.actor(k).eligible())until_present=true;
+                                const auto all_listed_dead=[&](){return std::all_of(c.wide.begin()+static_cast<std::ptrdiff_t>(first_id),c.wide.end(),[&](double v){
+                                    return v<0||std::any_of(pilot_dead.begin(),pilot_dead.end(),[v](std::int32_t d){return static_cast<double>(d)==v;});});};
+                                if(pilot_frames>=static_cast<unsigned>(c.args[0])||until_present||(clear&&!listed_alive)||(!listed_alive&&pilot_frames>0&&c.generators.empty()&&positive_ids==1)
+                                   ||(c.generators.empty()&&positive_ids>1&&all_listed_dead())
+                                   ||(!listed_alive&&(lone_generator||(c.ids_done&&positive_ids==0))&&generator_spawned)
+                                   ||(c.ids_done&&positive_ids>0&&all_listed_dead())){finish();continue;}
                                 if(pilot_kill_pause>0){--pilot_kill_pause;++pilot_frames;done=true;continue;}
                                 if(!listed_alive){l1=1;++pilot_frames;done=true;continue;}
                                 auto& victim=actors.actor(target);
@@ -13080,6 +13594,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     // but hold R1 only while facing the target (within 25 degrees, kept to 60 once held): the lock
                                     // is taken on the press, so the body turns first and the press then locks what it faces; once
                                     // the lock is on the target, R1 stays held and Square fires whatever the body's heading.
+                                    // A token a: back to the spot the command started at (to 0.3 units once off by 0.8) before turning.
+                                    if(c.anchor&&std::hypot(tx,ty)>=30.0F){
+                                        if(!pilot_anchor)pilot_anchor=std::array<float,3>{here.position[0],here.position[1],0};
+                                        auto& a=*pilot_anchor;
+                                        const float ax=a[0]-here.position[0],ay=a[1]-here.position[1],away=std::hypot(ax,ay);
+                                        a[2]=pilot_aim_frames==0&&(away>0.8F||(a[2]!=0&&away>0.3F))?1.0F:0.0F;
+                                        if(a[2]!=0){steer(std::atan2(-ax,ay)*57.29578F,true);++pilot_frames;done=true;continue;}
+                                    }
                                     const float off=steer(std::atan2(-tx,ty)*57.29578F,false);
                                     const bool locked=!clear&&pilot_aim_frames>0&&combat_session&&combat_session->pad().lock_c0
                                         &&static_cast<std::int64_t>(combat_session->pad().lock_id_c4)==static_cast<std::int64_t>(combat_ids[target]);
@@ -13093,7 +13615,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     // Unlocked, the shot goes the body's way level: pressed only on a target within 30 units. Locked,
                                     // only once the aim meter (+20, the hit roll's chance is +20 x +24) is 0.9 full.
                                     const bool aimed=locked&&combat_session->combat().aim(0).progress_20>=0.9F;
-                                    if(hold&&(aimed||(off<25.0F&&std::hypot(tx,ty)<30.0F))&&pilot_frames%8<2){
+                                    const bool close=c.lock_close>0&&std::hypot(tx,ty)<c.lock_close;
+                                    if(hold&&(aimed||(locked&&close)||((!c.lock_only||close)&&off<25.0F&&std::hypot(tx,ty)<30.0F
+                                        &&!(c.level_only&&std::abs(victim.published_position()[2]-here.position[2]-3.2F)>=3.0F)))&&pilot_frames%8<2){
                                         square=1;
                                         const float health=static_cast<float>(victim.health().health_40)+static_cast<float>(victim.health().armor_33a0);
                                         if(c.cover&&pilot_frames%8==0){
@@ -13193,6 +13717,24 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitnpc timed out: "+c.text);
                                 x=y=0;
                                 if(pilot_frames%60==0)std::cout<<"Pilot waitnpc at frame "<<frame<<": "<<combat_ids[target]<<" at ("<<p[0]<<", "<<p[1]<<", "<<p[2]<<")\n";
+                                ++pilot_frames;done=true;
+                            }else if(c.op=="strike"){
+                                std::size_t target=actors.size();
+                                for(std::size_t k=0;k<combat_ids.size()&&k<actors.size();++k)if(static_cast<double>(combat_ids[k])==c.wide[2])target=k;
+                                if(target==actors.size())throw std::runtime_error("Pilot: strike names no --combat actor: "+c.text);
+                                auto& victim=actors.actor(target);
+                                const unsigned presses=c.args.size()>3?static_cast<unsigned>(c.args[3]):1U;
+                                const auto life=victim.life_state();
+                                if(pilot_frames>=static_cast<unsigned>(c.args[0])||life==2||life==3||(pilot_dry_shots>=presses&&pilot_frames>=pilot_next_fire)){finish();continue;}
+                                const float tx=victim.published_position()[0]-here.position[0],ty=victim.published_position()[1]-here.position[1];
+                                const float bearing=std::atan2(-tx,ty)*57.29578F;
+                                if(std::hypot(tx,ty)>c.args[1]&&pilot_release==0)steer(bearing,true);
+                                else if(pilot_release>0){square=1;--pilot_release;}
+                                else if(steer(bearing,false)<20.0F&&pilot_frames>=pilot_next_fire&&pilot_dry_shots<presses){
+                                    square=1;pilot_release=1;pilot_next_fire=pilot_frames+30;++pilot_dry_shots;
+                                    std::cout<<"Pilot strike at frame "<<frame<<": "<<combat_ids[target]<<" distance "<<std::hypot(tx,ty)<<" health "
+                                             <<victim.health().health_40<<" life "<<int(life)<<"\n";
+                                }
                                 ++pilot_frames;done=true;
                             }else if(c.op=="pickup"){
                                 if(!combat_session)throw std::runtime_error("Pilot: pickup needs --combat: "+c.text);
@@ -13475,6 +14017,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // The natives' posts (003c9420 transport 0) are delivered by this frame's message pump 003c8de0;
                     // the receiver's frame update 001c8e10 follows; then this frame's audio is mixed.
                     // 00167dd0: fstream's loader service 003eb340 (the quips' LPDs) before the message pump.
+#ifdef __vita__
+                    // 132vs1: with the sound pump the mix and the device feed run on the audio core; the host's
+                    // direct calls here take the pump's lock.
+                    if(sound_pump){
+                        {std::lock_guard<std::recursive_mutex> g(sound_lock);sound_host->lpd_service();}
+                        game_sound->pump();
+                        game_sound->frame();
+                        std::vector<std::string> lines;
+                        {std::lock_guard<std::recursive_mutex> g(sound_lock);lines=sound_host->take_log();}
+                        for(const auto& line:sound_device->take_log())std::cout<<line<<" at frame "<<frame<<"\n";
+                        for(const auto& line:lines)std::cout<<"Sound at frame "<<frame<<": "<<line<<"\n";
+                        if(const auto s=sound_device->stats();s.underruns>sound_underruns_shown){
+                            if(sound_underruns_shown<20)std::cout<<"Sound output: underrun "<<s.underruns<<" at frame "<<frame<<" (the sound pump fell behind)\n";
+                            sound_underruns_shown=s.underruns;}
+                        return;
+                    }
+#endif
                     sound_host->lpd_service();
                     game_sound->pump();
                     game_sound->frame();
@@ -13723,6 +14282,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     for(const auto& bm:ni_events->take_beams())
                         std::cout<<"BeamMsg (actor "<<bm.actor<<", 00188140 flags "<<bm.flags<<") -> event object "<<bm.object<<" at frame "<<frame
                             <<(bm.handled?": script handler":": no script handler")<<"\n";
+                    for(const auto& hs:ni_events->take_human_seen())
+                        std::cout<<"HumanSeenMsg (actor "<<hs.actor<<") -> event object "<<hs.object<<" at frame "<<frame
+                            <<(hs.handled?": script handler":": no script handler")<<"\n";
                 }
                 // Checkpoint 132k: the cNetSpawnParticleMsgs 002307b0 queued before this pump (a script handler's, during
                 // last frame's delivery; 003c8de0 snapshots its queue). No script declares a handler; the GOB receivers
@@ -15999,7 +16561,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(npc_figures_added){
                     // A spawn appended a figure: the overlay images again hold the player's parts, then each NPC's.
                     overlay_images=make_overlay_images();
-                    state.renderer->set_overlay_textures(overlay_images);npc_figures_added=false;
+                    state.renderer->set_overlay_textures(overlay_images);drop_overlay_pixels();npc_figures_added=false;
                 }
                 std::vector<float> heat_own,heat_zone;   // the player's heat calls this frame (CombatThrowFrame::Heat)
                 bool water_updated=false;                 // 002b1d20 ran in the combat effect step
@@ -16421,6 +16983,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         std::cout<<(link_event.enable?"EnableMsg":"DisableMsg")<<" -> "<<script_npc.actor_id<<" at frame "<<frame
                             <<(link_event.script_handled?": script handler":link_event.effect==SoloActorFrame::LinkMessageEvent::Effect::activated?": activated (+5c)"
                                 :link_event.effect==SoloActorFrame::LinkMessageEvent::Effect::deactivated?": deactivated (+60)":": no effect")<<"\n";
+                    for(const auto& bt:world_frames[script_npc.actor].box_triggers)
+                        std::cout<<"GOBJTriggerEventMsg (type-3 box "<<bt.trigger.key_30<<", action "<<bt.trigger.action_24<<") -> "<<script_npc.actor_id
+                            <<" at frame "<<frame<<(bt.script_handled?": script handler"
+                                :": no script handler (001b3b60 -> 003cea10 -> 003caca0: empty +0x20 child list, dropped)")<<"\n";
                     if(const auto& npc_frame=world_frames[script_npc.actor];npc_frame.object_action){
                         std::cout<<"Object action -> "<<script_npc.actor_id<<" at frame "<<frame<<":";
                         if(npc_frame.object_action->rejected)std::cout<<" rejected";
@@ -16548,7 +17114,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(hotbox_list&&frame==1)for(const auto& b:sim.hotboxes().boxes){
                     std::cout<<"Hotbox "<<b.record.id<<" type "<<b.record.type<<(b.eligible()?"":" (ineligible)")<<" min "<<b.record.minimum[0]<<' '<<b.record.minimum[1]<<' '<<b.record.minimum[2]
                         <<" max "<<b.record.maximum[0]<<' '<<b.record.maximum[1]<<' '<<b.record.maximum[2];
-                    if(b.world)std::cout<<" at "<<(*b.world)[12]<<' '<<(*b.world)[13]<<' '<<(*b.world)[14];
+                    if(b.world)std::cout<<" at "<<(*b.world)[12]<<' '<<(*b.world)[13]<<' '<<(*b.world)[14]<<" x axis "<<(*b.world)[0]<<' '<<(*b.world)[1]<<' '<<(*b.world)[2];
                     std::cout<<" links";for(const auto k:b.link_keys)std::cout<<' '<<k;std::cout<<"\n";
                 }
                 if(hotbox_list&&frame==1)for(const auto& f:population.fires)
@@ -16620,26 +17186,35 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Display only (vertex colours): on a catch-up loop only the last step's pass is drawn.
                 OMEGA_ZONE_LAP(step_laps,"sim.vision");
                 if(textured&&k+1==steps){   // 00394d48 per terrain instance, then the VU1 light pass per batch (0x11f0..0x15b8)
-                    const auto table=stealth_table?*stealth_table:shadow_scene.light_table(render_camera,player_camera.rig.half_fov_60);
+                    std::optional<LevelLightTable> own_table;   // 132vs1: no copy of this frame's stealth table
+                    if(!stealth_table)own_table=shadow_scene.light_table(render_camera,player_camera.rig.half_fov_60);
+                    const LevelLightTable& table=stealth_table?*stealth_table:*own_table;
                     const auto& instances=shadow_scene.receivers().instances;
                     // The terrain instances come first; the GOB model sub-instances follow them.
                     if(instances.size()<terrain_instance_batches.size()||(terrain_instance_batches.size()<instances.size()&&instances[terrain_instance_batches.size()].filed))
                         throw std::runtime_error("Terrain lights: receiver instances differ from the terrain instances");
-                    std::vector<std::pair<std::size_t,std::size_t>> lit;   // (batch, instance light list), ascending batches
-                    std::vector<std::vector<TerrainPointLight>> lit_lights;
+                    auto& lit=terrain_lit;   // (batch, instance light list), ascending batches
+                    auto& lit_lights=terrain_lit_lights;
+                    lit.clear();
+                    std::size_t lit_lists=0;
                     for(std::size_t k=0;k<terrain_instance_batches.size();++k){
-                        auto lights=terrain_point_lights(shadow_scene.lights(),table,instances[k].bounds_min,instances[k].bounds_max);
+                        auto& lights=terrain_instance_lights;
+                        terrain_point_lights(lights,shadow_scene.lights(),table,instances[k].bounds_min,instances[k].bounds_max);
                         if(lights.empty())continue;
                         const auto from=lit.size();
                         for(std::size_t b=terrain_instance_batches[k].first;b<terrain_instance_batches[k].second;++b)
-                            for(const auto& l:lights)if(terrain_batch_reached(l,terrain.batch_spans[b])){lit.push_back({b,lit_lights.size()});break;}
-                        if(lit.size()>from)lit_lights.push_back(std::move(lights));
+                            for(const auto& l:lights)if(terrain_batch_reached(l,terrain.batch_spans[b])){lit.push_back({b,lit_lists});break;}
+                        if(lit.size()>from){
+                            if(lit_lists==lit_lights.size())lit_lights.emplace_back();
+                            lit_lights[lit_lists++].assign(lights.begin(),lights.end());
+                        }
                     }
                     OMEGA_ZONE_LAP(step_laps,"sim.terrain_light.lists");
-                    std::vector<std::size_t> touched=terrain_lit_batches;
+                    auto& touched=terrain_touched;
+                    touched.assign(terrain_lit_batches.begin(),terrain_lit_batches.end());
                     for(const auto& [b,l]:lit)touched.push_back(b);
                     std::sort(touched.begin(),touched.end());touched.erase(std::unique(touched.begin(),touched.end()),touched.end());
-                    std::vector<std::array<float,3>> positions;std::vector<std::array<std::uint8_t,3>> colours;std::vector<TerrainPointLight> batch_lights;
+                    auto& positions=terrain_light_positions;auto& colours=terrain_light_colours;auto& batch_lights=terrain_batch_lights;
                     std::size_t next=0,update_first=0,update_count=0;
                     if(terrain_light_memo_on&&terrain_light_memo.size()!=terrain.batch_spans.size()){
                         terrain_light_memo.assign(terrain.batch_spans.size(),{});terrain_light_memo_valid.assign(terrain.batch_spans.size(),0);
@@ -17608,7 +18183,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             std::vector<OverlayGsAlpha> ghost_gs;std::map<std::size_t,std::pair<std::uint32_t,std::uint32_t>> ghost_items;
             if(game_camera&&!state.orbit&&vision_render.thermal_53b358&&thermal_images.empty()){
                 load_thermal();
-                overlay_images=make_overlay_images();state.renderer->set_overlay_textures(overlay_images);
+                overlay_images=make_overlay_images();state.renderer->set_overlay_textures(overlay_images);drop_overlay_pixels();
             }
             if(game_camera&&!state.orbit&&(vision_render.thermal_53b358||vision_render.night_53b350))
                 apply_vision_shading(game_camera->first,game_camera->second,player_ghost_gs,player_ghost_flags,npc_draw_gs,ghost_gs,ghost_items,static_cast<unsigned>(frame));
@@ -18607,7 +19182,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // (the crash "003836b0: model 45 part 0 texture id 48 not decoded" with CHEAT: ALL).
                 if(weapon_library&&gun_images_generation!=weapon_library->generation()){
                     const auto before=gun_images.size();
-                    overlay_images=make_overlay_images();state.renderer->set_overlay_textures(overlay_images);
+                    overlay_images=make_overlay_images();state.renderer->set_overlay_textures(overlay_images);drop_overlay_pixels();
                     if(gun_images.size()>before){
                         std::cout<<"Weapon textures for the GUI draw at frame "<<frame<<" (132wp1, ids):";
                         for(auto i=before;i<gun_images.size();++i)std::cout<<" "<<i<<" "<<weapon_library->textures()[i].member;
@@ -19011,6 +19586,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // end: the play's sound device closes and its renderers give up the game window's back buffer
             // (Checkpoint 132win: the window and device stay), and the front end resumes in the state 001690f0
             // left (0x0c: the _EOL movie request; 1: the GUI start).
+#ifdef __vita__
+            sound_pump.reset();   // 132vs1: the pump stops before its device
+#endif
             sound_device.reset();
             state.renderer->release_targets();
             window.clear_events();
@@ -19022,34 +19600,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 fg.card_ok=gui_overlay_draw->rt.g.card_ok;   // 004ffbb8 / 004ffbbc (an in-game save flow's)
                 fg.card_slot=gui_overlay_draw->rt.g.card_slot;
             }
-            const auto r=frontend_app->resume_after_level(*level_end_next,0x14);
-            if(!r.level){std::cout<<"Front end: ended ("<<r.frames<<" frames, "<<r.captures.size()<<" captures)\n";break;}
-            std::cout<<"Front end: hand-off to the "<<*r.level<<" play setup (the next level, in this process; "<<r.frames<<" frames, "
-                <<r.captures.size()<<" captures)\n";
-            apply_mods_at_level_boundary(*frontend_app,*r.level);
             // The actor serial counter 004ee968 is only ever incremented (001b6fe4, 001b80c4, 001b86d4): the next
             // level's NPCs continue from this one's count.
             npc_serial=static_cast<std::int32_t>(serial_counter);
-            mission=*r.level;
             // The first level's harness and diagnostic inputs (placement, script calls, pilot, captures, dumps,
             // surveys, selections) do not carry over; --next-level-frames / --next-level-capture replace the run's.
             start_override.reset();debug_ni_plays.clear();debug_script_calls.clear();diagnostic_resets.clear();flashlight_taps.clear();goggles_item.reset();debug_pda_quips.clear();
             diagnostic_moves.clear();pilot_path.clear();record_path.clear();collision_dump_path.clear();dt_trace_path.clear();
             audio_wav_path.clear();ledge_survey=0;hotbox_survey=false;shadow_capture=0;waypoint_id.reset();map_marker_id.reset();
-            captures=next_level_captures;
-            if(!next_level_script_path.empty())script_path=next_level_script_path;
-            if(next_level_frames)max_frames=next_level_frames;
-            if(next_level_god)god_from=next_level_god;
-            if(!output.empty()){
-                output=output.parent_path()/(output.filename().string()+"_"+mission);
-                if(fs::exists(output))throw std::runtime_error("The next level's output folder "+output.string()+" must be new");
-            }
-            window.log_handoff("front end hand-off to "+mission+" (loading screen)");
-            LoadingHostOptions loading_options;loading_options.hidden=frontend_hidden;
-            loading_options.capture_dir=frontend_capture;loading_options.host=frontend_hidden?nullptr:host_window.get();
-            loading_options.test_device_lost_sweep=loading_sweep_frame;loading_options.capture_frame=loading_capture_frame;
-            loading_host=std::make_unique<LoadingScreenHost>(build_loading_screen(disc,mission),mission,loading_options);
-            ++level_pass;
+            // Port-only (132vp1, research/VITA.md "Playability, memory and coverage"): the front end resumes at the
+            // next pass's start, after this pass's locals (the level: terrain, models, textures, NPCs, renderers)
+            // are released, so the _EOL movie, the command centre and the briefing do not run beside the whole
+            // level (130 MB of TORONTO1's heap on the Vita).
+            resume_state=*level_end_next;
             continue;
         }
         break;

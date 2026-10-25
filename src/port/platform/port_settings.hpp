@@ -53,7 +53,7 @@ std::string update_port_settings_text(std::string_view existing, const PortSetti
 // while its window is unfocused (audio_device.hpp set_background_muted), 1 keeps it playing. Throws on another value.
 bool background_audio_setting(const PortSettings& s);
 // Checkpoint 132ln1 (port-only, research/LAN_PLAY.md): lan_play=0|1 (kept in `other`; default 1 since 132ln1b, the user's
-// request): 1 shows LAN PLAY on the online / offline select (GuiHost::port_lan_play), 0 hides it. Throws on another value.
+// request): 1 shows Play LAN on the online / offline select (GuiHost::port_lan_play), 0 hides it. Throws on another value.
 bool lan_play_setting(const PortSettings& s);
 // Checkpoint 132md1 (port-only, research/MODDING.md): mods=0|1 (kept in `other`; default 1): 0 turns every mod off
 // (the original game's assets only, as with --no-mods); mods_folder=<folder> (UTF-8; default "mods" next to the game):

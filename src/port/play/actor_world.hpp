@@ -63,8 +63,10 @@ public:
     // 001b8130 at the same address. The AI actor at index is replaced by a new
     // one with the same handles, so it keeps its place in the traversal and
     // every reference to it (a handle, an index) names the rebuilt actor, as a
-    // pointer to the original's record does. Not during a step (a script
-    // native runs between steps), not for a removed or deleted actor.
+    // pointer to the original's record does. Not for a removed or deleted actor.
+    // Checkpoint 132ws9: also during a step (a script native the pump runs, e.g. the revive's
+    // NotifyCheckpointMsg -> m::ReStartLevel): the new actor takes the old one's slot in the step's traversal
+    // (SoloActorSimulation::replace_in_step) and the old object lives until the step ends.
     void rebuild_ai(std::size_t index,const SoloActorConfig& config,SoloActorAnimation* animation,ActorAnimationTuning tuning,
         const SoloActorController& controller,bool present,SoloActorControlFields initial={});
     std::size_t size() const;
@@ -163,8 +165,16 @@ private:
     std::unique_ptr<SoloActorSimulation> make(std::size_t index,const SoloActorConfig& config,SoloActorAnimation* animation,
         std::optional<ActorAnimationTuning> tuning,SoloActorControlFields initial,const SoloActorController& controller,bool present);
     bool stepping_{};
+    // The running step's traversal (132ws9, rebuild_ai during a step) and the actors rebuilt in it.
+    struct StepView{std::vector<SoloActorSimulation*>* list{};const std::vector<std::size_t>* live{};
+        std::vector<SoloActorFrame>* frames{};const std::vector<SoloActorFrameInput>* inputs{};};
+    StepView step_view_;
+    std::vector<std::unique_ptr<SoloActorSimulation>> retired_;
     std::shared_ptr<SoloCollisionWorld> world_;
     std::vector<std::unique_ptr<SoloActorSimulation>> actors_;
+    // The last set_step_dt (port-only, 132vp1): an actor made after it steps with the same dt (the Vita's measured dt;
+    // UKRAINE's first frame appended one with the fixed dt and the traversal's equal-dt check threw).
+    std::optional<float> step_dt_;
     std::vector<bool> removal_requested_,removed_,destroyed_;
     // The weak-owner serial of each slot (a water record's +4): rebuild_ai's new actor (001b57c0, 001b8130) no longer
     // matches the records of the one it replaced.

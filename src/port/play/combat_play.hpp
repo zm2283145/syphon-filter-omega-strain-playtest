@@ -256,6 +256,9 @@ struct CombatPlayConfig {
     // one-shot playback, the release, the thrown items after the bullet
     // manager, the senses +33a8 / +33ac); unset, a hold-class-1 request throws.
     std::optional<CombatThrowConfig> throws;
+    // game::HitInnocentNpcChance (*0048a2b8), read by the bullet rule per hit
+    // (00188918). Empty: its boot value 0.3.
+    std::function<float()> innocent_hit_chance;
     // The followed camera's +50 transform (its +10 matrix), read live by the
     // aim view (selector +38 = 8) lock 00249b10, thrown point 002497c0 and
     // shot frame 00176400: PlayerCameraState::transform_50 in omega_play.

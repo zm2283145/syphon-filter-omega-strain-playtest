@@ -300,6 +300,26 @@ std::int32_t gui_font_width(const GuiFont& font, std::span<const std::uint8_t> s
     return cvt_w(f, 0x36ab68);
 }
 
+void GuiDrawList::recycle() {
+    spare.reserve(spare.size() + batches.size());
+    for (GuiDrawBatch& b : batches) spare.push_back(std::move(b));
+    batches.clear();
+}
+
+GuiDrawBatch GuiDrawList::take() {
+    if (spare.empty()) return {};
+    GuiDrawBatch old = std::move(spare.back());
+    spare.pop_back();
+    GuiDrawBatch b;
+    b.strips = std::move(old.strips);
+    b.vertices = std::move(old.vertices);
+    b.breaks = std::move(old.breaks);
+    b.strips.clear();
+    b.vertices.clear();
+    b.breaks.clear();
+    return b;
+}
+
 void gui_font_draw(GuiDrawList& out, const GuiFont& font, std::span<const std::uint8_t> s,
                    const std::array<float, 4>& rgba, float x, float y, float z, float clip_l, float clip_r,
                    float fade) {
@@ -308,7 +328,7 @@ void gui_font_draw(GuiDrawList& out, const GuiFont& font, std::span<const std::u
         return s[k];
     };
     if (rd(0) == 0) return;
-    GuiDrawBatch b;
+    GuiDrawBatch b = out.take();
     b.render_mode = 5;
     b.slot = font.slot();
     b.prim = 3;
@@ -984,7 +1004,7 @@ void GuiDrawer::draw_edit_cursor(GuiDrawList& out, const GuiRuntime& gui, const 
     const GuiFont* f = fonts_(w.font);
     if (!f) fail(0x36a2f0, "font handle without a hosted font");
     const float h = static_cast<float>(f->height());
-    GuiDrawBatch b;
+    GuiDrawBatch b = out.take();
     b.flush = 0x3701b0;
     b.render_mode = 0;
     b.prim = 2;
@@ -1162,7 +1182,7 @@ void GuiDrawer::draw_bitmap(GuiDrawList& out, const GuiRuntime& gui, const Widge
     if ((w.flags & 0x100) && gui.canvas().focus == &w) fail(0x41e560, "focus highlight draw");
     if (!w.bm || w.bm->texture == -1) return;
     const auto& b = *w.bm;
-    GuiDrawBatch batch;
+    GuiDrawBatch batch = out.take();
     batch.render_mode = 5;
     batch.slot = static_cast<std::uint32_t>(b.texture);  // 003820e0
     batch.prim = 3;
@@ -1358,7 +1378,7 @@ void GuiDrawer::draw_selection_bar(GuiDrawList& out, const Widget& w, float y, f
     const std::array<float, 4> cyan = {0.0F, 1.0F, 1.0F, std::bit_cast<float>(0x3f008081U)};
     std::array<std::int32_t, 4> c{};
     for (int k = 0; k < 4; ++k) c[k] = cvt_w(fmul(128.0F, cyan[k]), 0x25c9e4);  // 0025c9d0
-    GuiDrawBatch b;
+    GuiDrawBatch b = out.take();
     b.flush = 0x371200;
     b.render_mode = 0;
     b.prim = 2;          // V+1048: render mode & 1 ? 3 : 2

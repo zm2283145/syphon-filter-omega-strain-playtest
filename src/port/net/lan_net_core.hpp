@@ -448,6 +448,60 @@ public:
     };
     NpcSectionOut npc_section_001b1710(std::uint32_t c, const NpcSectionIn& in);
     bool has_npc(std::uint32_t c) const { return npc_blocks_.contains(c); }
+    // 132ln5h14c (research/NET_INLEVEL.md 4.26): 003cc990(human, hp, 0) on a spawned NPC's block (c): +0x40 = hp
+    // and, in a network game, the health message (vtable 0x004e0ee0, type 0x00582750; +0x28 the block's +c, +0x2c
+    // hp, byte +0x20 4) through 003c9420(msg, human, 0) (the clone 00431960, 003fb020 to all, the serialiser
+    // 00431bc0). The other consoles' receive 00431a70 runs 003cc990(0040c540(key), hp, 1): the received changes
+    // (outside 001b1710's section) are kept for the play (take_remote_healths). PORT-ONLY: the local player's
+    // 003cc990(.., 0) (00186c40's refill) is not sent (its block's +c is the port's id, not its LAN key).
+    void set_health_003cc990(std::uint32_t c, std::int32_t hp);
+    struct RemoteHealth {
+        std::uint32_t key = 0;     // the object's +c (an NPC block's, the local player's LAN key or a remote human's)
+        bool local_player = false;
+        std::int32_t hp = 0;
+    };
+    std::vector<RemoteHealth> take_remote_healths();
+    std::uint32_t healths_sent() const { return healths_sent_; }
+    std::uint32_t healths_received() const { return healths_received_; }
+    // 132ln5h14c (research/NET_INLEVEL.md 4.27): the damage message MSGLIB_DAMAGE_REQUEST (type 0x005716f0, vtable
+    // 0x004e08a0) a network game's 003ccb00 (+20 2) and the replica 00187b58 (+20 8) send through 003c9420(msg,
+    // actor, 0): the clone 00407f40, the serialiser 004083d0 (the source's key, +2e, +2d, +2c, +24) to the host
+    // (+20 2 from a client) or the actor's owner (+20 8); the receive 004081e0 runs the damage virtual +100 of the
+    // object of the key with (source, category, type, 0, 1, 0, amount) (a notice, +2e 1, is queued to it instead).
+    // True: 003c9420 queued the message on this console too (the play's pump takes it).
+    struct DamageSend {
+        std::uint32_t victim_key = 0, source_key = 0;   // the LAN keys (the source's: 0 when it has none)
+        std::uint32_t word_1c = 0;
+        std::uint8_t flags_20 = 0, type_2c = 0, category_2d = 0, byte_2e = 0;
+        std::int32_t value = 0;
+    };
+    bool send_damage_message(const DamageSend& d);
+    // The received damage messages' +100 calls (PORT-ONLY: the play's actor of the key takes the damage).
+    struct RemoteDamage {
+        std::uint32_t victim_key = 0, source_key = 0;
+        bool local_player = false;
+        std::uint8_t category = 0, type = 0;
+        float amount = 0;
+    };
+    std::vector<RemoteDamage> take_remote_damages();
+    std::uint32_t damages_sent() const { return damages_sent_; }
+    std::uint32_t damages_received() const { return damages_received_; }
+    std::uint32_t damage_notices_dropped() const { return damage_notices_dropped_; }
+    // 132ln5h14c (research/NET_INLEVEL.md 4.28): the kill's death action (00186e04..00186e58: action 0x42 kind 2, the
+    // death code +2c, +1c 0x40, flags 5) sent with 003c9420(msg, actor, 1) to every console (+20 bit 4: 003fb020 of
+    // the actor's key); clone 003e7370, serialiser 003e6270 (the action header, cvt.s.w(code)); the receive 003e4f70
+    // delivers it (003c9350, transport 0) to the object of the key: the play's actor runs 0018a950 a frame later.
+    // PORT-ONLY: the message is sent with flags 4 (the play already ran the death action here, bit 1's delivery).
+    void send_death_action(std::uint32_t key, std::int32_t code);
+    struct RemoteDeath {
+        std::uint32_t key = 0;
+        bool local_player = false;
+        std::int32_t code = 0;
+    };
+    std::vector<RemoteDeath> take_remote_deaths();
+    std::uint32_t deaths_sent() const { return deaths_sent_; }
+    std::uint32_t deaths_received() const { return deaths_received_; }
+    bool host_console() const { return memory_.read(0x5721c0, 1) != 0; }   // 005721c0
     std::uint32_t npc_sections_run() const { return npc_sections_run_; }
 
     void advance_timer(double milliseconds);
@@ -561,6 +615,9 @@ private:
     static constexpr std::uint32_t kGeneratorVtable = kFakes + 0xa00, kGenerators = kFakes + 0x1000;
     static constexpr std::uint32_t kFnGenEnable = 0x1d38f10, kFnGenDisable = 0x1d38f14, kFnGenPosition = 0x1d38f18;
     static constexpr std::uint32_t kFnHumanPosition = 0x1d38f1c;
+    // 132ln5h14c: the damage virtual +100 (003ccb00) of the objects 004081e0 reaches, and the damage message's
+    // source object (+28; the serialiser 004083d0 sends its +c, the LAN key).
+    static constexpr std::uint32_t kFnDamage = 0x1d38f20, kDamageSource = kScratch + 0x100;
     static constexpr std::uint32_t kGeneratorKey = kScratch + 0x80, kGeneratorNpcInfo = kScratch + 0x90;
     std::map<std::uint32_t, std::uint32_t> generator_blocks_;  // id -> block
     std::uint32_t next_generator_ = kGenerators;
@@ -589,6 +646,13 @@ private:
     std::vector<GeneratorRelease> generator_releases_;
     std::uint32_t generator_releases_sent_ = 0, generator_releases_received_ = 0;
     std::vector<RemoteDespawn> remote_despawns_;
+    std::vector<RemoteHealth> remote_healths_;
+    std::uint32_t healths_sent_ = 0, healths_received_ = 0;
+    std::vector<RemoteDamage> remote_damages_;
+    bool sending_damage_ = false, damage_queued_ = false;
+    std::uint32_t damages_sent_ = 0, damages_received_ = 0, damage_notices_dropped_ = 0;
+    std::vector<RemoteDeath> remote_deaths_;
+    std::uint32_t deaths_sent_ = 0, deaths_received_ = 0;
     std::uint32_t despawns_sent_ = 0, despawns_received_ = 0;
 };
 

@@ -28,6 +28,7 @@ float fdiv(float a,float b){
 float emax(float s,float t){return t>s?t:s;}
 float emin(float s,float t){return t<s?t:s;}
 void require(bool ok,const std::string& what){if(!ok)throw std::runtime_error("Flashlight: "+what);}
+void require(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string("Flashlight: ")+what);}   // 132vs1: no string unless it fails
 std::int32_t trunc_word(float v){                       // cvt.w.s
     require(std::isfinite(v)&&std::fabs(v)<2147483648.0F,"value outside the integer range");
     return static_cast<std::int32_t>(v);
@@ -47,7 +48,7 @@ RootVector transform(const ShotFrame& m,const RootVector& v){
 // vmul.xyz by vrsqrt(vf0.w, |v|^2); w unchanged.
 RootVector normalized(const RootVector& v,const char* what){
     const float s=sum_squares(v);
-    require(s!=0.0F,std::string("zero-length ")+what+" (the VU reciprocal square root of 0)");
+    if(s==0.0F)require(false,std::string("zero-length ")+what+" (the VU reciprocal square root of 0)");
     const float q=check(vu::rsqrt(1.0F,s));
     return {mul(v[0],q),mul(v[1],q),mul(v[2],q),v[3]};
 }

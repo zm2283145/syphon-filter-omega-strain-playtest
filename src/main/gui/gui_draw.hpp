@@ -161,11 +161,24 @@ struct GuiDrawBatch {
     // never mirrored into the side areas.
     std::uint32_t port_menu = 0;
     bool port_text = false;
+    // Port-only (checkpoint 132ws9, research/FRONTEND.md "Checkpoint 132ws9"): in the GUI rows y0..y1 (y up, 224 at
+    // the top) this batch's wide edge images stretch the art's rows at y1 (upper half) and y0 (lower half) instead of
+    // mirroring the rows between (the loading screen's backdrop: its baked-in ticker line is not mirrored into the
+    // side areas). y1 <= y0: off; unused by every other aspect.
+    struct PortEdgeBand {
+        float y0 = 0.0F, y1 = 0.0F;
+    } port_edge_band;
 };
 inline constexpr std::uint32_t port_anchor_widget = 0x10000;
 
 struct GuiDrawList {
     std::vector<GuiDrawBatch> batches;
+    // Port-only (132vf1, research/VITA.md "Front-end speed (132vf1)"): the batches of an earlier frame, kept for their
+    // vectors' storage. recycle() moves `batches` here; take() hands one back reset to a default batch (empty vectors
+    // that keep their capacity), so a frame's draw makes no new allocations once the storage has grown.
+    std::vector<GuiDrawBatch> spare;
+    void recycle();
+    GuiDrawBatch take();
 };
 
 // 0036a330(font, s, rgba, x, y, z, clip_l, clip_r, fade): appends the flush

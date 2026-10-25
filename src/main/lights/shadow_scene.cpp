@@ -9,6 +9,7 @@ namespace omega {
 namespace {
 using V=ShadowVector;
 void require(bool ok,const std::string& what){if(!ok)throw std::runtime_error("shadow scene: "+what);}
+void require(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string("shadow scene: ")+what);}   // 132vs1: no string unless it fails
 }
 
 std::uint32_t fold_shadow_model_flags(std::uint32_t flags,std::uint32_t header_flags,std::span<const MeshMaterial> materials){   // 00377120

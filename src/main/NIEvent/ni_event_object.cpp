@@ -1,6 +1,9 @@
 #include "ni_event_object.hpp"
+#include "character_shadows.hpp"
 #include "game_libm.hpp"
 #include "hotbox_world.hpp"
+#include "hud_map.hpp"
+#include "ie_screen.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -306,6 +309,47 @@ NiMatrix ni_billboard_world(const RootVector& camera,const RootVector& position)
     return {x0,dir,cross(x0,dir),position};                                  // 00131f00
 }
 
+NiMatrix ni_camera_matrix(const NiMatrix& node){
+    const RootVector& r2=node[2];
+    return {node[0],RootVector{-r2[0],-r2[1],-r2[2],r2[3]},node[1],node[3]};   // 00131fd0 / 00131fa0 / 00131f70
+}
+
+std::optional<LosServiceRequest> ni_camera_view_request(float half_fov,float environment_64,const NiMatrix& camera,
+                                                        const RootVector& point,std::uint64_t actor){
+    const float far_plane=add(12.0F,environment_64);                         // 0017a248: add.s
+    ShadowMatrix m;
+    for(std::size_t r=0;r<4;++r)m.column[r]=camera[r];
+    const ShadowMatrix view=shadow_rigid_inverse(m);                         // 00133190 -> 00133200
+    HudMapMatrix v{};
+    for(std::size_t r=0;r<4;++r)v[r]=view.column[r];
+    const auto clip=hud_map_clip_record(half_fov,2.0F,far_plane,v);         // 0037d9a0: renderer +f00
+    RootVector c{};
+    for(std::size_t k=0;k<4;++k)                                             // 00379ee4..00379ef0
+        c[k]=ie_ftz(ie_ftz(ie_ftz(ie_ftz(clip[0][k]*point[0])+clip[1][k]*point[1])+clip[2][k]*point[2])+clip[3][k]*point[3]);
+    const float aw=std::fabs(c[3]);
+    for(std::size_t k=0;k<3;++k)                                             // 00379f1c..00379fc4: c.ole.s / c.olt.s
+        if(!(c[k]<=aw)||c[k]<-aw)return std::nullopt;
+    const RootVector& eye=camera[3];                                         // the component's row 3 (sp+180)
+    RootVector d{};
+    for(std::size_t j=0;j<3;++j)d[j]=sub(point[j],eye[j]);                   // vsub.xyzw (w overwritten by +4c)
+    const float s=madd(madd(mul(1.0F,mul(d[0],d[0])),1.0F,mul(d[1],d[1])),1.0F,mul(d[2],d[2]));
+    const float len=static_cast<float>(std::sqrt(static_cast<double>(s)));   // vsqrt Q
+    float inv{};                                                             // div.s 1.0 / len (EE: 0 gives +FLT_MAX)
+    if(len!=0.0F)inv=fdiv(1.0F,len);
+    else inv=std::numeric_limits<float>::max();
+    LosServiceRequest q;
+    for(std::size_t j=0;j<3;++j)q.origin_30[j]=add(eye[j],mul(mul(d[j],2.0F),inv));   // vmulx, vmulx, vadd
+    q.origin_30[3]=1.0F;                                                     // +3c
+    q.displacement_40={d[0],d[1],d[2],0.0F};                                 // +4c
+    q.object_50=actor;
+    q.object_54=0;
+    q.mask_58=4;
+    q.mode_5c=0;
+    q.value_3c=1.0F;
+    q.value_4c=0.0F;
+    return q;
+}
+
 NiMatrix ni_rotation_compose(float x,float y,float z,const RootVector& position){
     NiMatrix m=ni_axis_angle(1.0F,0.0F,0.0F,mul(degree,x));
     ni_rotate_rows(m,ni_axis_angle(0.0F,1.0F,0.0F,mul(degree,y)));
@@ -504,6 +548,11 @@ void NiEventWorld::deliver(){
 
 void NiEventWorld::receive(const Message& m){
     auto& o=nodes_[static_cast<std::size_t>(m.node)];
+    if(m.human_seen){                                                    // 0023b7d0 -> 0023e890 -> 003cea10
+        const bool handled=host_.human_seen?host_.human_seen(o.id,m.actor):false;
+        human_seen_.push_back({o.id,m.actor,handled});
+        return;
+    }
     if(m.beam){                                                          // 0023b7d0 -> 0023e890 -> 003cea10
         const bool handled=host_.beam?host_.beam(o.id,m.actor):false;
         beams_.push_back({o.id,m.actor,m.flags,handled});
@@ -699,6 +748,16 @@ void NiEventWorld::node_update(int n){
     o.node_rows=rows;
     o.node_reason=reason;
     if(rows[0]&&rows[1]&&rows[2]&&rows[3])o.node_written=w;
+    if(o.light)return;                                                   // the NIL's +120 is 0023dda0 alone
+    // Checkpoint 132ms2: the rest of 0023a2d0. Kind 5 with an asset: the camera's component gets the
+    // permuted world (0023a3a0..0023a470); then each child's vt +120 in +a4 order (0023a4d0..0023a52c:
+    // +9c types NIE / NIL), the NIE children recursing.
+    if(o.kind==5&&o.asset){
+        o.camera=ni_camera_matrix(w);
+        o.camera_rows={rows[0],rows[2],rows[1],rows[3]};
+    }
+    const auto children=o.children;
+    for(const int c:children)node_update(c);
 }
 
 void NiEventWorld::update(float dt){
@@ -713,6 +772,8 @@ void NiEventWorld::update_node(int n,float dt){
         const NiMatrix node=o->node;
         host_.particle_update(o->id,dt,valid?&node:nullptr);             // 0023a5cc: asset vt +48(dt), node+10
     }
+    o=&nodes_[static_cast<std::size_t>(n)];
+    if(!o->light&&o->kind==5&&o->asset&&o->sw.on)update_camera(n);      // 0023a5cc: asset vt +48 = 0017e1b0
     o=&nodes_[static_cast<std::size_t>(n)];
     const bool was=o->playing_130;
     if(was||(o->kind==3&&o->sw.on&&o->present_2d&&o->enabled_2c)){      // 0023a604..0023a64c: +dc, +2d, +2c, !+2e
@@ -769,6 +830,39 @@ void NiEventWorld::update_beam(int n){
     }
 }
 
+void NiEventWorld::update_camera(int n){
+    auto& o=nodes_[static_cast<std::size_t>(n)];
+    if(!o.present_2d||!o.camera_ce4)return;                              // 0017e220..0017e26c: +2d, +2c (1), !+2e, +ce4
+    if(o.camera_ce0!=0){                                                 // 0017e274..0017e288
+        --o.camera_ce0;
+        return;
+    }
+    const std::uint32_t id=o.id;
+    if(!host_.camera_player||!host_.camera_los)
+        fail("0017e1b0: the kind-5 camera of "+hex(id)+" without hosted player slots 003fb8d0 / the LOS service 003caa50");
+    for(int slot=0;slot<4;++slot){                                       // 0017e298..0017e3bc
+        const auto player=host_.camera_player(slot);
+        if(!player)continue;
+        auto& c=nodes_[static_cast<std::size_t>(n)];
+        for(std::size_t r=0;r<4;++r)
+            if(!c.camera_rows[r])fail("0017a1e0: the camera of "+hex(id)+" reads its component matrix ("+c.node_reason+")");
+        const auto* lights=host_.lights;
+        if(!lights||!lights->current_environment||*lights->current_environment>=lights->environments.size())
+            fail("0017a228: the camera of "+hex(id)+" reads the current environment (*004ffbd4 +c), which is not hosted");
+        const auto request=ni_camera_view_request(mul(0.5F,std::bit_cast<float>(0x3f91361eU)),
+                                                  lights->environments[*lights->current_environment].far_term(),
+                                                  c.camera,player->position_e4,player->actor);
+        if(!request)continue;
+        if(host_.camera_los(*request).hit)continue;                      // 0017a568: the result byte
+        Message m{};                                                     // 0017e310: key 004ee930, vtable 004da310
+        m.node=n;                                                        // +ce8 (0017ff98: the NIE)
+        m.human_seen=true;
+        m.actor=player->actor;                                           // +24
+        m.byte_20=true;                                                  // single player (*005721c8 == 0)
+        queue_.push_back(m);                                             // 003c9420(msg, +ce8, 0)
+        nodes_[static_cast<std::size_t>(n)].camera_ce0=15;               // 0017e390
+    }
+}
 namespace {
 // Light vcall +28 (00144b10): vsub.xyzw and the MAC zero flags.
 bool moved(const ShadowVector& from,const RootVector& to){
@@ -991,5 +1085,6 @@ std::vector<NiNoticeRecord> NiEventWorld::take_notices(){return std::exchange(no
 std::vector<NiLightRecord> NiEventWorld::take_lights(){return std::exchange(lights_,{});}
 std::vector<NiBlastRecord> NiEventWorld::take_blasts(){return std::exchange(blasts_,{});}
 std::vector<NiBeamRecord> NiEventWorld::take_beams(){return std::exchange(beams_,{});}
+std::vector<NiHumanSeenRecord> NiEventWorld::take_human_seen(){return std::exchange(human_seen_,{});}
 
 }

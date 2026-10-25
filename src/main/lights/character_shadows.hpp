@@ -189,6 +189,8 @@ void gather_shadow_lights(const ShadowSettings& settings,ShadowCasterRecord& rec
 // The order in which 00372c50 examines candidates with these keys: qsort
 // 001273c8 with comparator 00373ba0 (ascending; equal keys keep no stable order).
 std::vector<std::size_t> shadow_light_order(const std::vector<float>& keys);
+// The same order into `order` (port-only, 132vs1: no allocation once `order` and the scratch have grown).
+void shadow_light_order(const float* keys,std::size_t count,std::vector<std::size_t>& order);
 // 003d4810 for caster record `record_index` (+ 003d3d50 for each new slot).
 void build_shadow_slots(ShadowFrame& frame,const ShadowSettings& settings,std::size_t record_index,const std::vector<ShadowCasterInput>& casters,
     const std::vector<ShadowReceiverInput>& receivers,const ShadowMatrix& camera_view);

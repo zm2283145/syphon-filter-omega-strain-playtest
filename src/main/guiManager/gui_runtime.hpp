@@ -125,8 +125,9 @@ enum class WidgetClass : std::uint8_t { widget, text, button, title, canvas, edi
                                         netmsgarray, netcontacts, netagencycell };
 
 // PORT-ONLY (checkpoint 132ln1): the label ONOFFSEL's "lan" button shows with GuiHost::port_lan_play (the
-// disc's text there is the developer placeholder "TEST"; no LAN string exists on the disc).
-inline constexpr const char* port_lan_play_label = "LAN PLAY";
+// disc's text there is the developer placeholder "TEST"; no LAN string exists on the disc). Worded like the disc's
+// $PlayOnline / $PlayOffline buttons at the user's request.
+inline constexpr const char* port_lan_play_label = "Play LAN";
 // PORT-ONLY (checkpoint 132ln2): the LAN-mode ONLINECN's configuration group (no LAN strings exist on the disc):
 // config_title, and the two config_list rows in place of the PS2 network configurations 0029d120 lists.
 inline constexpr const char* port_lan_game_title = "LAN GAME";

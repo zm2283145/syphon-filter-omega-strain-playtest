@@ -62,6 +62,7 @@ gui::GuiHost::BitmapTexture FrontendDisc::zeus_load(const std::string& name) {
     for (char& c : stem) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     if (const auto it = zeus_slots_.find(stem); it != zeus_slots_.end()) {
         ++zeus_by_slot_.at(it->second).refs;
+        if (zeus_released_.count(it->second)) zeus_restore(it->second);
         const Texture& t = zeus_images_.at(static_cast<std::uint32_t>(it->second));
         return {it->second, static_cast<std::int32_t>(t.width), static_cast<std::int32_t>(t.height)};
     }
@@ -79,7 +80,38 @@ gui::GuiHost::BitmapTexture FrontendDisc::slot_load(const std::vector<std::strin
     zeus_images_.emplace(static_cast<std::uint32_t>(slot), std::move(t));
     zeus_slots_.emplace(stem, slot);
     zeus_by_slot_.emplace(slot, ZeusSlot{stem, 1});
+    zeus_sources_.emplace(slot, std::make_pair(archive, member));
     return {slot, w, h};
+}
+
+void FrontendDisc::zeus_restore(std::int32_t slot) {
+    const auto& [archive, member] = zeus_sources_.at(slot);
+    zeus_images_.emplace(static_cast<std::uint32_t>(slot), decode_tdx(disc_.archive_member(archive, member)));
+    zeus_released_.erase(slot);
+}
+
+std::size_t FrontendDisc::release_images() {
+    const auto count = [](const Texture& t) {
+        std::size_t n = t.rgba.size();
+        for (const auto& m : t.mips) n += m.size();
+        for (const auto& a : t.raw_alpha) n += a.size();
+        return n;
+    };
+    std::size_t bytes = assets_.release_images();
+    for (const auto& [slot, source] : zeus_sources_) {
+        const auto it = zeus_images_.find(static_cast<std::uint32_t>(slot));
+        if (it == zeus_images_.end()) continue;
+        bytes += count(it->second);
+        for (const auto& f : it->second.animation) bytes += count(f);
+        zeus_images_.erase(it);
+        zeus_released_.insert(slot);
+    }
+    return bytes;
+}
+
+void FrontendDisc::restore_images() {
+    assets_.restore_images();
+    while (!zeus_released_.empty()) zeus_restore(*zeus_released_.begin());
 }
 
 namespace {
@@ -97,6 +129,7 @@ gui::GuiHost::BitmapTexture FrontendDisc::mantex_load(const std::string& name) {
     for (char& c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     if (const auto it = zeus_slots_.find(key); it != zeus_slots_.end()) {
         ++zeus_by_slot_.at(it->second).refs;
+        if (zeus_released_.count(it->second)) zeus_restore(it->second);
         const Texture& t = zeus_images_.at(static_cast<std::uint32_t>(it->second));
         return {it->second, static_cast<std::int32_t>(t.width), static_cast<std::int32_t>(t.height)};
     }
@@ -329,7 +362,7 @@ std::string FrontendDisc::agent_figure_draw(GuiDrawList& out, const AgentPacking
     }();
     OMEGA_ZONE("rec.figure.vertices");
     for (const auto& part : posed) {
-        GuiDrawBatch b;
+        GuiDrawBatch b = out.take();
         b.flush = flush;
         b.clip = view.clip;
         b.filter = 0x20;
@@ -412,6 +445,8 @@ void FrontendDisc::zeus_release(std::int32_t slot) {  // 003813a0(manager, slot,
     if (--it->second.refs > 0) return;
     zeus_slots_.erase(it->second.stem);
     zeus_images_.erase(static_cast<std::uint32_t>(slot));
+    zeus_sources_.erase(slot);
+    zeus_released_.erase(slot);
     zeus_by_slot_.erase(it);
 }
 

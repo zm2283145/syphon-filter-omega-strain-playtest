@@ -13,12 +13,13 @@ using V=ShadowVector;
 // zero; compiled with -ffp-contract=off. Non-finite results throw (the EE
 // clamps them instead; not modelled).
 void require(bool ok,const std::string& what){if(!ok)throw std::runtime_error("model light gather: "+what);}
+void require(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string("model light gather: ")+what);}   // 132vs1: no string unless it fails
 float ftz(float v){return std::fpclassify(v)==FP_SUBNORMAL?(std::signbit(v)?-0.0F:0.0F):v;}
 float check(float v){require(std::isfinite(v),"value not finite");return ftz(v);}
 float add(float a,float b){return check(a+b);}
 float sub(float a,float b){return check(a-b);}
 float mul(float a,float b){return check(a*b);}
-float dvd(float a,float b,const char* what){require(b!=0.0F,std::string("division by zero (")+what+")");return check(vu::div(a,b));}
+float dvd(float a,float b,const char* what){if(b==0.0F)require(false,std::string("division by zero (")+what+")");return check(vu::div(a,b));}
 // max.s / min.s as the interpreter runs them: fs unless ft is strictly greater / smaller.
 float max_s(float s,float t){return t>s?t:s;}
 float min_s(float s,float t){return t<s?t:s;}
@@ -32,11 +33,11 @@ float dot3(const V& a,const V& b){return add(add(mul(a[0],b[0]),mul(a[1],b[1])),
 // 00132060: xyz *= vrsqrt(vf0.w, sum of squares); w kept.
 V normalized(const V& v,const char* what){
     const float s=sum_squares(v);
-    require(s!=0.0F,std::string("zero-length vector (")+what+")");
+    if(s==0.0F)require(false,std::string("zero-length vector (")+what+")");
     const float q=check(vu::rsqrt(1.0F,s));
     return {mul(v[0],q),mul(v[1],q),mul(v[2],q),v[3]};
 }
-void require_finite(const V& v,const char* what){for(float x:v)require(std::isfinite(x),std::string(what)+" not finite");}
+void require_finite(const V& v,const char* what){for(float x:v)if(!std::isfinite(x))require(false,std::string(what)+" not finite");}
 
 // Pool strides (LEVEL_LIGHTS.md 2.1): ambient and point 0x40, directional
 // 0x50, spot 0xe0. The direction +0x40 exists in the directional and spot

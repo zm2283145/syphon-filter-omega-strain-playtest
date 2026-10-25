@@ -131,6 +131,7 @@ std::unique_ptr<SoloActorSimulation> ActorWorld::make(std::size_t index,const So
         water_.get(),water_actors_.get(),default_water_sink_.get()};
     std::unique_ptr<SoloActorSimulation> actor(new SoloActorSimulation(link,config,animation,std::move(tuning),initial,controller,present));
     actor->set_movement_world(movement_.get());
+    if(step_dt_)actor->set_step_dt(*step_dt_);
     actor->set_actor_peers([this](std::uint64_t h)->SoloActorSimulation*{
         if(h<SoloCollisionWorld::actor_handle||h-SoloCollisionWorld::actor_handle>=actors_.size())return nullptr;
         const auto i=static_cast<std::size_t>(h-SoloCollisionWorld::actor_handle);
@@ -150,11 +151,24 @@ std::size_t ActorWorld::add(const SoloActorConfig& config,SoloActorAnimation* an
 void ActorWorld::rebuild_ai(std::size_t index,const SoloActorConfig& config,SoloActorAnimation* animation,ActorAnimationTuning tuning,
     const SoloActorController& controller,bool present,SoloActorControlFields initial){
     if(index>=actors_.size())throw std::runtime_error("Actor world: rebuild of an unknown actor");
-    if(stepping_)throw std::runtime_error("Actor world: an actor rebuilt during a step (001b8130 runs from a script native, between steps)");
     if(!controller.ai||!animation)throw std::runtime_error("Actor world: an AI actor needs its AI controller and animation model");
     if(actors_[index]->player_controller())throw std::runtime_error("Actor world: the player's rebuild is not hosted");
     if(removal_requested_[index]||destroyed_[index])throw std::runtime_error("Actor world: rebuild of a removed or deleted actor");
-    actors_[index]=make(index,config,animation,std::move(tuning),initial,controller,present);++serials_[index];
+    auto rebuilt=make(index,config,animation,std::move(tuning),initial,controller,present);
+    if(stepping_){
+        // 132ws9: 001b8130 from a script native the pump runs (the revive's NotifyCheckpointMsg). The original
+        // rebuilds the record at the same address and the traversal goes on to it; here the new actor takes the
+        // old one's traversal slot and the old object is kept until the step ends (its phase may be on the stack).
+        if(!step_view_.list)throw std::runtime_error("Actor world: a rebuild during a step outside the traversal");
+        const auto& live=*step_view_.live;
+        const auto at=std::find(live.begin(),live.end(),index);
+        if(at==live.end())throw std::runtime_error("Actor world: an actor appended in this step rebuilt in it (not hosted)");
+        const auto k=static_cast<std::size_t>(at-live.begin());
+        SoloActorSimulation::replace_in_step(*actors_[index],*rebuilt,(*step_view_.frames)[k],(*step_view_.inputs)[k]);
+        (*step_view_.list)[k]=rebuilt.get();
+        retired_.push_back(std::move(actors_[index]));
+    }
+    actors_[index]=std::move(rebuilt);++serials_[index];
 }
 std::size_t ActorWorld::add_player(const SoloActorConfig& config,SoloActorAnimation* animation,
     std::optional<ActorAnimationTuning> tuning,SoloActorControlFields initial,bool present){
@@ -190,6 +204,8 @@ std::vector<SoloActorFrame> ActorWorld::step(std::span<const SoloActorFrameInput
     const std::unique_ptr<bool[]> traverse(new bool[live.size()+1]);
     for(std::size_t k=0;k<live.size();++k)traverse[k]=!removed_[live[k]];
     std::vector<SoloActorFrame> live_frames(live.size());
+    step_view_={&list,&live,&live_frames,&live_inputs};
+    struct ViewEnd{ActorWorld& w;~ViewEnd(){w.step_view_={};w.retired_.clear();}} view_end{*this};
     std::function<void()> services;
     if(services_)services=[this]{services_(frame_counter_);};
     std::function<void()> later;
@@ -237,7 +253,7 @@ bool ActorWorld::traversed(std::size_t index) const{
 }
 void ActorWorld::set_frame_services(std::function<void(std::uint32_t frame)> services){services_=std::move(services);}
 void ActorWorld::set_after_first_traversal(std::function<void(std::uint32_t frame)> entries){after_first_traversal_=std::move(entries);}
-void ActorWorld::set_step_dt(float dt){for(auto& a:actors_)a->set_step_dt(dt);}
+void ActorWorld::set_step_dt(float dt){for(auto& a:actors_)a->set_step_dt(dt);step_dt_=dt;}
 void ActorWorld::set_movement_list(std::function<std::vector<std::size_t>()> list){movement_list_=std::move(list);}
 void ActorWorld::set_agent_slot(int slot,std::optional<std::size_t> actor){
     if(slot<1||slot>3)throw std::runtime_error("Actor world: agent slots are 1..3 (slot 0 is the first player)");

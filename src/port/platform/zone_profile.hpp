@@ -4,7 +4,8 @@
 // the Vita app prints the slots every 120 frames and resets them. Without OMEGA_ZONE_PROFILE (every Windows build)
 // the macro is an empty statement, so the shared code is unchanged. Zones belong on the simulation thread only (the
 // counters are not atomic). OMEGA_ZONE_LAPS(laps) / OMEGA_ZONE_LAP(laps, "name") time consecutive stretches of
-// one long scope (the play step's sections) without new scopes: each lap adds the time since the previous one.
+// one long scope (the play step's sections) without new scopes: each lap adds the time since the previous one. Each
+// zone also counts the heap allocations its thread made inside it (132vs1; the Vita app's operator new count).
 
 #if defined(OMEGA_ZONE_PROFILE)
 #include <atomic>
@@ -13,10 +14,16 @@
 
 namespace omega::zone {
 
+// Port-only (132vs1): the calling thread's heap allocations so far (the Vita app's operator new count), which each
+// zone charges with its own; null (no counts) until the app sets it.
+inline std::uint32_t (*thread_allocations)() = nullptr;
+inline std::uint32_t allocations_now() { return thread_allocations ? thread_allocations() : 0U; }
+
 struct Slot {
     const char* name;
     std::uint64_t ns = 0;
     std::uint32_t calls = 0;
+    std::uint32_t allocs = 0;
     Slot* next = nullptr;
 
     explicit Slot(const char* n) : name(n) {
@@ -39,9 +46,11 @@ inline std::uint64_t now_ns() {
 struct Scope {
     Slot& slot;
     std::uint64_t t0;
-    explicit Scope(Slot& s) : slot(s), t0(now_ns()) {}
+    std::uint32_t a0;
+    explicit Scope(Slot& s) : slot(s), t0(now_ns()), a0(allocations_now()) {}
     ~Scope() {
         slot.ns += now_ns() - t0;
+        slot.allocs += allocations_now() - a0;
         ++slot.calls;
     }
     Scope(const Scope&) = delete;
@@ -50,13 +59,17 @@ struct Scope {
 
 struct Laps {
     std::uint64_t t = now_ns();
+    std::uint32_t a = allocations_now();
 };
 
 inline void lap(Laps& laps, Slot& slot) {
     const std::uint64_t now = now_ns();
+    const std::uint32_t a = allocations_now();
     slot.ns += now - laps.t;
+    slot.allocs += a - laps.a;
     ++slot.calls;
     laps.t = now;
+    laps.a = a;
 }
 
 }  // namespace omega::zone

@@ -260,6 +260,14 @@ public:
     void set_remote(SoloActorSimulation& actor);
     void make_fresh_ai(SoloActorSimulation& actor);
     bool is_remote() const{return remote_.has_value();}
+    // 132ln5h14c: +54 / +58 / +5c for the damage path: the remote NPC controller's 002d2a90 / 002d2aa0 / 002d2b20
+    // answer 0 / 0 / 1; the LAN remote human's figure (PORT-ONLY stand-in for 0x004de530, whose +54 is 002d7c70) 1 / 0 / 0;
+    // the AI's 0 / 1 / 0.
+    ActorDamageController damage_predicates() const override{
+        if(port_remote_controlled_)return {true,false,false};
+        if(remote_)return {false,false,true};
+        return {false,true,false};
+    }
     const std::optional<NpcRemoteState>& remote_state() const{return remote_;}
     std::uint8_t controller_88() const{return remote_?2:1;}
     bool port_fire_held() const{return port_hold_fire_;}

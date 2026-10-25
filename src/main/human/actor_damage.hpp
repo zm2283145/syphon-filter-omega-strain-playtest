@@ -1,14 +1,16 @@
 #pragma once
 // Human actor health, damage and kill (ACTOR_DAMAGE_AND_HEALTH.md): the life
 // state 001872f0 (virtual +108), the damage virtual 00187360 (+100) with the
-// base damage 003ccb00, and the kill virtual 00186bf0 (+10c). Single player
-// only (005721c8 clear): the multiplayer branches of 003ccb00/003cc990 are not
-// reproduced. Every outgoing message, sound, rumble and helper call is
+// base damage 003ccb00, and the kill virtual 00186bf0 (+10c). Every outgoing
+// message, sound, rumble and helper call is
 // returned as an event in call order; nothing is played. The calls that
 // return a value or run synchronously in the original (positions, the
 // explosion LOS request, the hit-direction classifier 00186950, the
 // controller's +84 and the immediate death action) go through the host, and
-// an empty host function that is reached throws.
+// an empty host function that is reached throws. In a network game
+// (ActorDamageInput::network) 003ccb00 sends the damage message with +20 = 2
+// (or not at all) and a remote NPC's controller (virtual +5c) keeps +40;
+// 003cc990's network side is the health message (dme_game, 132ln5h14c).
 #include "animation_root.hpp"
 #include <array>
 #include <cstdint>
@@ -129,6 +131,8 @@ struct ActorDamageInput {
     bool quiet{};                                           // t1
     std::optional<RootVector> hit_point;                    // t2
     float amount{};                                         // f12
+    bool network{};                                         // 005721c8 (a network game)
+    bool host_console{};                                    // 005721c0 (this console hosts it)
 };
 struct ActorDamageResult {
     bool dead{};                                            // life state 3 afterwards
