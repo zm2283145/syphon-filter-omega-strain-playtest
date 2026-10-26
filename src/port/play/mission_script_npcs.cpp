@@ -354,6 +354,15 @@ bool ActorWorldScriptNpcs::request_facial_hotbox(Word npc, Word box, float durat
     return true;
 }
 
+bool ActorWorldScriptNpcs::request_facial_sound(Word npc, Word sound, float duration) {
+    const auto& e = entry(npc);
+    if (!e.controller->facial_hosted()) return false;
+    const auto handle = sound_handle_ ? sound_handle_(sound) : std::nullopt;
+    if (!handle) return false;
+    e.controller->script_request_facial(world_.actor(e.actor), *handle, duration);
+    return true;
+}
+
 bool ActorWorldScriptNpcs::request_look_at(Word npc, std::optional<Word> object, float duration) {
     const auto& e = entry(npc);
     if (!e.controller->facial_hosted()) return false;
@@ -381,6 +390,15 @@ bool ActorWorldScriptNpcs::request_look_at_hotbox(Word npc, Word box, float dura
     const auto& e = entry(npc);
     if (!e.controller->facial_hosted()) return false;
     const auto handle = hotbox_handle_ ? hotbox_handle_(box) : std::nullopt;
+    if (!handle) return false;
+    e.controller->script_request_look_at(world_.actor(e.actor), *handle, duration);
+    return true;
+}
+
+bool ActorWorldScriptNpcs::request_look_at_sound(Word npc, Word sound, float duration) {
+    const auto& e = entry(npc);
+    if (!e.controller->facial_hosted()) return false;
+    const auto handle = sound_handle_ ? sound_handle_(sound) : std::nullopt;
     if (!handle) return false;
     e.controller->script_request_look_at(world_.actor(e.actor), *handle, duration);
     return true;

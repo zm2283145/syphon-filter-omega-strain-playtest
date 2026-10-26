@@ -266,6 +266,7 @@ void LoadingScreenHost::run() {
         services.ticks = ticks;
         services.font = [&](std::uint32_t h) { return assets_->font(h); };
         GuiDrawList last;
+        std::int64_t drawn_frames = 0;
         // --loading-capture-frame: the thread runs on until that frame is drawn, even after stop() (the level load is
         // often quicker than 30 frames).
         while (!stop_ || (fixed_clock && frames_ < options_.capture_frame)) {
@@ -293,7 +294,16 @@ void LoadingScreenHost::run() {
             phase_ = "the frame 00166850";
             loading_frame_166850(list, draw, assets_->globals, services);
             ++frames_;
-            if (window && !window->minimized()) {
+#ifdef __vita__
+            // Port-only (132vl2, research/VITA.md "Load time (132vl2)"): the Vita draws and presents every 2nd game
+            // frame (10 fps; the game frames still run at 20), leaving core 1 to the load's decode workers. The PC
+            // draws every frame. A --loading-capture-frame frame is always drawn.
+            const bool drawn = (frames_ & 1) != 0 || frames_ == options_.capture_frame;
+#else
+            const bool drawn = true;
+#endif
+            if (drawn) ++drawn_frames;
+            if (drawn && window && !window->minimized()) {
                 phase_ = "draw into the window";
                 if (window && options_.test_device_lost_sweep >= 0 && frames_ == options_.test_device_lost_sweep &&
                     !sweep_call) {
@@ -369,6 +379,10 @@ void LoadingScreenHost::run() {
             pacing_summary_ = frame_time_summary(times.stats(vblank.count() * 1000.0), vblank.count() * 1000.0) +
                               "; process CPU " + std::to_string(process_cpu_seconds() - cpu_start) + " s in " +
                               std::to_string(wall) + " s wall (the level load runs alongside)";
+#ifdef __vita__
+            pacing_summary_ += "; drawn " + std::to_string(drawn_frames) + " of " + std::to_string(frames_.load()) +
+                               " frames (every 2nd, port-only 132vl2)";
+#endif
         }
         if (renderer && !options_.capture_dir.empty()) {
             std::filesystem::create_directories(options_.capture_dir);

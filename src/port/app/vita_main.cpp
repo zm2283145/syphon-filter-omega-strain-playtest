@@ -14,6 +14,7 @@
 #include "crash_report.hpp"
 #include "crash_report_vita.hpp"
 #include "derived_data.hpp"
+#include "draw_prepare.hpp"
 #include "host_window.hpp"
 #include "launcher.hpp"
 #include "disc.hpp"
@@ -303,6 +304,199 @@ struct FrameParts {
         *this = FrameParts{};
         overlay = line;
         reads = disc_reads;
+    }
+};
+
+// Port-only (132vg2, research/VITA.md "Vita render path (132vg2)"): per play-frames window, the render thread's
+// execute / present time (RenderThread::totals), each thread's busy and kernel run time and the cores' idle time, the
+// GXM backend's timers and GPU time (MemoryStats::gxm), one frame's scenes (gxm::scene_dump) and the particle
+// prepare's split (g_particle_prepare_times).
+bool g_gpu_probe_cycle = false;  // 132vg2 step 3f: vita_test_gpu_probe.txt
+struct RenderWindow {
+    gfx::RenderThread::Totals rt{};
+    gfx::gxm::GxmTimers t{};
+    std::vector<ThreadUsage> threads;
+    std::uint64_t idle[3]{};
+    bool idle_ok = false;
+    std::uint64_t pp[6]{};
+    std::uint64_t cull[7]{};  // g_scene_cull_stats
+    double start = 0.0;
+    static void cull_now(std::uint64_t (&out)[7]) {
+        const auto& c = g_scene_cull_stats;
+        const std::uint64_t v[7]{c.frames.load(), c.models.load(), c.culled.load(), c.surfaces.load(),
+                                 c.culled_surfaces.load(), c.indices.load(), c.culled_indices.load()};
+        std::copy(std::begin(v), std::end(v), std::begin(out));
+    }
+
+    void begin(const gfx::gxm::MemoryStats& g) {
+        rt = gfx::RenderThread::totals();
+        t = g.gxm;
+        threads = thread_usage();
+        idle_ok = core_idle_us(idle);
+        const auto& p = g_particle_prepare_times;
+        const std::uint64_t now[6]{p.calls.load(), p.batches.load(), p.programs.load(), p.program_us.load(),
+                                   p.sprite_us.load(), p.wall_us.load()};
+        std::copy(std::begin(now), std::end(now), std::begin(pp));
+        cull_now(cull);
+        start = now_seconds();
+    }
+    void report(const gfx::gxm::MemoryStats& g, unsigned frames) {
+        const double wall = std::max(now_seconds() - start, 1e-3);
+        const double f = std::max(frames, 1u);
+        const auto r = gfx::RenderThread::totals();
+        const double rf = std::max<double>(double(r.frames - rt.frames), 1.0);
+        const double ex = double(r.execute_us - rt.execute_us) / 1000.0, pr = double(r.present_us - rt.present_us) / 1000.0;
+        log("play render thread: %llu frames executed; ms/frame execute %.2f, present %.2f; executing %.1f%% and "
+            "presenting %.1f%% of the %.1f s",
+            static_cast<unsigned long long>(r.frames - rt.frames), ex / rf, pr / rf, ex / 10.0 / wall, pr / 10.0 / wall,
+            wall);
+
+        const auto after = thread_usage();
+        std::string list;
+        for (std::size_t i = 0; i < after.size(); ++i) {
+            const ThreadUsage& u = after[i];
+            const std::uint64_t busy0 = i < threads.size() && threads[i].busy_us <= u.busy_us ? threads[i].busy_us : 0;
+            const std::uint64_t run0 = i < threads.size() && threads[i].run_us <= u.run_us ? threads[i].run_us : 0;
+            if (u.busy_us == busy0 && u.run_us == run0) continue;
+            char item[96];
+            std::snprintf(item, sizeof item, "%s%s (core %u) %.0f/%.0f", list.empty() ? "" : ", ", u.name.c_str(),
+                          thread_role_core(u.role), double(u.busy_us - busy0) / 1e4 / wall,
+                          double(u.run_us - run0) / 1e4 / wall);
+            list += item;
+        }
+        std::uint64_t idle_now[3]{};
+        char cores[96] = "no kernel idle clock";
+        if (idle_ok && core_idle_us(idle_now))
+            std::snprintf(cores, sizeof cores, "core idle %.0f%% / %.0f%% / %.0f%%", double(idle_now[0] - idle[0]) / 1e4 / wall,
+                          double(idle_now[1] - idle[1]) / 1e4 / wall, double(idle_now[2] - idle[2]) / 1e4 / wall);
+        log("play threads (busy %% / kernel run %%): %s; %s", list.c_str(), cores);
+
+        const auto& n = g.gxm;
+        if (n.submits != t.submits) {
+            const auto ms = [&](std::uint64_t a, std::uint64_t b) { return double(a - b) / 1000.0 / f; };
+            const auto per = [&](std::uint64_t a, std::uint64_t b) { return double(a - b) / f; };
+            const double s = std::max<double>(double(n.sampled - t.sampled), 1.0);
+            const auto us = [&](std::uint64_t a, std::uint64_t b) { return double(a - b) / s; };
+            const double whole = us(n.sample_total_us, t.sample_total_us);
+            const double parts = us(n.sample_program_us, t.sample_program_us) + us(n.sample_state_us, t.sample_state_us) +
+                                 us(n.sample_texture_us, t.sample_texture_us) + us(n.sample_uniform_us, t.sample_uniform_us) +
+                                 us(n.sample_draw_us, t.sample_draw_us);
+            log("play gxm (ms/frame): submit %.2f (x%.1f), begin scene %.2f (x%.1f), end scene %.2f, clears %.2f (x%.1f), "
+                "copies %.2f (x%.1f), updates %.2f (x%.1f, %.0f KB; constants x%.0f), display queue %.2f, present wait "
+                "%.2f, drains %.2f (x%.2f), shadow filter %.2f (x%.1f); 1 draw in 8 (us a draw, %.0f sampled): whole "
+                "%.1f = programs %.1f + state %.1f + textures %.1f + uniforms %.1f + draw %.1f + rest %.1f; per frame: "
+                "state calls skipped %.0f of %.0f, texture slots skipped %.0f, fragment program cache hits %.0f; "
+                "patches %.1f (%.0f KB, filled %.0f KB, live %llu), patched draws %.0f, rebased lists %.1f, widened %.2f, folds %.2f; "
+                "no-alpha-test draws %.0f, alpha test proven to pass %.0f (vertex ranges read %.1f); shadow receivers "
+                "by vertex flags %.1f",
+                ms(n.submit_us, t.submit_us), per(n.submits, t.submits), ms(n.begin_scene_us, t.begin_scene_us),
+                per(n.scenes, t.scenes), ms(n.end_scene_us, t.end_scene_us), ms(n.clear_us, t.clear_us),
+                per(n.clears, t.clears), ms(n.copy_us, t.copy_us), per(n.copies, t.copies), ms(n.update_us, t.update_us),
+                per(n.updates, t.updates), double(n.update_bytes - t.update_bytes) / 1024.0 / f,
+                per(n.constant_updates, t.constant_updates), ms(n.display_queue_us, t.display_queue_us),
+                ms(n.present_wait_us, t.present_wait_us), ms(n.drain_us, t.drain_us), per(n.drains, t.drains),
+                ms(n.shadow_filter_us, t.shadow_filter_us), per(n.shadow_draws, t.shadow_draws),
+                double(n.sampled - t.sampled), whole, us(n.sample_program_us, t.sample_program_us),
+                us(n.sample_state_us, t.sample_state_us), us(n.sample_texture_us, t.sample_texture_us),
+                us(n.sample_uniform_us, t.sample_uniform_us), us(n.sample_draw_us, t.sample_draw_us), whole - parts,
+                per(n.state_skipped, t.state_skipped), per(n.state_calls, t.state_calls),
+                per(n.texture_slots_skipped, t.texture_slots_skipped), per(n.program_cache_hits, t.program_cache_hits),
+                per(n.patch_updates, t.patch_updates), double(n.patch_bytes - t.patch_bytes) / 1024.0 / f,
+                double(n.patch_fill_bytes - t.patch_fill_bytes) / 1024.0 / f,
+                static_cast<unsigned long long>(n.patches_live), per(n.patch_draws, t.patch_draws),
+                per(n.rebased_lists, t.rebased_lists), per(n.patch_widened, t.patch_widened),
+                per(n.patch_folds, t.patch_folds), per(n.no_alpha_test_draws, t.no_alpha_test_draws),
+                per(n.alpha_proven_draws, t.alpha_proven_draws), per(n.alpha_scans, t.alpha_scans),
+                per(n.shadow_flagged_draws, t.shadow_flagged_draws));
+            {
+                // 132vg2 step 3f: the scene draws by kind, and the GPU probe's mode this window (gfx_gxm.hpp)
+                static const char* const probe_names[]{"off",          "no texture",          "blending off",
+                                                       "no discard",   "blended draws skipped", "scene draws skipped",
+                                                       "1x1 viewport"};
+                const int mode = gfx::gxm::g_gpu_probe_mode.load();
+                log("play scene draws (per frame): %.1f, blended %.1f (blend proven a no-op and dropped %.1f), with "
+                    "discard %.1f, into the display %.1f; patched draws' alpha read %.1f; skipped (every pixel "
+                    "discarded) %.1f; GPU probe mode %d (%s)",
+                    per(n.scene_draws, t.scene_draws), per(n.scene_blended, t.scene_blended),
+                    per(n.blend_proven_draws, t.blend_proven_draws),
+                    per(n.scene_discard, t.scene_discard), per(n.scene_display, t.scene_display),
+                    per(n.alpha_patched_reads, t.alpha_patched_reads),
+                    per(n.alpha_skipped_draws, t.alpha_skipped_draws), mode,
+                    probe_names[mode >= 0 && mode < 7 ? mode : 0]);
+                if (g_gpu_probe_cycle) gfx::gxm::g_gpu_probe_mode.store((mode + 1) % 7);
+                if (n.census[0] + n.census[1] + n.census[2] + n.census[3] + n.census[4] !=
+                    t.census[0] + t.census[1] + t.census[2] + t.census[3] + t.census[4])
+                    log("play blend census (per frame, scene draws still blended): other blend factors %.1f, FIX over "
+                        "%.1f, alpha range unknown %.1f, cut-out (texture alpha 0 or full) %.1f, translucent %.1f; of "
+                        "them with discard %.1f, writing depth %.1f, linear filter %.1f, full vertex alpha %.1f, "
+                        "untextured %.1f",
+                        per(n.census[0], t.census[0]), per(n.census[1], t.census[1]), per(n.census[2], t.census[2]),
+                        per(n.census[3], t.census[3]), per(n.census[4], t.census[4]), per(n.census[5], t.census[5]),
+                        per(n.census[6], t.census[6]), per(n.census[7], t.census[7]), per(n.census[8], t.census[8]),
+                        per(n.census[9], t.census[9]));
+            }
+            log("play gxm updates (ms/frame): patch path %.2f (x%.1f, in place x%.1f, rotated x%.1f; allocate %.2f, GPU "
+                "writes %.2f, %.1f new in CDRAM); fresh copies %.2f (x%.1f, %.0f KB copied from the old block); plain "
+                "writes %.2f",
+                ms(n.upd_patch_us, t.upd_patch_us), per(n.patch_updates, t.patch_updates),
+                per(n.upd_patch_in_place, t.upd_patch_in_place), per(n.upd_patch_rotated, t.upd_patch_rotated),
+                ms(n.upd_patch_alloc_us, t.upd_patch_alloc_us),
+                ms(n.upd_patch_gpu_write_us, t.upd_patch_gpu_write_us), per(n.upd_patch_in_cdram, t.upd_patch_in_cdram),
+                ms(n.upd_fresh_us, t.upd_fresh_us), per(n.upd_fresh, t.upd_fresh),
+                double(n.upd_fresh_copied - t.upd_fresh_copied) / 1024.0 / f, ms(n.upd_write_us, t.upd_write_us));
+            if (n.gpu_scenes != t.gpu_scenes) {
+                std::string kinds;
+                for (unsigned k = 0; k < gfx::gxm::GxmTimers::gpu_kinds; ++k) {
+                    if (n.gpu_kind_scenes[k] == t.gpu_kind_scenes[k]) continue;
+                    char item[80];
+                    std::snprintf(item, sizeof item, "%s%s %.2f (x%.1f)", kinds.empty() ? "" : ", ", gfx::gxm::gpu_kind_name(k),
+                                  ms(n.gpu_kind_us[k], t.gpu_kind_us[k]), per(n.gpu_kind_scenes[k], t.gpu_kind_scenes[k]));
+                    kinds += item;
+                }
+                log("play gpu: busy %.2f ms/frame over %.1f scenes/frame (%.0f%% of the %.1f s); by target ms/frame: %s; "
+                    "resyncs %llu",
+                    ms(n.gpu_busy_us, t.gpu_busy_us), per(n.gpu_scenes, t.gpu_scenes),
+                    double(n.gpu_busy_us - t.gpu_busy_us) / 1e4 / wall, wall, kinds.c_str(),
+                    static_cast<unsigned long long>(n.gpu_resyncs - t.gpu_resyncs));
+            }
+            const std::string dump = gfx::gxm::scene_dump();
+            std::size_t at = 0;
+            bool first = true;
+            while (at < dump.size()) {
+                // up to about 900 characters a line, broken between scenes
+                std::size_t end = dump.size();
+                if (end - at > 900) {
+                    end = dump.rfind('\n', at + 900);
+                    if (end == std::string::npos || end <= at) end = std::min(dump.size(), at + 900);
+                }
+                std::string part = dump.substr(at, end - at);
+                for (char& c : part)
+                    if (c == '\n') c = ';';
+                log("%s%s", first ? "play scene sequence: " : "play scene sequence (more): ", part.c_str());
+                first = false;
+                at = end;
+            }
+        }
+
+        const auto& p = g_particle_prepare_times;
+        const std::uint64_t now[6]{p.calls.load(), p.batches.load(), p.programs.load(), p.program_us.load(),
+                                   p.sprite_us.load(), p.wall_us.load()};
+        {
+            std::uint64_t c[7];
+            cull_now(c);
+            const double cf = std::max<double>(double(c[0] - cull[0]), 1.0);
+            if (c[0] != cull[0])
+                log("play scene cull (%s): per scene frame %.0f models filed, %.0f outside the view (%.0f of %.0f surfaces, "
+                    "%.0f of %.0f indices)", g_scene_cull ? "outside models not drawn" : "off: all drawn",
+                    double(c[1] - cull[1]) / cf, double(c[2] - cull[2]) / cf, double(c[4] - cull[4]) / cf,
+                    double(c[3] - cull[3]) / cf, double(c[6] - cull[6]) / cf, double(c[5] - cull[5]) / cf);
+        }
+        if (now[0] != pp[0])
+            log("play particle prepare: per frame %.1f calls, %.1f batches, %.1f VU1 programs; ms/frame wall %.2f, worker "
+                "time in the programs %.2f, in the sprite programs %.2f",
+                double(now[0] - pp[0]) / f, double(now[1] - pp[1]) / f, double(now[2] - pp[2]) / f,
+                double(now[5] - pp[5]) / 1000.0 / f, double(now[3] - pp[3]) / 1000.0 / f, double(now[4] - pp[4]) / 1000.0 / f);
+        begin(g);
     }
 };
 
@@ -895,23 +1089,30 @@ int App::play(DiscImage& disc, const std::string& iso) {
     // The play loop's split (frame_profile.hpp, the --frame-overlay profile) and the OMEGA_ZONE slots, logged about
     // every 10 s with the heap and the allocations per frame: the in-level hot spots (research/VITA.md "Profiling").
     // 132vt2e: every 5 s, with the backend's draws and render-target scenes per frame and the draws merged into them
-    // (gfx::CommandList::merge_contiguous_draws).
+    // (gfx::CommandList::merge_contiguous_draws). 132vt3: then the GXM scenes per frame by why each began (MemoryStats::
+    // SceneKind; research/VITA.md "GXM scenes").
     FrameProfile::frame_profile_sink() = [](const FrameProfile::Averages& a) {
         static double sum[FrameProfile::phase_count]{}, peak = 0.0, started = 0.0;
         static unsigned frames = 0, windows = 0;
         static std::uint32_t mallocs = g_mallocs;
-        static std::uint64_t draws = 0, scenes = 0, merged = 0, state_set = 0, state_skipped = 0, triangles = 0, tested = 0, kept = 0, reallocs = 0, writes = 0, bytes = 0;
+        static std::uint64_t gxm[gfx::gxm::MemoryStats::scene_kinds]{}, gxm_total = 0;
+        static std::uint64_t draws = 0, scenes = 0, merged = 0, state_set = 0, state_skipped = 0, triangles = 0, tested = 0, kept = 0, cached = 0, reallocs = 0, writes = 0, bytes = 0;
+        static RenderWindow render_window;  // 132vg2
         if (started == 0.0) {
             started = now_seconds();
             const auto g = gfx::gxm::memory_stats();
+            render_window.begin(g);
             draws = g.draws_total;
             scenes = g.scenes_total;
+            std::copy(std::begin(g.gxm_scenes), std::end(g.gxm_scenes), std::begin(gxm));
+            gxm_total = g.gxm_scenes_total;
             merged = gfx::CommandList::merged_draws.load();
             state_set = g.gl_state_set;
             state_skipped = g.gl_state_skipped;
             triangles = g.triangles_total;
             tested = g.shadow_tested;
             kept = g.shadow_kept;
+            cached = g.shadow_cached;
             reallocs = g.buffer_reallocs;
             writes = g.buffer_writes;
             bytes = g.buffer_bytes;
@@ -926,16 +1127,32 @@ int App::play(DiscImage& disc, const std::string& iso) {
         const std::uint64_t merged_now = gfx::CommandList::merged_draws.load();
         log("play frames: %u in %.1f s = %.1f fps; ms/frame sim %.2f, script %.2f, render %.2f, present %.2f "
             "(longest frame %.1f); draws/frame %.0f (scenes %.1f, merged %.0f; GL state set %.0f, unchanged %.0f; "
-            "triangles %.0f; shadow filter tested %.0f, kept %.0f; buffer updates %.0f new memory, %.0f in place, %.0f KB); "
+            "triangles %.0f; shadow filter tested %.0f, kept %.0f, cached %.0f (%.0f KB); buffer updates %.0f new memory, %.0f in place, %.0f KB); "
             "%.0f allocations per frame; %s",
             frames, span, frames / span, sum[0] / frames, sum[1] / frames, sum[2] / frames, sum[3] / frames, peak,
             double(g.draws_total - draws) / frames, double(g.scenes_total - scenes) / frames,
             double(merged_now - merged) / frames, double(g.gl_state_set - state_set) / frames,
             double(g.gl_state_skipped - state_skipped) / frames, double(g.triangles_total - triangles) / frames,
             double(g.shadow_tested - tested) / frames, double(g.shadow_kept - kept) / frames,
+            double(g.shadow_cached - cached) / frames, g.shadow_cache_bytes / 1024.0,
             double(g.buffer_reallocs - reallocs) / frames, double(g.buffer_writes - writes) / frames,
             double(g.buffer_bytes - bytes) / 1024.0 / frames, double(g_mallocs - mallocs) / frames,
             process_memory_line().c_str());
+        if (g.shadow_checked || g.shadow_mismatched)
+            log("play shadow cache check: %llu hits equal to the buffers, %llu not (all so far)",
+                static_cast<unsigned long long>(g.shadow_checked), static_cast<unsigned long long>(g.shadow_mismatched));
+        if (g.gxm_scenes_total != gxm_total) {
+            std::string kinds;
+            for (unsigned k = 0; k < gfx::gxm::MemoryStats::scene_kinds; ++k) {
+                char item[64];
+                std::snprintf(item, sizeof item, "%s%s %.1f", k ? ", " : "", gfx::gxm::scene_kind_name(k),
+                              double(g.gxm_scenes[k] - gxm[k]) / frames);
+                kinds += item;
+            }
+            log("play scenes: GXM scenes/frame %.1f (begun for: %s); target binds/frame %.1f",
+                double(g.gxm_scenes_total - gxm_total) / frames, kinds.c_str(), double(g.scenes_total - scenes) / frames);
+        }
+        render_window.report(g, frames);  // 132vg2
         zone_report([](const char* text) { log("%s", text); }, int(frames));
         // 132vp1 (VITA.md "Playability, memory and coverage"): once a level is in (heap in use past 96 MB), one longer
         // report of the heap's holders, for the per-mission memory table.
@@ -951,12 +1168,15 @@ int App::play(DiscImage& disc, const std::string& iso) {
         mallocs = g_mallocs;
         draws = g.draws_total;
         scenes = g.scenes_total;
+        std::copy(std::begin(g.gxm_scenes), std::end(g.gxm_scenes), std::begin(gxm));
+        gxm_total = g.gxm_scenes_total;
         merged = merged_now;
         state_set = g.gl_state_set;
         state_skipped = g.gl_state_skipped;
         triangles = g.triangles_total;
         tested = g.shadow_tested;
         kept = g.shadow_kept;
+        cached = g.shadow_cached;
         reallocs = g.buffer_reallocs;
         writes = g.buffer_writes;
         bytes = g.buffer_bytes;
@@ -1165,7 +1385,9 @@ private:
 // blocking submit used to wait out on the simulation thread) and the pump feeds it to the device as the output drains
 // it, keeping `target` frames queued; what is left when the movie ends is dropped (the window's device goes on to the
 // sound mix the same way). The movie's clock (132vt2a2): movie_begin starts it, movie_played_seconds is the movie PCM
-// fed to the device less what it still holds, the sound heard so far; AheadMovie paces the pictures by it.
+// fed to the device less what it still holds, the sound heard so far; AheadMovie paces the pictures by it. 132vf3: the
+// movie's PCM is held from movie_begin until AheadMovie's movie_release (its first picture on screen), and the clock
+// counts from the movie's first frame the device took (the mix queued before it no longer counts as the movie's).
 class SoundPump {
 public:
     static constexpr std::size_t grain = 512;
@@ -1186,16 +1408,27 @@ public:
         fifo_.insert(fifo_.end(), pcm.begin(), pcm.end());
         movie_pushed_ += pcm.size() / 2;
     }
-    // A new movie (132vt2a2): drops any movie PCM still waiting and restarts the movie clock.
+    // A new movie (132vt2a2): drops any movie PCM still waiting and restarts the movie clock. 132vf3: the movie's
+    // PCM is held (queued here, not fed to the device) until movie_release: the picture's first presentation.
     void movie_begin() {
         drop_movie();
-        clock_fed_ = 0;
+        movie_hold_ = true;
+        movie_origin_ = no_origin;
     }
-    // The movie's PCM heard since movie_begin, in seconds (fed to the device less what it still queues).
+    // 132vf3: the movie's sound may start (its first picture is on screen).
+    void movie_release() { movie_hold_ = false; }
+    bool movie_started() const { return movie_origin_ != no_origin; }
+    // The movie's PCM heard since its first frame went to the device, in seconds (132vf3): the frames the device has
+    // taken out of its queue (submitted less queued) past the movie's first frame (the frames submitted before it, the
+    // front end's mix among them, are not the movie's), less the grain SceAudioOut holds while the one before plays.
+    // 0 until the movie's sound starts.
     double movie_played_seconds() {
-        const std::uint64_t fed = clock_fed_;
-        const std::uint64_t queued = device_.stats().queued_frames;
-        return double(fed - std::min(queued, fed)) / audio::Mixer::output_rate;
+        const std::uint64_t origin = movie_origin_;
+        if (origin == no_origin) return 0.0;
+        const auto s = device_.stats();
+        const std::uint64_t taken = s.submitted_frames - std::min<std::uint64_t>(s.queued_frames, s.submitted_frames);
+        const std::uint64_t heard = taken > origin + grain ? taken - origin - grain : 0;
+        return double(heard) / audio::Mixer::output_rate;
     }
     // Movie PCM pushed and not yet heard (the pump's FIFO and the device's queue), in frames.
     std::size_t movie_buffered() { return movie_waiting() + device_.stats().queued_frames; }
@@ -1245,12 +1478,12 @@ private:
                 base_mixed = mixed_;
             }
             bool worked = false;
-            if (movie) {
+            if (movie && !movie_hold_) {
                 // The device holds prime x 2 = 6144 frames: below `target` a grain always fits, so this never waits.
                 while (device_.stats().queued_frames < target_ && take_movie(movie_pcm)) {
+                    if (movie_origin_ == no_origin) movie_origin_ = device_.stats().submitted_frames;
                     device_.submit(movie_pcm);
                     movie_fed_ += movie_pcm.size() / 2;
-                    clock_fed_ += movie_pcm.size() / 2;
                     worked = true;
                 }
             }
@@ -1297,7 +1530,10 @@ private:
     std::mutex fifo_lock_;
     std::vector<std::int16_t> fifo_;
     std::size_t fifo_read_ = 0;
-    std::atomic<std::uint64_t> movie_pushed_{0}, movie_fed_{0}, movie_dropped_{0}, clock_fed_{0};
+    std::atomic<std::uint64_t> movie_pushed_{0}, movie_fed_{0}, movie_dropped_{0};
+    static constexpr std::uint64_t no_origin = ~std::uint64_t(0);
+    std::atomic<bool> movie_hold_{false};
+    std::atomic<std::uint64_t> movie_origin_{no_origin};   // the device's submitted frames before the movie's first
     std::thread thread_;
 };
 
@@ -1412,7 +1648,14 @@ public:
         : inner_(std::move(inner)), name_(std::move(name)), aspect_(inner_->picture_aspect()), sink_(audio_sink_) {
         if (active_) active_->stop();
         active_ = this;
+        // Port-only test switch (132vf3, research/VITA.md "Movies"): with ux0:data/omega_strain/
+        // vita_test_movie_sound_early.txt the movie's sound starts at once and no picture skips its RGBA (the sync
+        // before 132vf3), for before / after comparisons in one build.
+        sound_early_ = vita_file_size(std::string(vita_data_root) + "/vita_test_movie_sound_early.txt") >= 0;
+        if (sound_early_) log("movie %s: vita_test_movie_sound_early.txt present: the sound starts at once (test switch)",
+                              name_.c_str());
         if (sink_) sink_->movie_begin();
+        if (sink_ && sound_early_) sink_->movie_release();
         decode_thread_ = std::thread([this] { decode(); });
         colour_thread_ = std::thread([this] { colour(); });
     }
@@ -1426,14 +1669,17 @@ public:
         }
         stop();
         if (active_ == this) active_ = nullptr;
-        log("movie %s (decoded ahead, 132vt2a2): %llu pictures decoded, %llu shown, %llu skipped late, %llu held; "
-            "decode %.1f ms mean (%.1f max), RGBA %.1f ms mean (%.1f max); paced by %s; audio read ahead %llu times; "
-            "the decoder was behind the clock %u times; at the end %u decoded waiting, %u converting, %u ready",
+        log("movie %s (decoded ahead, 132vt2a2): %llu pictures decoded, %llu shown, %llu skipped late (%llu of them "
+            "before their RGBA, 132vf3), %llu held; decode %.1f ms mean (%.1f max), RGBA %.1f ms mean (%.1f max); paced "
+            "by %s; audio read ahead %llu times; the decoder was behind the clock %u times; at the end %u decoded "
+            "waiting, %u converting, %u ready",
             name_.c_str(), static_cast<unsigned long long>(pictures_), static_cast<unsigned long long>(shown_),
-            static_cast<unsigned long long>(skipped_), static_cast<unsigned long long>(held_),
-            pictures_ ? decode_ms_ / pictures_ : 0.0, decode_max_, pictures_ ? colour_ms_ / pictures_ : 0.0, colour_max_,
-            audio_fed_ ? "the movie's sound" : "the wall clock", static_cast<unsigned long long>(read_aheads_.load()),
-            behind_, unsigned(waiting), unsigned(converting), unsigned(ready));
+            static_cast<unsigned long long>(skipped_ + colour_skipped_), static_cast<unsigned long long>(colour_skipped_),
+            static_cast<unsigned long long>(held_), pictures_ ? decode_ms_ / pictures_ : 0.0, decode_max_,
+            pictures_ ? colour_ms_ / pictures_ : 0.0, colour_max_, audio_fed_ ? "the movie's sound" : "the wall clock",
+            static_cast<unsigned long long>(read_aheads_.load()), behind_, unsigned(waiting), unsigned(converting),
+            unsigned(ready));
+        log_av_offset("at the end");
     }
     // The movie being shown (null when none).
     static AheadMovie* active() { return active_; }
@@ -1454,17 +1700,26 @@ public:
         std::unique_ptr<Item> next;
         std::vector<std::unique_ptr<Item>> late;
         if (!current_) {
-            // The first picture is waited for (the movie's start); the clock starts when it is shown.
+            // The first picture is waited for (the movie's start). 132vf3: the clock and the sound start at the next
+            // call, once this picture has been presented (the frame that hands it over can stall: INTRO's first one
+            // waited ~3 s for the subtitle projection on the handheld while its sound already played).
             std::unique_lock<std::mutex> lock(mutex_);
             if (ready_.empty()) cv_.wait(lock, [this] { return stop_ || !ready_.empty(); });
             if (ready_.empty()) return false;   // stopped (the next movie opened)
             next = std::move(ready_.front());
             ready_.pop_front();
-            start_ = now_seconds();
-            audio_changed_ = start_;
         } else {
-            const auto due = static_cast<std::uint64_t>(std::max(0.0, clock() * (30000.0 / 1001.0)));
+            if (!started_) {
+                started_ = true;
+                start_ = now_seconds();
+                audio_changed_ = start_;
+                if (sink_) sink_->movie_release();
+            }
+            const double movie_time = clock();
+            const auto due = static_cast<std::uint64_t>(std::max(0.0, movie_time * picture_rate));
             std::lock_guard<std::mutex> lock(mutex_);
+            due_time_ = movie_time;
+            due_wall_ = now_seconds();
             if (current_->index >= due) {
                 // The shown picture is still due: held.
             } else if (ready_.empty()) {
@@ -1492,12 +1747,16 @@ public:
         if (current_->ended) return false;
         std::swap(frame, current_->frame);
         aspect_ = current_->aspect;
-        if (++shown_ % 300 == 0)
+        measure_av_offset(current_->index);
+        if (++shown_ % 300 == 0) {
             log("movie %s: %llu pictures shown (%llu skipped late, %llu held); decode %.1f ms mean, RGBA %.1f ms mean; "
                 "clock %.2f s; movie PCM buffered %u frames",
-                name_.c_str(), static_cast<unsigned long long>(shown_), static_cast<unsigned long long>(skipped_),
-                static_cast<unsigned long long>(held_), pictures_ ? decode_ms_ / pictures_ : 0.0,
-                pictures_ ? colour_ms_ / pictures_ : 0.0, clock(), sink_ ? unsigned(sink_->movie_buffered()) : 0u);
+                name_.c_str(), static_cast<unsigned long long>(shown_),
+                static_cast<unsigned long long>(skipped_ + colour_skipped_), static_cast<unsigned long long>(held_),
+                pictures_ ? decode_ms_ / pictures_ : 0.0, pictures_ ? colour_ms_ / pictures_ : 0.0, clock(),
+                sink_ ? unsigned(sink_->movie_buffered()) : 0u);
+            log_av_offset("so far");
+        }
         return true;
     }
     bool repeated_picture() const override { return repeated_; }
@@ -1534,7 +1793,36 @@ private:
     };
     static constexpr std::size_t depth = 4;               // pictures decoded or converted ahead of the session
     static constexpr std::size_t audio_ahead = 48000;     // movie PCM kept buffered ahead of the sound heard (1 s)
+    static constexpr double picture_rate = 30000.0 / 1001.0;
 
+    // Port-only diagnostic (132vf3): the A/V offset, the handed-over picture's time less the movie sound heard (+: the
+    // picture ahead of the sound, -: behind it), from the first picture handed over while the sound is heard. The
+    // picture reaches the screen at the frame's present, about one frame after the hand-over measured here.
+    void measure_av_offset(std::uint64_t index) {
+        if (!started_ || !sink_ || !audio_fed_ || !sink_->movie_started()) return;
+        const double heard = sink_->movie_played_seconds();
+        if (heard <= 0.0) return;
+        const double offset = double(index) / picture_rate - heard;
+        if (!av_count_) av_start_ = offset;
+        av_min_ = av_count_ ? std::min(av_min_, offset) : offset;
+        av_max_ = av_count_ ? std::max(av_max_, offset) : offset;
+        av_sum_ += offset;
+        av_abs_sum_ += std::abs(offset);
+        if (std::abs(offset) > 0.1) ++av_over_100ms_;
+        ++av_count_;
+    }
+    void log_av_offset(const char* when) {
+        if (!av_count_) {
+            log("movie %s: A/V offset (132vf3) %s: not measured (no movie sound heard)", name_.c_str(), when);
+            return;
+        }
+        log("movie %s: A/V offset (132vf3, picture time minus the sound heard, at hand-over; + picture ahead) %s: "
+            "start %+.0f ms, mean %+.0f ms (mean |offset| %.0f ms), min %+.0f ms, max %+.0f ms; %llu of %llu pictures "
+            "off by more than 100 ms",
+            name_.c_str(), when, av_start_ * 1000.0, av_sum_ / double(av_count_) * 1000.0,
+            av_abs_sum_ / double(av_count_) * 1000.0, av_min_ * 1000.0, av_max_ * 1000.0,
+            static_cast<unsigned long long>(av_over_100ms_), static_cast<unsigned long long>(av_count_));
+    }
     // The movie's time (seconds) the shown picture should be at: the movie PCM heard; when it has not moved for
     // 0.15 s (not started yet, starved, or the sound ended before the pictures) the wall clock from its last value.
     double clock() {
@@ -1657,13 +1945,29 @@ private:
         sceKernelChangeThreadPriority(sceKernelGetThreadId(), 160);   // below the simulation thread's 128
         for (bool ended = false; !ended;) {
             std::unique_ptr<Item> item;
+            bool late = false;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait(lock, [this] { return stop_ || !decoded_.empty(); });
                 if (stop_) return;
                 item = std::move(decoded_.front());
                 decoded_.pop_front();
-                ++converting_;
+                // 132vf3: a picture the session would skip anyway is not converted, so a late pipeline rejoins the
+                // clock: the next decoded picture is already waiting here and is itself due by the movie time now (the
+                // session's last clock, moved on by the wall clock). Only with the sound on the pump (the PCM left
+                // the item at decode), and never the end or an error.
+                if (sink_ && audio_fed_ && !sound_early_ && due_time_ >= 0.0 && !decoded_.empty() && !item->ended &&
+                    !item->error && !decoded_.front()->ended && !decoded_.front()->error) {
+                    const double now_due = (due_time_ + (now_seconds() - due_wall_)) * picture_rate;
+                    late = double(decoded_.front()->index) <= now_due;
+                }
+                if (!late) ++converting_;
+            }
+            if (late) {
+                ++colour_skipped_;
+                recycle(std::move(item));
+                cv_.notify_all();
+                continue;
             }
             ended = item->ended || item->error;
             double ms = 0.0;
@@ -1698,9 +2002,13 @@ private:
     // The session's side only.
     std::unique_ptr<Item> current_;
     bool repeated_ = false;
+    bool started_ = false;   // 132vf3: the first picture was presented; the sound and the clock run
+    bool sound_early_ = false;   // 132vf3's test switch (set before the threads start)
     double start_ = 0.0, audio_last_ = -1.0, audio_changed_ = 0.0;
     std::uint64_t shown_ = 0, skipped_ = 0, held_ = 0;
     unsigned behind_ = 0;
+    double av_start_ = 0.0, av_sum_ = 0.0, av_abs_sum_ = 0.0, av_min_ = 0.0, av_max_ = 0.0;
+    std::uint64_t av_count_ = 0, av_over_100ms_ = 0;
     // The decode thread's side only.
     int format_ = 0;   // 0 unknown, 1 the pump's 48 kHz stereo, 2 another (dropped)
     std::vector<std::int16_t> early_pcm_;
@@ -1715,6 +2023,10 @@ private:
     std::atomic<bool> stop_{false};
     std::uint64_t pictures_ = 0;
     double decode_ms_ = 0.0, decode_max_ = 0.0, colour_ms_ = 0.0, colour_max_ = 0.0;
+    // 132vf3: the movie time the session's last next_frame computed and when (a negative time: not started yet), and
+    // the pictures the colour thread skipped as late.
+    double due_time_ = -1.0, due_wall_ = 0.0;
+    std::atomic<std::uint64_t> colour_skipped_{0};
     std::thread decode_thread_, colour_thread_;
 };
 
@@ -2524,6 +2836,19 @@ int main() {
         unsigned(arm), unsigned(bus), unsigned(gpu), unsigned(xbar), scePowerGetArmClockFrequency(),
         scePowerGetBusClockFrequency(), scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
     enter_thread_role(ThreadRole::simulation, "simulation");
+#if defined(OMEGA_ZONE_PROFILE)
+    {
+        const auto cost = omega::zone::calibrate_clock();
+        log("profiling: one clock read %.0f ns (std::chrono::steady_clock), %.0f ns (sceKernelGetProcessTimeWide); the "
+            "zones use %s%s",
+            cost.steady_ns, cost.process_ns, omega::zone::g_process_clock ? "the process clock" : "steady_clock",
+#if defined(OMEGA_ZONE_PROFILE_FINE)
+            ", with the GL backend's per-draw zones");
+#else
+            " (the GL backend's per-draw zones are compiled out: OMEGA_VITA_FINE_ZONES)");
+#endif
+    }
+#endif
     try {
         gfx::gxm::Options options;
         options.log = [](const std::string& text) { log("%s", text.c_str()); };
@@ -2538,6 +2863,42 @@ int main() {
         // Port-only test switch (VITA.md "Depth across scenes"): vita_test_depth_keep_off.txt clears depth at every
         // GXM scene (vitaGL's default; the vt2d hardware's see-through walls).
         options.keep_depth = vita_file_size(std::string(vita_data_root) + "/vita_test_depth_keep_off.txt") < 0;
+        // Port-only test switch (VITA.md "Shadow filter cache"): vita_test_shadow_cache_off.txt reads the shadow
+        // receivers' buffers at every draw (the 132vt4 A/B).
+        options.shadow_filter_cache = vita_file_size(std::string(vita_data_root) + "/vita_test_shadow_cache_off.txt") < 0;
+        if (!options.shadow_filter_cache) log("display: vita_test_shadow_cache_off.txt present: shadow filter cache off");
+        options.shadow_filter_check = vita_file_size(std::string(vita_data_root) + "/vita_test_shadow_cache_check.txt") >= 0;
+        if (options.shadow_filter_check) log("display: vita_test_shadow_cache_check.txt present: shadow filter cache hits checked");
+    // 132vg2 (VITA.md "Vita render path (132vg2)"): the GXM backend's per-scene GPU timing, on unless switched off.
+    options.gpu_timing = vita_file_size(std::string(vita_data_root) + "/vita_test_gpu_timing_off.txt") < 0;
+    if (!options.gpu_timing) log("display: vita_test_gpu_timing_off.txt present: GXM per-scene GPU timing off");
+    options.linear_textures = vita_file_size(std::string(vita_data_root) + "/vita_test_linear_textures.txt") >= 0;
+    options.patched_proofs = vita_file_size(std::string(vita_data_root) + "/vita_test_patched_proofs_off.txt") < 0;
+    if (!options.patched_proofs) log("display: vita_test_patched_proofs_off.txt present: patched draws unproven");
+    options.census = vita_file_size(std::string(vita_data_root) + "/vita_test_census.txt") >= 0;
+    if (options.census) log("display: vita_test_census.txt present: the blend census is counted");
+    options.blend_proof = vita_file_size(std::string(vita_data_root) + "/vita_test_blend_proof_off.txt") < 0;
+    if (!options.blend_proof) log("display: vita_test_blend_proof_off.txt present: every scene blend kept");
+    g_gpu_probe_cycle = vita_file_size(std::string(vita_data_root) + "/vita_test_gpu_probe.txt") >= 0;
+    if (g_gpu_probe_cycle)
+        log("display: vita_test_gpu_probe.txt present: the GPU probe cycles its modes per play window (diagnostic: the "
+            "picture is wrong in modes 1-6)");
+    options.shadow_vertex_flags = vita_file_size(std::string(vita_data_root) + "/vita_test_shadow_flags_off.txt") < 0;
+    if (!options.shadow_vertex_flags)
+        log("display: vita_test_shadow_flags_off.txt present: shadow receivers gathered per triangle");
+    options.shadow_flags_check = vita_file_size(std::string(vita_data_root) + "/vita_test_shadow_flags_check.txt") >= 0;
+    if (options.shadow_flags_check) log("display: vita_test_shadow_flags_check.txt present: shadow flags checked");
+    options.alpha_proof = vita_file_size(std::string(vita_data_root) + "/vita_test_alpha_proof_off.txt") < 0;
+    if (!options.alpha_proof)
+        log("display: vita_test_alpha_proof_off.txt present: draws with an alpha test keep the full program");
+    g_scene_cull = vita_file_size(std::string(vita_data_root) + "/vita_test_scene_cull_off.txt") < 0;
+    if (!g_scene_cull) log("display: vita_test_scene_cull_off.txt present: models outside the view are drawn");
+    options.alpha_test_variant = vita_file_size(std::string(vita_data_root) + "/vita_test_alpha_variant_off.txt") < 0;
+    if (!options.alpha_test_variant)
+        log("display: vita_test_alpha_variant_off.txt present: every scene draw uses the program with the alpha test");
+    options.large_buffer_patches = vita_file_size(std::string(vita_data_root) + "/vita_test_patches_off.txt") < 0;
+    if (!options.large_buffer_patches)
+        log("display: vita_test_patches_off.txt present: large-buffer updates wait for the GPU and write in place");
         // ux0:data/omega_strain/vita_test_display_order.txt ("1" rows as read, "2" reversed): the GPU display copy's
         // row order without the first-use check (the same section; a hardware fallback should the check refuse).
         if (FILE* f = std::fopen((std::string(vita_data_root) + "/vita_test_display_order.txt").c_str(), "r")) {

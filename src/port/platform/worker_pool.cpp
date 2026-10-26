@@ -1,5 +1,6 @@
 #include "worker_pool.hpp"
 
+#include "float_environment.hpp"
 #include "thread_roles.hpp"
 
 #include <algorithm>
@@ -62,6 +63,7 @@ void WorkerPool::loop() {
         }
         {
             ThreadBusyScope busy_time;
+            const FloatControlsScope caller_mode(job->float_controls);  // 132vs3: the caller's rounding / denormal flush
             work(*job);
         }
         {
@@ -90,6 +92,7 @@ void WorkerPool::for_each_beside(std::size_t count, const std::function<void(std
     Job job;
     job.fn = &fn;
     job.count = count;
+    job.float_controls = float_controls();
     {
         std::lock_guard lock(mutex_);
         job_ = &job;

@@ -106,10 +106,12 @@ public:
     bool request_facial_node(Word npc, std::int32_t node, float duration) override;
     bool request_facial_object(Word npc, Word object, float duration) override;
     bool request_facial_hotbox(Word npc, Word box, float duration) override;
+    bool request_facial_sound(Word npc, Word sound, float duration) override;
     bool request_look_at(Word npc, std::optional<Word> object, float duration) override;
     bool request_look_at_node(Word npc, std::int32_t node, float duration) override;
     bool request_look_at_object(Word npc, Word object, float duration) override;
     bool request_look_at_hotbox(Word npc, Word box, float duration) override;
+    bool request_look_at_sound(Word npc, Word sound, float duration) override;
     bool resume_look_at(Word npc) override;
     bool deactivate_dead(Word npc, bool value) override;
     // EquipGoggles through the goggles host (set_goggles_host: the play's
@@ -215,6 +217,10 @@ public:
     // (or unset) when the world does not host the box: RequestFacial of it is
     // then deferred.
     void set_hotbox_handle(std::function<std::optional<std::uint64_t>(Word)> resolver) { hotbox_handle_ = std::move(resolver); }
+    // A sound object's handle (sound_host_handle) by its SND record ID; nullopt
+    // (or unset) when the world does not host it: RequestFacial of it is then
+    // deferred.
+    void set_sound_handle(std::function<std::optional<std::uint64_t>(Word)> resolver) { sound_handle_ = std::move(resolver); }
     float closest_player_distance_squared(Word npc) override { return actor_closest_player_distance_squared(actor_of(npc)); }
     NpcAiSystem& system() override { return system_; }
     // 00188d80(actor, -1): a present actor's skeleton node 5 (00132910 through
@@ -249,6 +255,7 @@ private:
     std::function<bool(std::uint64_t)> unnamed_source_;
     std::function<std::optional<std::uint64_t>(Word)> object_handle_;
     std::function<std::optional<std::uint64_t>(Word)> hotbox_handle_;
+    std::function<std::optional<std::uint64_t>(Word)> sound_handle_;
     InteractTrigger interact_trigger_;
     InteractCode interact_code_;
     ResetHost reset_;

@@ -128,7 +128,8 @@ struct DeferredProgram {
     std::array<Qword, 0x12> uploads{};  // data 0xf..0x20 at the MSCAL
     std::array<Qword, 0xd> block{};     // data TOP..TOP+0xc at the MSCAL
 };
-// Runs a recorded MSCAL on a fresh Vu1State and fills its batch (stop, bounds, positions, colours) as the draw does.
+// Runs a recorded MSCAL on this thread's Vu1State (thread_vu1_state: the registers as a fresh state's; the data words
+// it does not write are never read) and fills its batch (stop, bounds, positions, colours) as the draw does.
 // The ShatterWindow heat-haze stop 0x19a8 throws as in 0039c680. `state` (tests): run on that state instead, with
 // only the recorded words written into it.
 void run_deferred_program(const DeferredProgram& program, ParticleBatch& batch, Vu1State* state = nullptr);

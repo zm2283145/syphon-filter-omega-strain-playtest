@@ -82,6 +82,14 @@ public:
     std::vector<FrameTime> frame_times() const;
     std::string summary() const;
 
+    // Port-only (132vg1 / 132vg2, research/VITA.md "Vita render path (132vg2)"): every render thread's totals since
+    // the start (microseconds; the frames executed, their execute and present times), read by the PS Vita's play log
+    // per window. Nothing else reads them.
+    struct Totals {
+        std::uint64_t frames = 0, execute_us = 0, present_us = 0;
+    };
+    static Totals totals();
+
     struct Core;
 
 private:

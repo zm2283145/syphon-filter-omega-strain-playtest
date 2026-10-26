@@ -1,6 +1,7 @@
 #include "actor_world.hpp"
 #include "actor_movement_scheduler.hpp"
 #include "morph_resources.hpp"
+#include <algorithm>
 #include <deque>
 #include <stdexcept>
 

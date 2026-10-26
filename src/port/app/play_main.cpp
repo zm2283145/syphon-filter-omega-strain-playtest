@@ -44,6 +44,7 @@
 #include "card_backup.hpp"
 #include "level_animation.hpp"
 #include "float_environment.hpp"
+#include "upper_body_pass.hpp"
 #include "geometry.hpp"
 #include "gs_alpha.hpp"
 #include "material_anim.hpp"
@@ -166,6 +167,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -188,6 +190,8 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -2326,7 +2330,7 @@ struct PlayGuiOverlay{
             const auto& model=map_models[m];
             const auto& mesh=model.mesh;
             for(const auto& s:mesh.surfaces){
-                GuiDrawBatch b;
+                GuiDrawBatch b=out.take();   // 132vf4 (port-only): a recycled batch's storage
                 b.flush=0x26ca70;b.clip=clip;b.filter=0x20;
                 const auto slot=model.material_slot.at(s.material);
                 b.render_mode=slot>=0?1U:0U;
@@ -2425,6 +2429,7 @@ struct PlayGuiOverlay{
     // about z. Then the actor's +48(dt) step and its draw (render mode 0x15) under camera record 0
     // (eqmodify_figure_clip_2bfa90), lit by MANLIGHT (386c28: actor byte +2c11 set takes 0055dec0's colours).
     void figure_draw(GuiDrawList& out,const gui::Widget& screen,const PlayGunPreview& guns){
+        OMEGA_ZONE("ui.figure");   // 132vf4 (port-only): the loadout figure's record (its step and vertices)
         if(!figure)throw std::runtime_error("002c2340: the loadout figure (002c1100's display actor 00393ff0) is not built");
         if(!screen.em)throw std::runtime_error("002c2340: the loadout figure without its GuiEquipmentModify screen *0051ee10");
         const float h=(rt.em_figure_turn(screen)-3.14159274F)*0.5F;
@@ -2525,7 +2530,9 @@ struct PlayGuiOverlay{
                                     const std::array<std::array<float,4>,4>& clip,const FrontendLightSet& lights_world,
                                     const std::array<std::int32_t,10>& table,const PlayGunPreview& guns,std::uint32_t flush){
         if(placement)f.character->set_anchor_world_placement(SoloActorSimulation::flor_key,*placement,false);
-        f.character->step(f.manifest->graph,*f.clips,{},f.morph,draw_dt);++f.morph.speech_elapsed_tick;
+        {OMEGA_ZONE("ui.figure.step");   // 132vf4 (port-only)
+         f.character->step(f.manifest->graph,*f.clips,{},f.morph,draw_dt);}
+        ++f.morph.speech_elapsed_tick;
         const auto* drawn_parts=&f.character->geometry();
         if(f.models){   // 132md3 (port-only): the replacements skinned by the figure's committed palette
             f.modded=*drawn_parts;
@@ -2535,10 +2542,11 @@ struct PlayGuiOverlay{
         const auto& parts=*drawn_parts;
         for(std::size_t i=0;i<parts.size();++i){
             const auto& g=parts[i].mesh;
-            GuiDrawBatch b;
+            GuiDrawBatch b=out.take();   // 132vf4 (port-only): a recycled batch's storage
             b.flush=flush;b.clip=clip;b.filter=0x20;
             b.render_mode=f.textured.at(i)?1U:0U;
             b.slot=f.slots.at(i);
+            b.vertices.reserve(g.triangles.size()*3);
             for(const auto& t:g.triangles)
                 for(const auto k:t){
                     const auto& v=g.vertices.at(k);
@@ -2578,7 +2586,7 @@ struct PlayGuiOverlay{
         if(!slots)throw std::runtime_error("0038e100: the player's attach points are not built (no hard mesh)");
         if(preview_generation!=guns.library->generation()){
             preview_parts.clear();preview_textures.clear();preview_generation=guns.library->generation();
-            preview_overrides.clear();preview_mod_slots.clear();preview_mod_vertices.clear();
+            preview_overrides.clear();preview_mod_slots.clear();preview_mod_vertices.clear();preview_vertices.clear();
         }
         const auto& player=fig.character->model().player();
         const auto component=figure_frame(root_placement_matrix(RootParentTransform{player.orientation,player.position}));
@@ -2617,8 +2625,9 @@ struct PlayGuiOverlay{
             static SkinnedMeshGeometry geometry;   // 132win11: storage kept across draws (port-side speed only)
             slot=gun_geometry(handle,part,decoded,matrices,slot,guns,geometry);
             const bool flare=gun_part_flare_program(decoded.mesh);
-            GuiDrawBatch b;
+            GuiDrawBatch b=out.take();   // 132vf4 (port-only): a recycled batch's storage
             b.flush=flush;b.clip=clip;b.filter=0x20;b.render_mode=1;b.slot=slot;
+            b.vertices.reserve(geometry.triangles.size()*3);
             for(const auto& t:geometry.triangles)
                 for(const auto k:t){
                     const auto& v=geometry.vertices.at(k);
@@ -2679,6 +2688,7 @@ struct PlayGuiOverlay{
         return s.empty()?" none drawn":s;
     }
     unsigned draw_frame=0;
+    GuiDrawList draw_list;   // 132vf4 (port-only): draw()'s list, recycled every frame
     // The weapon preview's LOD 0 parts per (model handle, part) and the gun textures registered in this
     // renderer (host slots gun_slot_base + texture id); both dropped when the library changes.
     static constexpr std::uint32_t gun_slot_base=0x80000000U;
@@ -2692,6 +2702,9 @@ struct PlayGuiOverlay{
     std::map<const omega::gfx::ReplacementModel*,std::uint32_t> preview_mod_slots;
     // 132md7 (port-only, MODDING.md "Speed"): the replaced parts' preview vertices, kept while their inputs are unchanged.
     omega::mods::GunPreviewCache preview_mod_vertices;
+    // 132vf4 (port-only): the disc parts' preview vertices (preview_draw), kept while their inputs are unchanged.
+    struct PreviewVertices{bool valid=false;bool flare=false;std::int32_t alpha=0;GunSlotMatrices matrices{};std::uint32_t slot=0;std::vector<GuiVertex> vertices;};
+    std::map<std::pair<std::int32_t,std::size_t>,PreviewVertices> preview_vertices;
     const omega::mods::GunModelOverrides* preview_override(std::int32_t handle,const PlayGunPreview& guns){
         auto it=preview_overrides.find(handle);
         if(it==preview_overrides.end()){
@@ -2746,13 +2759,14 @@ struct PlayGuiOverlay{
     // registers 005382c8..d4; drawn here as the vertex alpha, a host choice).
     void preview_draw(GuiDrawList& out,IeDrawState& st,std::int32_t handle,const PlayGunPreview& guns,
                       const std::array<float,16>* matrix=nullptr,std::uint8_t alpha_416=0x80){
+        OMEGA_ZONE("ui.preview");   // 132vf4 (port-only): a gun preview's record (the loadout boxes, the HUD)
         if(handle==0)return;
         const GunModel& model=guns.library->model(handle);
         if(!gun_model_drawn(model))return;   // 003836f0: +417
         if(!guns.images)throw std::runtime_error("003836b0: the HUD weapon preview without decoded gun textures (--textured)");
         if(preview_generation!=guns.library->generation()){
             preview_parts.clear();preview_textures.clear();preview_generation=guns.library->generation();
-            preview_overrides.clear();preview_mod_slots.clear();preview_mod_vertices.clear();
+            preview_overrides.clear();preview_mod_slots.clear();preview_mod_vertices.clear();preview_vertices.clear();
         }
         const auto matrices=gun_preview_matrices(model,guns.frame);
         for(const auto part:gun_preview_parts(model)){
@@ -2786,29 +2800,40 @@ struct PlayGuiOverlay{
                         omega::mods::gun_preview_vertices(geometry,lights.gun,flare,c,a))});
                 }
                 if(e->vertices->empty())continue;
-                GuiDrawBatch b;
+                GuiDrawBatch b=out.take();   // 132vf4 (port-only): a recycled batch's storage
                 b.flush=0x3836b0;b.render_mode=1;b.slot=e->slot;b.filter=0x20;b.matrix=matrix?*matrix:st.top();
                 b.shared_vertices=e->vertices;b.strips={static_cast<std::int32_t>(e->vertices->size())};
                 out.batches.push_back(std::move(b));
                 sweep_preview_records.insert(guns.library->attached(handle).item_40a);   // PORT-ONLY count (132wp1)
                 continue;
             }
-            slot=gun_geometry(handle,part,decoded,matrices,slot,guns,geometry);
-            GuiDrawBatch b;
-            b.flush=0x3836b0;b.render_mode=1;b.slot=slot;b.filter=0x20;b.matrix=matrix?*matrix:st.top();
-            for(const auto& t:geometry.triangles)
-                for(const auto i:t){
-                    const auto& v=geometry.vertices.at(i);
-                    GuiVertex g;
-                    g.pos={v.position[0],v.position[1],v.position[2],1.0F};
-                    if(flare)g.colour={c,c,c,a};
-                    else{
-                        const auto lit=frontend_light_colour(lights.gun,{v.normal[0],v.normal[1],v.normal[2]});
-                        g.colour={lit[0],lit[1],lit[2],a};
+            GuiDrawBatch b=out.take();   // 132vf4 (port-only): a recycled batch's storage
+            // 132vf4 (port-only, research/VITA.md "Front-end speed (132vf4)"): the disc part's skinned and lit
+            // vertices, kept while its matrices (bitwise), flare and alpha are unchanged (a still box is not skinned
+            // and lit again each frame); the same values in the same order.
+            PreviewVertices& kept=preview_vertices[{handle,part}];
+            if(!(kept.valid&&kept.flare==flare&&kept.alpha==a&&std::memcmp(&kept.matrices,&matrices,sizeof matrices)==0)){
+                slot=gun_geometry(handle,part,decoded,matrices,slot,guns,geometry);
+                kept.valid=true;kept.flare=flare;kept.alpha=a;kept.matrices=matrices;kept.slot=slot;
+                kept.vertices.clear();
+                kept.vertices.reserve(geometry.triangles.size()*3);
+                for(const auto& t:geometry.triangles)
+                    for(const auto i:t){
+                        const auto& v=geometry.vertices.at(i);
+                        GuiVertex g;
+                        g.pos={v.position[0],v.position[1],v.position[2],1.0F};
+                        if(flare)g.colour={c,c,c,a};
+                        else{
+                            const auto lit=frontend_light_colour(lights.gun,{v.normal[0],v.normal[1],v.normal[2]});
+                            g.colour={lit[0],lit[1],lit[2],a};
+                        }
+                        g.uv={v.uv[0]+2048.0F,v.uv[1]+2048.0F,1.0F,0.0F};
+                        kept.vertices.push_back(g);
                     }
-                    g.uv={v.uv[0]+2048.0F,v.uv[1]+2048.0F,1.0F,0.0F};
-                    b.vertices.push_back(g);
-                }
+            }
+            slot=kept.slot;
+            b.flush=0x3836b0;b.render_mode=1;b.slot=slot;b.filter=0x20;b.matrix=matrix?*matrix:st.top();
+            b.vertices.assign(kept.vertices.begin(),kept.vertices.end());
             if(b.vertices.empty())continue;
             b.strips={static_cast<std::int32_t>(b.vertices.size())};
             out.batches.push_back(std::move(b));
@@ -3074,7 +3099,10 @@ struct PlayGuiOverlay{
         for(;host_log_seen<host.log.size();++host_log_seen)
             std::cout<<"GUI host at frame "<<frame<<": "<<host.log[host_log_seen]<<"\n";
         upload();
-        GuiDrawList list;
+        // Port-only (132vf4, research/VITA.md "Front-end speed (132vf4)"): the overlay's list keeps last frame's batches
+        // as spares (GuiDrawList::recycle), so the HUD and loadout draws reuse their storage instead of allocating.
+        GuiDrawList& list=draw_list;
+        list.recycle();
         // Checkpoint 132f6: 00244b90 at 0x00244bac: byte 004ffc29 set (the loadout screen pending) skips to
         // 0x00244ce0, the GUI canvas alone (+5c); the HUD screen 003e7670 and its texts are not drawn.
         if(loadout_pending)hud=nullptr;
@@ -4717,6 +4745,18 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // the session (worker_pool.hpp) before any D3D device, so that a level's start and end make and end no thread
         // ("The loading-screen hang"). 0 workers (--worker-threads 0 / worker_threads=0): the old single-threaded path.
         WorkerPool workers(display.worker_threads<0?WorkerPool::default_workers():static_cast<unsigned>(display.worker_threads));
+        // 132vs3 (port-only, research/VITA.md "In-level sim speed (132vs3)"): the upper-body pass's four runs
+        // (upper_body_pass.hpp) on the pool, the same result. Test switch:
+        // ux0:data/omega_strain/vita_test_upper_body_serial.txt runs them on this thread (the hardware A/B); PC:
+        // --worker-threads 0.
+        bool upper_body_parallel=workers.workers()>0;
+#ifdef __vita__
+        if(upper_body_parallel&&vita_file_size(std::string(vita_data_root)+"/vita_test_upper_body_serial.txt")>=0){
+            upper_body_parallel=false;
+            std::cout<<"Upper-body pass: vita_test_upper_body_serial.txt present: one thread (test switch)\n";
+        }
+#endif
+        const UpperBodyPassPoolScope upper_body_pool(upper_body_parallel?&workers:nullptr);
         PadConnection session_pads(controller_prompt);
         if(frontend){
             if(frontend_script.empty()&&!frontend_hidden&&!session_gamepad)session_gamepad=std::make_unique<GamepadDevice>();
@@ -7240,6 +7280,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // Declared after the device and the host: the pump stops first.
         std::recursive_mutex sound_lock;std::unique_ptr<GameSoundHost> locked_sound_host;
         std::unique_ptr<VitaMovieHooks::SoundPumpHandle> sound_pump;
+        // 132vs3: the step's gameSound pump and frame each take the lock once (the host's calls in them re-enter it)
+        // rather than per host call, so the simulation waits for a grain's mix at most once in each. Test switch:
+        // ux0:data/omega_strain/vita_test_sound_lock_per_call.txt keeps the per-call lock (the hardware A/B).
+        bool sound_lock_per_pass=true;
 #endif
         // Checkpoint 122d: the NIE kind-2 particle assets (vtable 004daa10), their PAR library (00397b20) and the
         // emitter runtime (003a2dd0 / 003a2400 / 003a0050). Declared before ni_events, whose hooks use it.
@@ -7438,12 +7482,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // its colours (the pass is a function of the list and the base colours), so it is neither relit nor uploaded.
         std::vector<std::vector<TerrainPointLight>> terrain_light_memo;std::vector<std::uint8_t> terrain_light_memo_valid;
         // Port-only (132vs1): the pass's working lists, kept between frames so a frame's pass allocates nothing once
-        // they have grown: the (batch, instance list) pairs, the instance lists (the first terrain_lit_list_count in
-        // use), the batches to relight, and one batch's positions, colours and reaching lights.
-        std::vector<std::pair<std::size_t,std::size_t>> terrain_lit;std::vector<std::vector<TerrainPointLight>> terrain_lit_lights;
-        std::vector<TerrainPointLight> terrain_instance_lights;std::vector<std::size_t> terrain_touched;
-        std::vector<std::array<float,3>> terrain_light_positions;std::vector<std::array<std::uint8_t,3>> terrain_light_colours;
-        std::vector<TerrainPointLight> terrain_batch_lights;
+        // they have grown: the (batch, terrain instance) pairs with the bits of the instance's lights that reach the
+        // batch, and the batches to relight.
+        // 132vs2 (research/VITA.md "In-level sim speed (132vs2)"): the batches' VU1 spheres (terrain_batch_sphere,
+        // made once), each terrain instance's light list and (batch, reaching lights) pairs (the instances run on the
+        // worker pool), and per batch to relight its lit pair (or none) and whether it was relit (the batches run on
+        // the pool; the GPU updates follow in batch order on this thread).
+        std::vector<std::pair<std::size_t,std::size_t>> terrain_lit;std::vector<std::uint32_t> terrain_lit_masks;
+        std::vector<std::size_t> terrain_touched;
+        std::vector<TerrainBatchSphere> terrain_batch_spheres;
+        std::vector<std::vector<TerrainPointLight>> terrain_instance_lights;
+        std::vector<std::vector<std::pair<std::size_t,std::uint32_t>>> terrain_instance_reached;
+        std::vector<std::size_t> terrain_touched_lit;std::vector<std::uint8_t> terrain_touched_relit;
+        // Port-only test switch (132vs2): ux0:data/omega_strain/vita_test_terrain_light_serial.txt runs the pass on the
+        // simulation thread alone (the pool's A/B on the hardware); PC: --worker-threads 0.
+        bool terrain_light_parallel=workers.workers()>0;
+#ifdef __vita__
+        if(terrain_light_parallel&&vita_file_size(std::string(vita_data_root)+"/vita_test_terrain_light_serial.txt")>=0){
+            terrain_light_parallel=false;
+            std::cout<<"Terrain light pass: vita_test_terrain_light_serial.txt present: one thread (test switch)\n";
+        }
+#endif
 #if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
         std::uint64_t terrain_memo_kept=0,terrain_memo_relit=0,terrain_memo_vertices=0;
 #endif
@@ -8612,8 +8671,18 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // "no_vum", 0021af28), +2c Enable / Disable, +2d the zone tracker, +2e 0; +50 the record's matrix
                 // (0021b5b0 -> 003cdff0; a pathed object's pose), parentless, so 001c7a48's +40 is its row 3.
                 // GOBs are not deleted in play: +c stays the id.
-                const auto sound_gob=[&population](std::uint32_t id)->std::optional<std::size_t>{
-                    for(std::size_t k=0;k<population.objects.size();++k)if(population.objects[k].id==id)return k;
+                // 132vs3 (port-only): the population is the level's own (const here), so its owners are looked up
+                // in id indexes made once (each GOB id's first record, as the scan found it) instead of a scan per call.
+                const auto sound_gob_ids=[&population]{
+                    auto ids=std::make_shared<std::unordered_map<std::uint32_t,std::size_t>>();
+                    for(std::size_t k=0;k<population.objects.size();++k)ids->emplace(population.objects[k].id,k);
+                    return std::shared_ptr<const std::unordered_map<std::uint32_t,std::size_t>>(std::move(ids));}();
+                const auto sound_id_set=[](const auto& records){
+                    auto ids=std::make_shared<std::unordered_set<std::uint32_t>>();
+                    for(const auto& r:records)ids->insert(r.id);
+                    return std::shared_ptr<const std::unordered_set<std::uint32_t>>(std::move(ids));};
+                const auto sound_gob=[sound_gob_ids](std::uint32_t id)->std::optional<std::size_t>{
+                    if(const auto it=sound_gob_ids->find(id);it!=sound_gob_ids->end())return it->second;
                     return std::nullopt;};
                 const auto sound_gob_view=[&population,&mission_host,&zone_tracker,&pathed_objects,&lift_world](std::size_t k){
                     const auto& o=population.objects[k];
@@ -8632,8 +8701,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // Checkpoint 132vo2: an SND: owner (a SoundGOBJ that owns its sound, +1f2). 00212ee0 -> 003cf0e0(obj,
                 // .., 0xb): +c = the record id, +49 = 0xb, +2c 1 (Enable / Disable 0015bf80 / 0015bf90), +2d its
                 // virtual +5c / +60, +2e 0; +50 the record's basis and position (virtual +90 = 003cdff0), parentless.
-                const auto sound_snd=[&population](std::uint32_t id){
-                    return std::any_of(population.sound_objects.begin(),population.sound_objects.end(),[id](const PopulationSoundObject& s){return s.id==id;});};
+                const auto sound_snd=[ids=sound_id_set(population.sound_objects)](std::uint32_t id){return ids->contains(id);};
                 const auto sound_snd_view=[&sound_world](std::uint32_t id){
                     if(!sound_world)throw std::runtime_error("gameSound: SND "+std::to_string(id)+"'s view (001c75c0) during its constructor 00212ee0");
                     const auto& r=sound_world->record(id);const auto& s=sound_world->state(id);
@@ -8652,8 +8720,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // is cleared at 0015c82c and only the zone tracker's activation (virtual +5c 003ce980) sets it,
                 // for a node an ACL: group lists. 001c78e0 reads +2d first, so an absent node's sound is
                 // silent and its null +50 is never read. Nodes are not deleted in play.
-                const auto sound_node=[&population](std::uint32_t id){
-                    return std::any_of(population.nodes.begin(),population.nodes.end(),[id](const PopulationNode& n){return n.id==id;});};
+                const auto sound_node=[ids=sound_id_set(population.nodes)](std::uint32_t id){return ids->contains(id);};
                 const auto sound_node_view=[&mission_host,&zone_tracker](std::uint32_t id){
                     if(!zone_tracker)throw std::runtime_error("gameSound: node "+std::to_string(id)+"'s +2d before the zone tracker exists");
                     GameSoundOwnerView v;
@@ -8665,8 +8732,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // after 003cf0e0: +c the record key, +49 0x12, +2c / +2d / +2e the zone's (Enable / Disable, the zone
                 // tracker); +50 the identity transform 0055c9f0 (003cdff0), so +40 is row 3 of the identity
                 // (level_fire_zone_position_e4). FIR: zones are not deleted in play; their state is the combat session's.
-                const auto sound_fire=[&population](std::uint32_t id){
-                    return std::any_of(population.fires.begin(),population.fires.end(),[id](const PopulationFire& f){return f.id==id;});};
+                const auto sound_fire=[ids=sound_id_set(population.fires)](std::uint32_t id){return ids->contains(id);};
                 const auto sound_fire_view=[&combat_session](std::uint32_t id){
                     const FireZone* z=combat_session&&combat_session->throws()?combat_session->throws()->level_fire_zone_state(id):nullptr;
                     if(!z)throw std::runtime_error("gameSound: FIR: owner "+std::to_string(id)+"'s view (001c75c0) without the combat session's fire zone");
@@ -8795,6 +8861,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(locked_sound_host){
                         sound_pump=vita_movie_hooks().sound_pump(*sound_host,sound_lock,*sound_device);
                         std::cout<<"Sound: the level's mix runs on the sound pump (the audio core, port-only, 132vs1)\n";
+                        if(vita_file_size(std::string(vita_data_root)+"/vita_test_sound_lock_per_call.txt")>=0){
+                            sound_lock_per_pass=false;
+                            std::cout<<"Sound: vita_test_sound_lock_per_call.txt present: the pump's lock per host call (test switch)\n";
+                        }
                     }
 #endif
                     std::cout<<"Sound: real-time output on the default device (XAudio2)"<<(muted?", muted for --test-audio-device (port-only test)":"")
@@ -9556,7 +9626,25 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // StreetsBlow): +c, +40, +2c/+2d (+2e 0), +e8 row 3 and +c0 = +e4 (0014d340).
                         auto hosts=bc.host_objects;const std::size_t gobs=population.objects.size();
                         const std::function<std::optional<CombatHostObject>(std::uint64_t)> host_view=[hosts,gobs,gob_vum,&population,&pathed_objects,&lift_world,&sim,
-                            &ni_events,&ni_model_bounds,&mission_host](std::uint64_t o)->std::optional<CombatHostObject>{
+                            &ni_events,&ni_model_bounds,&mission_host,&sound_world](std::uint64_t o)->std::optional<CombatHostObject>{
+                            if(o>=sound_host_handle(0)&&o<sound_host_handle(population.sound_objects.size())){
+                                // 132ms9: a sound object (SoundGOBJ vtable 004daf30; MYANMAR's Area3Thugs RequestFacial of
+                                // O_FIRE_MEDIUM). Its ctor 00212ee0 builds the record's basis + translation (w 1, 00213158)
+                                // and attaches it through +90 003cdff0 (+50 a new transform: the matrix copied). +40 0
+                                // (003cf0e0), +2c/+2d (+2e 0), +e8 row 3 (003cd1c0), +c0 0014d340 -> +e4 003cd260 with
+                                // +88 0013ee60 null: the matrix's row 3; +f4 003ccff0 the matrix; +c4 0015c020 (0).
+                                const auto& r=population.sound_objects[static_cast<std::size_t>(o-sound_host_handle(0))];
+                                if(!sound_world||!sound_world->contains(r.id))
+                                    throw std::runtime_error("SND "+std::to_string(r.id)+" as a combat object: the sound objects are not hosted (00212ee0)");
+                                const auto& s=sound_world->state(r.id);
+                                CombatHostObject g;g.id=static_cast<std::int32_t>(r.id);g.health_40=0.0F;
+                                g.root={s.enabled_2c,s.present_2d,0};
+                                const auto m=gob_matrix({r.position.x,r.position.y,r.position.z},r.basis);
+                                g.position=m[3];g.eye=object_eye_c0(&m,std::nullopt,~std::uint64_t{0});
+                                for(std::size_t i=0;i<4;++i)g.matrix_f4[i]=m[i];
+                                g.bounds_hosted=true;g.kind_c4=0;
+                                return g;
+                            }
                             if(o>=0xa0000000ULL&&o<0xa0000000ULL+population.event_objects.size()&&ni_events){
                                 // Checkpoint 132zf11: an NIE (vtable 004dc050; the tank's body registered by 00284100): +c, +40,
                                 // +2c 1 / +2d / +2e 0 (003cf0e0, 0023c010), +e8 row 3 (003cd1c0), +c0 -> +e4 (0014d340 -> 003cd260),
@@ -9716,6 +9804,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             const auto k=sim.hotboxes().find(id);                      // 0040c540: the box's +0c
                             if(!k)return std::nullopt;
                             return hotbox_host_handle(*k);});
+                        if(script_npcs_host)script_npcs_host->set_sound_handle([&population,&sound_world](Word id)->std::optional<std::uint64_t>{
+                            if(!sound_world||!sound_world->contains(id))return std::nullopt;
+                            for(std::size_t k=0;k<population.sound_objects.size();++k)
+                                if(population.sound_objects[k].id==id)return sound_host_handle(k);
+                            return std::nullopt;});
                         // 0040c540 for the HUD callouts (00242330) and their trackers (003e9880): the population
                         // GOBs and the hotboxes by id (an actor or NPC node is the combat session's).
                         host_object_by_id=[gobs,&population,&sim,host_view](std::int32_t id)->std::optional<CombatHostObject>{
@@ -10079,6 +10172,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             {
                 // The zone activation map with every key 0040c540 answers here, and the level-start tracker
                 // update (001350e0 -> 0013d8a0; the original runs it before 003e1a20's start stages).
+                OMEGA_ZONE_LAPS(zone_lap);   // port-only (132vl2): this block's steps in the Vita's load phases
                 std::set<std::uint32_t> known;
                 for(const auto& o:population.objects)known.insert(o.id);
                 for(const auto& b:population.hotboxes)known.insert(b.id);
@@ -10092,8 +10186,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 if(play_particles)for(const auto& pl:play_particles->placements)known.insert(pl.key);
                 for(const auto& o:loaded_level_lights.objects)known.insert(o.id);   // the PNT / DIR light objects
+                OMEGA_ZONE_LAP(zone_lap,"load.zone_known");
                 zone_map.emplace(population_zone_activation_map(population,[&known](std::uint32_t k){return known.count(k)!=0;}));
                 zone_tracker.emplace(*zone_map);
+                OMEGA_ZONE_LAP(zone_lap,"load.zone_map");
                 // Checkpoint 132zf8: an actor's region tracker +32a0 (002245f0 over the terrain zones: retained while
                 // its zone contains the position, else 00224ac0 among that zone's members, else 002248a0), as the
                 // backpack's regions read them (+2c 1, +2d the zone's presence, +2e 0).
@@ -10114,7 +10210,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // The light objects the first ENV activated (virtual +5c: 003ce980 sets +2d).
                 for(const auto id:loaded_level_lights.environment_activated)zone_tracker->mark_present(id);
                 std::size_t pnt_members=0;
-                for(const auto& z:zone_map->zones())for(const auto key:z.members)if(key&&is_level_light_object(loaded_level_lights,key))++pnt_members;
+                {
+                    // Port-only (132vl2, load time): is_level_light_object's answer from a set of the light objects' ids.
+                    std::unordered_set<std::uint32_t> light_ids;
+                    for(const auto& o:loaded_level_lights.objects)light_ids.insert(o.id);
+                    for(const auto& z:zone_map->zones())for(const auto key:z.members)if(key&&light_ids.contains(key))++pnt_members;
+                }
                 std::size_t fire_links=0,fire_zone_links=0;
                 for(const auto& f:population.fires)for(const auto& l:f.links){
                     ++fire_links;
@@ -10123,6 +10224,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"Zone activation map: "<<zone_map->zones().size()
                     <<" terrain zones (SND/GOB/PLR/NIL/NIE/PNT/GEN/INV/BOX/FIR members; "<<pnt_members<<" PNT light memberships); FIR: "
                     <<population.fires.size()<<" fire zones with "<<fire_links<<" links, "<<fire_zone_links<<" to terrain zones\n";
+                OMEGA_ZONE_LAP(zone_lap,"load.zone_counts");
                 const auto for_good=apply_generator_load_presence(*generator_world,population,*zone_map,&generator_for_good);
                 std::cout<<"Generators present for good (no region object, 002214b0): "<<for_good<<"\n";
                 const auto start_requests=zone_tracker->update(actor_position_e0(sim),sim.component());
@@ -10146,6 +10248,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 apply_crate_zone_requests(start_requests,combat_session.get());
                 if(play_particles)apply_placement_zone_requests(start_requests,play_particles->placements,*play_particles->system,ni_events.get());
                 else if(ni_events)apply_event_zone_requests(start_requests,*ni_events);
+                OMEGA_ZONE_LAP(zone_lap,"load.zone_start");
             }
             script_printed={mission_host->calls().size(),mission_host->objectives().outcomes().size(),mission_host->objectives().progression_adds().size()};
             VITA_LOAD_PHASE(disc,"mission start to the script hooks (hotboxes, pathed objects, zones)");
@@ -13007,6 +13110,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // applied the bindings, mouse look and display settings): the presents' vsync, the overlay and its key (a
         // profile made for it when needed) and the render scale (the buffers re-sized at the next frame).
         bool render_scale_changed=false;
+#ifdef __vita__
+        std::optional<float> vita_scene_scale_logged;   // 132vp4: the render scale last given the scene renderer
+#endif
         struct PageListen{PortSettingsPage& page;std::size_t id;~PageListen(){page.unlisten(id);}};
         const PageListen page_listen{settings_page,settings_page.listen([&](const PortSettings& s){
             if(pacing&&pacing->vsync()!=s.vsync){
@@ -13306,7 +13412,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 generator_dt=step_dt;
                 if(god_from&&frame>=*god_from)sim.set_invulnerable_33a4(true);   // --god (port-only test cheat)
                 // Physical stick deflection and pressure slots for this frame.
-                float x=0,y=0,p10=0,p11=0,rx=0,ry=0,cross=0,triangle=0,square=0,r1=0,l1=0,circle=0,dpad_right=0,select=0;
+                float x=0,y=0,p10=0,p11=0,rx=0,ry=0,cross=0,triangle=0,square=0,r1=0,l1=0,circle=0,dpad_right=0,select=0,r3=0;
                 std::array<float,4> dpad{};   // sp+fb0..fbc: Up, Down, Left, Right
                 if(!script.empty()){
                     script_teleport();
@@ -13330,6 +13436,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     else if(script_index<script.size()){const auto& st=script[script_index];x=st.x;y=st.y;p10=st.p10;p11=st.p11;rx=st.rx;ry=st.ry;
                         cross=st.cross;triangle=st.triangle;square=st.square;r1=st.r1;l1=st.l1;circle=st.circle;dpad=st.dpad;
                         if(st.pad&ds2::select)select=1;   // the PAD column's Select (sp+f80, the weapon switch 0x0024ca48)
+                        if(st.pad&ds2::r3)r3=1;           // the PAD column's R3 (sp+fd8, the manual reload 0x0024cde4)
                         --script_left;}
                     else if(!pilot.empty()){
                         const auto here=sim.floor_root_placement();
@@ -13795,7 +13902,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     const auto on=[&](std::uint16_t bit){return (in.held&bit)?1.0F:0.0F;};
                     p10=on(ds2::r2);p11=on(ds2::l2);
                     cross=on(ds2::cross);triangle=on(ds2::triangle);square=on(ds2::square);circle=on(ds2::circle);
-                    r1=on(ds2::r1);l1=on(ds2::l1);select=on(ds2::select);
+                    r1=on(ds2::r1);l1=on(ds2::l1);select=on(ds2::select);r3=on(ds2::r3);
                     dpad_right=on(ds2::right);
                     dpad[0]=on(ds2::up);dpad[1]=on(ds2::down);dpad[2]=on(ds2::left);dpad[3]=on(ds2::right);
                 }
@@ -13808,6 +13915,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(d.down(ds2::l1))l1=1;
                     if(d.down(ds2::circle))circle=1;
                     if(d.down(ds2::select))select=1;
+                    if(d.down(ds2::r3))r3=1;
                     if(d.down(ds2::right))dpad_right=std::max(dpad_right,d.pressure_word(ds2::p_right)/255.0F);   // sp+f88
                     if(d.down(ds2::up))dpad[0]=1;if(d.down(ds2::down))dpad[1]=1;if(d.down(ds2::left))dpad[2]=1;if(d.down(ds2::right))dpad[3]=1;
                 }
@@ -14021,9 +14129,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // 132vs1: with the sound pump the mix and the device feed run on the audio core; the host's
                     // direct calls here take the pump's lock.
                     if(sound_pump){
-                        {std::lock_guard<std::recursive_mutex> g(sound_lock);sound_host->lpd_service();}
-                        game_sound->pump();
-                        game_sound->frame();
+                        // 132vs3: sub-zones of sim.sound; the .lock zones are the waits for the pump's lock (a grain's
+                        // mix in progress), the pump and frame passes' only waits unless the test switch is present
+                        // (sound.level_frame: the front end's own sound step is "sound.frame").
+                        {OMEGA_ZONE("sound.lpd");
+                         std::unique_lock<std::recursive_mutex> g(sound_lock,std::defer_lock);
+                         {OMEGA_ZONE("sound.lpd.lock");g.lock();}
+                         sound_host->lpd_service();}
+                        {OMEGA_ZONE("sound.pump");
+                         std::unique_lock<std::recursive_mutex> g(sound_lock,std::defer_lock);
+                         if(sound_lock_per_pass){OMEGA_ZONE("sound.pump.lock");g.lock();}
+                         game_sound->pump();}
+                        {OMEGA_ZONE("sound.level_frame");
+                         std::unique_lock<std::recursive_mutex> g(sound_lock,std::defer_lock);
+                         if(sound_lock_per_pass){OMEGA_ZONE("sound.level_frame.lock");g.lock();}
+                         game_sound->frame();}
+                        OMEGA_ZONE("sound.logs");
                         std::vector<std::string> lines;
                         {std::lock_guard<std::recursive_mutex> g(sound_lock);lines=sound_host->take_log();}
                         for(const auto& line:sound_device->take_log())std::cout<<line<<" at frame "<<frame<<"\n";
@@ -14877,7 +14998,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     gated.left_f70=pin.pad->left;gated.right_f60=pin.right_stick;
                     gated.r2_fa8=pin.pad->pressure_10;gated.l2_fac=pin.pad->pressure_11;
                     gated.cross_fa0=cross;gated.triangle_fa4=triangle;gated.square_f9c=square;gated.circle_f98=circle;
-                    gated.r1_f90=r1;gated.l1_f94=l1;gated.right_f88=dpad_right;gated.select_f80=select;gated.left_f84=dpad_left;
+                    gated.r1_f90=r1;gated.l1_f94=l1;gated.right_f88=dpad_right;gated.select_f80=select;gated.left_f84=dpad_left;gated.r3_fd8=r3;
                     PlayerPadGateBytes gb;
                     gb.input_00=0;                       // input +0: the constructor's 0 (0x00250500); no other store is known
                     gb.loadout_pending_4ffc29=gui_overlay_draw&&gui_overlay_draw->loadout_pending;   // 004ffc29 (--loadout-screen)
@@ -14917,6 +15038,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     combat_input.now_ms=static_cast<std::uint32_t>(std::floor(elapsed*1000.0));
                     combat_input.dpad_right=gated.right_f88;
                     combat_input.select=gated.select_f80;
+                    combat_input.r3=gated.r3_fd8;
                     if(gui_overlay_draw){   // 0024b5d0's GuiGameScreen +d4 and the 200 ms hold's 0045ca20(1) (132hud)
                         combat_input.game_screen_d4_one=gui_overlay_draw->rt.gs.d4==1;
                         combat_input.choose_menu_45ca20=[overlay=gui_overlay_draw.get()]{overlay->rt.gs_open_ca20(true);};
@@ -17193,62 +17315,90 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // The terrain instances come first; the GOB model sub-instances follow them.
                     if(instances.size()<terrain_instance_batches.size()||(terrain_instance_batches.size()<instances.size()&&instances[terrain_instance_batches.size()].filed))
                         throw std::runtime_error("Terrain lights: receiver instances differ from the terrain instances");
-                    auto& lit=terrain_lit;   // (batch, instance light list), ascending batches
-                    auto& lit_lights=terrain_lit_lights;
-                    lit.clear();
-                    std::size_t lit_lists=0;
-                    for(std::size_t k=0;k<terrain_instance_batches.size();++k){
-                        auto& lights=terrain_instance_lights;
-                        terrain_point_lights(lights,shadow_scene.lights(),table,instances[k].bounds_min,instances[k].bounds_max);
-                        if(lights.empty())continue;
-                        const auto from=lit.size();
-                        for(std::size_t b=terrain_instance_batches[k].first;b<terrain_instance_batches[k].second;++b)
-                            for(const auto& l:lights)if(terrain_batch_reached(l,terrain.batch_spans[b])){lit.push_back({b,lit_lists});break;}
-                        if(lit.size()>from){
-                            if(lit_lists==lit_lights.size())lit_lights.emplace_back();
-                            lit_lights[lit_lists++].assign(lights.begin(),lights.end());
-                        }
+                    auto& lit=terrain_lit;   // (batch, terrain instance), ascending batches
+                    auto& lit_masks=terrain_lit_masks;   // per pair, the instance's lights that reach the batch
+                    const std::size_t instance_count=terrain_instance_batches.size();
+                    if(terrain_batch_spheres.size()!=terrain.batch_spans.size()){
+                        terrain_batch_spheres.clear();
+                        for(const auto& batch:terrain.batch_spans)terrain_batch_spheres.push_back(terrain_batch_sphere(batch));
                     }
+                    if(terrain_instance_lights.size()<instance_count){
+                        terrain_instance_lights.resize(instance_count);terrain_instance_reached.resize(instance_count);
+                    }
+                    // Per instance (132vs2: on the pool; each writes its own slots): its light list and the batches
+                    // it reaches, with every light tested (the relight step's memo uses the bits).
+                    const auto instance_pass=[&](std::size_t k){
+                        auto& lights=terrain_instance_lights[k];auto& reached=terrain_instance_reached[k];
+                        reached.clear();
+                        terrain_point_lights(lights,shadow_scene.lights(),table,instances[k].bounds_min,instances[k].bounds_max);
+                        if(lights.empty())return;
+                        for(std::size_t b=terrain_instance_batches[k].first;b<terrain_instance_batches[k].second;++b)
+                            if(const auto m=terrain_batch_reach_mask(lights,terrain_batch_spheres[b]))reached.push_back({b,m});
+                    };
+                    if(terrain_light_parallel)workers.for_each(instance_count,instance_pass);
+                    else for(std::size_t k=0;k<instance_count;++k)instance_pass(k);
+                    lit.clear();lit_masks.clear();
+                    for(std::size_t k=0;k<instance_count;++k)
+                        for(const auto& [b,m]:terrain_instance_reached[k]){lit.push_back({b,k});lit_masks.push_back(m);}
                     OMEGA_ZONE_LAP(step_laps,"sim.terrain_light.lists");
                     auto& touched=terrain_touched;
                     touched.assign(terrain_lit_batches.begin(),terrain_lit_batches.end());
                     for(const auto& [b,l]:lit)touched.push_back(b);
                     std::sort(touched.begin(),touched.end());touched.erase(std::unique(touched.begin(),touched.end()),touched.end());
-                    auto& positions=terrain_light_positions;auto& colours=terrain_light_colours;auto& batch_lights=terrain_batch_lights;
-                    std::size_t next=0,update_first=0,update_count=0;
+                    constexpr std::size_t not_lit=~std::size_t{0};
+                    auto& touched_lit=terrain_touched_lit;auto& relit=terrain_touched_relit;
+                    touched_lit.clear();
+                    for(std::size_t next=0;const auto b:touched){
+                        while(next<lit.size()&&lit[next].first<b)++next;
+                        touched_lit.push_back(next<lit.size()&&lit[next].first==b?next:not_lit);
+                    }
+                    relit.assign(touched.size(),0);
                     if(terrain_light_memo_on&&terrain_light_memo.size()!=terrain.batch_spans.size()){
                         terrain_light_memo.assign(terrain.batch_spans.size(),{});terrain_light_memo_valid.assign(terrain.batch_spans.size(),0);
                     }
-                    for(const auto b:touched){
+                    // Per touched batch (132vs2: on the pool; each writes its own batch's memo, flag and vertices).
+                    const auto batch_pass=[&](std::size_t j){
+                        const auto b=touched[j];
                         const auto& batch=terrain.batch_spans[b];
-                        while(next<lit.size()&&lit[next].first<b)++next;
-                        const bool batch_lit=next<lit.size()&&lit[next].first==b;
+                        const auto li=touched_lit[j];
+                        std::span<const TerrainPointLight> lights;
+                        if(li!=not_lit)lights=terrain_instance_lights[lit[li].second];
                         if(terrain_light_memo_on){
                             // The pass skips a light that does not reach the batch's sphere (apply_terrain_point_lights),
                             // so the batch's colours are a function of the reaching lights, in list order.
-                            batch_lights.clear();
-                            if(batch_lit)for(const auto& l:lit_lights.at(lit[next].second))if(terrain_batch_reached(l,batch))batch_lights.push_back(l);
+                            const std::uint32_t mask=li!=not_lit?lit_masks[li]:0U;
                             auto& memo=terrain_light_memo[b];
-                            if(terrain_light_memo_valid[b]&&memo.size()==batch_lights.size()
-                                &&(memo.empty()||std::memcmp(memo.data(),batch_lights.data(),memo.size()*sizeof(TerrainPointLight))==0)){
-#if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
-                                ++terrain_memo_kept;
-#endif
-                                continue;
+                            if(terrain_light_memo_valid[b]&&memo.size()==std::size_t(std::popcount(mask))){
+                                bool same=true;
+                                for(std::size_t i=0,m=0;same&&i<lights.size();++i)
+                                    if(mask>>i&1U)same=std::memcmp(&memo[m++],&lights[i],sizeof(TerrainPointLight))==0;
+                                if(same)return;
                             }
-                            memo=batch_lights;terrain_light_memo_valid[b]=1;
+                            memo.clear();
+                            for(std::size_t i=0;i<lights.size();++i)if(mask>>i&1U)memo.push_back(lights[i]);
+                            terrain_light_memo_valid[b]=1;
                         }
+                        relit[j]=1;
+                        relight_terrain_batch(lights,terrain_batch_spheres[b],batch,
+                            std::span(terrain_base_colours).subspan(batch.first_vertex,batch.vertex_count),
+                            std::span(terrain.vertices).subspan(batch.first_vertex,batch.vertex_count));
+                    };
+                    if(terrain_light_parallel)workers.for_each(touched.size(),batch_pass);
+                    else for(std::size_t j=0;j<touched.size();++j)batch_pass(j);
+                    // 132vs4: the relight (memo, colours) apart from the GPU updates ("sim.terrain_light" below).
+                    OMEGA_ZONE_LAP(step_laps,"sim.terrain_light.relight");
+                    std::size_t update_first=0,update_count=0;
+                    for(std::size_t j=0;j<touched.size();++j){
+                        if(!relit[j]){
+#if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
+                            ++terrain_memo_kept;
+#endif
+                            continue;
+                        }
+                        const auto& batch=terrain.batch_spans[touched[j]];
 #if defined(OMEGA_ZONE_PROFILE)&&!defined(__vita__)
                         ++terrain_memo_relit;terrain_memo_vertices+=batch.vertex_count;
 #endif
-                        colours.assign(terrain_base_colours.begin()+batch.first_vertex,terrain_base_colours.begin()+batch.first_vertex+batch.vertex_count);
-                        if(batch_lit){
-                            positions.clear();
-                            for(std::size_t v=0;v<batch.vertex_count;++v){const auto& p=terrain.vertices[batch.first_vertex+v].position;positions.push_back({p.x,p.y,p.z});}
-                            apply_terrain_point_lights(lit_lights.at(lit[next].second),batch,positions,colours);
-                        }
-                        for(std::size_t v=0;v<batch.vertex_count;++v)
-                            for(std::size_t i=0;i<3;++i)terrain.vertices[batch.first_vertex+v].color[i]=float(colours[v][i])/128;
                         // Port-only (132vt2d, with the memo): adjacent relit batches go to the GPU as one update.
                         if(terrain_light_memo_on){
                             if(update_count&&update_first+update_count==batch.first_vertex){update_count+=batch.vertex_count;continue;}
@@ -17602,6 +17752,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const bool text_state_after_draw=gui_overlay_draw&&k+1==steps;
                 OMEGA_ZONE_LAP(step_laps,"sim.level_end");
                 if(hud_object){
+                    OMEGA_ZONE_LAPS(hud_laps);   // port-only (132vs3): sim.hud's sections on the Vita (the hardware's 2.5 ms)
                     // The object loop 00133420 (0x001336b8..0x00133758) reaches the target-lock trackers after the
                     // actors (they are appended to the scope when 00244380 makes them): 003e9880 follows the target
                     // (0040c540, virtual +c0) and, once a released element's time is below 0.5, leaves the tree
@@ -17646,6 +17797,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     for(const float v:heat_zone)player_heat_1ac=hud_controller_heat(player_heat_1ac,v);
                     hud_object->ticker_update(step_dt);
                     hud_callout_step(step_dt);
+                    OMEGA_ZONE_LAP(hud_laps,"hud.meters");
                     // Checkpoint 132vo2: --map-marker (port-only, off by default; superseded by the hosted map on D-pad
                     // Left, checkpoint 132hud) stands in for the map screen: its highlight 00272ad0 (manager +3c, read
                     // back by 00272ac0) of the marker record, then the commit 0026c570(hud + 6a0) past its gate
@@ -17832,6 +17984,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // 00261540(*(0x4ffc2c) + d0, 0, the largest aim progress at the player).
                         if(danger_value)hud_object->radar_meter(false,*danger_value,meter_vars);
                     }
+                    OMEGA_ZONE_LAP(hud_laps,"hud.radar");
                     // 00242190(hud, player) at its place in 00244fa0 (after the ticker and the radar; 00242330 and
                     // the targets are not hosted here). The inventory (actor +3524) is the combat session's (no
                     // --combat: not hosted, not run). GuiGameScreen +6a4's +d4 (1 while the weapon select is open,
@@ -17843,6 +17996,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         hud_object->ammo(hud_ammo_text(combat_session->combat().inventory(0),*weapon_db,ammo_in));
                     }
                     hud_object->update_screen(step_dt);   // 003e79c0(*(hud + 54), dt) at 002451f8
+                    OMEGA_ZONE_LAP(hud_laps,"hud.update_screen");
                     // Checkpoint 132hud: 0x0024520c: with hud + 6a0, 0026d620(map, dt): the L1 / R1 hold's countdown
                     // (00272ac0's highlighted record's +8 tracker +68: 003e99b0 stores the record's +0, its object
                     // ID, 0x00273724 / 0x003e9a14), the camera 0026d040, then the IAMAP update 003e79c0(*(map + 8)).
@@ -17866,6 +18020,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         hud_map_camera(m,step_dt,host.map_camera());
                         if(host.iamap)host.iamap->update(step_dt);   // 003e79c0(*(map + 8), dt)
                     }
+                    OMEGA_ZONE_LAP(hud_laps,"hud.map");
                     // The render pass 00132e50: each registered blip's object draw (+58 002610f0 -> +110 00261360) in
                     // the frame *004f82b0, which the HUD draw 00244b90 then rebuilds first (00261130 at 00244ba0) for
                     // the next frame. *004f82a0 is the player's ID: the role-1 load 00131400 tail-calls 002426d0
@@ -17912,8 +18067,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             hud_blips_logged=hud_blips.live();
                         }
                     }
+                    OMEGA_ZONE_LAP(hud_laps,"hud.blips");
                     if(!text_state_after_draw)
                         hud_object->screen().draw_texts(static_cast<std::int32_t>(std::floor((elapsed+double(step_dt))*1000.0)));
+                    OMEGA_ZONE_LAP(hud_laps,"hud.texts");
                     const int current=hud_object->ticker().current;
                     if(current!=hud_ticker_shown){
                         if(current>=0)std::cout<<"HUD ticker at frame "<<frame<<(gui_overlay?" (003f9e60, drawn by 003e7670): shows slot ":" (003f9e60, not drawn without --gui-overlay): shows slot ")<<current<<" \""
@@ -18009,6 +18166,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             const double latency_waited_ms=state.minimized?0.0:window.wait_frame_latency();
             if(prof&&latency_waited_ms>0)prof->add(FrameProfile::present,latency_waited_ms/1000.0);
             const auto render_begin=std::chrono::steady_clock::now();
+            // 132vd1 (VITA.md "Per-draw cost"): the render phase in laps (the zone report; empty off the Vita).
+            OMEGA_ZONE_LAPS(render_laps);
             if(test_device_lost_frames.erase(frame))recover_display("--test-device-lost (port-only diagnostic)");
             else if(state.renderer->device()->removed())recover_display("display device removed");
             else if(device_lost_pending()){
@@ -18178,6 +18337,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             backpack_clip_wide=scene_view_clip&&(frame_wide_cull_x_scale(state.renderer->width(),state.renderer->height())!=1.0F||frame_fov_scale(state.renderer->width(),state.renderer->height())!=1.0F);
             if(game_camera)backpack_camera=game_camera->first;else backpack_camera.reset();
             build_actor_mesh(actor_mesh);
+            OMEGA_ZONE_LAP(render_laps,"render.actors");
             // Checkpoint 132cp5: the night / thermal shading of the man draw (skm_vision_shading.hpp).
             const auto ghost_surface_begin=static_cast<std::uint32_t>(actor_mesh.surfaces.size());
             std::vector<OverlayGsAlpha> ghost_gs;std::map<std::size_t,std::pair<std::uint32_t,std::uint32_t>> ghost_items;
@@ -18209,6 +18369,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 gear_gs.insert(gear_gs.end(),ghost_gs.begin(),ghost_gs.end());
                 state.renderer->set_overlay_gs_ranges(std::move(gear_gs));
             }
+            OMEGA_ZONE_LAP(render_laps,"render.overlay");
             // Checkpoint 132p: the kind-1 NIE models (0013e250 -> 00239fa0 -> 00394ad0), re-placed when their
             // asset matrix changes (none: the VUM as stored, in world space); a model not filed stays out of the plan.
             std::size_t ni_models_drawn=0;
@@ -18339,6 +18500,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         sky_items.push_back({SceneDrawItem::Source::main,sky_draw->first_surface[i],sky_draw->surface_count[i],true});
                 }
             }
+            OMEGA_ZONE_LAP(render_laps,"render.models_sky");
             std::vector<GobGlowCall> glow_pass0,glow_pass1;   // Checkpoint 132cp6: drawn by 003781b0 after the effects
             // Checkpoint 132cp7: the scene frame's non-model steps the host draws, in the frame's order (scene_draw_steps);
             // gob_draw pass 1 is 0x25f230, pass 0 0x25f270.
@@ -18396,6 +18558,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     file({3,0,0},std::nullopt,std::array<std::array<float,4>,4>{},key_3c);
                 }
             }
+            OMEGA_ZONE_LAP(render_laps,"render.particle_filing");
             constexpr std::uint32_t kParticleHook=0xf0000000U;   // the plan's hook items for scene_particles[k]
             if(scene_clip){
                 // The scene frame's model draws (0013e844..; the vision mode [*004ffc30]'s steps).
@@ -18404,9 +18567,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // hosted: 0x80) in 7140 as one entry with no hosted distance (their bounds are not hosted).
                 std::vector<SceneDrawEntry> entries;entries.reserve(scene_models.size()+2);
                 std::vector<std::size_t> filed;filed.reserve(scene_models.size());   // entry -> scene_models
+#ifdef __vita__
+                ++g_scene_cull_stats.frames;
+#endif
                 for(std::size_t m=0;m<scene_models.size();++m){
                     const auto& model=scene_models[m];
                     if(model.hidden)continue;   // a NIE model not filed (0013e250)
+#ifdef __vita__
+                    // Port-only, PS Vita (132vg2, research/VITA.md "Vita render path (132vg2)"): a model outside the
+                    // drawn view (003c8990 code 0x80 through scene_view_clip, the wide view the receivers' walk uses)
+                    // produces no pixels; it is counted and, with g_scene_cull, not drawn.
+                    if(scene_view_clip&&model.lo[0]<=model.hi[0]){   // (a piece without an INL record is never culled)
+                        std::uint64_t indices=0;
+                        for(std::uint32_t k=0;k<model.surface_count;++k)indices+=terrain.surfaces[model.first_surface+k].index_count;
+                        ++g_scene_cull_stats.models;g_scene_cull_stats.surfaces+=model.surface_count;g_scene_cull_stats.indices+=indices;
+                        if(object_cull_003c8990(*scene_view_clip,0.0F,model.lo,model.hi,model.transform).code==0x80U){
+                            ++g_scene_cull_stats.culled;g_scene_cull_stats.culled_surfaces+=model.surface_count;
+                            g_scene_cull_stats.culled_indices+=indices;
+                            if(g_scene_cull)continue;
+                        }
+                    }
+#endif
                     SceneDrawEntry entry{model.bucket,0.0F,true};
                     if(model.bucket==SceneBucket::list_5120)
                         entry.key=object_cull_003c8990(*scene_clip,0.0F,model.lo,model.hi,model.transform).dist;
@@ -18592,6 +18773,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     plan.push_back({SceneDrawItem::Source::overlay,0,static_cast<std::uint32_t>(actor_mesh.surfaces.size())});
                 state.renderer->set_draw_plan(std::move(plan));
             }else state.renderer->set_draw_plan({});
+            OMEGA_ZONE_LAP(render_laps,"render.draw_plan");
             if(scene_geometry_dirty){
 #ifdef __vita__
                 state.renderer->refresh_vertices(std::move(scene_geometry_ranges));
@@ -18613,6 +18795,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 state.renderer->set_surface_uv_offsets(std::move(offsets));
             }
+            OMEGA_ZONE_LAP(render_laps,"render.vertices");
             // Checkpoint 132cp7: the scene frame's non-model steps the host draws run as the scene draw's hooks at
             // their positions (scene_draw_hook_order); any the plan does not place (no plan, a lost device, the vision
             // mode 2 tail) run after it in that order.
@@ -18630,7 +18813,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             const auto draw_batches=[&](const std::string& source,std::vector<particle::ParticleBatch>& batches,const auto& world){
                 auto& p=*play_particles;
                 const auto pf=particle_draw->frame(world);
+                OMEGA_ZONE_LAPS(batch_laps);   // 132vd1: the zones
                 const auto drawn=prepare_particle_sprites(workers,batches,particle_records,pf.cull,pf.sprite,no_heat_haze);
+                OMEGA_ZONE_LAP(batch_laps,"particle.prepare");
                 if(captures.count(frame)){
                     auto& n=ptally.sources[source];
                     for(const auto& b:batches){++n[0];n[1]+=b.emitter&&b.emitter->u32(0x00)==particle::kType0EmitterVtable;n[2]+=b.stop==0x1cc8;}
@@ -18641,7 +18826,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     ptally.adc+=b.adc;p.range_particles+=b.range;p.range_adc+=b.range_adc;
                     if(b.stop==0x1cc8){ptally.haze_sprites+=b.sprites.size();ptally.haze_adc+=b.adc;}
                 }
+                OMEGA_ZONE_LAP(batch_laps,"particle.tally");
                 const auto n=particle_draw->draw(drawn);
+                OMEGA_ZONE_LAP(batch_laps,"particle.record");
                 ptally.sprites+=n;
                 return n;
             };
@@ -18656,7 +18843,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     auto& pl=p.placements.at(o.index);
                     if(!pl.asset.has_bounds())return;   // 00394520: no instance, nothing drawn
                     std::vector<particle::ParticleBatch> batches;
-                    {const DeferredDraws deferring(*p.system,particle_records,workers);pl.asset.draw(*p.system,o.code,batches,nullptr,o.fade);}
+                    {OMEGA_ZONE("particle.asset_draw");const DeferredDraws deferring(*p.system,particle_records,workers);pl.asset.draw(*p.system,o.code,batches,nullptr,o.fade);}
                     draw_batches("PLR "+std::to_string(pl.key)+" "+pl.name,batches,pl.node);
                     ++ptally.placements;
                 }else if(o.kind==1){
@@ -18665,7 +18852,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     const auto world=ni_events->particle_world(o.id);
                     if(!world)throw std::runtime_error("0023a5a0: NIE "+std::to_string(o.id)+" filed without a particle world");
                     std::vector<particle::ParticleBatch> batches;
-                    {const DeferredDraws deferring(*p.system,particle_records,workers);asset.draw(*p.system,o.code,batches,nullptr,o.fade);}
+                    {OMEGA_ZONE("particle.nie_draw");const DeferredDraws deferring(*p.system,particle_records,workers);asset.draw(*p.system,o.code,batches,nullptr,o.fade);}
                     std::string source="NIE "+std::to_string(o.id);
                     for(const auto& [eid,ename]:p.event_assets)if(eid==o.id)source+=" "+ename;
                     draw_batches(source,batches,*world);
@@ -18674,6 +18861,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // Checkpoint 132ms2: the weather record's vt+58 00232e00: each visible cell's 003a1ad0(instance, +38,
                     // identity): the rain emitter's 00399080 triangles (00371200, the def+74 texture) and its splash
                     // children's own draws.
+                    OMEGA_ZONE("particle.weather");
                     p.weather->flags_38=o.code;
                     const std::array<std::array<float,4>,4> identity{{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}}};
                     particle::draw_weather_field(*p.weather,[&](std::uint64_t h,std::uint32_t flags){
@@ -18686,6 +18874,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }else{
                     // Checkpoint 132cp9: the smoke field (vt+88 null, so +38 = 2): vt+58 00235a00, each node's 003a1ad0
                     // under its identity frame.
+                    OMEGA_ZONE("particle.smoke");
                     p.smoke->flags_38=o.code;
                     std::size_t smoke_sprites=0;
                     particle::draw_smoke_field(*p.smoke,[&](std::uint64_t h,std::uint32_t flags,const particle::SmokeMatrix& m){
@@ -18937,6 +19126,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 corona_groups[3]=corona_calls.size();
                 vision_coronas=vision.size();
             }
+            OMEGA_ZONE_LAP(render_laps,"render.coronas_prep");
             std::vector<CoronaDrawn> corona_drawn(corona_calls.size());
             const auto hook_coronas=[&](std::size_t group){
                 if(!coronas_on||corona_groups[group]==corona_groups[group+1])return;
@@ -19006,27 +19196,42 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 depth_cleared=true;
             };
             const auto run_hook=[&](std::uint32_t id){
-                if(id>=kParticleHook&&id-kParticleHook<scene_particles.size()){draw_scene_particle(id-kParticleHook);return;}
+                if(id>=kParticleHook&&id-kParticleHook<scene_particles.size()){OMEGA_ZONE("hook.scene_particle");draw_scene_particle(id-kParticleHook);return;}
                 if(!hooks_run.insert(id).second)throw std::runtime_error("Scene draw hook "+std::to_string(id)+" run twice in a frame");
                 if(in_scene_draw)hooks_in_draw.push_back(id);
                 switch(id){
-                case 0x37bd40:hook_screen_fx();break;
-                case 0x2b1cb0:hook_particles();break;
-                case 0x278650:hook_decals();break;
-                case 0x3ec300:hook_effects();break;
-                case 0x25f230:hook_coronas(0);break;
-                case 0x25f270:hook_coronas(1);break;
-                case 0x25f4c0:hook_coronas(2);break;
-                case 0x25f930:hook_vision();break;
+                case 0x37bd40:{OMEGA_ZONE("hook.screen_fx");hook_screen_fx();}break;   // 132vd1: the zones
+                case 0x2b1cb0:{OMEGA_ZONE("hook.particles");hook_particles();}break;
+                case 0x278650:{OMEGA_ZONE("hook.decals");hook_decals();}break;
+                case 0x3ec300:{OMEGA_ZONE("hook.effects");hook_effects();}break;
+                case 0x25f230:{OMEGA_ZONE("hook.coronas0");hook_coronas(0);}break;
+                case 0x25f270:{OMEGA_ZONE("hook.coronas1");hook_coronas(1);}break;
+                case 0x25f4c0:{OMEGA_ZONE("hook.coronas2");hook_coronas(2);}break;
+                case 0x25f930:{OMEGA_ZONE("hook.vision");hook_vision();}break;
                 case 0x37a1e0:hook_depth_clear();break;
                 default:throw std::runtime_error("Scene draw hook "+std::to_string(id)+" is not hosted");
                 }
             };
             {
                 struct HookScope{SceneRenderer& renderer;~HookScope(){renderer.set_draw_hook({});}} hook_scope{*state.renderer};
+#ifdef __vita__
+                {   // 132vp4 (port-only): the Vita's render scale (Port Settings DISPLAY, research/VITA.md "Render scale")
+                    const float s=vita_render_scale(display.render_scale);
+                    if(state.renderer->scene_scale()!=s)state.renderer->set_scene_scale(s);
+                    if(!vita_scene_scale_logged||*vita_scene_scale_logged!=s){
+                        vita_scene_scale_logged=s;
+                        const auto pixels=[&](unsigned n){return static_cast<unsigned>(std::max(1L,std::lround(float(n)*s)));};
+                        std::cout<<"Render scale (port-only, Vita): "<<static_cast<int>(std::lround(s*100.0F))<<" %, the 3D scene "
+                                 <<pixels(state.renderer->width())<<" x "<<pixels(state.renderer->height())
+                                 <<(s<1.0F?" upscaled to ":" (the display) of ")<<state.renderer->width()<<" x "<<state.renderer->height()
+                                 <<" before the HUD at frame "<<frame<<"\n";
+                    }
+                }
+#endif
                 state.renderer->set_draw_hook(run_hook);in_scene_draw=true;
                 state.renderer->draw(*state.camera,{textured,state.wire,false,true,state.vertex_light,textured&&!first_pass});
             }
+            OMEGA_ZONE_LAP(render_laps,"render.scene_draw");
             in_scene_draw=false;
             if(test_device_lost_mid_frames.erase(frame)){
                 render_thread.drain();   // 132mt2: the frame's queued calls run first, so the loss hits the next call as before
@@ -19048,6 +19253,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     hooks_reported=s.str();
                     std::cout<<"Scene draw hooks (Checkpoint 132cp7) at frame "<<frame<<": "<<hooks_reported<<"\n";
                 }
+            }
+            OMEGA_ZONE_LAP(render_laps,"render.after_hooks");
+            if(state.renderer->scene_open()){
+                // 132vp4 (port-only, the Vita's render scale, research/VITA.md): the scaled scene (its hooks, coronas and
+                // vision passes included) up to the display before the HUD / GUI, which draw at its full size.
+                state.renderer->end_scene();
+                if(!fade_renderer&&!gui_overlay_draw)fade_renderer.emplace(state.renderer->device());
+                GuiRenderer& r=gui_overlay_draw?gui_overlay_draw->renderer:*fade_renderer;
+                r.draw_upscale(state.renderer->render_target(),state.renderer->width(),state.renderer->height(),state.renderer->scene_view());
+                OMEGA_ZONE_LAP(render_laps,"render.upscale");
             }
             if(coronas_on){
                 const bool logged=captures.count(frame)!=0;
@@ -19156,6 +19371,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             <<" t "<<el.anim.t<<" +20 ("<<el.words_20[0]<<", "<<el.words_20[1]<<", "<<el.words_20[2]<<")\n";
                     }
             }
+            OMEGA_ZONE_LAP(render_laps,"render.hud");
             if(gui_overlay_draw){
                 // A paused sandbox (no game frame this window frame) rolls back the HUD draw's colour writes
                 // (003e8190's 0055a280 block), as no ticker update or text manager draw follows them.
@@ -19200,6 +19416,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // The text manager draw 003d0c10 (0x001690dc) after the render pass (see the step above).
                 if(hud_object&&steps>0)hud_object->screen().draw_texts(static_cast<std::int32_t>(std::floor(elapsed*1000.0)));
             }
+            OMEGA_ZONE_LAP(render_laps,"render.gui_overlay");
             // The world fader's alpha 0025e5b0 (00133170, after the HUD draw 00244b90) into the video object's
             // +1d4 (005383c4), which the next video begin 0037a9f0 draws as the full-screen fade quad over the
             // finished frame before its flip (0037a370 mode 3): the respawn's fade-out / fade-in and the level
@@ -19244,6 +19461,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     std::cout<<"Frame overlay (port-only) at frame "<<frame<<":";for(const auto& t:lines)std::cout<<" ["<<t<<"]";std::cout<<"\n";
                 }
             }
+            OMEGA_ZONE_LAP(render_laps,"render.fade_overlay");
             // Port-only (132win3): a D3D call of this frame's draws saw the device lost (or --test-device-lost-mid):
             // the device is re-created now and the frame is dropped (no capture, no present).
             bool frame_dropped=false;

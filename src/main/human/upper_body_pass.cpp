@@ -1,4 +1,5 @@
 #include "upper_body_pass.hpp"
+#include "worker_pool.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -118,7 +119,12 @@ Run run_once(const UpperBodyPassInput& in,const UpperBodyLegTargets& legs,float 
     }
     return r;
 }
+// 132vs3: the pool of this thread's UpperBodyPassPoolScope (none: the runs in order on the caller).
+thread_local WorkerPool* pass_pool=nullptr;
 }
+
+UpperBodyPassPoolScope::UpperBodyPassPoolScope(WorkerPool* pool):previous_(pass_pool){pass_pool=pool;}
+UpperBodyPassPoolScope::~UpperBodyPassPoolScope(){pass_pool=previous_;}
 
 UpperBodyPassResult run_upper_body_pass(const UpperBodyPassInput& input){
     const auto& rows=upper_body_state_rows();
@@ -131,7 +137,8 @@ UpperBodyPassResult run_upper_body_pass(const UpperBodyPassInput& input){
     try{
         // 001ccb60..001cdbc4 reads no pass state: one evaluation serves every run.
         const UpperBodyLegTargets legs=upper_body_leg_targets(input.legs,input.component,secondary_aim_inverse(input.component));
-        for(std::size_t k=0;k<runs.size();++k)runs[k]=run_once(input,legs,result.blend_31c,k);
+        if(pass_pool)pass_pool->for_each(runs.size(),[&](std::size_t k){runs[k]=run_once(input,legs,result.blend_31c,k);});
+        else for(std::size_t k=0;k<runs.size();++k)runs[k]=run_once(input,legs,result.blend_31c,k);
     }catch(const std::exception& e){
         result.failure=e.what();
         return result;

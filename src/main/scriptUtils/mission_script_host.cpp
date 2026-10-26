@@ -2639,7 +2639,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             // A Node GOBJ is the node object itself (vtable 004d95b0; +c its ID);
             // a population GOB is the GOB (its +c0 0014d340 jumps to +e4); a
             // hotbox (BOX: record or MakeNPCInteractable) is the box (vtable
-            // 004d9ac0, the same +c0).
+            // 004d9ac0, the same +c0); a SND record is the sound object (vtable
+            // 004daf30, the same +c0).
             const bool look = name == "RequestLookAt";
             const float duration = std::bit_cast<float>(number(arguments.at(2)));
             const auto* object = std::get_if<RuntimeObjectHandle>(&arguments.at(1));
@@ -2656,6 +2657,9 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             else if (section != objects_.sections.end() && section->second == "hotbox" && objects_.objects.alive(*object))
                 applied = look ? npcs->request_look_at_hotbox(handle->id, object->id, duration)
                                : npcs->request_facial_hotbox(handle->id, object->id, duration);   // a box: +c0 0014d340
+            else if (section != objects_.sections.end() && section->second == "sound" && objects_.objects.alive(*object))
+                applied = look ? npcs->request_look_at_sound(handle->id, object->id, duration)
+                               : npcs->request_facial_sound(handle->id, object->id, duration);    // a SND: +c0 0014d340
             else applied = look ? npcs->request_look_at(handle->id, actor_object(1), duration)
                                 : npcs->request_facial(handle->id, actor_object(1), duration);
             return std::nullopt;

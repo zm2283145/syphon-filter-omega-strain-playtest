@@ -16,11 +16,14 @@
 #include <malloc.h>
 #include <vitaGL.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+
+extern "C" unsigned int _newlib_heap_size_user __attribute__((weak));   // vita_main.cpp's 192 MB
 
 namespace omega {
 
@@ -43,11 +46,14 @@ std::string process_memory_line() {
     sceKernelGetFreeMemorySize(&info);
     // The backend's snapshot, under its lock: the loading-screen thread draws while the level loads.
     const gfx::gxm::MemoryStats gpu = gfx::gxm::memory_stats();
-    char text[260];
+    char text[320];
+    // 132vp2 (VITA.md "GPU memory headroom"): the heap's room left (vitaGL's last fallback for GPU memory, too).
+    const unsigned heap_kb = &_newlib_heap_size_user ? unsigned(_newlib_heap_size_user / 1024) : 0;
     std::snprintf(text, sizeof text,
-                  "heap in use %u KB (arena %u KB), kernel free: user %u KB, CDRAM %u KB, phycont %u KB; vitaGL free: "
-                  "VRAM %u KB, RAM %u KB",
-                  unsigned(m.uordblks / 1024), unsigned(m.arena / 1024), unsigned(info.size_user / 1024),
+                  "heap in use %u KB (arena %u KB, %u KB left of %u KB), kernel free: user %u KB, CDRAM %u KB, phycont %u KB; "
+                  "vitaGL free: VRAM %u KB, RAM %u KB",
+                  unsigned(m.uordblks / 1024), unsigned(m.arena / 1024),
+                  heap_kb - std::min(heap_kb, unsigned(m.uordblks / 1024)), heap_kb, unsigned(info.size_user / 1024),
                   unsigned(info.size_cdram / 1024), unsigned(info.size_phycont / 1024),
                   unsigned((gpu.cdram_pool - gpu.cdram_used) / 1024), unsigned((gpu.lpddr_pool - gpu.lpddr_used) / 1024));
     return std::string(text) + "; " + gfx::gxm::placement_line();

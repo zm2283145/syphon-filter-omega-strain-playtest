@@ -1,4 +1,5 @@
 #include "shadow_scene.hpp"
+#include "float_bits.hpp"
 #include "morph_resources.hpp"
 #include <cmath>
 #include <stdexcept>
@@ -8,6 +9,8 @@
 namespace omega {
 namespace {
 using V=ShadowVector;
+// The interpreter's flush of shadow_transform (character_shadows.cpp).
+float ftz(float v){return float_bits::subnormal(v)?(std::signbit(v)?-0.0F:0.0F):v;}
 void require(bool ok,const std::string& what){if(!ok)throw std::runtime_error("shadow scene: "+what);}
 void require(bool ok,const char* what){if(!ok)throw std::runtime_error(std::string("shadow scene: ")+what);}   // 132vs1: no string unless it fails
 }
@@ -81,11 +84,19 @@ std::vector<ShadowReceiverSlotConstants> shadow_receiver_constants(const std::ve
 
 bool shadow_visibility_substitute(const ShadowMatrix& clip,const ShadowVector& lo,const ShadowVector& hi,const std::optional<ShadowMatrix>& transform){
     // NOT ORIGINAL: stands in for 003c8990 (VU0 micro routine, not ported).
+    // 132vs2b: the corners through the first matrix (the transform, else the clip) are shadow_transform's arithmetic
+    // with its products m.column[c][k] * lo[c] / hi[c] formed once per box (the same rounded values, added in the
+    // same order and flushed the same way); m.column[3][k] * 1 is m.column[3][k] (exact, and NaN stays NaN). The
+    // test stops once no plane is common to the corners seen (the rest can only clear more bits of `all`).
+    const ShadowMatrix& m=transform?*transform:clip;
+    float p[3][2][4];
+    for(std::size_t c=0;c<3;++c)for(std::size_t k=0;k<4;++k){p[c][0][k]=m.column[c][k]*lo[c];p[c][1][k]=m.column[c][k]*hi[c];}
     int all=0x3f;
-    for(int k=0;k<8;++k){
-        V c{(k&1)?hi[0]:lo[0],(k&2)?hi[1]:lo[1],(k&4)?hi[2]:lo[2],1.0F};
-        if(transform)c=shadow_transform(*transform,c);
-        const V v=shadow_transform(clip,c);
+    for(std::size_t k=0;k<8&&all!=0;++k){
+        const std::size_t sx=k&1U,sy=(k>>1)&1U,sz=(k>>2)&1U;
+        V c;
+        for(std::size_t r=0;r<4;++r)c[r]=ftz(ftz(ftz(ftz(p[0][sx][r])+p[1][sy][r])+p[2][sz][r])+m.column[3][r]);
+        const V v=transform?shadow_transform(clip,c):c;
         const float w=std::fabs(v[3]);
         int code=0;
         for(std::size_t a=0;a<3;++a){
@@ -197,6 +208,7 @@ ShadowSceneFrame ShadowScene::build(const ShadowSceneFrameInput& in){
     ShadowMatrix visibility_clip=out.camera_clip;   // port-only view_x_scale (132ws); the PS2's clip at 1
     if(in.view_x_scale!=1.0F)for(auto& c:visibility_clip.column)c[0]*=in.view_x_scale;
     if(in.view_y_scale!=1.0F)for(auto& c:visibility_clip.column)c[1]*=in.view_y_scale;   // 132ws3
+    f.receivers.reserve(instances.size());
     for(std::size_t i=0;i<instances.size();++i){
         const ShadowReceiverInstance& r=instances[i];
         ShadowReceiverInput x;

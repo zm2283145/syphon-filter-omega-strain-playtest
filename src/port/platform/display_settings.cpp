@@ -62,6 +62,12 @@ std::optional<float> parse_render_scale(std::string_view text) {
     return v;
 }
 
+float vita_render_scale(float render_scale) {
+    if (render_scale >= 0.875F) return 1.0F;
+    if (render_scale >= 0.625F) return 0.75F;
+    return 0.5F;
+}
+
 DisplaySettings display_settings(const PortSettings& settings) {
     DisplaySettings s;
     for (const auto& [key, value] : settings.other) {

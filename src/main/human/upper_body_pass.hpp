@@ -50,6 +50,8 @@
 
 namespace omega {
 
+class WorkerPool;
+
 struct UpperBodyPassInput {
     std::uint8_t state_a=0,state_b=0;              // +310 / +311 after the state step
     float weight_318=0.0F;                         // +318 after the state step
@@ -95,6 +97,20 @@ struct UpperBodyPassResult {
 };
 inline constexpr std::size_t upper_body_pass_runs=4;
 UpperBodyPassResult run_upper_body_pass(const UpperBodyPassInput& input);
+
+// Port-only (132vs3, research/VITA.md "In-level sim speed (132vs3)"): while a scope lives, run_upper_body_pass
+// called on the thread that made it evaluates its runs (each its own fill, reading only the input and the static
+// tables) on `pool` (null: in order on the caller, as without a scope). The result is the same: the runs are merged
+// in run order and a throw reports the lowest run's, the first a serial loop meets.
+class UpperBodyPassPoolScope {
+public:
+    explicit UpperBodyPassPoolScope(WorkerPool* pool);
+    ~UpperBodyPassPoolScope();
+    UpperBodyPassPoolScope(const UpperBodyPassPoolScope&)=delete;
+    UpperBodyPassPoolScope& operator=(const UpperBodyPassPoolScope&)=delete;
+private:
+    WorkerPool* previous_;
+};
 
 // The model's side of the input: the first 21 nodes' +1a0 / +1b0 and bone
 // record offsets, their parent bytes, the binding's bone count (the

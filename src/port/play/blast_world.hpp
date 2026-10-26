@@ -41,6 +41,10 @@ inline constexpr std::uint64_t gob_host_handle(std::size_t k){return 0xb0000000U
 // Hotbox k of the world (HotboxWorld::boxes order, run-time boxes included):
 // the object a script's RequestFacial of a box names (hotbox_eye_c0).
 inline constexpr std::uint64_t hotbox_host_handle(std::size_t k){return 0xf0000000ULL+k;}
+// Sound object k (population.sound_objects order, SoundGOBJ vtable 004daf30): the object a script's
+// RequestFacial / RequestLookAt of a SND names (MYANMAR's Area3Thugs facing O_FIRE_MEDIUM); above every
+// 32-bit tag the other handle ranges use.
+inline constexpr std::uint64_t sound_host_handle(std::size_t k){return 0x100000000ULL+k;}
 
 // A registry entry that is not an actor. `known` false: the host cannot give
 // its fields (registry() then throws, naming `what`).

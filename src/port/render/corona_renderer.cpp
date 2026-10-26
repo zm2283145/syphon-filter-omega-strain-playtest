@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -178,6 +179,7 @@ std::vector<CoronaDrawn> CoronaRenderer::draw(const std::vector<CoronaSpriteCall
     struct Probe {
         std::size_t call;
         std::uint32_t first;   // 6 + 6 probe vertices, then 6 reduce vertices
+        std::int32_t x, y, cx, cy, box;   // GS coordinates: the probe's quads at (cx, cy) and (x, y), +-box
     };
     struct Segment {
         std::uint32_t first, count;
@@ -246,7 +248,7 @@ std::vector<CoronaDrawn> CoronaRenderer::draw(const std::vector<CoronaSpriteCall
         out.y = y;
         out.box = box;
         const float depth = clip[2] / w;
-        Probe probe{n, static_cast<std::uint32_t>(vertices.size())};
+        Probe probe{n, static_cast<std::uint32_t>(vertices.size()), x, y, cx, cy, box};
         const std::array<float, 4> zero{0, 0, 0, 0}, one{0, 0, 0, 1};
         quad(vertices, ndc_x(float(cx - box)), ndc_y(float(cy - box)), ndc_x(float(cx + box)), ndc_y(float(cy + box)),
              0.0F, 0, 0, 0, 0, zero, zero);
@@ -327,24 +329,43 @@ std::vector<CoronaDrawn> CoronaRenderer::draw(const std::vector<CoronaSpriteCall
         const gfx::Texture* none[2]{nullptr, nullptr};
         if (!scene_.frame_alpha_target() || !scene_.frame_alpha_view())
             throw std::runtime_error("003781b0: the scene has no frame-alpha target");
-        for (std::size_t k = 0; k < probes.size(); ++k) {
-            const auto& probe = probes[k];
-            // The probe: the frame alpha with the scene's depth (tested, not written).
+        // Port-only (132vt3, research/VITA.md "GXM scenes"): the probes go in runs, each run's probe draws (into the
+        // frame alpha) and then its reduces (into the reduce target), not probe, reduce, probe, ...: one target
+        // switch each way per run (vitaGL begins a GXM scene at each). A run ends before a probe whose quads reach the
+        // rectangle an earlier probe of the run reduces, so every reduce reads what it read with each probe drawn and
+        // reduced in turn (GS coordinates, 2 units of margin for the host pixels and the bilinear taps).
+        const auto reaches = [](const Probe& later, const Probe& earlier) {
+            const std::int32_t span = std::abs(earlier.box) + std::abs(later.box) + 4;
+            const auto hit = [&](std::int32_t x, std::int32_t y) {
+                return std::abs(x - earlier.cx) < span && std::abs(y - earlier.cy) < span;
+            };
+            return hit(later.cx, later.cy) || hit(later.x, later.y);
+        };
+        for (std::size_t k = 0; k < probes.size();) {
+            std::size_t end = k + 1;
+            while (end < probes.size() && std::none_of(probes.begin() + static_cast<std::ptrdiff_t>(k),
+                                                       probes.begin() + static_cast<std::ptrdiff_t>(end),
+                                                       [&](const Probe& p) { return reaches(probes[end], p); }))
+                ++end;
+            // The probes: the frame alpha with the scene's depth (tested, not written).
             l.set_textures(0, 2, none);
             l.set_target(scene_.frame_alpha_target(), scene_.depth_view());
             l.set_viewport({0.0F, 0.0F, W, H, 0.0F, 1.0F});
             l.set_blend(nullptr);
             l.set_depth(probe_depth_.get());
             l.set_program(gfx::Program::corona_probe);
-            l.draw(12, probe.first);
-            // The reduce into texel k.
+            for (std::size_t j = k; j < end; ++j) l.draw(12, probes[j].first);
+            // The reduces into texels k ...
             l.set_target(reduce_.get());
-            l.set_viewport({static_cast<float>(k), 0.0F, 1.0F, 1.0F, 0.0F, 1.0F});
             l.set_depth(no_depth_.get());
             l.set_program(gfx::Program::corona_reduce);
             l.set_sampler(0, clamp_.get());
             l.set_texture(0, scene_.frame_alpha_view());
-            l.draw(6, probe.first + 12);
+            for (std::size_t j = k; j < end; ++j) {
+                l.set_viewport({static_cast<float>(j), 0.0F, 1.0F, 1.0F, 0.0F, 1.0F});
+                l.draw(6, probes[j].first + 12);
+            }
+            k = end;
         }
         l.set_textures(0, 2, none);
         // The element sprites over the scene target, no depth.

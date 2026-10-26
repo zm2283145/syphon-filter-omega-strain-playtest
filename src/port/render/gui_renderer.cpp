@@ -1016,11 +1016,20 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 }
                 return b;
             };
+            // 132vf4 (port-only): each menu range's bounds once a frame (the split pass reads them again; the vertices
+            // do not change until the shifts below), not two or three divides per vertex each time.
+            thread_local std::vector<std::array<float, 4>> ranges_bounds;
+            ranges_bounds.resize(wide_ranges.size());
+            for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
+                const WideRange& r = wide_ranges[i];
+                if (r.menu != 0 && r.anchor == 0 && r.kind == wide_frame) ranges_bounds[i] = range_bounds(r);
+            }
             const auto bounds_of = [&] {
                 std::map<std::uint32_t, std::array<float, 4>> out;
-                for (const WideRange& r : wide_ranges) {
+                for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
+                    const WideRange& r = wide_ranges[i];
                     if (r.menu == 0 || r.anchor != 0 || r.kind != wide_frame) continue;
-                    const auto b = range_bounds(r);
+                    const auto b = ranges_bounds[i];
                     auto [it, fresh] = out.try_emplace(r.menu, b);
                     if (!fresh)
                         it->second = {std::min(it->second[0], b[0]), std::max(it->second[1], b[1]),
@@ -1035,7 +1044,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
                 WideRange& r = wide_ranges[i];
                 if (r.menu == 0 || r.anchor != 0 || r.kind != wide_frame) continue;
-                if (gui_wide_menu_spreads(menu_bounds[r.menu]) || !gui_wide_menu_spreads(range_bounds(r))) continue;
+                if (gui_wide_menu_spreads(menu_bounds[r.menu]) || !gui_wide_menu_spreads(ranges_bounds[i])) continue;
                 r.menu = menu_split_tag | static_cast<std::uint32_t>(i);
                 split = true;
             }
@@ -1621,6 +1630,20 @@ void GuiRenderer::draw_wide_fill(const gfx::Texture* target, unsigned width, uns
     if (side_l > 0.0F) quad(v, left, inner_l, std::min(side_l, 1.0F), 0.0F, 0.0F, 1.0F, dim);
     if (side_r > 0.0F) quad(v, inner_r, 320.0F, 1.0F, 1.0F - std::min(side_r, 1.0F), 0.0F, 1.0F, dim);
     draw_host_vertices(target, width, height, v.data(), v.size(), opaque_.get(), sampler_.get(), fill_tiny_.get());
+} catch (const DeviceLost&) {
+    list_.clear();
+}
+
+void GuiRenderer::draw_upscale(const gfx::Texture* target, unsigned width, unsigned height, const gfx::Texture* scene) try {
+    if (lost() || !target || !scene) return;
+    const gfx::TargetView none_target{};
+    list_.clear();
+    list_.set_targets(1, &none_target, nullptr);   // the scene's target is sampled next
+    device_->submit(list_);
+    const HostVertex tl{-320.0F, 224.0F, 0, 0, 1, 1, 1, 1}, tr{320.0F, 224.0F, 1, 0, 1, 1, 1, 1};
+    const HostVertex bl{-320.0F, -224.0F, 0, 1, 1, 1, 1, 1}, br{320.0F, -224.0F, 1, 1, 1, 1, 1, 1};
+    const HostVertex quad[] = {tl, tr, bl, bl, tr, br};
+    draw_host_vertices(target, width, height, quad, 6, opaque_.get(), sampler_.get(), scene);
 } catch (const DeviceLost&) {
     list_.clear();
 }

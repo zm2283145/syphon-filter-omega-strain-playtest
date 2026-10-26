@@ -24,8 +24,34 @@
 #include <functional>
 #include <span>
 #include <vector>
+#if defined(__vita__)
+#include <atomic>
+#endif
 
 namespace omega {
+
+#if defined(__vita__)
+// Port-only, PS Vita only (132vg2, research/VITA.md "Vita render path (132vg2)"): prepare_particle_groups' time
+// split for the play log (timing only): the calls, the batches, the recorded VU1 programs run, the summed worker
+// time in the programs (run_deferred_program) and in the sprite programs (particle_sprite_batch), and the calls'
+// wall time (microseconds, totals since the start).
+struct ParticlePrepareTimes {
+    std::atomic<std::uint64_t> calls{0}, batches{0}, programs{0}, program_us{0}, sprite_us{0}, wall_us{0};
+};
+inline ParticlePrepareTimes g_particle_prepare_times;
+
+// Port-only, PS Vita only (132vg2, research/VITA.md "Vita render path (132vg2)"): the scene frame's model filing
+// (play_main, 0013e250) tested against the drawn (wide) view's clip with the scene frame's culler 003c8990, which
+// the port did not apply to the drawn models: the frames, the models filed, those outside the view (code 0x80), and
+// their surfaces and indices. With g_scene_cull (default; vita_test_scene_cull_off.txt clears it) those models are not
+// drawn: they produce no pixels.
+struct SceneCullStats {
+    std::atomic<std::uint64_t> frames{0}, models{0}, culled{0}, surfaces{0}, culled_surfaces{0}, indices{0},
+        culled_indices{0};
+};
+inline SceneCullStats g_scene_cull_stats;
+inline bool g_scene_cull = true;
+#endif
 
 class WorkerPool;
 namespace gfx {

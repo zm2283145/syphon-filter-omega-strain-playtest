@@ -339,6 +339,11 @@ public:
     // box (vtable 004d9ac0), its eye +c0 = 0014d340 -> +e4 003cd260
     // (hotbox_eye_c0); false when the world does not host the box or the NPC.
     virtual bool request_facial_hotbox(Word, Word, float) { return false; }
+    // RequestFacial of a sound object (SND record ID; SoundGOBJ vtable 004daf30,
+    // whose ctor 00212ee0 attaches its record matrix through +90 003cdff0): its
+    // eye +c0 = 0014d340 -> +e4 003cd260 with +88 0013ee60 null, the position
+    // (w 1). false when the world does not host the sound object or the NPC.
+    virtual bool request_facial_sound(Word, Word, float) { return false; }
     // RequestLookAt (00149ed0 -> +128 = 0014dfb0(c, object, 100, the float):
     // look entry 0, +80 = 0), with the same GOBJ kinds and hosting as
     // RequestFacial. ResumeAILookAt (00149df0 -> +13c = 0014de30(c, 100)) and
@@ -348,6 +353,7 @@ public:
     virtual bool request_look_at_node(Word, std::int32_t, float) { return false; }
     virtual bool request_look_at_object(Word, Word, float) { return false; }
     virtual bool request_look_at_hotbox(Word, Word, float) { return false; }
+    virtual bool request_look_at_sound(Word, Word, float) { return false; }
     virtual bool resume_look_at(Word) { return false; }
     virtual bool deactivate_dead(Word, bool) { return false; }
     // EquipGoggles (00149070 -> +1f0 = 0014a7f0: 001992b0(actor, word != 0,

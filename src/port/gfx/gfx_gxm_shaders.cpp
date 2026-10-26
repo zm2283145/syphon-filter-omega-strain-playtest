@@ -68,6 +68,7 @@ OMEGA_OUT main(float3 vNormal : TEXCOORD0, float2 vUv : TEXCOORD1, float4 vColor
         color *= texel;
     }
     bool raw = alphaTest.z > 0.5;
+#ifndef OMEGA_NO_ALPHA_TEST  // 132vg2: the GXM backend's variant for draws without an alpha test (no discard)
     if (alphaTest.w > 0.5) {
         float at = ceil(color.a * 127.5 - 0.001);
         float as = floor(at * (alphaTest.w - 1.0) / 128.0);
@@ -78,6 +79,7 @@ OMEGA_OUT main(float3 vNormal : TEXCOORD0, float2 vUv : TEXCOORD1, float4 vColor
         bool passed = round(color.a * (raw ? 255.0 : 127.5)) > alphaTest.x;
         if (passed == (alphaTest.y > 0.5)) discard;
     }
+#endif
     float lengthSquared = dot(vNormal, vNormal);
     float lighting = 0.28;
     float3 rgb = color.rgb;

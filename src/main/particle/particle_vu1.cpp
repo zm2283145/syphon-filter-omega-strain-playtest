@@ -3,8 +3,32 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 #include <string>
+
+// 132vd2 (port-side speed only): the FMAC on Advanced SIMD where the target has it (the PS Vita); see Machine::fmac_neon.
+#if defined(__arm__) && defined(__ARM_NEON) && !defined(OMEGA_PARTICLE_NO_NEON)
+#include <arm_neon.h>
+#define OMEGA_PARTICLE_NEON 1
+#else
+#define OMEGA_PARTICLE_NEON 0
+#endif
+#if OMEGA_PARTICLE_NEON && defined(OMEGA_PARTICLE_NEON_CHECK)
+#include <atomic>
+#include <iostream>
+#include <iterator>
+#else
+#undef OMEGA_PARTICLE_NEON_CHECK
+#define OMEGA_PARTICLE_NEON_CHECK 0
+#endif
+#if defined(__GNUC__)
+#define OMEGA_PARTICLE_INLINE inline __attribute__((always_inline))
+#define OMEGA_PARTICLE_NOINLINE __attribute__((noinline))
+#else
+#define OMEGA_PARTICLE_INLINE inline
+#define OMEGA_PARTICLE_NOINLINE
+#endif
 
 namespace omega::particle {
 namespace {
@@ -63,6 +87,73 @@ Qword imm(std::uint32_t b) { return {b, b, b, b}; }
 
 enum class Op { add, sub, mul, madd, msub };
 
+// Port-side speed only (132vd1, research/VITA.md "In-level renderer: per-draw cost"; the same bits): an FMAC lane in
+// binary32 arithmetic when no operand has exponent 255. The operands are binary32 values (a zero exponent read as
+// signed zero), so the binary32 operation is correctly rounded, the value rnd(double operation) gives (the double
+// result is exact or innocuously double-rounded, 53 >= 2 * 24 + 2), and its sign is the double result's, zeros
+// included. A binary32 result with exponent 255 (overflow past FLT_MAX) returns false: the double path then makes the
+// 2^128 binade / +-MAX; a zero exponent keeps the sign only, as rnd does. No operand is an infinity or NaN here, so no
+// result is a NaN. The PS Vita's particle programs run some 100 FMACs per particle, most of the in-level render CPU.
+inline bool fast_operand(std::uint32_t b) { return (b & 0x7f800000u) != 0x7f800000u; }
+inline float fast_value(std::uint32_t b) { return std::bit_cast<float>((b & 0x7f800000u) ? b : b & 0x80000000u); }
+inline bool fast_result(float r, std::uint32_t& out) {
+    const std::uint32_t b = std::bit_cast<std::uint32_t>(r);
+    const std::uint32_t e = b & 0x7f800000u;
+    if (e == 0x7f800000u) return false;
+    out = e ? b : b & 0x80000000u;
+    return true;
+}
+inline bool fast_lane(Op op, std::uint32_t sb, std::uint32_t tb, std::uint32_t accb, std::uint32_t& out) {
+    if (!fast_operand(sb) || !fast_operand(tb)) return false;
+    const float a = fast_value(sb), b = fast_value(tb);
+    switch (op) {
+    case Op::add: return fast_result(a + b, out);
+    case Op::sub: return fast_result(a - b, out);
+    case Op::mul: return fast_result(a * b, out);
+    case Op::madd:
+    case Op::msub: {
+        std::uint32_t p;  // the product rounded first (MADD / MSUB)
+        if (!fast_operand(accb) || !fast_result(a * b, p)) return false;
+        const float c = fast_value(accb), q = std::bit_cast<float>(p);
+        return fast_result(op == Op::madd ? c + q : c - q, out);
+    }
+    }
+    return false;
+}
+
+#if OMEGA_PARTICLE_NEON
+inline bool neon_matches_vfp() {
+    std::uint32_t fpscr;
+    asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    return (fpscr & 0x01f70000u) == 0x01000000u;  // FZ (bit 24) set; RMode (23:22) nearest; Stride, Len 0
+}
+#endif
+
+#if OMEGA_PARTICLE_NEON_CHECK
+// The check build (-DOMEGA_PARTICLE_NEON_CHECK, research/VITA.md "Particle programs on NEON (132vd2)"): every FMAC of a
+// thread in the NEON mode runs both paths; a difference throws, and a log line counts them every 2^20 FMACs.
+std::atomic<std::uint32_t> g_neon_checked{0}, g_neon_fallback{0};
+void neon_check(Op op, bool fast, const Qword& got, const Qword& expect, const Qword& S, const Qword& T,
+                const Qword& acc, int dest) {
+    const std::uint32_t n = g_neon_checked.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!fast) g_neon_fallback.fetch_add(1, std::memory_order_relaxed);
+    if (fast && got != expect) {
+        char b[400];
+        std::snprintf(b, sizeof b,
+                      "VU1 particle NEON check: op %d dest %x at pair %03x: NEON %08x %08x %08x %08x, lanes %08x %08x "
+                      "%08x %08x; S %08x %08x %08x %08x; T %08x %08x %08x %08x; ACC %08x %08x %08x %08x",
+                      static_cast<int>(op), dest, g_pair, got[0], got[1], got[2], got[3], expect[0], expect[1],
+                      expect[2], expect[3], S[0], S[1], S[2], S[3], T[0], T[1], T[2], T[3], acc[0], acc[1], acc[2],
+                      acc[3]);
+        throw std::runtime_error(b);
+    }
+    if ((n & 0xfffffu) == 0)
+        std::cerr << "VU1 particle NEON check: " << n << " FMACs compared, " << g_neon_fallback.load()
+                  << " to the lanes, 0 differences\n";
+}
+void neon_selftest();
+#endif
+
 struct Machine {
     Vu1State& s;
 
@@ -74,11 +165,75 @@ struct Machine {
             if (dest & (8 >> k)) dst[k] = out[k];
     }
 
+#if OMEGA_PARTICLE_NEON
+    // 132vd2: set when the thread's VFP mode is the one Advanced SIMD always uses (flush-to-zero, round to nearest).
+    bool neon = neon_matches_vfp();
+
+    // Port-side speed only (132vd2, research/VITA.md "Particle programs on NEON (132vd2)"; the same bits): the four
+    // lanes of fast_lane at once. Advanced SIMD arithmetic is IEEE binary32 round to nearest with flush-to-zero of
+    // denormal operands and of results tiny before rounding (ARM ARM A2.7.4 / A2.7.5, the standard FPSCR value), which
+    // is what the VFP instructions of fast_lane do under FPSCR FZ = 1 and RMode = 0, the mode the play threads and the
+    // pool jobs run in (enable_ps2_denormal_flush, FloatControlsScope); `neon` is false otherwise. MADD / MSUB round
+    // the product first (VMUL then VADD / VSUB, as fast_lane). Returns false, writing nothing, when a dest lane has an
+    // operand (or the ACC of MADD / MSUB) or a result with exponent 255: fmac_lanes then decides every lane as before.
+    OMEGA_PARTICLE_INLINE bool fmac_neon(Op op, Qword& dst, const Qword& S, const Qword& T, int dest) {
+        const uint32x4_t e = vdupq_n_u32(0x7f800000u);
+        const uint32x4_t mask = {(dest & X) ? ~0u : 0u, (dest & Y) ? ~0u : 0u, (dest & Z) ? ~0u : 0u,
+                                 (dest & W) ? ~0u : 0u};
+        const uint32x4_t sb = vld1q_u32(S.data()), tb = vld1q_u32(T.data());
+        uint32x4_t bad = vorrq_u32(vceqq_u32(vandq_u32(sb, e), e), vceqq_u32(vandq_u32(tb, e), e));
+        const float32x4_t a = vreinterpretq_f32_u32(sb), b = vreinterpretq_f32_u32(tb);
+        float32x4_t r;
+        switch (op) {
+        case Op::add: r = vaddq_f32(a, b); break;
+        case Op::sub: r = vsubq_f32(a, b); break;
+        case Op::mul: r = vmulq_f32(a, b); break;
+        case Op::madd:
+        case Op::msub: {
+            const uint32x4_t cb = vld1q_u32(s.acc.data());
+            bad = vorrq_u32(bad, vceqq_u32(vandq_u32(cb, e), e));
+            const float32x4_t p = vmulq_f32(a, b), c = vreinterpretq_f32_u32(cb);
+            r = op == Op::madd ? vaddq_f32(c, p) : vsubq_f32(c, p);  // a product past FLT_MAX makes r infinite
+            break;
+        }
+        default: return false;
+        }
+        const uint32x4_t rb = vreinterpretq_u32_f32(r);
+        bad = vandq_u32(vorrq_u32(bad, vceqq_u32(vandq_u32(rb, e), e)), mask);
+        const uint32x2_t half = vorr_u32(vget_low_u32(bad), vget_high_u32(bad));
+        if (vget_lane_u32(vpmax_u32(half, half), 0)) return false;
+        if (&dst == &s.vf[0]) return true;
+        vst1q_u32(dst.data(), dest == XYZW ? rb : vbslq_u32(mask, rb, vld1q_u32(dst.data())));
+        return true;
+    }
+#endif
+
     // FMAC: dst (a VF or the ACC) = op(S, T) on the dest lanes.
-    void fmac(Op op, Qword& dst, const Qword& S, const Qword& T, int dest) {
+    OMEGA_PARTICLE_INLINE void fmac(Op op, Qword& dst, const Qword& S, const Qword& T, int dest) {
+#if OMEGA_PARTICLE_NEON
+#if OMEGA_PARTICLE_NEON_CHECK
+        if (neon) {  // the check build: both paths into copies, compared; dst from the lanes as before
+            static const bool tested = (neon_selftest(), true);
+            (void)tested;
+            Qword got = dst, expect = dst;
+            const bool fast = fmac_neon(op, got, S, T, dest);
+            fmac_lanes(op, expect, S, T, dest);
+            neon_check(op, fast, got, expect, S, T, s.acc, dest);
+            fmac_lanes(op, dst, S, T, dest);
+            return;
+        }
+#else
+        if (neon && fmac_neon(op, dst, S, T, dest)) return;
+#endif
+#endif
+        fmac_lanes(op, dst, S, T, dest);
+    }
+
+    OMEGA_PARTICLE_NOINLINE void fmac_lanes(Op op, Qword& dst, const Qword& S, const Qword& T, int dest) {
         Qword out = dst;
         for (int k = 0; k < 4; ++k) {
             if (!(dest & (8 >> k))) continue;
+            if (fast_lane(op, S[k], T[k], s.acc[k], out[k])) continue;
             const double a = daz(S[k]), b = daz(T[k]);
             double r = 0;
             switch (op) {
@@ -186,7 +341,62 @@ struct Machine {
     void rxor(std::uint32_t word) { s.r = (s.r ^ word) & 0x7fffffu; }
 };
 
+#if OMEGA_PARTICLE_NEON_CHECK
+// The check build, once: 2^20 random FMACs with the exponents at the edges (0, 1, the 2^0 binades, 253 to 255, the
+// tiny and the overflowing results), both paths compared on every dest mask.
+void neon_selftest() {
+    auto vu = std::make_unique<Vu1State>();
+    Machine m{*vu};
+    std::uint32_t x = 0x9e3779b9u;
+    auto next = [&] {
+        x ^= x << 13, x ^= x >> 17, x ^= x << 5;
+        return x;
+    };
+    auto value = [&] {
+        static constexpr std::uint32_t edges[] = {0, 1, 2, 3, 24, 25, 126, 127, 128, 150, 151, 252, 253, 254, 255};
+        const std::uint32_t r = next();
+        const std::uint32_t ex = (r & 3) ? edges[(r >> 2) % std::size(edges)] : (r >> 8) & 0xff;
+        return (next() & 0x807fffffu) | (ex << 23);
+    };
+    std::uint32_t fast = 0, differences = 0;
+    for (std::uint32_t i = 0; i < (1u << 20); ++i) {
+        Qword S, T, d;
+        for (int k = 0; k < 4; ++k) S[k] = value(), T[k] = value(), vu->acc[k] = value(), d[k] = value();
+        if (next() & 1) T = S;  // a - a, a * a
+        const Op op = static_cast<Op>(next() % 5);
+        const int dest = int(next() % 15) + 1;
+        Qword got = d, expect = d;
+        if (!m.fmac_neon(op, got, S, T, dest)) continue;
+        ++fast;
+        try {
+            m.fmac_lanes(op, expect, S, T, dest);
+        } catch (const std::exception&) {
+            expect = Qword{~got[0], 0, 0, 0};
+        }
+        if (got != expect && differences++ < 8)
+            std::cerr << "VU1 particle NEON self-test: op " << int(op) << " dest " << dest << " S " << std::hex << S[0]
+                      << ' ' << S[1] << ' ' << S[2] << ' ' << S[3] << " T " << T[0] << ' ' << T[1] << ' ' << T[2] << ' '
+                      << T[3] << " NEON " << got[0] << ' ' << got[1] << ' ' << got[2] << ' ' << got[3] << " lanes "
+                      << expect[0] << ' ' << expect[1] << ' ' << expect[2] << ' ' << expect[3] << std::dec << '\n';
+    }
+    std::cerr << "VU1 particle NEON self-test: " << (1u << 20) << " random FMACs, " << fast << " on NEON, " << differences
+              << " differences\n";
+}
+#endif
+
 }  // namespace
+
+Vu1State& thread_vu1_state() {
+    thread_local std::unique_ptr<Vu1State> state;
+    if (!state) return *(state = std::make_unique<Vu1State>());
+    Vu1State& s = *state;
+    s.vf = {};
+    s.vf[0] = {0, 0, 0, 0x3f800000u};
+    s.acc = {};
+    s.i = s.q = s.r = 0;
+    s.vi = {};
+    return s;
+}
 
 std::uint32_t run_particle_program(Vu1State& vu, std::uint32_t top) {
     Machine m{vu};
@@ -660,7 +870,7 @@ std::uint32_t run_shatter_program(Vu1State& vu, std::uint32_t top) {
 
 std::uint32_t cull_batch(const Qword& bound_min, const Qword& bound_max, const std::array<Qword, 4>& cull) {
     if ((bound_max[0] & 0xffffu) == 0xffffu) return 0;  // pair 0xd: ibeq vi1, 0xffff
-    Vu1State state;
+    Vu1State& state = thread_vu1_state();
     Machine m{state};
     auto& s = state;
     for (int k = 0; k < 4; ++k) s.vf[1 + k] = cull[k];
@@ -704,7 +914,7 @@ std::vector<Qword> run_sprite_program(std::uint32_t stop, const std::vector<Qwor
     if (position.size() != colour.size()) throw std::runtime_error("VU1 sprite program: position/colour counts differ");
     const bool flipped = stop == 0x8a0;
     const std::uint32_t base = flipped ? 0x116 : 0xbe;
-    Vu1State state;
+    Vu1State& state = thread_vu1_state();
     Machine m{state};
     auto& s = state;
     auto v = [&](int r) -> Qword& { return s.vf[r]; };
@@ -798,7 +1008,7 @@ Qword heat_haze_uv_qword(std::int32_t width, std::int32_t height) {
 std::vector<Qword> run_heat_haze_program(const std::vector<Qword>& position, const std::vector<Qword>& colour,
                                          const SpriteFrame& frame, const Qword& tag) {
     if (position.size() != colour.size()) throw std::runtime_error("VU1 heat-haze program: position/colour counts differ");
-    Vu1State state;
+    Vu1State& state = thread_vu1_state();
     Machine m{state};
     auto& s = state;
     auto v = [&](int r) -> Qword& { return s.vf[r]; };

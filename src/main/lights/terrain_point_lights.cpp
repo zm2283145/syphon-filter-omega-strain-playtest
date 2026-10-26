@@ -146,15 +146,79 @@ bool terrain_batch_reached(const TerrainPointLight& light,const MeshBatch& batch
     return reached(vu,light,batch_sphere(vu,batch));
 }
 
+TerrainBatchSphere terrain_batch_sphere(const MeshBatch& batch){
+    TerrainBatchSphere t;
+    try{
+        Vu vu;
+        const BatchSphere s=batch_sphere(vu,batch);
+        t.centre={s.centre[0],s.centre[1],s.centre[2]};t.radius=s.radius;
+    }catch(const std::runtime_error&){t.not_a_number=true;}   // the only error batch_sphere throws
+    return t;
+}
+
+namespace {
+BatchSphere cached_sphere(const TerrainBatchSphere& t){
+    require(!t.not_a_number,"VU value not a number");
+    return {{t.centre[0],t.centre[1],t.centre[2]},t.radius};
+}
+}
+
+bool terrain_batch_reached(const TerrainPointLight& light,const TerrainBatchSphere& sphere){
+    Vu vu;
+    return reached(vu,light,cached_sphere(sphere));
+}
+
+std::uint32_t terrain_batch_reach_mask(std::span<const TerrainPointLight> lights,const TerrainBatchSphere& sphere){
+    require(lights.size()<=32,"more than 32 lights for a reach mask");
+    if(lights.empty())return 0;
+    Vu vu;
+    const BatchSphere s=cached_sphere(sphere);
+    std::uint32_t mask=0;
+    for(std::size_t i=0;i<lights.size();++i)if(reached(vu,lights[i],s))mask|=1U<<i;
+    return mask;
+}
+
 namespace {bool fast_reject=false;}
 void set_terrain_light_fast_reject(bool on){fast_reject=on;}
 bool terrain_light_fast_reject(){return fast_reject;}
+
+namespace {
+void apply_lights(std::span<const TerrainPointLight> lights,const BatchSphere& s,
+                  std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours);
+}
 
 void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const MeshBatch& batch,
                                 std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours){
     require(positions.size()==batch.vertex_count&&colours.size()==batch.vertex_count,"vertex spans differ from the batch");
     Vu vu;
-    const BatchSphere s=batch_sphere(vu,batch);
+    apply_lights(lights,batch_sphere(vu,batch),positions,colours);
+}
+
+void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const TerrainBatchSphere& sphere,const MeshBatch& batch,
+                                std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours){
+    require(positions.size()==batch.vertex_count&&colours.size()==batch.vertex_count,"vertex spans differ from the batch");
+    apply_lights(lights,cached_sphere(sphere),positions,colours);
+}
+
+void relight_terrain_batch(std::span<const TerrainPointLight> lights,const TerrainBatchSphere& sphere,const MeshBatch& batch,
+                           std::span<const std::array<std::uint8_t,3>> base_colours,std::span<MeshVertex> vertices){
+    require(base_colours.size()==batch.vertex_count&&vertices.size()==batch.vertex_count,"relight spans differ from the batch");
+    thread_local std::vector<std::array<std::uint8_t,3>> colours;
+    thread_local std::vector<std::array<float,3>> positions;
+    colours.assign(base_colours.begin(),base_colours.end());
+    if(!lights.empty()){
+        positions.clear();
+        for(const MeshVertex& v:vertices)positions.push_back({v.position.x,v.position.y,v.position.z});
+        apply_terrain_point_lights(lights,sphere,batch,positions,colours);
+    }
+    for(std::size_t v=0;v<vertices.size();++v)
+        for(std::size_t i=0;i<3;++i)vertices[v].color[i]=float(colours[v][i])/128;
+}
+
+namespace {
+void apply_lights(std::span<const TerrainPointLight> lights,const BatchSphere& s,
+                  std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours){
+    Vu vu;
     for(const TerrainPointLight& light:lights){
         if(!reached(vu,light,s))continue;
         const float span=vu.sub(light.a[3],light.b[3]);                                  // sub.w
@@ -190,5 +254,6 @@ void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const 
             }
         }
     }
+}
 }
 }

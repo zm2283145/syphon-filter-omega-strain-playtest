@@ -407,6 +407,14 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
     l.set_depth(depth_.get());
     l.set_sampler(0, sampler_.get());
     int bound = 0;   // 1: the sprite pipeline, -1: the heat-haze pipeline
+#if defined(__vita__)
+    // 132vt3: the haze draws (vertices first, count, image), drawn into the frame alpha after the loop.
+    struct HazeAlpha {
+        std::uint32_t first, count;
+        const gfx::Texture* view;
+    };
+    std::vector<HazeAlpha> haze_alpha;
+#endif
     for (const Segment& s : segments) {
         const int kind = s.blend < 0 ? -1 : 1;
         if (kind != bound) {
@@ -419,7 +427,11 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
             if (kind < 0 && !scene_.frame_alpha_target())
                 throw std::runtime_error("0037d3d8: the scene has no frame-alpha target for sprite A");
             const gfx::TargetView targets[2]{{target, 0}, {kind > 0 ? nullptr : scene_.frame_alpha_target(), 0}};
+#if defined(__vita__)
+            l.set_targets(1, targets, scene_.depth_view());   // 132vt3: the frame alpha after the loop
+#else
             l.set_targets(kind > 0 ? 1 : 2, targets, scene_.depth_view());
+#endif
         }
         if (kind > 0) l.set_blend(s.blend == 4 ? reverse_subtract_.get() : blend_[s.blend].get());
         l.set_texture(0, s.view);
@@ -430,7 +442,11 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
 #if defined(__vita__)
         // Port-only (132vt2, the Vita): each copy from the display ends vitaGL's GXM scene, so the sprites go in runs
         // whose boxes do not overlap: one copy of the run's bounding box, then the run's draw. Each sprite still
-        // reads its box with every earlier overlapping sprite drawn, as the per-sprite copies below.
+        // reads its box with every earlier overlapping sprite drawn, as the per-sprite copies below. 132vt3: the run's
+        // draw is the scene colour (SV_Target0) only; its frame alpha (SV_Target1: the image's alpha and the sprite
+        // colour, no blending, read by nothing in this list) is drawn for all the runs after the loop, in the same
+        // order and with the same depth test, so each run costs vitaGL two GXM scenes (the copy, the scene target)
+        // instead of three (and the frame alpha, one in all; research/VITA.md "GXM scenes").
         for (std::uint32_t v = s.first; v < s.first + s.count;) {
             gfx::Box run{};
             std::uint32_t end = v;
@@ -459,6 +475,11 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
             l.copy_region(frame_copy_.get(), 0, run.left, run.top, target, 0, &run);
             l.set_texture(2, frame_copy_.get());
             l.draw(end - v, v);
+            if (!haze_alpha.empty() && haze_alpha.back().view == s.view
+                && haze_alpha.back().first + haze_alpha.back().count == v)
+                haze_alpha.back().count += end - v;
+            else
+                haze_alpha.push_back({v, end - v, s.view});
             v = end;
         }
 #else
@@ -473,6 +494,23 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
         }
 #endif
     }
+#if defined(__vita__)
+    if (!haze_alpha.empty()) {
+        if (bound > 0) {
+            l.set_vertex_buffer(haze_vertices_.get(), sizeof(HazeVertex));
+            l.set_program(gfx::Program::particle_haze);
+            l.set_texture(1, screen_fx_.get());
+        }
+        bound = -1;
+        l.set_blend(haze_blend_.get());
+        const gfx::TargetView targets[2]{{nullptr, 0}, {scene_.frame_alpha_target(), 0}};
+        l.set_targets(2, targets, scene_.depth_view());
+        for (const HazeAlpha& h : haze_alpha) {
+            l.set_texture(0, h.view);
+            l.draw(h.count, h.first);
+        }
+    }
+#endif
     const gfx::Texture* none[3]{};
     l.set_textures(0, 3, none);
     if (bound < 0) l.set_target(target, scene_.depth_view());

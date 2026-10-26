@@ -6,6 +6,7 @@
 #include "worker_pool.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -47,6 +48,9 @@ struct Batch {
 constexpr unsigned max_frames_ahead = 1;  // the simulation records frame N+1 while frame N executes
 constexpr std::size_t max_pooled_lists = 64;
 constexpr std::size_t max_pooled_bytes = 16;
+
+// 132vg1: RenderThread::totals() (every render thread's, since the start).
+std::atomic<std::uint64_t> g_total_frames{0}, g_total_execute_us{0}, g_total_present_us{0};
 
 }  // namespace
 
@@ -121,6 +125,9 @@ struct RenderThread::Core {
             const float total_ms = ms_since(begin);
             current.execute_ms += total_ms - present_ms;
             current.present_ms += present_ms;
+            g_total_execute_us += static_cast<std::uint64_t>(std::max(total_ms - present_ms, 0.0F) * 1000.0F);
+            g_total_present_us += static_cast<std::uint64_t>(present_ms * 1000.0F);
+            if (b.frame_end) ++g_total_frames;
             std::vector<std::shared_ptr<void>> freed;
             {
                 std::lock_guard lock(m);
@@ -421,6 +428,10 @@ void RenderThread::stop() {
         core_->graveyard.clear();
     }
     if (pending) std::rethrow_exception(pending);
+}
+
+RenderThread::Totals RenderThread::totals() {
+    return {g_total_frames.load(), g_total_execute_us.load(), g_total_present_us.load()};
 }
 
 std::vector<RenderThread::FrameTime> RenderThread::frame_times() const {

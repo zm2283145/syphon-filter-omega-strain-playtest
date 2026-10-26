@@ -46,6 +46,10 @@
 #endif
 
 #include "device_lost.hpp"
+#include "worker_pool.hpp"
+#ifdef __vita__
+#include "vita_file.hpp"
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -60,6 +64,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace omega {
 
@@ -420,6 +425,30 @@ struct FrontendApp::Impl {
     bool script_waiting = false;  // PORT-ONLY test (132on2c): the step's "waitfile" is not there yet
     void simulate_card(const std::string& spec, const char* from);
     GuiDrawList shown;
+    // Port-only (132vf2, research/VITA.md "Front-end speed (132vf2)"): the PS Vita's threaded present. A frame's draw
+    // and present run on the render core (a host thread of their own) while the next step runs, from render_list (the
+    // list handed over; shown is the one being recorded). shown_is_last: shown holds the latest list (else
+    // render_list does); every other platform never hands a list over, so there shown is always the latest.
+    GuiDrawList render_list;
+    bool shown_is_last = true;
+    const GuiDrawList& last_list() const { return shown_is_last ? shown : render_list; }
+    bool threaded_present = false;  // the PS Vita, unless the test switch vita_test_frontend_inline.txt is there
+    bool spin_wait = false;  // the PS Vita: finish_present polls the job's end (test switch vita_test_frontend_block.txt)
+    bool in_nested_frame = false;
+    std::shared_ptr<HostThread::Completion> present_job;
+    std::exception_ptr present_error;  // the job's, rethrown on the simulation thread
+    double job_draw_s = 0.0, job_present_s = 0.0;
+    bool job_timed = false;
+    std::uint64_t threaded_frames = 0, inline_frames = 0;
+    double present_wait_s = 0.0;  // the simulation thread's waits for the job (logged with the counts)
+    // The hand-off's own cost (logged with the counts): the job's start after its hand-over, and the waiting
+    // simulation thread's wake after the job's end.
+    std::chrono::steady_clock::time_point job_given{}, job_started{}, job_ended{};
+    double job_start_s = 0.0, job_wake_s = 0.0;
+    bool threaded_present_ok() const;
+    void present_threaded();
+    void finish_present();
+    void present_log();
     std::uint64_t movie_serial = 0, screen_movie_serial = 0;
     // Checkpoint 132cp11: *005392d0 as the last GUI batch drawn left it (0 at boot).
     std::uint32_t last_render_mode = 0;
@@ -463,6 +492,8 @@ struct FrontendApp::Impl {
     std::uint64_t overlay_logged = ~0ull;
     void overlay_events();
     void draw_overlay(std::int64_t frame);
+    std::vector<std::string> overlay_lines(std::int64_t frame);
+    void draw_overlay_lines(const std::vector<std::string>& lines);
     // Port-only (checkpoint 132win11): the Port Settings page (FrontendOptions::settings_page) and this front
     // end's listener on it (menu bindings, vsync, the overlay).
     std::shared_ptr<PortSettingsStore> store;
@@ -470,6 +501,7 @@ struct FrontendApp::Impl {
     std::size_t page_listener = 0;
     std::uint16_t page_input(std::uint16_t held, bool keys_down, const KeyboardState& keys);
     ~Impl() {
+        if (present_job) present_job->wait();  // 132vf2: the job uses this front end's renderer and window
         if (page) page->unlisten(page_listener);
     }
     // Port-only (checkpoint 132win5): FrontendOptions::test_minimize / test_close, and the minimised window's
@@ -487,6 +519,7 @@ struct FrontendApp::Impl {
 
     Impl(DiscImage& disc, const FrontendOptions& o);
     void upload(std::uint32_t slot, const Texture& t) {
+        finish_present();  // 132vf2: the renderer's textures change between jobs only
         if (screen) screen->set_texture(slot, t);
         if (offscreen) offscreen->set_texture(slot, t);
     }
@@ -495,12 +528,13 @@ struct FrontendApp::Impl {
     void sync_zeus() {
         const auto& images = data->zeus_images();
         std::set<std::uint32_t> drawn;
-        for (const auto& b : shown.batches) drawn.insert(b.slot);
+        for (const auto& b : last_list().batches) drawn.insert(b.slot);
         for (auto it = zeus_uploaded.begin(); it != zeus_uploaded.end();) {
             if (images.count(*it) || drawn.count(*it)) {
                 ++it;
                 continue;
             }
+            finish_present();
             if (screen) screen->drop_texture(*it);
             if (offscreen) offscreen->drop_texture(*it);
             it = zeus_uploaded.erase(it);
@@ -600,6 +634,15 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
     }
     profile.threshold_ms = options.profile_ms;
     profile.disc = &disc;
+#ifdef __vita__
+    // Port-only (132vf2, research/VITA.md "Front-end speed (132vf2)"): the threaded present, off with the test switch.
+    threaded_present = vita_file_size(std::string(vita_data_root) + "/vita_test_frontend_inline.txt") < 0;
+    spin_wait = vita_file_size(std::string(vita_data_root) + "/vita_test_frontend_block.txt") < 0;
+    std::cout << "Front end: present "
+              << (threaded_present ? "on the render core, overlapping the next step (port-only, 132vf2)"
+                                   : "inline (vita_test_frontend_inline.txt, test switch)")
+              << "\n";
+#endif
     if (profile.on()) {  // port-only (132win5): the session's disc / decode services, timed
         profile_service(services.gui_file, profile, "gui_file");
         profile_service(services.decor, profile, "decor");
@@ -1043,6 +1086,7 @@ void FrontendApp::Impl::open_output() {
 
 // A device re-created after a loss (HostWindow::present): a new renderer with the images uploaded so far.
 void FrontendApp::Impl::make_screen() {
+    finish_present();  // 132vf2
     screen = std::make_unique<GuiRenderer>(host->gfx());
     overlay.release();  // port-only (132win11): the overlay's texture on the new device
     lan_notice_overlay.release();  // port-only (132md5)
@@ -1101,6 +1145,7 @@ void FrontendApp::Impl::read_simulated_devices() {
 }
 
 void FrontendApp::Impl::release_output() {
+    finish_present();  // 132vf2: the last frame's job ends before its renderer and window go
 #ifdef __vita__
     sound_pump.reset();
 #endif
@@ -1122,7 +1167,7 @@ void FrontendApp::Impl::capture(const std::string& name) {
                   static_cast<long long>(session->frames()));
     const auto path = options.capture_dir / file;
     offscreen->clear({0.0F, 0.0F, 0.0F, 1.0F});
-    offscreen->draw(shown);
+    offscreen->draw(last_list());
     offscreen->capture(path);
     result.captures.push_back(path.string());
     std::cout << "Front end: capture " << path.string() << "\n";
@@ -1187,6 +1232,7 @@ void FrontendApp::Impl::step(std::uint16_t held) {
             offscreen->set_texture(movie_slot, movie_picture());
         }
         shown = movie_list(s.movie_aspect());
+        shown_is_last = true;
         if (const auto* track = s.movie_subtitles()) {
             append_subtitles(shown, data->fonts(), *track, s.movie_subtitle_colour(), last_render_mode);
             // Port-only log (checkpoint 132cp11): the cue's reveal start, its complete text and its hide.
@@ -1205,10 +1251,12 @@ void FrontendApp::Impl::step(std::uint16_t held) {
         FrontendProfileScope scope(profile, "draw_list");
         shown.recycle();   // 132vf1: keeps the batches' storage (as the Vita loop)
         drawer->draw_canvas(shown, s.runtime(), s.now_ms());
+        shown_is_last = true;
         if (!shown.batches.empty()) last_render_mode = shown.batches.back().render_mode;
         sync_zeus();  // the part textures the agent model draw took this frame
     } else if (s.movie_playing() || !s.gui_active()) {
         shown.batches.clear();
+        shown_is_last = true;
     }
     // A movie's PCM goes to the device instead of the sound mix: gameSound
     // is not loaded while a movie plays (the boot movie precedes 002cb3d0,
@@ -1286,8 +1334,15 @@ void FrontendApp::Impl::step(std::uint16_t held) {
 }
 
 void FrontendApp::Impl::present() {
+    if (threaded_present_ok()) {
+        present_threaded();
+        return;
+    }
+    finish_present();  // 132vf2: the frames the threaded present leaves inline (movies, nested frames, tests)
+    if (threaded_present && host && screen) ++inline_frames;
     if (host && host->minimized()) ++minimized_presents_skipped;
     if (!host || !screen || host->minimized()) return;
+    const GuiDrawList& list = last_list();
     const std::int64_t frame = session->frames();
     if (!test_lost.empty() && *test_lost.begin() <= frame) {  // port-only diagnostic (132win5): a loss at the frame boundary
         test_lost.erase(test_lost.begin());
@@ -1324,8 +1379,8 @@ void FrontendApp::Impl::present() {
         const bool slideshow = shown_top && shown_top->cls == gui::WidgetClass::slideshow;
         screen->set_wide_edge_extend(!wide_background && !session->movie_playing() && !slideshow);
         screen->set_wide_menu(!slideshow);
-        screen->draw(shown, host->back_buffer(), host->width(), host->height());
-        if (!wide_background && !session->movie_playing() && !shown.batches.empty() && screen->wide_edge_images() == 0)
+        screen->draw(list, host->back_buffer(), host->width(), host->height());
+        if (!wide_background && !session->movie_playing() && !list.batches.empty() && screen->wide_edge_images() == 0)
             screen->draw_wide_fill(host->back_buffer(), host->width(), host->height());
         draw_overlay(frame);
         draw_lan_notices();
@@ -1360,6 +1415,12 @@ void FrontendApp::Impl::present() {
 // top-left corner, as the play draws it), before the window capture and the present.
 void FrontendApp::Impl::draw_overlay(std::int64_t frame) {
     if (!overlay_on || !overlay_profile) return;
+    draw_overlay_lines(overlay_lines(frame));
+}
+
+// The overlay's lines (simulation thread: they read the frame profile); 132vf2: drawn apart (draw_overlay_lines), on
+// the render core with the threaded present.
+std::vector<std::string> FrontendApp::Impl::overlay_lines(std::int64_t frame) {
     const auto& a = overlay_profile->averages();
     const auto ms = [](double v) {
         std::ostringstream o;
@@ -1372,16 +1433,120 @@ void FrontendApp::Impl::draw_overlay(std::int64_t frame) {
         lines = {"FRAME " + ms(a.total) + " MS  " + ms(a.fps) + " FPS  MAX " + ms(a.max_total),
                  "FRONT END STEP " + ms(a.ms[omega::FrameProfile::sim]),
                  "DRAW " + ms(a.ms[omega::FrameProfile::render]) + "  PRESENT " + ms(a.ms[omega::FrameProfile::present])};
-    const auto r = frame_rect(host->width(), host->height());
-    const unsigned scale = FrameOverlay::scale_for(host->height());
-    overlay.draw(*host->gfx(), host->back_buffer(), host->width(), host->height(), lines, r.x + 4 * scale,
-                 r.y + 4 * scale, scale);
     if (overlay_logged != a.frames && options.window_captures.count(frame)) {
         overlay_logged = a.frames;
         std::cout << "Front end: frame overlay (port-only) at front-end frame " << frame << ":";
         for (const auto& t : lines) std::cout << " [" << t << "]";
         std::cout << "\n";
     }
+    return lines;
+}
+
+void FrontendApp::Impl::draw_overlay_lines(const std::vector<std::string>& lines) {
+    const auto r = frame_rect(host->width(), host->height());
+    const unsigned scale = FrameOverlay::scale_for(host->height());
+    overlay.draw(*host->gfx(), host->back_buffer(), host->width(), host->height(), lines, r.x + 4 * scale,
+                 r.y + 4 * scale, scale);
+}
+
+// Port-only (132vf2, research/VITA.md "Front-end speed (132vf2)"): the PS Vita's threaded present, for the plain
+// frames: a movie (its picture's upload), a nested frame (a card wait), the window's tests and captures, the
+// profile and the LAN notices keep the inline present.
+bool FrontendApp::Impl::threaded_present_ok() const {
+    return threaded_present && host && screen && session && !host->minimized() && !in_nested_frame &&
+           test_lost.empty() && options.window_captures.empty() && !profile.on() && lan_notices.empty() &&
+           !session->movie_playing() && host->device_generation() == screen_generation;
+}
+
+// Waits for the last frame's job; its draw and present times go to the frame overlay's profile here, on the
+// simulation thread, and its error is rethrown here.
+void FrontendApp::Impl::finish_present() {
+    if (!present_job) return;
+    const auto begun = std::chrono::steady_clock::now();
+    // The simulation thread has core 0 to itself: it polls the job's end for up to 25 ms before blocking (a blocked
+    // wait woke about 3.8 ms after the job's end on Vita3K, every frame).
+    if (spin_wait) {
+        const auto limit = begun + std::chrono::milliseconds(25);
+        while (!present_job->done() && std::chrono::steady_clock::now() < limit) {
+        }
+    }
+    present_job->wait();
+    present_job.reset();
+    const auto woke = std::chrono::steady_clock::now();
+    present_wait_s += std::chrono::duration<double>(woke - begun).count();
+    if (job_timed) {
+        job_start_s += std::chrono::duration<double>(job_started - job_given).count();
+        if (job_ended > begun) job_wake_s += std::chrono::duration<double>(woke - job_ended).count();
+    }
+    if (overlay_profile && job_timed) {
+        overlay_profile->add(omega::FrameProfile::render, job_draw_s);
+        overlay_profile->add(omega::FrameProfile::present, job_present_s);
+    }
+    job_timed = false;
+    if (present_error) std::rethrow_exception(std::exchange(present_error, nullptr));
+}
+
+// Hands the frame to the render core: what the draw reads of the session is taken here (the top screen's wide
+// background and slideshow, the overlay's lines), the list recorded last becomes render_list, and the job draws and
+// presents it while the next step records into shown.
+void FrontendApp::Impl::present_threaded() {
+    const std::int64_t frame = session->frames();
+    const gui::Widget* top = session->gui_active() ? session->runtime().top() : nullptr;
+    std::string background;
+    if (top && frame_wide(host->width(), host->height())) background = std::string("frontend.") + frontend_class_name(top->cls);
+    const bool slideshow = top && top->cls == gui::WidgetClass::slideshow;
+    std::vector<std::string> lines;
+    const bool overlay_drawn = overlay_on && overlay_profile;
+    if (overlay_drawn) lines = overlay_lines(frame);
+    const unsigned interval = pacing ? pacing->sync_interval() : 1u;
+    finish_present();
+    if (shown_is_last) {
+        std::swap(shown, render_list);
+        shown_is_last = false;
+    }
+    host->back_buffer();  // made here, not on the render core
+    ++threaded_frames;
+    if ((threaded_frames + inline_frames) % 600 == 0) present_log();
+    static HostThread* render_core = new HostThread("frontend present");  // kept to the process end (worker_pool.hpp)
+    job_given = std::chrono::steady_clock::now();
+    present_job = render_core->run([this, background = std::move(background), slideshow, lines = std::move(lines),
+                                    overlay_drawn, interval] {
+        try {
+            const auto draw_begun = std::chrono::steady_clock::now();
+            job_started = draw_begun;
+            host->sync_buffers();
+            const float black[4] = {0, 0, 0, 1};
+            gfx::clear_target(*host->gfx(), host->back_buffer(), black);
+            const bool wide_background =
+                !background.empty() &&
+                screen->draw_wide_background(background, host->back_buffer(), host->width(), host->height());
+            screen->set_wide_edge_extend(!wide_background && !slideshow);
+            screen->set_wide_menu(!slideshow);
+            screen->draw(render_list, host->back_buffer(), host->width(), host->height());
+            if (!wide_background && !render_list.batches.empty() && screen->wide_edge_images() == 0)
+                screen->draw_wide_fill(host->back_buffer(), host->width(), host->height());
+            if (overlay_drawn) draw_overlay_lines(lines);
+            const auto present_begun = std::chrono::steady_clock::now();
+            host->present(interval);
+            job_ended = std::chrono::steady_clock::now();
+            job_draw_s = std::chrono::duration<double>(present_begun - draw_begun).count();
+            job_present_s = std::chrono::duration<double>(job_ended - present_begun).count();
+            job_timed = true;
+        } catch (const DeviceLost&) {
+        } catch (...) {
+            present_error = std::current_exception();
+        }
+    });
+}
+
+void FrontendApp::Impl::present_log() {
+    if (!threaded_present) return;
+    std::cout << "Front end: threaded present (port-only, 132vf2): " << threaded_frames << " frames on the render core, "
+              << inline_frames << " inline; the step's wait for the render core "
+              << (threaded_frames ? present_wait_s * 1000.0 / double(threaded_frames) : 0.0) << " ms/frame; the hand-off: the job's start "
+              << (threaded_frames ? job_start_s * 1000.0 / double(threaded_frames) : 0.0)
+              << " ms, the waiting step's wake " << (threaded_frames ? job_wake_s * 1000.0 / double(threaded_frames) : 0.0)
+              << " ms/frame (" << (spin_wait ? "polled" : "blocked, vita_test_frontend_block.txt") << ")\n";
 }
 
 // Port-only (checkpoint 132md5, research/MODDING.md "LAN: the mod report at join"): the LAN mod gate on a session
@@ -1580,6 +1745,7 @@ void FrontendApp::Impl::nested_frame() {
     FrontendSession& s = *session;
     shown.batches.clear();
     drawer->draw_canvas(shown, s.runtime(), s.now_ms());
+    shown_is_last = true;
     sync_zeus();
     const gui::Widget* top = s.runtime().top();
     const std::string name = top ? frontend_class_name(top->cls) : std::string("(none)");
@@ -1590,6 +1756,11 @@ void FrontendApp::Impl::nested_frame() {
         card_wait_captured = s.frames();
         capture(wait_thread ? "WAITTHREAD" : "CARDWAIT");
     }
+    in_nested_frame = true;
+    struct Nested {
+        bool& flag;
+        ~Nested() { flag = false; }
+    } nested{in_nested_frame};
     present();
 }
 
@@ -1751,6 +1922,8 @@ FrontendResult FrontendApp::Impl::loop() {
         arm_device_hooks();
         if (steps == 0 && !pacing) Sleep(1);
     }
+    finish_present();  // 132vf2: the pass's last frame presented before the level, the next pass or the exit
+    present_log();
     if (sweep_call) {  // the pass ended inside a sweep: disarmed so that the loss cannot fire in the level
         device_lost_inject(-1);
         std::cout << "Device-lost sweep (port-only diagnostic) cut short at front-end frame " << s.frames()

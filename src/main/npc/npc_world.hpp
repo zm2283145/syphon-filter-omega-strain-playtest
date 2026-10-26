@@ -541,6 +541,7 @@ private:
     std::function<bool(std::uint64_t)> pickupable_awareness_filter_;
     std::function<bool(std::uint8_t)> mode_change_filter_;
     std::optional<NpcPerceptionHost> sense_;
+    std::function<std::optional<NpcSenseObject>(std::uint64_t)> sense_object_base_;   // sense_'s own views (host(); 132vs4)
     std::unique_ptr<NpcAttackHost> attack_;
     std::unique_ptr<NpcCarryHost> carry_;                      // Checkpoint 132uk5: mode 8 (npc_carry_body.hpp)
     std::unique_ptr<NpcGoToBodyHost> go_to_body_;              // Checkpoint 132ms4: mode 7 toward a body (npc_script_control.hpp)

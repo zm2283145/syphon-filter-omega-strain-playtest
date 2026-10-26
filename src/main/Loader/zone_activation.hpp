@@ -44,8 +44,30 @@ public:
     std::optional<std::size_t> zone_of(std::uint32_t key) const;
     bool resolved() const { return resolved_; }
 private:
+    // Port-only (132vl2, load time): an open-addressing table of 64-bit keys (never ~0) to 32-bit values, without
+    // a node allocation per entry.
+    class KeyTable {
+    public:
+        // Stores key -> value when the key is absent; answers whether it was stored.
+        bool insert(std::uint64_t key, std::uint32_t value);
+        std::optional<std::uint32_t> find(std::uint64_t key) const;
+        void clear();
+    private:
+        std::vector<std::uint64_t> keys_;
+        std::vector<std::uint32_t> values_;
+        std::size_t size_{};
+        std::size_t slot(std::uint64_t key) const;
+    };
     std::vector<ActivationZone> zones_;
     bool resolved_{};
+    // Port-only (132vl2, load time): lookups that answer as the scans did. index_ maps each zone key to its zone (keys
+    // are unique: the constructor throws on a duplicate); listed_ holds (zone << 32 | key) for each key a zone lists,
+    // until 001740e0.
+    KeyTable index_;
+    KeyTable listed_;
+    // Port-only (132vl2): the zones among each zone's keys, in key order (the keys the propagation acts on).
+    std::vector<std::vector<std::uint32_t>> linked_;
+    void list_key(std::size_t zone, std::uint32_t key);
 };
 // The population's map: TER:/ACL:/INL: and the associations of the hosted
 // classes in load order: SND: (00212ee0, before GOB: pairs with neither word

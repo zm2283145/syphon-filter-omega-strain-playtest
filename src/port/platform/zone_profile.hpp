@@ -11,6 +11,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#if defined(__vita__)
+#include <psp2/kernel/processmgr.h>
+#endif
 
 namespace omega::zone {
 
@@ -37,7 +40,17 @@ struct Slot {
     }
 };
 
+#if defined(__vita__)
+// 132vt2f: the hardware log of vt2e showed every zone costing ~10 us more than its body (a lap with nothing in it:
+// 9.7 us), the price of std::chrono::steady_clock there. calibrate_clock() (the app's start) times both clocks and
+// keeps the process clock (microseconds) when it is cheaper.
+inline bool g_process_clock = false;
+#endif
+
 inline std::uint64_t now_ns() {
+#if defined(__vita__)
+    if (g_process_clock) return sceKernelGetProcessTimeWide() * 1000u;
+#endif
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
             .count());
@@ -72,6 +85,26 @@ inline void lap(Laps& laps, Slot& slot) {
     laps.a = a;
 }
 
+#if defined(__vita__)
+// The cost of one read of each clock (ns, over 2000 reads); the process clock is kept when it is cheaper.
+struct ClockCost {
+    double steady_ns, process_ns;
+};
+inline ClockCost calibrate_clock() {
+    constexpr int reads = 2000;
+    volatile std::uint64_t sink = 0;
+    const std::uint64_t p0 = sceKernelGetProcessTimeWide();
+    for (int k = 0; k < reads; ++k)
+        sink = sink + static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::uint64_t p1 = sceKernelGetProcessTimeWide();
+    for (int k = 0; k < reads; ++k) sink = sink + sceKernelGetProcessTimeWide();
+    const std::uint64_t p2 = sceKernelGetProcessTimeWide();
+    const ClockCost cost{double(p1 - p0) * 1000.0 / reads, double(p2 - p1) * 1000.0 / reads};
+    g_process_clock = cost.process_ns < cost.steady_ns;
+    return cost;
+}
+#endif
+
 }  // namespace omega::zone
 
 #define OMEGA_ZONE_LAPS(var) ::omega::zone::Laps var
@@ -96,5 +129,23 @@ inline void lap(Laps& laps, Slot& slot) {
     } while (false)
 #define OMEGA_ZONE_LAP(var, label) \
     do {                           \
+    } while (false)
+#endif
+
+// 132vt2f: the Vita GL backend's per-draw zones (about 13 clock reads a draw, about 1,000 draws a frame in a level)
+// only with OMEGA_ZONE_PROFILE_FINE (CMake OMEGA_VITA_FINE_ZONES=ON); the default VPK keeps the coarse zones.
+#if defined(OMEGA_ZONE_PROFILE_FINE)
+#define OMEGA_ZONE_FINE(label) OMEGA_ZONE(label)
+#define OMEGA_ZONE_FINE_LAPS(var) OMEGA_ZONE_LAPS(var)
+#define OMEGA_ZONE_FINE_LAP(var, label) OMEGA_ZONE_LAP(var, label)
+#else
+#define OMEGA_ZONE_FINE(label) \
+    do {                       \
+    } while (false)
+#define OMEGA_ZONE_FINE_LAPS(var) \
+    do {                          \
+    } while (false)
+#define OMEGA_ZONE_FINE_LAP(var, label) \
+    do {                                \
     } while (false)
 #endif

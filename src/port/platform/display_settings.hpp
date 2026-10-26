@@ -16,6 +16,9 @@
 //   render_scale=<0.25..4>         the internal render scale: the swap chain's buffers are the window's client size
 //                                  times it (DXGI scales them to the window); default 1 (native). Below 1 renders
 //                                  fewer pixels (faster, softer), above 1 supersamples.
+//                                  132vp4, the PS Vita: the display is fixed at 960 x 544, so only the 3D scene is
+//                                  scaled (vita_render_scale: 1, 0.75 or 0.5; the Port Settings page's 100 / 75 / 50 %),
+//                                  drawn at that size and upscaled before the HUD / GUI (research/VITA.md "Render scale")
 //   frame_overlay=0|1              the frame-time overlay in play (frame_overlay.hpp; default 0, off)
 //   frame_overlay_key=<key>|none   its toggle key in play (input_bindings.hpp key names; default F3)
 //   render_thread=0|1              checkpoint 132mt2: the play's GPU submission and present on a render thread, one
@@ -65,5 +68,7 @@ std::optional<bool> parse_movie_fill(std::string_view text);
 std::optional<MovieFit> parse_movie_fit(std::string_view text);
 // A render scale in [render_scale_min, render_scale_max]; nullopt otherwise.
 std::optional<float> parse_render_scale(std::string_view text);
+// 132vp4: the PS Vita's scene scale for a render scale: 1 (100 %) from 0.875 up, 0.75 (75 %) from 0.625, else 0.5.
+float vita_render_scale(float render_scale);
 
 }  // namespace omega

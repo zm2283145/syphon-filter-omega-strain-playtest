@@ -35,6 +35,13 @@ struct Vu1State {
     Vu1State() { vf[0] = {0, 0, 0, 0x3f800000u}; }
 };
 
+// Port-side speed only (132vd2, research/VITA.md "Particle programs on NEON (132vd2)"): this thread's Vu1State, its
+// registers set as a fresh one's (vf0 = (0, 0, 0, 1), the rest zero) and its data memory as the last call on this
+// thread left it, instead of a fresh 17 KB state zeroed per batch. cull_batch and the sprite / heat-haze programs read
+// no data word; run_deferred_program's programs read only the words it writes first (DeferredProgram). Valid until
+// the next call on the thread.
+Vu1State& thread_vu1_state();
+
 // Runs 0x29c with TOP = `top` (XTOP). Inputs: data 0xf..0x20 (the 003a0050
 // uploads), TOP+0xb (low 15 bits of x: the particle count n) and TOP+0xc (the
 // random-table qword). Outputs: n qwords vf10 at TOP+0xc and n qwords vf13 at

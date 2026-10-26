@@ -415,6 +415,9 @@ public:
     // single-sample target that can be copied (as the vision blur). A caller first tries draw_wide_background
     // (a mod's native wide image, drawn before the screen) and skips this fill when that returned true.
     void draw_wide_fill(const gfx::Texture* target, unsigned width, unsigned height);
+    // Port-only (132vp4, research/VITA.md "Render scale"): a scaled scene (SceneRenderer::scene_view) drawn over the
+    // whole target with bilinear filtering, opaque, before the HUD / GUI draw at the target's full size.
+    void draw_upscale(const gfx::Texture* target, unsigned width, unsigned height, const gfx::Texture* scene);
     // Port-only (checkpoint 132ws2): under the wide aspect, the 4:3 panel art the frame's edges cut (flat batches drawn
     // in the fitted rectangle, textured or untextured, IE or sprite: not covers, HUD elements, pictures or
     // perspective / clip batches) is extended into the side areas with gui_wide_edge_images, each image drawn right

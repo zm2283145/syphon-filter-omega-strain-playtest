@@ -38,11 +38,58 @@ bool zone_contains(const ActivationZone& zone, const RootVector& p) {
     return true;
 }
 
+bool ZoneActivationMap::KeyTable::insert(std::uint64_t key, std::uint32_t value) {
+    if ((size_ + 1) * 2 > keys_.size()) {   // at most half full
+        std::vector<std::uint64_t> keys(std::max<std::size_t>(64, keys_.size() * 2), ~0ULL);
+        std::vector<std::uint32_t> values(keys.size());
+        keys.swap(keys_);
+        values.swap(values_);
+        for (std::size_t i = 0; i < keys.size(); ++i)
+            if (keys[i] != ~0ULL) {
+                const auto at = slot(keys[i]);
+                keys_[at] = keys[i];
+                values_[at] = values[i];
+            }
+    }
+    const auto at = slot(key);
+    if (keys_[at] == key) return false;
+    keys_[at] = key;
+    values_[at] = value;
+    ++size_;
+    return true;
+}
+
+std::optional<std::uint32_t> ZoneActivationMap::KeyTable::find(std::uint64_t key) const {
+    if (keys_.empty()) return std::nullopt;
+    const auto at = slot(key);
+    if (keys_[at] != key) return std::nullopt;
+    return values_[at];
+}
+
+void ZoneActivationMap::KeyTable::clear() {
+    keys_ = {};
+    values_ = {};
+    size_ = 0;
+}
+
+// The key's slot or the empty one where it would go (linear probing from a Fibonacci hash; never full).
+std::size_t ZoneActivationMap::KeyTable::slot(std::uint64_t key) const {
+    const std::size_t mask = keys_.size() - 1;
+    auto at = static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ULL) >> 32) & mask;
+    while (keys_[at] != key && keys_[at] != ~0ULL) at = (at + 1) & mask;
+    return at;
+}
+
+namespace {
+std::uint64_t listed_key(std::size_t zone, std::uint32_t key) { return (static_cast<std::uint64_t>(zone) << 32) | key; }
+}
+
 ZoneActivationMap::ZoneActivationMap(const std::vector<std::uint32_t>& terrain_keys,
                                      const std::vector<std::vector<std::uint32_t>>& groups,
                                      const std::vector<TerrainLink>& links) {
     for (const auto key : terrain_keys) {
-        if (zone_of(key)) throw std::runtime_error("Zone activation: duplicate terrain key " + std::to_string(key));
+        if (!index_.insert(key, static_cast<std::uint32_t>(zones_.size())))
+            throw std::runtime_error("Zone activation: duplicate terrain key " + std::to_string(key));
         ActivationZone zone;
         zone.key = key;
         // 00174500: min = FLT_MAX, max = -FLT_MAX (w = 1) until an INL record.
@@ -51,6 +98,7 @@ ZoneActivationMap::ZoneActivationMap(const std::vector<std::uint32_t>& terrain_k
         zone.max = {-big, -big, -big, 1.0F};
         zones_.push_back(std::move(zone));
     }
+    linked_.resize(zones_.size());
     for (const auto& link : links) {
         const auto zone = zone_of(link.id);
         if (!zone) throw std::runtime_error("Zone activation: INL record for a key that is not a terrain: " + std::to_string(link.id));
@@ -58,12 +106,21 @@ ZoneActivationMap::ZoneActivationMap(const std::vector<std::uint32_t>& terrain_k
         auto& z = zones_[*zone];
         z.min = {link.bounds.minimum.x, link.bounds.minimum.y, link.bounds.minimum.z, 1.0F};
         z.max = {link.bounds.maximum.x, link.bounds.maximum.y, link.bounds.maximum.z, 1.0F};
-        for (const auto key : groups[link.adjacency]) z.keys.push_back(mask_key(key));
+        for (const auto key : groups[link.adjacency]) {
+            list_key(*zone, mask_key(key));
+            listed_.insert(listed_key(*zone, mask_key(key)), 1);
+        }
     }
 }
 
+// Appends the key to the zone's list (the zones exist before any key is listed, so a key's zone never changes).
+void ZoneActivationMap::list_key(std::size_t zone, std::uint32_t key) {
+    zones_[zone].keys.push_back(key);
+    if (const auto other = index_.find(key)) linked_[zone].push_back(*other);
+}
+
 std::optional<std::size_t> ZoneActivationMap::zone_of(std::uint32_t key) const {
-    for (std::size_t i = 0; i < zones_.size(); ++i) if (zones_[i].key == key) return i;
+    if (const auto zone = index_.find(key)) return *zone;
     return std::nullopt;
 }
 
@@ -71,14 +128,14 @@ void ZoneActivationMap::associate(std::size_t zone, std::uint32_t member, bool p
     if (resolved_) throw std::runtime_error("Zone activation: association after 001740e0");
     if (zone >= zones_.size() || (parent && *parent >= zones_.size()))
         throw std::runtime_error("Zone activation: association with an unknown zone");
-    auto& list = zones_[zone].keys;
-    const bool add = !parent || *parent == zone || listed(list, zones_[*parent].key);
-    if (add && !listed(list, member)) list.push_back(member);
+    const bool add = !parent || *parent == zone || listed_.find(listed_key(zone, zones_[*parent].key));
+    if (add && listed_.insert(listed_key(zone, member), 1)) list_key(zone, member);
     if (!propagate) return;
-    // The loop re-reads the count; the recursion only changes other zones.
-    for (std::size_t i = 0; i < zones_[zone].keys.size(); ++i) {
-        const auto other = zone_of(zones_[zone].keys[i]);
-        if (other && *other != zone) associate(*other, member, false, parent);
+    // The original loops over every key, re-reading the count; the recursion only changes other zones, so this zone's
+    // keys (and the zones among them, linked_) are fixed during the loop.
+    for (std::size_t i = 0; i < linked_[zone].size(); ++i) {
+        const auto other = linked_[zone][i];
+        if (other != zone) associate(other, member, false, parent);
     }
 }
 
@@ -89,6 +146,8 @@ void ZoneActivationMap::resolve(const std::function<bool(std::uint32_t)>& exists
         for (const auto key : zone.keys) zone.members.push_back(zone_of(key) || exists(key) ? key : 0U);
         zone.keys.clear();
     }
+    listed_.clear();
+    linked_ = {};
     resolved_ = true;
 }
 

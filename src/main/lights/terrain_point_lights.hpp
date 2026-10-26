@@ -76,6 +76,29 @@ bool terrain_batch_reached(const TerrainPointLight& light,const MeshBatch& batch
 // so it lights the vertices within the inner distance fully and no others.
 void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const MeshBatch& batch,
     std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours);
+// Port-only (132vs2, speed only): the VU1 pass's batch sphere (centre, radius) computed once. The batch header
+// bounds do not change, so the play host keeps one per batch instead of recomputing it for every light test. A
+// header whose sphere meets a not-a-number keeps not_a_number, and the calls below throw the error the MeshBatch
+// forms throw for that batch, at the same point.
+struct TerrainBatchSphere {
+    std::array<float,3> centre{};
+    float radius{};
+    bool not_a_number{false};
+};
+TerrainBatchSphere terrain_batch_sphere(const MeshBatch& batch);
+// terrain_batch_reached and apply_terrain_point_lights for a batch with its sphere: the same results.
+bool terrain_batch_reached(const TerrainPointLight& light,const TerrainBatchSphere& sphere);
+void apply_terrain_point_lights(std::span<const TerrainPointLight> lights,const TerrainBatchSphere& sphere,const MeshBatch& batch,
+    std::span<const std::array<float,3>> positions,std::span<std::array<std::uint8_t,3>> colours);
+// The lights that reach the batch, as bits (bit i: lights[i]; at most 32 lights, more throws). Every light is tested.
+std::uint32_t terrain_batch_reach_mask(std::span<const TerrainPointLight> lights,const TerrainBatchSphere& sphere);
+// One batch's relight as the play host runs it (132vs2: in the core library, so the PS Vita compiles it at -O2): the
+// colour bytes start as `base_colours` (the batch's decoded bytes); when `lights` is not empty the pass applies
+// them (apply_terrain_point_lights, the positions from `vertices`); each vertex colour r, g, b becomes byte / 128.
+// `base_colours` and `vertices` are the batch's spans (sizes the batch's vertex count, else throws). Its scratch is
+// per thread, so batches can be relit on several threads at once.
+void relight_terrain_batch(std::span<const TerrainPointLight> lights,const TerrainBatchSphere& sphere,const MeshBatch& batch,
+    std::span<const std::array<std::uint8_t,3>> base_colours,std::span<MeshVertex> vertices);
 // Port-only (checkpoint 132vt2d, speed only; the PS Vita play host turns it on with --terrain-light-memo):
 // apply_terrain_point_lights skips a vertex whose double-precision distance from a light exceeds the light's
 // range by a margin (1e-4 of the operands) far above the VU path's rounding, where that path gives a <= 0.

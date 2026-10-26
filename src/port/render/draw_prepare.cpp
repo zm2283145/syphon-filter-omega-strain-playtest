@@ -9,6 +9,9 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#if defined(__vita__)
+#include <psp2/kernel/processmgr.h>  // 132vg2: the particle prepare's timing (PS Vita only)
+#endif
 
 namespace omega {
 
@@ -44,8 +47,14 @@ void prepare_particle_groups(WorkerPool& pool, std::vector<ParticleGroup>& group
         g.sprites.clear();
         for (auto& b : *g.batches) items.push_back({&g, &b, std::nullopt, nullptr, nullptr});
     }
+#if defined(__vita__)
+    const std::uint64_t wall0 = sceKernelGetProcessTimeWide();
+#endif
     pool.for_each(items.size(), [&](std::size_t i) {
         Item& it = items[i];
+#if defined(__vita__)
+        std::uint64_t t0 = sceKernelGetProcessTimeWide();
+#endif
         if (const auto r = it.batch->deferred) {
             try {
                 if (r > records.size()) throw std::logic_error("prepare_particle_groups: a batch names no record");
@@ -54,13 +63,27 @@ void prepare_particle_groups(WorkerPool& pool, std::vector<ParticleGroup>& group
                 it.program_error = std::current_exception();
                 return;
             }
+#if defined(__vita__)
+            const std::uint64_t t1 = sceKernelGetProcessTimeWide();
+            g_particle_prepare_times.program_us += t1 - t0;
+            ++g_particle_prepare_times.programs;
+            t0 = t1;
+#endif
         }
         try {
             it.sprites = particle::particle_sprite_batch(*it.batch, it.group->cull, it.group->frame, skip_heat_haze);
         } catch (...) {
             it.sprite_error = std::current_exception();
         }
+#if defined(__vita__)
+        g_particle_prepare_times.sprite_us += sceKernelGetProcessTimeWide() - t0;
+#endif
     });
+#if defined(__vita__)
+    g_particle_prepare_times.wall_us += sceKernelGetProcessTimeWide() - wall0;
+    g_particle_prepare_times.batches += items.size();
+    ++g_particle_prepare_times.calls;
+#endif
     // The serial order: every program ran in the draw (the first failure there), then each group's sprites.
     for (const auto& it : items)
         if (it.program_error) std::rethrow_exception(it.program_error);

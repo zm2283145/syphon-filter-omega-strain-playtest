@@ -1719,8 +1719,9 @@ void ParticleSystem::defer(DeferredProgram::Kind kind, ParticleBatch& batch) {
 }
 
 void run_deferred_program(const DeferredProgram& p, ParticleBatch& batch, Vu1State* state) {
-    std::optional<Vu1State> fresh;  // vf0 = (0, 0, 0, 1), everything else zero: no program reads it (DeferredProgram)
-    if (!state) state = &fresh.emplace();
+    // 132vd2: the thread's state (thread_vu1_state: fresh registers, stale data words no program reads) instead of a
+    // fresh 17 KB one per record.
+    if (!state) state = &thread_vu1_state();
     Vu1State& vu = *state;
     for (std::size_t q = 0; q < p.uploads.size(); ++q) vu.data[0xf + q] = p.uploads[q];
     for (std::size_t q = 0; q < p.block.size(); ++q) vu.data[(kParticleTop + q) & 0x3ff] = p.block[q];

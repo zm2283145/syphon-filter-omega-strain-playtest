@@ -59,6 +59,8 @@ constexpr std::array<const char*, 7> input_rows{"MOUSE LOOK", "SENSITIVITY", "IN
                                                 "FIELD OF VIEW", "MOVIES"};  // 132ws3 / 132vt2a2: the DISPLAY page is full
 constexpr std::array<MovieFit, 3> movie_fits{MovieFit::fill, MovieFit::bars, MovieFit::stretch};  // 132vt2a2: movies=
 constexpr std::array<float, 8> render_scales{0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 3.0F, 4.0F};
+// 132vp4: the Vita's (the scene scale; press steps down: 100 -> 75 -> 50 -> 100 %)
+constexpr std::array<float, 3> vita_render_scales{0.5F, 0.75F, 1.0F};
 constexpr std::array<float, 14> sensitivities{0.25F, 0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 2.5F, 3.0F, 4.0F, 5.0F, 6.0F, 8.0F, 10.0F};
 // 132ws: the ASPECT row's values: the aspect settings, then wide with movie_fill=zoom (WIDE ZOOM).
 struct AspectChoice {
@@ -301,6 +303,8 @@ std::string PortSettingsPage::value(std::int32_t row) const {
         case 2: return aspects[aspect_choice(d)].label;
         case 3:
             if (capture_ && capture_->text) return *capture_->text + "_";
+            if (!pc_rows_)   // 132vp4: the Vita's scene scale (display_settings.hpp vita_render_scale)
+                return std::to_string(std::lround(vita_render_scale(d.render_scale) * 100.0F)) + "%";
             return number(d.render_scale) + "X";
         case 4: return on_off(d.frame_overlay);
         case 5: return binding_value(s, {"frame_overlay_key", "OVERLAY KEY", true});
@@ -416,6 +420,13 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
             return true;
         }
         case 3: {
+            if (!pc_rows_) {   // 132vp4: the Vita's 100 / 75 / 50 %, cycled (no keyboard for a typed value)
+                const float v = vita_render_scales[step<vita_render_scales.size()>(
+                    nearest(vita_render_scales, vita_render_scale(d.render_scale)), a == Action::press ? false : forward)];
+                set_port_setting(s, "render_scale", number(v));
+                commit(s, "RENDER SCALE " + std::to_string(std::lround(v * 100.0F)) + "%");
+                return true;
+            }
             if (a == Action::press) return start_entry({"render_scale", "RENDER SCALE"});
             const float v = render_scales[step<render_scales.size()>(nearest(render_scales, d.render_scale), forward)];
             set_port_setting(s, "render_scale", number(v));

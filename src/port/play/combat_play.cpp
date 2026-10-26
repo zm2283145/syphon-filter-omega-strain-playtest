@@ -1461,6 +1461,7 @@ struct CombatPlaySession::Impl {
         load_fields(f);
         flashlight_pad_stage(f);                                                                            // 0024c980..0024ca44
         weapon_switch_stage(f);                                                                             // 0x0024ca48..0x0024cd30
+        manual_reload_stage();                                                                              // 0x0024cdb0..0x0024cde4
         auto hh=hud_host();
         hh.sprites=[this](const HudSpriteEvent& e){frame.hud_sprites_pad.push_back(e);};
         const auto released=update_target_markers(hud,registered,world.actor(a).handle(),pad,state,hh);   // 0022c210
@@ -1770,6 +1771,19 @@ struct CombatPlaySession::Impl {
                 config.net_weapon(inv.current_84<inv.slots.size()?inv.slots[inv.current_84].item:-1);};
         }
         run_player_weapon_switch(weapon_switch,in,h);
+    }
+    // 0x0024cdb0..0x0024cde4 of the pad producer: 0024aa70(input, R3 sp+fd8 != 0 && !input +ba, actor). Input +ba
+    // has no writer (the constructor's 0), so R3 held asks every frame; with 00143560 allowing a reload it sends
+    // action 0x3c kind 0 with transport 0 (003c9420), which the actor's pump takes as a discharge's reload.
+    void manual_reload_stage(){
+        if(input.r3==0.0F)return;
+        const auto a=config.player;
+        std::vector<WeaponInventoryEvent> ev;
+        const bool ok=combat->inventory_ops(a,false,ev).reload_allowed();   // 0024aa84 00143560(+3524)
+        combat->check_events(ev);
+        if(!ok)return;
+        PendingAction q;q.actor=a;q.kind=PendingAction::Kind::reload;pending.push_back(q);
+        frame.notes.push_back("manual reload (R3, 0x0024cde4 0024aa70): action 0x3c queued");
     }
     // 001b1d74: 0045ae70(fl, M, dt) while the flashlight is on (001b1710).
     void flashlight_update_stage(std::size_t a,float dt){
@@ -2693,7 +2707,9 @@ NpcPerceptionLink CombatPlaySession::npc_perception_link(CombatPerceptionWorld w
         if(present)h.self_head=observer.skeleton_node_world_matrix(14);             // 00133ed0, node *0049d024
         h.self_forward=rows_of(root_placement_matrix(observer.floor_root_placement()))[1];   // +e8 = 00184a80, row 1
         h.blind_33a8=self->blind_33a8(o);h.flag_3470=observer.item_actions().vision_3470;   // 0016bd60 / 0016be14 / 0016c220 / 0016d8e0: == 1
-        h.object=[self,world](std::uint64_t object)->std::optional<NpcSenseObject>{
+        // Port-only (speed, 132vs4): the world by pointer (the session keeps it, self->perception), so the
+        // view fits std::function's small buffer on the Vita (no allocation per host).
+        h.object=[self,world=world.get()](std::uint64_t object)->std::optional<NpcSenseObject>{
             if(const auto* n=self->node_at(object))return npc_node_sense_object(static_cast<std::int32_t>(n->id),n->position);
             const auto a=self->find_index(object);
             if(!a){
@@ -2747,6 +2763,7 @@ NpcPerceptionLink CombatPlaySession::npc_perception_link(CombatPerceptionWorld w
         // Port-only (port_cheats.hpp): a marked observer sees no NPC unless it is engaged (132ob6), and no
         // observer sees a marked NPC.
         const bool observer_ignored=port_perception_observer_blind(observer);
+        h.think_list.reserve(world->system->think_list.size());                      // port-only (speed, 132vs4)
         for(const auto& k:world->system->think_list){                                  // 004ea190 as {actor, ID}
             bool found=false;
             for(std::size_t a=0;a<self->world.size()&&!found;++a){

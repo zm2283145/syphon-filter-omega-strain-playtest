@@ -388,6 +388,8 @@ struct CombatPlayInput {
     // Select (sp+f80, 0055a44c & 0x100) after the input gates, read by the
     // weapon switch 0x0024ca48..0x0024cd30.
     float select{};
+    // R3 (sp+fd8, 0055a44c & 0x400) after the input gates: the manual reload 0x0024cdb0..0x0024cde4.
+    float r3{};
     // Checkpoint 132hud: GuiGameScreen +d4 == 1 (the weapon select is open, 0x0024cc9c) and the hold-Select
     // menu 0045ca20(HUD +6a4, 1) (0x0024cc74); empty, a held Select throws naming 0045ca20.
     bool game_screen_d4_one{};

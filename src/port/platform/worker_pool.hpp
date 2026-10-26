@@ -7,8 +7,10 @@
 // WorkerPool(n) starts n worker threads (0: none, every call runs inline on the caller: the old path). for_each(count,
 // fn) runs fn(0) .. fn(count - 1) on the workers and the calling thread and returns when all are done; a call that
 // throws does not stop the others, and the exception of the lowest index is rethrown on the caller (the one a serial
-// loop would have met first). Calls must not touch shared state except through their own index's slot. Portable C++
-// threads only (std::thread, mutex, condition_variable), so the PS Vita build (3 user cores) uses the same code.
+// loop would have met first). Calls must not touch shared state except through their own index's slot. The workers
+// run a job under the caller's floating-point mode (132vs3: float_environment.hpp; the simulation thread flushes
+// denormals as the PS2 does), so an index gives the same bits on any thread. Portable C++ threads only (std::thread,
+// mutex, condition_variable), so the PS Vita build (3 user cores) uses the same code.
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -61,6 +63,7 @@ private:
         std::mutex error_mutex;
         std::size_t error_index = 0;
         std::exception_ptr error;
+        std::uint64_t float_controls = 0;  // the caller's floating-point mode, which the workers run the job under
     };
     void work(Job& job);
     void loop();

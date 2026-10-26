@@ -4,6 +4,7 @@
 #include "gfx_device_lost.hpp"
 #include "gs_alpha.hpp"
 #include "texture_blocks.hpp"
+#include "zone_profile.hpp"
 
 #ifdef _WIN32
 #include <DirectXMath.h>
@@ -151,7 +152,7 @@ void SceneRenderer::release_device() {
     }
     // Everything made on the old device goes; the CPU-side state (mesh_, the overlay mesh, plans, frames,
     // offsets, untextured materials, the shadow frame pointer) is kept and re-uploaded.
-    target_.reset(); depth_.reset(); frame_alpha_.reset();
+    target_.reset(); depth_.reset(); frame_alpha_.reset(); scene_target_.reset(); scene_open_ = false;
     constants_.reset();
     vertices_.reset(); indices_.reset(); collision_vertices_.reset(); collision_indices_.reset();
     skin_buffers_.clear(); skin_constants_.clear(); skin_written_.clear(); skin_current_ = nullptr; skin_ready_ = false;  // 132md8
@@ -459,9 +460,37 @@ void SceneRenderer::capture_shadow_buffer(std::size_t index, const std::filesyst
 
 void SceneRenderer::targets() {
     target_ = swap_chain_->buffer(true, "Get swap-chain buffer", "Create render target");
+    scene_targets();
+}
+
+void SceneRenderer::set_scene_scale(float scale) {
+    if (!(scale > 0.0F) || scale > 1.0F) scale = 1.0F;
+    scene_scale_ = scale;
+}
+
+// The depth / frame alpha targets (and, below scale 1, the scene's colour target) at the scene's size (132vp4).
+void SceneRenderer::scene_targets() {
+    scene_built_scale_ = scene_scale_;
+    scene_width_ = width_;
+    scene_height_ = height_;
+    scene_target_.reset();
+    if (scene_scale_ < 1.0F) {
+        scene_width_ = std::max(1U, unsigned(std::lround(float(width_) * scene_scale_)));
+        scene_height_ = std::max(1U, unsigned(std::lround(float(height_) * scene_scale_)));
+        gfx::TextureDesc color;
+        color.width = scene_width_;
+        color.height = scene_height_;
+        color.format = gfx::Format::rgba8;
+        color.bind = gfx::bind_target | gfx::bind_sampled;
+        gfx::TextureLabels color_labels;
+        color_labels.texture = "Create scaled scene target";
+        color_labels.target = "Create scaled scene target view";
+        color_labels.sampled = "Create scaled scene view";
+        scene_target_ = device_->create_texture(color, nullptr, color_labels);
+    }
     gfx::TextureDesc depth;
-    depth.width = width_;
-    depth.height = height_;
+    depth.width = scene_width_;
+    depth.height = scene_height_;
     depth.format = gfx::Format::d24s8;
     depth.bind = gfx::bind_depth;
     gfx::TextureLabels depth_labels;
@@ -469,8 +498,8 @@ void SceneRenderer::targets() {
     depth_labels.depth = "Create depth view";
     depth_ = device_->create_texture(depth, nullptr, depth_labels);
     gfx::TextureDesc alpha;
-    alpha.width = width_;
-    alpha.height = height_;
+    alpha.width = scene_width_;
+    alpha.height = scene_height_;
     alpha.format = gfx::Format::r8;
     alpha.bind = gfx::bind_target | gfx::bind_sampled;
     gfx::TextureLabels alpha_labels;
@@ -483,7 +512,9 @@ void SceneRenderer::targets() {
 void SceneRenderer::release_targets() {
     list_.set_targets(0, nullptr, nullptr);
     device_->submit(list_);
+    scene_open_ = false;
     target_.reset();
+    scene_target_.reset();
     depth_.reset();
     frame_alpha_.reset();
     list_.flush();
@@ -505,6 +536,7 @@ void SceneRenderer::resize(unsigned width, unsigned height) try {
 void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options) try {
     // Port-only (132win2): on a removed device only the camera (last_view / last_projection) is kept.
     bool gone = lost();
+    scene_open_ = false;
     if (!target_ && !gone) {
         try {
             swap_chain_->size(width_, height_, "Read the swap chain");
@@ -513,6 +545,19 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
             gone = true;
         }
     }
+    if (target_ && !gone && scene_built_scale_ != scene_scale_) {
+        try {  // 132vp4: the render scale changed; the scene's targets are re-made at its size
+            list_.set_targets(0, nullptr, nullptr);
+            device_->submit(list_);
+            scene_target_.reset();
+            depth_.reset();
+            frame_alpha_.reset();
+            scene_targets();
+        } catch (const DeviceLost&) {
+            gone = true;
+        }
+    }
+    const unsigned scene_w = scene_width(), scene_h = scene_height();
     const auto& center = camera.target;
     const float horizontal = camera.distance * std::cos(camera.pitch);
     const auto eye = XMVectorSet(center.x + horizontal * std::cos(camera.yaw),
@@ -540,11 +585,15 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
         std::memcpy(last_projection_.data(), &p, sizeof p);
     }
     if (gone) return;
+    scene_open_ = scene_target_ != nullptr;   // 132vp4: render_target() / width() / height() name the scene until end_scene()
     auto& l = list_;
     l.clear();
     skin_extents_.clear();
     skin_written_.assign(skin_written_.size(), false);
-    if (shadows_) draw_shadow_buffers();
+    if (shadows_) {
+        OMEGA_ZONE("scene.shadow_buffers");   // 132vd1
+        draw_shadow_buffers();
+    }
     // The surface texture (t0) is bound only when it changes (132mt1: the same state at every draw as binding it per
     // surface, with fewer commands; unknown until the first bind, null after a hook's unbind).
     const gfx::Texture* bound0 = nullptr;
@@ -556,13 +605,15 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
         bound0_known = true;
     };
     const float background[]{0.025F, 0.032F, 0.045F, 1};
-    l.clear_target({target_.get(), 0}, background);
-    l.clear_depth(depth_.get(), gfx::CommandList::clear_depth_bit | gfx::CommandList::clear_stencil_bit, 1, 0);
     const float zero[]{0, 0, 0, 0};
+    // 132vt3: the frame alpha first, so the scene target's clear and the frame's draws share one GXM scene on the Vita
+    // (research/VITA.md "GXM scenes"; clears of different targets commute).
+    const gfx::Texture* target = render_target();
     l.clear_target({frame_alpha_.get(), 0}, zero);   // 0037a5c0: RGBAQ +c8 A = 0
-    const gfx::Texture* target = target_.get();
+    l.clear_target({target, 0}, background);
+    l.clear_depth(depth_.get(), gfx::CommandList::clear_depth_bit | gfx::CommandList::clear_stencil_bit, 1, 0);
     l.set_target(target, depth_.get());
-    const gfx::Viewport viewport{0, 0, float(width_), float(height_), 0, 1};
+    const gfx::Viewport viewport{0, 0, float(scene_w), float(scene_h), 0, 1};
     l.set_viewport(viewport);
     data.options = {options.textured ? 1.0F : 0.0F, 0, options.vertex_lighting ? 1.0F : 0.0F, 0};
     const gfx::Buffer* constants = constants_.get();
@@ -829,7 +880,7 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
             // 132md11: a skinned part at its level of detail for the frame's size.
             std::array<unsigned, 2> range{surface.index_count, surface.first_index};
             if (surface.skin && skin_bound)
-                range = skin_range(surface, *skin_bound, &data.mvp.m[0][0], 0.5F * float(width_), 0.5F * float(height_));
+                range = skin_range(surface, *skin_bound, &data.mvp.m[0][0], 0.5F * float(scene_w), 0.5F * float(scene_h));
             l.draw_indexed(range[0], range[1]);
             if (man_gs) {
                 data.alpha_test.y = 1;
@@ -856,7 +907,10 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
             if (!draw_hook_) throw std::runtime_error("Draw plan has a hook item but no draw hook");
             // The hook draws with its own lists on the same device: everything recorded so far goes first.
             device_->submit(l);
-            draw_hook_(item.first);
+            {
+                OMEGA_ZONE("scene.hooks");   // 132vd1: the hooks' own recording (particles, glows, ...)
+                draw_hook_(item.first);
+            }
             // The hook's own pipeline: restore the scene's.
             l.set_target(target, depth_.get());
             l.set_viewport(viewport);
@@ -898,6 +952,8 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
 }
 
 void SceneRenderer::refresh_geometry() try {
+    vertices_.reset();  // port-only: the old copies freed first (a Vita level's 34 MB mesh fits the GPU pools once)
+    indices_.reset();
     auto vertices=buffer(mesh_.vertices.data(),mesh_.vertices.size()*sizeof(MeshVertex),gfx::bind_vertices,true);
     auto indices=buffer(mesh_.indices.data(),mesh_.indices.size()*sizeof(std::uint32_t),gfx::bind_indices);
     vertices_=std::move(vertices);indices_=std::move(indices);
@@ -1147,6 +1203,7 @@ bool SceneRenderer::lost() const {
 
 bool SceneRenderer::present(unsigned sync_interval, bool sleep_when_occluded) {
     if (!swap_chain_) return false;
+    scene_open_ = false;
     if (device_lost_pending()) return false;  // 132win3: lost mid-frame; the owner re-creates the device
     const auto presented = swap_chain_->present(sync_interval, "Present 3D frame");
     if (presented == gfx::SwapChain::Presented::lost) return false;

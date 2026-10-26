@@ -26,6 +26,7 @@
 #include <psp2/common_dialog.h>
 #include <psp2/gxm.h>
 #include <psp2/io/stat.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/message_dialog.h>
 #include <vitaGL.h>
@@ -42,11 +43,18 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 // vitaGL's display depth / stencil surface (source/gxm.c; the library exports it).
 extern "C" SceGxmDepthStencilSurface gxm_depth_stencil_surface;
+// 132vp3: vitaGL's circular vertex pool (source/vgl.c; exported): one slice per display buffer, the current frame's
+// at vgl_circular_idx. Past its limit, vitaGL allocates each reservation from its pools and frees it 4 frames later.
+extern "C" std::uint8_t* circular_data_pool[];
+extern "C" std::uint8_t* circular_data_pool_ptr[];
+extern "C" std::uint8_t* circular_data_pool_limit[];
+extern "C" int vgl_circular_idx;
 
 namespace omega::gfx::gxm {
 namespace {
@@ -55,6 +63,14 @@ constexpr unsigned display_width = 960, display_height = 544;
 std::size_t align_up(std::size_t v, std::size_t a) { return (v + a - 1) / a * a; }
 
 std::recursive_mutex g_mutex;  // every vitaGL call (the render thread, the loader's uploads, captures)
+// 132vd1 (VITA.md "Per-draw cost"): takes g_mutex; a caller that finds it held (the render thread inside a list or the
+// flip, or the simulation thread inside a create) times its wait in the zone `label`.
+#define VGL_LOCK(label)                                                                    \
+    std::unique_lock<std::recursive_mutex> vgl_lock_(g_mutex, std::try_to_lock);           \
+    if (!vgl_lock_.owns_lock()) {                                                          \
+        OMEGA_ZONE(label);                                                                 \
+        vgl_lock_.lock();                                                                  \
+    }
 class Impl;
 Impl* g_impl = nullptr;
 
@@ -104,6 +120,23 @@ Pool pool_of(const void* p) {
     return info.mappedSize == vglMemTotal(VGL_MEM_RAM) ? pool_ram : pool_heap;
 }
 
+// 132vp2 (VITA.md "GPU memory headroom"): the free space of every pool vitaGL places into, in KB.
+std::string pools_free_text() {
+    char text[160];
+    std::snprintf(text, sizeof text, "vitaGL free KB: VRAM %u, RAM %u, phycont %u, cdlg %u",
+                  unsigned(vglMemFree(VGL_MEM_VRAM) >> 10), unsigned(vglMemFree(VGL_MEM_RAM) >> 10),
+                  unsigned(vglMemFree(VGL_MEM_PHYCONT) >> 10), unsigned(vglMemFree(VGL_MEM_BUDGET) >> 10));
+    return text;
+}
+
+// 132vp2: an object vitaGL found no memory for in any pool (CDRAM, RAM, phycont, cdlg, then the newlib heap). Thrown
+// before anything draws from it: vitaGL leaves such a buffer without memory, and a draw from it faults the GPU.
+[[noreturn]] void out_of_gpu_memory(const char* what, std::size_t bytes) {
+    throw std::runtime_error("gfx vitagl: out of GPU memory for " + std::string(what) + " of " +
+                             std::to_string(bytes >> 10) + " KB (" + pools_free_text() +
+                             "; the newlib heap is full too; VITA.md \"Memory\")");
+}
+
 void place(std::uint8_t& pool, std::size_t& held, Pool now, std::size_t bytes) {
     if (held) g_placement.live[pool] -= std::min(g_placement.live[pool], held);
     pool = std::uint8_t(now);
@@ -120,11 +153,78 @@ void unplace(std::uint8_t pool, std::size_t& held) {
     held = 0;
 }
 
+// 132vp3 (research/VITA.md "GPU waits"): the time vitaGL spends blocked in the sceGxm calls that can wait for the GPU,
+// timed by the __wrap_ functions at the end of this file (the linker's --wrap: cmake/vita/OmegaVitaTargets.cmake).
+// sceGxmBeginScene waits while the render target's scene slots (scenesPerFrame) are still in use by the GPU;
+// sceGxmFinish is a full wait (glFinish, a read-back, vitaGL's out-of-memory path); sceGxmDisplayQueueAddEntry waits
+// for a free display buffer. Logged every 5 s with the circular vertex pool's use (log_waits, from present()).
+enum Wait : unsigned { wait_begin_scene, wait_end_scene, wait_finish, wait_display_queue, wait_notification, wait_count };
+const char* const wait_names[wait_count] = {"begin scene", "end scene", "finish", "display queue", "notification wait"};
+struct Waits {
+    std::uint64_t us[wait_count]{};
+    std::uint32_t calls[wait_count]{}, longest[wait_count]{};
+};
+Waits g_waits;
+std::function<void(const std::string&)> g_wait_log;  // the render targets' creation (Options::log)
+std::uint64_t render_target_bytes = 0;                 // their driver memory (sceGxmGetRenderTargetMemSize)
+std::map<const SceGxmRenderTarget*, unsigned> g_render_targets;
+std::uint64_t now_us() { return sceKernelGetProcessTimeWide(); }
+void add_wait(Wait w, std::uint64_t start) {
+    const std::uint64_t us = now_us() - start;
+    g_waits.us[w] += us;
+    ++g_waits.calls[w];
+    g_waits.longest[w] = std::max<std::uint32_t>(g_waits.longest[w], static_cast<std::uint32_t>(us));
+}
+// The frames since the last wait line: the circular pool's use at each flip (its slice is per display buffer).
+struct WaitWindow {
+    std::uint64_t start = 0;
+    unsigned frames = 0, overruns = 0;
+    std::uint64_t circular_sum = 0;
+    std::uint32_t circular_peak = 0;
+};
+WaitWindow g_window;
+void note_circular_pool() {
+    const int idx = vgl_circular_idx;
+    const std::uint32_t used = static_cast<std::uint32_t>(circular_data_pool_ptr[idx] - circular_data_pool[idx]);
+    g_window.circular_sum += used;
+    g_window.circular_peak = std::max(g_window.circular_peak, used);
+    if (circular_data_pool_ptr[idx] > circular_data_pool_limit[idx]) ++g_window.overruns;
+    ++g_window.frames;
+}
+void log_waits(const std::function<void(const std::string&)>& log) {
+    const std::uint64_t now = now_us();
+    if (!g_window.start) g_window.start = now;
+    if (now - g_window.start < 5000000 || !g_window.frames) return;
+    const double frames = g_window.frames;
+    const int idx = vgl_circular_idx;
+    const unsigned slice = static_cast<unsigned>(circular_data_pool_limit[idx] - circular_data_pool[idx]);
+    std::string text = "vitagl waits per frame over " + std::to_string(g_window.frames) + " frames (ms, calls, longest ms):";
+    for (unsigned w = 0; w < wait_count; ++w) {
+        char item[96];
+        std::snprintf(item, sizeof item, "%s %s %.2f x%.1f max %.1f", w ? ";" : "", wait_names[w], g_waits.us[w] / 1000.0 / frames,
+                      g_waits.calls[w] / frames, g_waits.longest[w] / 1000.0);
+        text += item;
+    }
+    char tail[200];
+    std::snprintf(tail, sizeof tail, "; circular vertex pool %.0f KB a frame, peak %u KB of the %u KB slice, %u frames over; "
+                                     "render target driver memory %u KB",
+                  g_window.circular_sum / 1024.0 / frames, g_window.circular_peak >> 10, slice >> 10, g_window.overruns,
+                  static_cast<unsigned>(render_target_bytes >> 10));
+    text += tail;
+    if (log) log(text);
+    g_waits = Waits{};
+    g_window = WaitWindow{};
+    g_window.start = now;
+}
+
 // ---- resources ----
+
+std::uint64_t g_buffer_ids = 0;  // VglBuffer::id (assigned under g_mutex: create_buffer)
 
 struct VglBuffer final : Buffer {
     explicit VglBuffer(const BufferDesc& d) { desc_ = d; }
     ~VglBuffer() override;
+    std::uint64_t id = ++g_buffer_ids;  // 132vt4: the shadow filter cache's key (never reused, unlike the address)
     std::vector<std::uint8_t> cpu;  // the buffer's bytes (constants are only here; the shadow filter reads vertices)
     GLuint gl = 0;                  // vertex / index buffers
     // 132vt2 (research/VITA.md "Memory"): a large vertex / index buffer (the level's scene mesh, 34 MB in TORONTO1)
@@ -172,6 +272,7 @@ struct VglTexture final : Texture {
     std::uint8_t pool = pool_unknown;  // where vitaGL placed it (g_placement)
     std::size_t placed = 0;
     std::uint8_t applied_sampler = 0xff;  // 132vt2e: the filter / wrap execute() last set on it (0xff: unknown)
+    std::uint8_t scene_kind = MemoryStats::scene_other;  // 132vt3: what a GXM scene drawing into it is counted as
     unsigned rows() const { return layer_rows * std::max(desc_.layers, 1u); }
     std::size_t stride() const { return align_up(std::max(desc_.width, 1u), 8) * 4; }  // vitaGL's linear RGBA rows
     void set_desc(const TextureDesc& d) { desc_ = d; }
@@ -372,16 +473,60 @@ struct ShadowFilter {
         const float w = std::fabs(X[3]);
         return std::fabs(X[0]) > w || std::fabs(X[1]) > w || std::fabs(X[2]) > w;
     }
-    bool keep(const std::uint8_t* v0, const std::uint8_t* v1, const std::uint8_t* v2) const {
-        float a[3], b[3], c[3], n[3];
-        std::memcpy(a, v0, sizeof a);
-        std::memcpy(b, v1, sizeof b);
-        std::memcpy(c, v2, sizeof c);
-        if (outside(a) || outside(b) || outside(c)) return false;
-        std::memcpy(n, v2 + 12, sizeof n);  // MeshVertex::normal
+    // One triangle's three positions; then the third vertex's normal (MeshVertex::normal). Not inlined, so the cached
+    // and the direct paths below run the same instructions (the same float results).
+    __attribute__((noinline)) bool inside(const float* t) const { return !outside(t) && !outside(t + 3) && !outside(t + 6); }
+    __attribute__((noinline)) bool faces(const float* n) const {
         return facing[0] * n[0] + facing[1] * n[1] + facing[2] * n[2] < 0.0F;
     }
+    bool keep(const std::uint8_t* v0, const std::uint8_t* v1, const std::uint8_t* v2) const {
+        float t[9], n[3];
+        std::memcpy(t, v0, 12);
+        std::memcpy(t + 3, v1, 12);
+        std::memcpy(t + 6, v2, 12);
+        if (!inside(t)) return false;
+        std::memcpy(n, v2 + 12, sizeof n);
+        return faces(n);
+    }
 };
+
+// 132vt4 (research/VITA.md "Shadow filter cache"): a shadow receiver draw's vertices as the filter reads them (each
+// vertex's first 24 bytes: MeshVertex position and normal) and its indices, copied out of the draw's buffers into
+// cached RAM the first time the draw's range is filtered. The scene mesh keeps its bytes only in vitaGL's memory
+// (gl_only), which the CPU reads uncached (about 3.6 us a triangle on the handheld); the same receiver ranges are
+// drawn every frame. Every write of a cached vertex's bytes (update_buffer, on the same thread and in order: the
+// per-frame lighting writes the colours of the same vertices) is copied into the entry too; an entry goes when its
+// index range is written, when its buffer's bytes are discarded or the buffer destroyed, and when unused for
+// shadow_cache_idle presents. So it always holds what the GPU draws.
+struct ShadowCacheKey {
+    std::uint64_t vertices = 0, indices = 0;  // VglBuffer::id (indices 0: a non-indexed draw)
+    std::uint32_t offset = 0, stride = 0, first = 0, count = 0;
+    bool operator==(const ShadowCacheKey& o) const {
+        return vertices == o.vertices && indices == o.indices && offset == o.offset && stride == o.stride &&
+               first == o.first && count == o.count;
+    }
+};
+struct ShadowCacheKeyHash {
+    std::size_t operator()(const ShadowCacheKey& k) const {
+        std::uint64_t h = k.vertices * 0x9E3779B97F4A7C15ull ^ k.indices;
+        for (std::uint32_t v : {k.offset, k.stride, k.first, k.count}) h = (h ^ v) * 0x100000001B3ull;
+        return static_cast<std::size_t>(h ^ (h >> 32));
+    }
+};
+struct ShadowCacheEntry {
+    ShadowCacheKey key;
+    std::size_t vertex_lo = 0, vertex_hi = 0;      // the vertex buffer's bytes held
+    std::vector<std::uint32_t> vertices;           // the vertices used (sorted)
+    std::vector<float> attributes;                 // 6 floats a vertex: its first 24 bytes
+    std::vector<std::uint32_t> local, indices_used;  // 3 a triangle: into vertices, and the draw's own
+    unsigned used = 0;                             // the present it was last used at
+    std::size_t bytes() const {
+        return (vertices.size() + attributes.size() + local.size() + indices_used.size()) * 4 + sizeof *this;
+    }
+};
+constexpr std::size_t shadow_cache_limit = 512u << 10;
+constexpr unsigned shadow_cache_idle = 120;
+constexpr std::uint32_t shadow_vertex_bytes = 24;
 
 // The draw state (D3D11-style: it persists across submitted lists until changed or reset).
 struct State {
@@ -491,6 +636,10 @@ public:
     void placed(std::uint8_t& pool, std::size_t& held, const void* p, std::size_t bytes, const char* what);
     // The same for a heap-less buffer just given its memory (bound): throws when vitaGL found none.
     void placed_buffer(VglBuffer& b, std::size_t bytes);
+    void finish() {  // glFinish (132vt3: counted when it ends a scene)
+        gpu_wait();
+        glFinish();
+    }
 
 private:
     void copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsigned y, const Box& b);
@@ -523,7 +672,132 @@ private:
     std::uint32_t ops_since_draw_ = ~0u, last_draw_end_ = ~0u;
     std::map<std::uint32_t, std::uint32_t> draw_breaks_;
     unsigned break_frames_ = 0;
+    // 132vt2f: the frame's target switches (each one a new GXM scene) in order, with the draw count at the switch;
+    // the frame that logs the draw breaks logs them too (the evidence for which passes split the frame's scenes).
+    struct SceneMark {
+        const VglTexture* colour;
+        bool depth;
+        bool blit;
+        unsigned draws;
+    };
+    std::vector<SceneMark> scene_marks_;
+    void mark_scene(const VglTexture* colour, bool depth, bool blit) {
+        if (options.log && scene_marks_.size() < 256) scene_marks_.push_back({colour, depth, blit, draws_});
+    }
+    // 132vt3 (research/VITA.md "GXM scenes"): vitaGL's scene_reset begins a GXM scene (ending the open one) at the
+    // first draw or blit after the framebuffer bound for drawing changed, after a present, and at glFinish /
+    // glReadPixels of the framebuffer drawn (each also waits for the GPU). This follows it: the framebuffer bound
+    // (gl_fb_, 0: the display) and its kind, the open scene's framebuffer, whether work went into it since it began.
+    static constexpr GLuint no_scene = ~0u;
+    GLuint gl_fb_ = 0, scene_fb_ = no_scene;
+    unsigned gl_fb_kind_ = MemoryStats::scene_display;
+    bool scene_drawn_ = false;
+    unsigned frame_scenes_ = 0, frame_kinds_[MemoryStats::scene_kinds]{};   // this frame's (added at the present)
+    void bind_framebuffer(GLuint fbo, unsigned kind) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        gl_fb_ = fbo;
+        gl_fb_kind_ = kind;
+    }
+    void scene_work(bool blit) {
+        if (scene_fb_ != gl_fb_) {
+            scene_fb_ = gl_fb_;
+            ++frame_kinds_[blit ? MemoryStats::scene_display_copy : gl_fb_kind_];
+            ++frame_scenes_;
+        }
+        scene_drawn_ = true;
+    }
+    // glFinish (any framebuffer) or glReadPixels of `read` (the framebuffer read): vitaGL ends a scene drawn into.
+    void gpu_wait(GLuint read = no_scene) {
+        if (scene_fb_ == no_scene || !scene_drawn_ || (read != no_scene && read != scene_fb_)) return;
+        ++frame_kinds_[MemoryStats::scene_wait];
+        ++frame_scenes_;
+        scene_drawn_ = false;
+    }
     std::vector<std::uint32_t> filter_kept_;  // the shadow filter's kept indices (reused: no allocation per draw)
+    // 132vt4: the shadow filter cache (ShadowCacheEntry), its bytes, and the presents counted for its ageing; its
+    // entries by (vertex buffer, first vertex byte) for the writes (rebuilt after a change), the longest entry span
+    // and the index buffers named.
+    std::unordered_map<ShadowCacheKey, ShadowCacheEntry, ShadowCacheKeyHash> shadow_cache_;
+    std::size_t shadow_cache_bytes_ = 0;
+    unsigned shadow_presents_ = 0;
+    std::vector<ShadowCacheEntry*> shadow_order_;
+    bool shadow_order_stale_ = false;
+    std::size_t shadow_span_ = 0;
+    std::vector<std::uint64_t> shadow_index_buffers_;
+    const ShadowCacheEntry* shadow_entry(bool indexed, std::uint32_t count, std::uint32_t first, std::uint32_t stride);
+    void drop_shadow_entry(decltype(shadow_cache_)::iterator it) {
+        shadow_cache_bytes_ -= it->second.bytes();
+        shadow_cache_.erase(it);
+        shadow_order_stale_ = true;
+    }
+    void order_shadow_cache() {
+        shadow_order_.clear();
+        shadow_index_buffers_.clear();
+        shadow_span_ = 0;
+        for (auto& [key, e] : shadow_cache_) {
+            shadow_order_.push_back(&e);
+            shadow_span_ = std::max(shadow_span_, e.vertex_hi - e.vertex_lo);
+            if (key.indices && std::find(shadow_index_buffers_.begin(), shadow_index_buffers_.end(), key.indices) ==
+                                   shadow_index_buffers_.end())
+                shadow_index_buffers_.push_back(key.indices);
+        }
+        std::sort(shadow_order_.begin(), shadow_order_.end(), [](const ShadowCacheEntry* a, const ShadowCacheEntry* b) {
+            return std::tie(a->key.vertices, a->vertex_lo) < std::tie(b->key.vertices, b->vertex_lo);
+        });
+        shadow_order_stale_ = false;
+    }
+
+public:
+    // 132vt4: bytes [offset, offset + bytes) of buffer `id` are being written with `data` (discard: the buffer's other
+    // bytes are lost too, or it is destroyed). The entries' vertices take the new bytes; the entries whose indices
+    // or whose discarded vertices they were go.
+    void shadow_written(std::uint64_t id, const void* data, std::size_t offset, std::size_t bytes, bool discard) {
+        if (shadow_cache_.empty()) return;
+        if (shadow_order_stale_) order_shadow_cache();
+        const bool index_buffer =
+            std::find(shadow_index_buffers_.begin(), shadow_index_buffers_.end(), id) != shadow_index_buffers_.end();
+        if (discard || index_buffer) {
+            for (auto it = shadow_cache_.begin(); it != shadow_cache_.end();) {
+                const ShadowCacheKey& k = it->first;
+                const bool indices = k.indices == id && (discard || (offset < (std::size_t(k.first) + k.count) * 4 &&
+                                                                     std::size_t(k.first) * 4 < offset + bytes));
+                if (indices || (discard && k.vertices == id)) {
+                    auto next = std::next(it);
+                    drop_shadow_entry(it);
+                    it = next;
+                } else {
+                    ++it;
+                }
+            }
+            if (discard) return;
+            if (shadow_order_stale_) order_shadow_cache();
+        }
+        if (!bytes) return;
+        const std::size_t w0 = offset, w1 = offset + bytes;
+        const std::size_t from = w0 > shadow_span_ ? w0 - shadow_span_ : 0;
+        auto it = std::lower_bound(shadow_order_.begin(), shadow_order_.end(), std::make_pair(id, from),
+                                   [](const ShadowCacheEntry* e, const std::pair<std::uint64_t, std::size_t>& v) {
+                                       return std::tie(e->key.vertices, e->vertex_lo) < std::tie(v.first, v.second);
+                                   });
+        const auto* source = static_cast<const std::uint8_t*>(data);
+        for (; it != shadow_order_.end() && (*it)->key.vertices == id && (*it)->vertex_lo < w1; ++it) {
+            ShadowCacheEntry& e = **it;
+            if (e.vertex_hi <= w0) continue;
+            const std::size_t base = e.key.offset, stride = e.key.stride;
+            // The vertices v whose bytes [base + v * stride, + 24) meet [w0, w1).
+            const std::size_t v_begin = w0 < base + shadow_vertex_bytes ? 0 : (w0 - base - shadow_vertex_bytes) / stride + 1;
+            const std::size_t v_end = w1 <= base ? 0 : (w1 - base + stride - 1) / stride;
+            auto v = std::lower_bound(e.vertices.begin(), e.vertices.end(), v_begin);
+            for (; v != e.vertices.end() && *v < v_end; ++v) {
+                const std::size_t at = base + std::size_t(*v) * stride, s = std::max(at, w0),
+                                  n = std::min(at + shadow_vertex_bytes, w1) - s;
+                std::memcpy(reinterpret_cast<std::uint8_t*>(e.attributes.data() + (v - e.vertices.begin()) * 6) + (s - at),
+                            source + (s - w0), n);
+            }
+        }
+    }
+
+private:
     // copy_from_display's GPU path: unchecked until its first use, then the row order it matched the read-back with.
     enum class DisplayBlit { unchecked, direct, flipped, failed } display_blit_ = DisplayBlit::unchecked;
     std::uint64_t display_blits_ = 0, display_readbacks_ = 0;
@@ -559,13 +833,14 @@ private:
 
 VglBuffer::~VglBuffer() {
     if (!gl) return;
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    VGL_LOCK("vgl.wait.release");
+    if (g_impl) g_impl->shadow_written(id, nullptr, 0, 0, true);
     unplace(pool, placed);
     glDeleteBuffers(1, &gl);
 }
 
 VglTexture::~VglTexture() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    VGL_LOCK("vgl.wait.release");
     if (g_impl) g_impl->forget(this);
     unplace(pool, placed);
     if (gl) glDeleteTextures(1, &gl);
@@ -579,18 +854,93 @@ Impl::Impl(const Options& o) : options(o) {
     // The GXM backend's compile settings (vitashark's shark_compile_shader defaults): no fast-math variants, so the
     // programs' floor / round arithmetic matches the D3D11 reference (VITA.md "Floating point").
     vglSetupRuntimeShaderCompiler(SHARK_OPT_DEFAULT, GL_FALSE, GL_FALSE, GL_FALSE);
-    // RAM pool: the free user memory less 8 MB (thread stacks, audio, the kernel); all free CDRAM (VITA.md "Memory").
+    // RAM pool: the free user memory less 12 MB (thread stacks, audio, the kernel, the render targets' driver memory;
+    // 132vp4, 8 MB before); all free CDRAM (VITA.md "Memory").
     // vglInitExtended returns GL_TRUE only when it fell back to a smaller display resolution.
     // 132vp1: Vita3K has more free memory than the hardware, so its pools are larger (CDRAM 112 / RAM 56 MB against
     // the 132vt2e unit's 96 / 25 MB; both have the 26 MB phycont). vita_test_hw_pools.txt sizes them as the hardware's,
     // so a level that would not fit there spills (and fails) here too (VITA.md "Playability, memory and coverage").
     const bool hw_pools = file_exists("ux0:data/omega_strain/vita_test_hw_pools.txt");
-    if (hw_pools ? vglInitWithCustomSizes(0x100000, display_width, display_height, 25 * 1024 * 1024, 96 * 1024 * 1024,
-                                          26 * 1024 * 1024, 0, SCE_GXM_MULTISAMPLE_NONE)
-                 : vglInitExtended(0x100000, display_width, display_height, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE))
+    // 132vp2 (VITA.md "GPU memory headroom"): vita_test_cdram_mb.txt (a number of MB) gives the CDRAM pool that size,
+    // with the hardware's other pools, so a level runs short of CDRAM and spills into the RAM pool, phycont and the
+    // newlib heap (vitaGL's fallback) as the handheld would with a larger level.
+    unsigned cdram_mb = hw_pools ? 96 : 0;
+    if (FILE* f = std::fopen("ux0:data/omega_strain/vita_test_cdram_mb.txt", "r")) {
+        unsigned mb = 0;
+        if (std::fscanf(f, "%u", &mb) == 1 && mb >= 16 && mb <= 112) cdram_mb = mb;
+        std::fclose(f);
+    }
+    // 132vp3 (VITA.md "GPU waits"): every render target (the display's, each framebuffer object's) may hold up to 8
+    // scenes in one frame, as the GXM backend's display. vitaGL's default of 1 makes each scene after the first on a
+    // target wait in sceGxmBeginScene for the GPU to finish the one before: the level returns to the display about 9
+    // times a frame and to its 960x544 targets more. The wrapped sceGxmCreateRenderTarget falls back to fewer scenes
+    // when the driver memory is short. vita_test_rt_scenes.txt (a number, 1-8) sets the count (1: vitaGL's default).
+    g_wait_log = options.log;
+    unsigned rt_scenes = 8;
+    if (FILE* f = std::fopen("ux0:data/omega_strain/vita_test_rt_scenes.txt", "r")) {
+        unsigned n = 0;
+        if (std::fscanf(f, "%u", &n) == 1 && n >= 1 && n <= 8) rt_scenes = n;
+        std::fclose(f);
+    }
+    vglSetupRenderTargetScenesNum(static_cast<std::uint8_t>(rt_scenes), static_cast<std::uint8_t>(rt_scenes));
+    // 132vp3 (VITA.md "GPU waits"): vitaGL's circular vertex pool (32 MB by default, one slice per display buffer,
+    // placed in its RAM pool and phycont at init) holds only client-side arrays here, about 2 KB a frame in a level
+    // (the shadow filter's kept indices and the display copies' quads; the "vitagl waits" line). 6 MB leaves 2 MB a
+    // frame and gives the rest to the GPU objects, which spilled 13.6 MB into the newlib heap in TORONTO1 on the
+    // handheld. No GL1 immediate-mode pool (vglInit*'s first argument): nothing here draws with glBegin.
+    // vita_test_circular_mb.txt (a number of MB, 3-32) sets the pool (32: vitaGL's default).
+    unsigned circular_mb = 6;
+    if (FILE* f = std::fopen("ux0:data/omega_strain/vita_test_circular_mb.txt", "r")) {
+        unsigned mb = 0;
+        if (std::fscanf(f, "%u", &mb) == 1 && mb >= 3 && mb <= 32) circular_mb = mb;
+        std::fclose(f);
+    }
+    vglSetCircularPoolSize(circular_mb * 1024 * 1024);
+    // 132vp4 (VITA.md "Render scale and memory headroom"): the user memory vglInitExtended leaves outside its RAM pool,
+    // 12 MB (8 before). On the handheld 8 MB left 2-3 MB free in a level (thread stacks, audio, the render targets'
+    // driver memory all come from it), so the targets made there got 1 scene (the wrapped sceGxmCreateRenderTarget
+    // keeps 3 MB); the 4 MB come off the RAM pool, whose overflow goes to phycont (26 MB free in a level).
+    // vita_test_user_reserve_mb.txt (a number of MB, 4-32) sets it; with the hardware's pools the RAM pool is the
+    // handheld's 33 MB of free user memory at init less it (25 MB at 8).
+    unsigned reserve_mb = 12;
+    if (FILE* f = std::fopen("ux0:data/omega_strain/vita_test_user_reserve_mb.txt", "r")) {
+        unsigned mb = 0;
+        if (std::fscanf(f, "%u", &mb) == 1 && mb >= 4 && mb <= 32) reserve_mb = mb;
+        std::fclose(f);
+    }
+    const unsigned hw_ram_mb = reserve_mb < 29 ? 33 - reserve_mb : 4;
+    if (cdram_mb ? vglInitWithCustomSizes(0, display_width, display_height, int(hw_ram_mb) * 1024 * 1024,
+                                          int(cdram_mb) * 1024 * 1024, 26 * 1024 * 1024, 0, SCE_GXM_MULTISAMPLE_NONE)
+                 : vglInitExtended(0, display_width, display_height, int(reserve_mb) * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE))
         throw std::runtime_error("gfx vitagl: the display does not support 960x544");
-    if (hw_pools && options.log) options.log("vitagl: the hardware's pool sizes (vita_test_hw_pools.txt)");
+    if (options.log) {
+        SceKernelFreeMemorySizeInfo info{};
+        info.size = sizeof info;
+        sceKernelGetFreeMemorySize(&info);
+        options.log("vitagl: user memory kept outside the RAM pool " + std::to_string(reserve_mb) +
+                    " MB (vita_test_user_reserve_mb.txt" + (cdram_mb ? ", hardware RAM pool " + std::to_string(hw_ram_mb) + " MB" : std::string()) +
+                    "); free after init: user " + std::to_string(info.size_user >> 10) + " KB, CDRAM " +
+                    std::to_string(info.size_cdram >> 10) + " KB, phycont " + std::to_string(info.size_phycont >> 10) + " KB");
+    }
+    if (cdram_mb && options.log)
+        options.log("vitagl: the hardware's pool sizes, CDRAM " + std::to_string(cdram_mb) +
+                    " MB (vita_test_hw_pools.txt / vita_test_cdram_mb.txt)");
     vglUseExtraMem(GL_TRUE);
+    if (options.log) {
+        SceGxmRenderTargetParams params{};
+        params.width = display_width;
+        params.height = display_height;
+        params.driverMemBlock = -1;
+        unsigned one = 0, eight = 0;
+        params.scenesPerFrame = 1;
+        sceGxmGetRenderTargetMemSize(&params, &one);
+        params.scenesPerFrame = 8;
+        sceGxmGetRenderTargetMemSize(&params, &eight);
+        options.log("vitagl: render targets hold scenes a frame: up to " + std::to_string(rt_scenes) + " (vita_test_rt_scenes.txt; "
+                    "driver memory for " + std::to_string(display_width) + "x" + std::to_string(display_height) +
+                    ": 1 scene " + std::to_string(one >> 10) + " KB, 8 scenes " + std::to_string(eight >> 10) +
+                    " KB); circular vertex pool " + std::to_string(circular_mb) + " MB (vita_test_circular_mb.txt)");
+    }
     if (options.keep_depth) keep_depth(&gxm_depth_stencil_surface);
     if (options.log) options.log(options.keep_depth ? "vitagl: depth kept across scenes (force load / store)"
                                                     : "vitagl: depth cleared at every scene (vitaGL's default)");
@@ -635,6 +985,15 @@ Impl::Impl(const Options& o) : options(o) {
 void Impl::placed(std::uint8_t& pool, std::size_t& held, const void* p, std::size_t bytes, const char* what) {
     const Pool now = bytes >= placed_bytes ? pool_of(p) : pool_unknown;
     place(pool, held, now, bytes);
+    // 132vp2 (VITA.md "GPU memory headroom"): the first object of 64 KB or more in each pool besides CDRAM. A texture or
+    // static buffer there means CDRAM was full (vitaGL's fallback: RAM pool, phycont, cdlg, the newlib heap); dynamic
+    // buffers start in the RAM pool.
+    static bool spilled[pool_count]{};
+    if (now != pool_cdram && now != pool_unknown && !spilled[now] && options.log) {
+        spilled[now] = true;
+        options.log("vitagl: the first object outside CDRAM in " + std::string(pool_names[now]) + ": " + what + " of " +
+                    std::to_string(bytes >> 10) + " KB (" + pools_free_text() + ")");
+    }
     if (bytes >= (1u << 20) && options.log) {
         char text[200];
         std::snprintf(text, sizeof text, "vitagl: %s of %u KB placed in %s (vitaGL free: VRAM %u KB, RAM %u KB)", what,
@@ -647,13 +1006,8 @@ void Impl::placed(std::uint8_t& pool, std::size_t& held, const void* p, std::siz
 void Impl::placed_buffer(VglBuffer& b, std::size_t bytes) {
     const void* p = glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY);
     glUnmapBuffer(GL_ARRAY_BUFFER);
-    if (!p) {
-        char text[160];
-        std::snprintf(text, sizeof text, "gfx vitagl: out of GPU memory for a %u KB buffer (VITA.md \"Memory\")",
-                      unsigned(bytes >> 10));
-        throw std::runtime_error(text);
-    }
     const bool indices = b.desc().bind & bind_indices;
+    if (!p) out_of_gpu_memory(indices ? "an index buffer" : "a vertex buffer", bytes);
     placed(b.pool, b.placed, p, bytes, indices ? "an index buffer" : "a vertex buffer");
 }
 
@@ -834,7 +1188,7 @@ std::shared_ptr<VglTexture> Impl::make_texture(const TextureDesc& desc, const Le
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         const void* data = vglGetTexDataPointer(GL_TEXTURE_2D);
-        if (!data) throw std::runtime_error("gfx vitagl: out of texture memory (VITA.md \"Memory\")");
+        if (!data) out_of_gpu_memory("a block-compressed texture", std::size_t(bytes));
         placed(t->pool, t->placed, data, std::size_t(bytes), "a texture");
         return t;
     }
@@ -852,7 +1206,7 @@ std::shared_ptr<VglTexture> Impl::make_texture(const TextureDesc& desc, const Le
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     auto* base = static_cast<std::uint8_t*>(vglGetTexDataPointer(GL_TEXTURE_2D));
-    if (!base) throw std::runtime_error("gfx vitagl: out of texture memory (VITA.md \"Memory\")");
+    if (!base) out_of_gpu_memory((desc.bind & bind_target) ? "a target" : "a texture", t->stride() * t->rows());
     std::memset(base, 0, t->stride() * t->rows());
     placed(t->pool, t->placed, base, t->stride() * t->rows(), (desc.bind & bind_target) ? "a target" : "a texture");
     const unsigned mips = std::max(desc.mips, 1u);
@@ -869,7 +1223,7 @@ void Impl::forget(const VglTexture* t) {
     for (auto it = framebuffers_.begin(); it != framebuffers_.end();) {
         if (it->first.first == t || it->first.second == t) {
             if (bound_ && bound_colour_ == it->first.first && bound_depth_ == it->first.second) {
-                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                bind_framebuffer(0, MemoryStats::scene_display);
                 bound_ = false;
             }
             if (it->second.depth_buffer) glDeleteRenderbuffers(1, &it->second.depth_buffer);
@@ -889,11 +1243,12 @@ void Impl::use_target(const VglTexture* colour, const VglTexture* depth) {
     if (colour && colour == back_.get()) {
         // The display: vitaGL's own colour and depth/stencil buffers (the depth texture stands for the latter).
         if (!bound_ || !display_bound_ || bound_depth_ != depth) {
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            bind_framebuffer(0, MemoryStats::scene_display);
             bound_ = display_bound_ = true;
             bound_colour_ = colour;
             bound_depth_ = depth;
             ++targets_;
+            mark_scene(colour, depth != nullptr, false);
             forget_gl_state();
         }
     } else if (!bound_ || bound_colour_ != colour || bound_depth_ != depth) {
@@ -901,7 +1256,7 @@ void Impl::use_target(const VglTexture* colour, const VglTexture* depth) {
         Framebuffer& f = framebuffers_[std::make_pair(colour, depth)];
         if (!f.fbo) {
             glGenFramebuffers(1, &f.fbo);
-            glBindFramebuffer(GL_FRAMEBUFFER, f.fbo);
+            bind_framebuffer(f.fbo, colour ? colour->scene_kind : MemoryStats::scene_other);
             const VglTexture* attach = colour;
             if (!attach) {
                 TextureDesc d;
@@ -929,12 +1284,13 @@ void Impl::use_target(const VglTexture* colour, const VglTexture* depth) {
                 options.log(text);
             }
         } else {
-            glBindFramebuffer(GL_FRAMEBUFFER, f.fbo);
+            bind_framebuffer(f.fbo, colour ? colour->scene_kind : MemoryStats::scene_other);
         }
         bound_ = true;
         bound_colour_ = colour;
         bound_depth_ = depth;
         ++targets_;
+        mark_scene(colour, depth != nullptr, false);
         forget_gl_state();
     }
     if (depth) {
@@ -958,12 +1314,12 @@ void Impl::bind_for_clear(const VglTexture* colour) {
 // ---- draws ----
 
 void Impl::execute(Pipeline& p, bool textures_only) {
-    OMEGA_ZONE_LAPS(lap);
+    OMEGA_ZONE_FINE_LAPS(lap);
     textures_only = textures_only && textures_only_ready_ && last_program_ && options.gl_state_cache;
     textures_only_ready_ = false;
     GlProgram& g = textures_only ? *last_program_ : program(p);
     last_program_ = &g;
-    OMEGA_ZONE_LAP(lap, "vgl.program_lookup");
+    OMEGA_ZONE_FINE_LAP(lap, "vgl.program_lookup");
     if (!options.gl_state_cache) forget_gl_state();
     const bool all = !applied_.valid;
     Applied& a = applied_;
@@ -1055,7 +1411,7 @@ void Impl::execute(Pipeline& p, bool textures_only) {
     float tex_size[16];
     float layers[4];
     bool unit_moved = false;
-    OMEGA_ZONE_LAP(lap, "vgl.fixed_state");
+    OMEGA_ZONE_FINE_LAP(lap, "vgl.fixed_state");
     for (unsigned k = 0; k < 4; ++k) {
         const VglTexture* t = p.textures[k].texture ? p.textures[k].texture : dummy_.get();
         if (t->depth) throw std::runtime_error("gfx vitagl: sampling a depth texture is unported");
@@ -1090,7 +1446,7 @@ void Impl::execute(Pipeline& p, bool textures_only) {
     }
     if (all || unit_moved) glActiveTexture(GL_TEXTURE0);
 
-    OMEGA_ZONE_LAP(lap, "vgl.textures");
+    OMEGA_ZONE_FINE_LAP(lap, "vgl.textures");
     const bool cache = options.gl_state_cache;
     auto set = [&](unsigned slot, GLint location, const void* data, std::size_t floats, unsigned declared) {
         if (location == -1 || location == 0 || !data) return;
@@ -1125,7 +1481,7 @@ void Impl::execute(Pipeline& p, bool textures_only) {
 
     // The attribute pointers (vitaGL keeps each one's buffer name and offset): set again when the program, buffer,
     // offset or stride differ, and always for client vertices.
-    OMEGA_ZONE_LAP(lap, "vgl.uniforms");
+    OMEGA_ZONE_FINE_LAP(lap, "vgl.uniforms");
     const bool new_vertices = !textures_only && (all || !a.vertices || !p.vertex_buffer || a.vertex_program != &g ||
                               a.vertex_buffer != p.vertex_buffer || a.vertex_offset != p.vertex_offset ||
                               a.stride != p.stride);
@@ -1155,16 +1511,17 @@ void Impl::execute(Pipeline& p, bool textures_only) {
         a.vertex_offset = p.vertex_offset;
         a.stride = p.stride;
     }
-    OMEGA_ZONE_LAP(lap, "vgl.attributes");
+    OMEGA_ZONE_FINE_LAP(lap, "vgl.attributes");
 
+    scene_work(false);
     if (p.indexed) {
-        OMEGA_ZONE("vgl.gl_draw");
+        OMEGA_ZONE_FINE("vgl.gl_draw");
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.index_buffer);
         const void* indices = p.index_buffer ? reinterpret_cast<const void*>(std::size_t(p.first) * 4)
                                              : static_cast<const void*>(p.client_indices);
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(p.count), GL_UNSIGNED_INT, indices);
     } else {
-        OMEGA_ZONE("vgl.gl_draw");
+        OMEGA_ZONE_FINE("vgl.gl_draw");
         glDrawArrays(GL_TRIANGLES, static_cast<GLint>(p.first), static_cast<GLsizei>(p.count));
     }
     ++draws_;
@@ -1185,8 +1542,77 @@ Viewport in_layer(Viewport v, const VglTexture* target, unsigned layer) {
     return v;
 }
 
+// 132vt4: the cache's entry for this draw's range, made now if there is none (null: not cached; the caller reads the
+// buffers directly). Only buffers whose bytes change through update_buffer alone are cached (no owner mirror).
+const ShadowCacheEntry* Impl::shadow_entry(bool indexed, std::uint32_t count, std::uint32_t first, std::uint32_t stride) {
+    if (!options.shadow_filter_cache || stride < shadow_vertex_bytes || state_.vertices->mirror ||
+        (indexed && state_.indices->mirror))
+        return nullptr;
+    ShadowCacheKey key;
+    key.vertices = state_.vertices->id;
+    key.indices = indexed ? state_.indices->id : 0;
+    key.offset = state_.offset;
+    key.stride = stride;
+    key.first = first;
+    key.count = count;
+    const auto found = shadow_cache_.find(key);
+    if (found != shadow_cache_.end()) {
+        ShadowCacheEntry& e = found->second;
+        e.used = shadow_presents_;
+        stats.shadow_cached += count / 3;
+        if (options.shadow_filter_check) {
+            // Test switch: the entry against the buffers' bytes now (the uncached reads the cache saves).
+            const std::uint8_t* vertices = buffer_bytes(*state_.vertices) + state_.offset;
+            bool same = !indexed || std::memcmp(e.indices_used.data(),
+                                                reinterpret_cast<const std::uint32_t*>(buffer_bytes(*state_.indices)) + first,
+                                                e.indices_used.size() * 4) == 0;
+            for (std::size_t k = 0; same && k < e.vertices.size(); ++k)
+                same = std::memcmp(e.attributes.data() + k * 6, vertices + std::size_t(e.vertices[k]) * stride,
+                                   shadow_vertex_bytes) == 0;
+            ++(same ? stats.shadow_checked : stats.shadow_mismatched);
+        }
+        return &e;
+    }
+    const std::size_t triangles = count / 3;
+    if (!triangles || triangles * 108 + sizeof(ShadowCacheEntry) > shadow_cache_limit / 2) return nullptr;
+    ShadowCacheEntry e;
+    e.key = key;
+    e.used = shadow_presents_;
+    e.indices_used.resize(triangles * 3);
+    if (indexed) {
+        // One copy of the range (memcpy's block loads), not three uncached loads a triangle.
+        std::memcpy(e.indices_used.data(), reinterpret_cast<const std::uint32_t*>(buffer_bytes(*state_.indices)) + first,
+                    e.indices_used.size() * 4);
+    } else {
+        for (std::size_t k = 0; k < e.indices_used.size(); ++k) e.indices_used[k] = first + static_cast<std::uint32_t>(k);
+    }
+    e.vertices = e.indices_used;
+    std::sort(e.vertices.begin(), e.vertices.end());
+    e.vertices.erase(std::unique(e.vertices.begin(), e.vertices.end()), e.vertices.end());
+    e.vertex_lo = state_.offset + std::size_t(e.vertices.front()) * stride;
+    e.vertex_hi = state_.offset + std::size_t(e.vertices.back()) * stride + shadow_vertex_bytes;
+    if (e.vertex_hi > state_.vertices->desc().bytes) return nullptr;
+    const std::uint8_t* vertices = buffer_bytes(*state_.vertices) + state_.offset;
+    e.attributes.resize(e.vertices.size() * 6);
+    for (std::size_t k = 0; k < e.vertices.size(); ++k)
+        std::memcpy(e.attributes.data() + k * 6, vertices + std::size_t(e.vertices[k]) * stride, shadow_vertex_bytes);
+    e.local.resize(e.indices_used.size());
+    for (std::size_t k = 0; k < e.local.size(); ++k)
+        e.local[k] = static_cast<std::uint32_t>(
+            std::lower_bound(e.vertices.begin(), e.vertices.end(), e.indices_used[k]) - e.vertices.begin());
+    while (!shadow_cache_.empty() && shadow_cache_bytes_ + e.bytes() > shadow_cache_limit) {
+        auto oldest = shadow_cache_.begin();
+        for (auto it = shadow_cache_.begin(); it != shadow_cache_.end(); ++it)
+            if (it->second.used < oldest->second.used) oldest = it;
+        drop_shadow_entry(oldest);
+    }
+    shadow_cache_bytes_ += e.bytes();
+    shadow_order_stale_ = true;
+    return &shadow_cache_.emplace(key, std::move(e)).first->second;
+}
+
 void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
-    OMEGA_ZONE("vgl.draw");
+    OMEGA_ZONE_FINE("vgl.draw");
     if (!state_.has_program) throw std::runtime_error("gfx vitagl: a draw with no program");
     if (!count) return;
     const GxmProgram& g = gxm_program(state_.program);
@@ -1219,18 +1645,35 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
         ShadowFilter filter;
         std::memcpy(filter.clip, shadow->cpu.data(), sizeof filter.clip);
         std::memcpy(filter.facing, shadow->cpu.data() + 96, sizeof filter.facing);
-        const std::uint8_t* vertices = buffer_bytes(*state_.vertices) + state_.offset;
-        const auto* source = indexed ? reinterpret_cast<const std::uint32_t*>(buffer_bytes(*state_.indices)) + first : nullptr;
         kept.reserve(count);
         stats.shadow_tested += count / 3;
-        for (std::uint32_t k = 0; k + 2 < count; k += 3) {
-            const std::uint32_t i0 = source ? source[k] : first + k, i1 = source ? source[k + 1] : first + k + 1,
-                                i2 = source ? source[k + 2] : first + k + 2;
-            if (filter.keep(vertices + std::size_t(i0) * p.stride, vertices + std::size_t(i1) * p.stride,
-                            vertices + std::size_t(i2) * p.stride)) {
-                kept.push_back(i0);
-                kept.push_back(i1);
-                kept.push_back(i2);
+        if (const ShadowCacheEntry* e = shadow_entry(indexed, count, first, p.stride)) {
+            const float* attributes = e->attributes.data();
+            const std::uint32_t* l = e->local.data();
+            const std::uint32_t* i = e->indices_used.data();
+            float t[9];
+            for (std::size_t k = 0, n = e->local.size() / 3; k < n; ++k, l += 3, i += 3) {
+                std::memcpy(t, attributes + l[0] * 6, 12);
+                std::memcpy(t + 3, attributes + l[1] * 6, 12);
+                std::memcpy(t + 6, attributes + l[2] * 6, 12);
+                if (filter.inside(t) && filter.faces(attributes + l[2] * 6 + 3)) {
+                    kept.push_back(i[0]);
+                    kept.push_back(i[1]);
+                    kept.push_back(i[2]);
+                }
+            }
+        } else {
+            const std::uint8_t* vertices = buffer_bytes(*state_.vertices) + state_.offset;
+            const auto* source = indexed ? reinterpret_cast<const std::uint32_t*>(buffer_bytes(*state_.indices)) + first : nullptr;
+            for (std::uint32_t k = 0; k + 2 < count; k += 3) {
+                const std::uint32_t i0 = source ? source[k] : first + k, i1 = source ? source[k + 1] : first + k + 1,
+                                    i2 = source ? source[k + 2] : first + k + 2;
+                if (filter.keep(vertices + std::size_t(i0) * p.stride, vertices + std::size_t(i1) * p.stride,
+                                vertices + std::size_t(i2) * p.stride)) {
+                    kept.push_back(i0);
+                    kept.push_back(i1);
+                    kept.push_back(i2);
+                }
             }
         }
         if (kept.empty()) return;
@@ -1259,15 +1702,18 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
     // particle_haze's two targets: SV_Target0 and SV_Target1 are two fragment programs drawn in turn (as on GXM).
     const bool second = g.fragment_alt != ~0U && state_.colour[1];
     for (unsigned pass = 0; pass < (second ? 2u : 1u); ++pass) {
-        if (!state_.colour[pass] && !state_.depth) return;
+        if (!state_.colour[pass]) {
+            if (second) continue;   // 132vt3: a two-target draw without its first target draws only the second
+            if (!state_.depth) return;
+        }
         {
-            OMEGA_ZONE("vgl.target");
+            OMEGA_ZONE_FINE("vgl.target");
             use_target(state_.colour[pass], state_.depth);
         }
         p.viewport = in_layer(state_.viewport, state_.colour[pass], state_.layer[pass]);
         p.fragment = pass ? g.fragment_alt : g.fragment;
         blend_for(blend.targets[pass && blend.independent ? 1 : 0], state_.factor, p);
-        OMEGA_ZONE("vgl.execute");
+        OMEGA_ZONE_FINE("vgl.execute");
         execute(p);
     }
     if (!second && p.indexed && p.index_buffer && !g.cpu_geometry) {
@@ -1277,7 +1723,7 @@ void Impl::draw(bool indexed, std::uint32_t count, std::uint32_t first) {
 }
 
 void Impl::draw_textures_only(std::uint32_t count, std::uint32_t first) {
-    OMEGA_ZONE("vgl.draw");
+    OMEGA_ZONE_FINE("vgl.draw");
     if (!count) return;
     if (!state_.indices || state_.indices->gl != last_pipeline_.index_buffer ||
         (std::size_t(first) + count) * 4 > state_.indices->desc().bytes)
@@ -1287,7 +1733,7 @@ void Impl::draw_textures_only(std::uint32_t count, std::uint32_t first) {
     p.count = count;
     for (unsigned k = 0; k < 4; ++k) p.textures[k].texture = state_.textures[k];
     {
-        OMEGA_ZONE("vgl.execute");
+        OMEGA_ZONE_FINE("vgl.execute");
         execute(p, true);
     }
     ++textures_only_draws_;
@@ -1420,11 +1866,12 @@ void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsign
         return;
     }
     forget_gl_state();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    bind_framebuffer(0, MemoryStats::scene_display);
     bound_ = display_bound_ = true;
     bound_colour_ = back_.get();
     bound_depth_ = nullptr;
     std::vector<std::uint8_t> up(std::size_t(w) * h * 4), rows(up.size());
+    gpu_wait(0);
     glReadPixels(static_cast<GLint>(box.left), static_cast<GLint>(display_height - box.top - h), static_cast<GLsizei>(w),
                  static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, up.data());
     for (unsigned r = 0; r < h; ++r) {
@@ -1449,9 +1896,13 @@ void Impl::copy_from_display(VglTexture& dst, unsigned layer, unsigned x, unsign
 // GL row = rows() - its row from the top. The whole-display copy is sx = sy = dx = dy = 0, w x h = the texture.
 void Impl::blit_from_display(VglTexture& dst, unsigned sx, unsigned sy, unsigned dx, unsigned dy, unsigned w,
                              unsigned h, bool flip) {
+    const std::size_t marks = scene_marks_.size();
     use_target(&dst, nullptr);
+    if (scene_marks_.size() > marks) scene_marks_.back().blit = true;
+    else mark_scene(&dst, false, true);
     forget_gl_state();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    scene_work(true);
     const GLint top = static_cast<GLint>(display_height - sy), bottom = top - static_cast<GLint>(h);
     const GLint x0 = static_cast<GLint>(sx), x1 = x0 + static_cast<GLint>(w);
     const GLint d0 = static_cast<GLint>(dx), d1 = d0 + static_cast<GLint>(w);
@@ -1473,6 +1924,7 @@ bool Impl::check_display_blit(VglTexture& dst, unsigned sx, unsigned sy, unsigne
     char where[2][96]{};
     for (const bool flip : {false, true}) {
         blit_from_display(dst, sx, sy, dx, dy, w, h, flip);
+        gpu_wait();
         glFinish();
         forget_gl_state();
         glBindTexture(GL_TEXTURE_2D, dst.gl);
@@ -1527,11 +1979,14 @@ bool Impl::check_display_blit(VglTexture& dst, unsigned sx, unsigned sy, unsigne
 // ---- CPU updates and read-back ----
 
 void Impl::update_buffer(VglBuffer& b, const void* data, std::size_t bytes, std::size_t offset, bool keep_rest) {
-    OMEGA_ZONE("vgl.update_buffer");
+    OMEGA_ZONE_FINE("vgl.update_buffer");
     const std::size_t size = b.desc().bytes;
     if (offset > size || bytes > size - offset) throw std::runtime_error("gfx vitagl: a buffer update past its end");
     stats.buffer_bytes += bytes;
     const bool whole = !keep_rest || (offset == 0 && bytes == size);
+    // 132vt4: only a dynamic heap-less buffer's whole update loses the bytes outside [offset, offset + bytes) (new GL
+    // memory); the other updates keep them (written in place, or the whole CPU copy given to GL).
+    shadow_written(b.id, data, offset, bytes, (b.gl_only && b.desc().usage == Usage::dynamic && whole) || (bytes && !data));
     if (b.gl_only) {
         if (!bytes) return;
         if (b.desc().usage == Usage::dynamic) {
@@ -1561,10 +2016,12 @@ void Impl::update_buffer(VglBuffer& b, const void* data, std::size_t bytes, std:
     glBindBuffer(GL_ARRAY_BUFFER, b.gl);
     // vitaGL gives a buffer the GPU may still read fresh memory (the old freed by its garbage collector).
     ++(whole ? stats.buffer_reallocs : stats.buffer_writes);
-    if (whole)
+    if (whole) {
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(size), b.cpu.data(), GL_DYNAMIC_DRAW);
-    else
+        placed_buffer(b, size);   // 132vp2: checked; the new memory may be in another pool
+    } else {
         glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(offset), static_cast<GLsizeiptr>(bytes), b.cpu.data() + offset);
+    }
 }
 
 // Written in place (vitaGL's glTexSubImage2D does the same): an update of a texture drawn earlier in the frame is
@@ -1581,6 +2038,7 @@ void Impl::read(const VglTexture& t, unsigned sub,
     if (t.depth) throw std::runtime_error("gfx vitagl: depth read-back is unported");
     const unsigned mips = std::max(t.desc().mips, 1u);
     if (sub % mips) throw std::runtime_error("gfx vitagl: read-back of mip levels above 0 is unported");
+    gpu_wait();
     glFinish();
     forget_gl_state();
     glBindTexture(GL_TEXTURE_2D, t.gl);
@@ -1628,6 +2086,7 @@ const VglBuffer* buffer_of(const void* p) { return static_cast<const VglBuffer*>
 const VglTexture* texture_of(const void* p) { return static_cast<const VglTexture*>(static_cast<const Texture*>(p)); }
 
 void Impl::submit(CommandList& list) {
+    OMEGA_ZONE("vgl.submit");   // 132vd1: the render thread's execution of the frame's lists (a few dozen a frame)
     for (const Command& c : list.commands()) {
         const std::uint32_t between = ops_since_draw_;
         if (c.op == Command::Op::draw_indexed) {
@@ -1735,9 +2194,10 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
     OMEGA_ZONE("vgl.present");
     forget_gl_state();
     if (options.log && presents_++ % 600 == 0) {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        bind_framebuffer(0, MemoryStats::scene_display);
         std::uint8_t px[4][4]{};
         const GLint at[4][2]{{480, 272}, {240, 136}, {720, 408}, {120, 450}};
+        gpu_wait(0);
         for (int k = 0; k < 4; ++k)
             glReadPixels(at[k][0], at[k][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[k]);
         char text[260];
@@ -1771,8 +2231,26 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
         options.log(text.c_str());
         draw_breaks_.clear();
         break_frames_ = 0;
+        // This frame's scenes: the target (display / colour WxH, +d with depth, blit: a copy from the display) and the
+        // draws recorded in it.
+        std::string seq = "vitagl scenes this frame (" + std::to_string(scene_marks_.size()) + " target switches, " +
+                          std::to_string(frame_scenes_) + " GXM scenes; target: draws):";
+        for (std::size_t k = 0; k < scene_marks_.size(); ++k) {
+            const SceneMark& m = scene_marks_[k];
+            const unsigned next = k + 1 < scene_marks_.size() ? scene_marks_[k + 1].draws : draws_;
+            char item[48];
+            if (m.colour == back_.get()) std::snprintf(item, sizeof item, " display%s: %u", m.depth ? "+d" : "", next - m.draws);
+            else if (m.colour)
+                std::snprintf(item, sizeof item, " %ux%u%s%s: %u", m.colour->desc().width, m.colour->rows(), m.depth ? "+d" : "",
+                              m.blit ? " blit" : "", next - m.draws);
+            else std::snprintf(item, sizeof item, " depth only: %u", next - m.draws);
+            seq += k ? ";" : "";
+            seq += item;
+        }
+        options.log(seq.c_str());
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    scene_marks_.clear();
+    bind_framebuffer(0, MemoryStats::scene_display);
     bound_ = display_bound_ = false;
     bound_colour_ = bound_depth_ = nullptr;
     // The sync interval in vertical blanks (2 for the level's 30 fps steps: vitaGL's display callback waits that many).
@@ -1781,21 +2259,43 @@ SwapChain::Presented Impl::present(unsigned sync_interval) {
         eglSwapInterval(nullptr, vsync);
         vsync_ = vsync;
     }
+    note_circular_pool();
     vglSwapBuffers(GL_FALSE);
+    scene_fb_ = no_scene;  // the swap ended the frame's last scene
+    scene_drawn_ = false;
+    for (unsigned k = 0; k < MemoryStats::scene_kinds; ++k) {
+        stats.gxm_scenes[k] += frame_kinds_[k];
+        frame_kinds_[k] = 0;
+    }
+    stats.gxm_scenes_total += frame_scenes_;
+    stats.gxm_scenes_last_frame = frame_scenes_;
+    frame_scenes_ = 0;
+    log_waits(options.log);
     if (options.presented) options.presented();
     stats.scenes_last_frame = targets_;
     stats.draws_last_frame = draws_;
     stats.scenes_total += targets_;
     stats.draws_total += draws_;
     targets_ = draws_ = 0;
+    // 132vt4: the shadow filter cache's entries unused for shadow_cache_idle presents go (a level left, a range no
+    // longer drawn).
+    if (++shadow_presents_ % 30 == 0)
+        for (auto it = shadow_cache_.begin(); it != shadow_cache_.end();) {
+            auto next = std::next(it);
+            if (shadow_presents_ - it->second.used > shadow_cache_idle) drop_shadow_entry(it);
+            it = next;
+        }
+    stats.shadow_cache_bytes = shadow_cache_bytes_;
     snapshot();
     return SwapChain::Presented::ok;
 }
 
 void Impl::message(const std::string& text) {
     forget_gl_state();
+    gpu_wait();
     glFinish();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    scene_fb_ = no_scene;  // the dialog's frames are its own
+    bind_framebuffer(0, MemoryStats::scene_display);
     bound_ = display_bound_ = false;
     bound_colour_ = bound_depth_ = nullptr;
     SceMsgDialogUserMessageParam user{};
@@ -1823,7 +2323,7 @@ public:
     const std::string& name() const override { return name_; }
     Capabilities capabilities() const override { return {.block_textures = true}; }   // 132md11 (DXT1 / DXT5)
     std::shared_ptr<Buffer> create_buffer(const BufferDesc& desc, const void* initial, const char*) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        VGL_LOCK("vgl.wait.create");
         trace("create_buffer %u bytes, bind %u", unsigned(desc.bytes), unsigned(desc.bind));
         auto b = std::make_shared<VglBuffer>(desc);
         const std::size_t padded = align_up(std::max<std::size_t>(desc.bytes, 16), 16);
@@ -1845,15 +2345,25 @@ public:
             glBindBuffer(GL_ARRAY_BUFFER, b->gl);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizei>(b->cpu.size()), b->cpu.data(),
                          desc.usage == Usage::immutable ? GL_STATIC_DRAW : GL_DYNAMIC_DRAW);
-            impl_.placed(b->pool, b->placed, nullptr, b->cpu.size(), "a buffer");
+            impl_.placed_buffer(*b, b->cpu.size());   // 132vp2: checked (throws when vitaGL found no memory)
         }
         return b;
     }
-    std::shared_ptr<Texture> create_texture(const TextureDesc& desc, const Level* levels, const TextureLabels&) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    std::shared_ptr<Texture> create_texture(const TextureDesc& desc, const Level* levels, const TextureLabels& labels) override {
+        VGL_LOCK("vgl.wait.create");
         trace("create_texture %ux%u format %u, %u mips, %u layers, bind %u", desc.width, desc.height,
               unsigned(desc.format), unsigned(desc.mips), unsigned(desc.layers), unsigned(desc.bind));
-        return impl_.make_texture(desc, levels);
+        auto t = impl_.make_texture(desc, levels);
+        // 132vt3: the scene kinds of the targets the in-level frame draws into (named by their creators' labels).
+        static const std::pair<const char*, MemoryStats::SceneKind> kinds[]{
+            {"Create shadow buffers", MemoryStats::scene_shadow},
+            {"Create frame alpha target", MemoryStats::scene_frame_alpha},
+            {"Create ScreenFxBuf", MemoryStats::scene_screen_fx},
+            {"Create corona reduce target", MemoryStats::scene_corona_reduce},
+            {"Create GUI target", MemoryStats::scene_gui}};
+        for (const auto& k : kinds)
+            if (labels.texture && std::strcmp(labels.texture, k.first) == 0) t->scene_kind = k.second;
+        return t;
     }
     std::shared_ptr<BlendState> create_blend(const BlendDesc& desc, const char*) override {
         auto s = std::make_shared<VglBlend>();
@@ -1876,7 +2386,7 @@ public:
         return s;
     }
     void prepare(Program program) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        VGL_LOCK("vgl.wait.create");
         const GxmProgram& g = gxm_program(program);
         trace("prepare program %u (vertex %u, fragment %u)", unsigned(program), g.vertex, g.fragment);
         impl_.shader(true, g.vertex);
@@ -1884,12 +2394,13 @@ public:
         if (g.fragment_alt != ~0U) impl_.shader(false, g.fragment_alt);
     }
     void submit(CommandList& list) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        VGL_LOCK("vgl.wait.submit");
         trace("submit");
         impl_.submit(list);
     }
     void write(const Buffer& buffer, const void* data, std::size_t bytes, const char*) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        OMEGA_ZONE("vgl.write");
+        VGL_LOCK("vgl.wait.write");
         impl_.update_buffer(const_cast<VglBuffer&>(static_cast<const VglBuffer&>(buffer)), data, bytes, 0, false);
     }
     void cpu_mirror(const Buffer& buffer, const void* data) override {
@@ -1898,13 +2409,13 @@ public:
     }
     void read(const Texture& staging, unsigned subresource,
               const std::function<void(const std::uint8_t* data, unsigned row_pitch)>& reader, const char*) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        VGL_LOCK("vgl.wait.read");
         impl_.read(static_cast<const VglTexture&>(staging), subresource, reader);
     }
     bool removed() const override { return false; }
     bool wait_idle() override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
-        glFinish();
+        VGL_LOCK("vgl.wait.read");
+        impl_.finish();
         return true;
     }
 
@@ -1921,12 +2432,12 @@ public:
         height = display_height;
     }
     std::shared_ptr<Texture> buffer(bool, const char*, const char*) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        VGL_LOCK("vgl.wait.read");
         return impl_.back_buffer();
     }
     void resize(unsigned, unsigned, const char*) override {}  // the Vita display is fixed at 960x544
     Presented present(unsigned sync_interval, const char*) override {
-        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        VGL_LOCK("vgl.wait.present");
         trace("present (interval %u)", sync_interval);
         return impl_.present(sync_interval);
     }
@@ -1964,12 +2475,15 @@ void arm_trace() {
 
 MemoryStats memory_stats() {
     if (!g_impl) return {};
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    VGL_LOCK("vgl.wait.stats");
     return g_impl->snapshot();
 }
 
+// 132vg2: the GXM backend's scene dump; vitaGL has its own scene line ("vitagl scenes this frame").
+std::string scene_dump() { return {}; }
+
 std::string placement_line() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    VGL_LOCK("vgl.wait.stats");
     const Placement& p = g_placement;
     std::string line = "GPU objects KB (live/peak):";
     for (unsigned i = 0; i < pool_count; ++i)
@@ -1977,6 +2491,9 @@ std::string placement_line() {
                                std::to_string(p.peak[i] >> 10) + ",";
     line += " depth buffers ~" + std::to_string(p.depth_live >> 10) + "/" + std::to_string(p.depth_peak >> 10) +
             "; largest " + std::to_string(p.largest >> 10) + " in " + pool_names[p.largest_pool];
+    // 132vp2 (VITA.md "GPU memory headroom"): the pools vitaGL falls back to once CDRAM is full.
+    line += "; phycont free " + std::to_string(vglMemFree(VGL_MEM_PHYCONT) >> 10) + " KB, cdlg free " +
+            std::to_string(vglMemFree(VGL_MEM_BUDGET) >> 10) + " KB";
     return line;
 }
 
@@ -1987,6 +2504,96 @@ void show_message(const std::string& text) {
 }
 
 }  // namespace omega::gfx::gxm
+
+// 132vp3: the linker's --wrap targets (cmake/vita/OmegaVitaTargets.cmake; research/VITA.md "GPU waits").
+extern "C" {
+int __real_sceGxmBeginScene(SceGxmContext*, unsigned int, const SceGxmRenderTarget*, const SceGxmValidRegion*,
+                            SceGxmSyncObject*, SceGxmSyncObject*, const SceGxmColorSurface*, const SceGxmDepthStencilSurface*);
+int __real_sceGxmEndScene(SceGxmContext*, const SceGxmNotification*, const SceGxmNotification*);
+void __real_sceGxmFinish(SceGxmContext*);
+int __real_sceGxmDisplayQueueAddEntry(SceGxmSyncObject*, SceGxmSyncObject*, const void*);
+int __real_sceGxmNotificationWait(const SceGxmNotification*);
+int __real_sceGxmCreateRenderTarget(const SceGxmRenderTargetParams*, SceGxmRenderTarget**);
+int __real_sceGxmDestroyRenderTarget(SceGxmRenderTarget*);
+
+int __wrap_sceGxmBeginScene(SceGxmContext* context, unsigned int flags, const SceGxmRenderTarget* target,
+                            const SceGxmValidRegion* region, SceGxmSyncObject* vertex_sync, SceGxmSyncObject* fragment_sync,
+                            const SceGxmColorSurface* colour, const SceGxmDepthStencilSurface* depth) {
+    const std::uint64_t start = omega::gfx::gxm::now_us();
+    const int r = __real_sceGxmBeginScene(context, flags, target, region, vertex_sync, fragment_sync, colour, depth);
+    omega::gfx::gxm::add_wait(omega::gfx::gxm::wait_begin_scene, start);
+    return r;
+}
+int __wrap_sceGxmEndScene(SceGxmContext* context, const SceGxmNotification* vertex, const SceGxmNotification* fragment) {
+    const std::uint64_t start = omega::gfx::gxm::now_us();
+    const int r = __real_sceGxmEndScene(context, vertex, fragment);
+    omega::gfx::gxm::add_wait(omega::gfx::gxm::wait_end_scene, start);
+    return r;
+}
+void __wrap_sceGxmFinish(SceGxmContext* context) {
+    const std::uint64_t start = omega::gfx::gxm::now_us();
+    __real_sceGxmFinish(context);
+    omega::gfx::gxm::add_wait(omega::gfx::gxm::wait_finish, start);
+}
+int __wrap_sceGxmDisplayQueueAddEntry(SceGxmSyncObject* old_buffer, SceGxmSyncObject* new_buffer, const void* data) {
+    const std::uint64_t start = omega::gfx::gxm::now_us();
+    const int r = __real_sceGxmDisplayQueueAddEntry(old_buffer, new_buffer, data);
+    omega::gfx::gxm::add_wait(omega::gfx::gxm::wait_display_queue, start);
+    return r;
+}
+int __wrap_sceGxmNotificationWait(const SceGxmNotification* notification) {
+    const std::uint64_t start = omega::gfx::gxm::now_us();
+    const int r = __real_sceGxmNotificationWait(notification);
+    omega::gfx::gxm::add_wait(omega::gfx::gxm::wait_notification, start);
+    return r;
+}
+// vitaGL asks for vglSetupRenderTargetScenesNum's count. sceGxm allocates the driver memory from the free user memory
+// (5 MB in a level on the handheld), which the rest of the process needs too: more than one scene only while 3 MB
+// stays free after it, and fewer scenes rather than no render target when the creation fails (a framebuffer object
+// without one draws nothing).
+int __wrap_sceGxmCreateRenderTarget(const SceGxmRenderTargetParams* params, SceGxmRenderTarget** target) {
+    using namespace omega::gfx::gxm;
+    SceGxmRenderTargetParams p = *params;
+    SceKernelFreeMemorySizeInfo info{};
+    info.size = sizeof info;
+    sceKernelGetFreeMemorySize(&info);
+    const unsigned reserve = 3u << 20;
+    const unsigned room = info.size_user > reserve ? info.size_user - reserve : 0;
+    unsigned bytes = 0;
+    while (p.scenesPerFrame > 1 && (sceGxmGetRenderTargetMemSize(&p, &bytes) < 0 || bytes > room))
+        p.scenesPerFrame = static_cast<std::uint16_t>(p.scenesPerFrame / 2);
+    int r = -1;
+    for (;;) {
+        bytes = 0;
+        sceGxmGetRenderTargetMemSize(&p, &bytes);
+        r = __real_sceGxmCreateRenderTarget(&p, target);
+        if (r >= 0 || p.scenesPerFrame <= 1) break;
+        p.scenesPerFrame = static_cast<std::uint16_t>(p.scenesPerFrame / 2);
+    }
+    if (r >= 0) {
+        render_target_bytes += bytes;
+        g_render_targets[*target] = bytes;
+    }
+    if (g_wait_log) {
+        char text[200];
+        std::snprintf(text, sizeof text,
+                      "vitagl: render target %ux%u, scenes a frame %u (asked %u), %u KB driver memory (user memory free before: %u KB)%s%s",
+                      unsigned(p.width), unsigned(p.height), unsigned(p.scenesPerFrame), unsigned(params->scenesPerFrame),
+                      bytes >> 10, unsigned(info.size_user >> 10), r >= 0 ? "" : ": failed ", r >= 0 ? "" : std::to_string(r).c_str());
+        g_wait_log(text);
+    }
+    return r;
+}
+int __wrap_sceGxmDestroyRenderTarget(SceGxmRenderTarget* target) {
+    using namespace omega::gfx::gxm;
+    const auto it = g_render_targets.find(target);
+    if (it != g_render_targets.end()) {
+        render_target_bytes -= std::min<std::uint64_t>(render_target_bytes, it->second);
+        g_render_targets.erase(it);
+    }
+    return __real_sceGxmDestroyRenderTarget(target);
+}
+}
 
 namespace omega::gfx {
 

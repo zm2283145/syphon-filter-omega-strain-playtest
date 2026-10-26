@@ -37,6 +37,12 @@ option(OMEGA_VITA_ZONES "Vita: compile the shared code's OMEGA_ZONE timers" ON)
 if(OMEGA_VITA_ZONES)
     target_compile_definitions(omega_core PUBLIC OMEGA_ZONE_PROFILE=1)
 endif()
+# 132vt2f: the GL backend's per-draw zones (OMEGA_ZONE_FINE) cost about 130 ms a level frame on the handheld in clock
+# reads; off unless asked for.
+option(OMEGA_VITA_FINE_ZONES "Vita: also compile the GL backend's per-draw OMEGA_ZONE_FINE timers" OFF)
+if(OMEGA_VITA_ZONES AND OMEGA_VITA_FINE_ZONES)
+    target_compile_definitions(omega_core PUBLIC OMEGA_ZONE_PROFILE_FINE=1)
+endif()
 # __sce_headroom (VitaSDK's armvita.x): vita-elf-create appends the SCE module info (imports/exports; 0xe1c bytes for omega_vita) to
 # the end of the text segment, but the RW segment starts at the next 64 KiB boundary; when the text happens to end just
 # below one (0x3a0 bytes short at bbeac37f) the appended data overlaps the RW segment and vita-elf-create corrupts its
@@ -72,6 +78,13 @@ target_link_libraries(omega_gfx_gxm PUBLIC omega_core omega_vita_platform ${omeg
     vitashark SceShaccCgExt SceShaccCg_stub taihen_stub
     SceGxm_stub SceDisplay_stub SceSysmodule_stub SceCommonDialog_stub SceAppMgr_stub SceKernelDmacMgr_stub
     SceIofilemgr_stub SceLibKernel_stub m)
+if(OMEGA_VITA_RENDERER STREQUAL "vitagl")
+    # 132vp3 (research/VITA.md "GPU waits"): gfx_vitagl.cpp's __wrap_ functions time vitaGL's calls that can wait for
+    # the GPU and size its render targets' scene slots.
+    target_link_options(omega_gfx_gxm INTERFACE -Wl,--wrap=sceGxmBeginScene -Wl,--wrap=sceGxmEndScene
+        -Wl,--wrap=sceGxmFinish -Wl,--wrap=sceGxmDisplayQueueAddEntry -Wl,--wrap=sceGxmNotificationWait
+        -Wl,--wrap=sceGxmCreateRenderTarget -Wl,--wrap=sceGxmDestroyRenderTarget)
+endif()
 
 # Extra pairs (source, path in the package) after the LiveArea images.
 # VitaSDK's vita_create_vpk builds its vita-pack-vpk flags as one string and splits it on spaces, which breaks on a
@@ -150,10 +163,18 @@ target_compile_definitions(omega_vita PRIVATE OMEGA_ISO_SIZE=${OMEGA_VITA_ISO_SI
     OMEGA_BOOT_EXECUTABLE="${OMEGA_VITA_BOOT_EXECUTABLE}"
     # iso_verify_vita.hpp's boot check: SHA-256 of the image's first and last MiB and its ISO 9660 root directory.
     OMEGA_ISO_QUICK_SHA256="61445c6c05423c7bc50abb94411c494332b4f318733d6cbfa4488c1360670714")
-omega_vita_livearea(${CMAKE_CURRENT_BINARY_DIR}/livearea_app "OMEGA STRAIN" "NATIVE PORT")
+# A GXM build is labelled as such so it can sit beside the vitaGL build (give it another OMEGA_VITA_TITLE_ID).
+if(OMEGA_VITA_RENDERER STREQUAL "gxm")
+    set(omega_vita_app_name "Omega Strain (native port, GXM)")
+    set(omega_vita_livearea_line "NATIVE PORT GXM")
+else()
+    set(omega_vita_app_name "Omega Strain (native port)")
+    set(omega_vita_livearea_line "NATIVE PORT")
+endif()
+omega_vita_livearea(${CMAKE_CURRENT_BINARY_DIR}/livearea_app "OMEGA STRAIN" "${omega_vita_livearea_line}")
 # config/disc_us.json (the disc profile: sizes and hashes, nothing disc-derived) goes in the package: the play host
 # checks for it under its working folder (vita_main.cpp copies it to ux0:data/omega_strain/config).
-omega_vita_package(omega_vita ${OMEGA_VITA_TITLE_ID} "Omega Strain (native port)"
+omega_vita_package(omega_vita ${OMEGA_VITA_TITLE_ID} "${omega_vita_app_name}"
     ${CMAKE_CURRENT_BINARY_DIR}/livearea_app ${CMAKE_CURRENT_SOURCE_DIR}/config/disc_us.json config/disc_us.json)
 
 # SFOS00003: the display bring-up check (src/port/app/vita_red_main.cpp; nothing from the game; VITA.md).

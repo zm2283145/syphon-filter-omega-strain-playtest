@@ -173,14 +173,16 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
         // +c, class word *004ea770, position and eye +c0 / +e4 = +80 (w 1).
         // Their +2c..+2e and the other fields are not read for them (taken
         // as 0).
-        sense_->object=[this,base=sense_->object](std::uint64_t o)->std::optional<NpcSenseObject>{
+        // The wrapper captures only this (port-only, speed, 132vs4: no allocation per host on the Vita).
+        sense_object_base_=std::move(sense_->object);
+        sense_->object=[this](std::uint64_t o)->std::optional<NpcSenseObject>{
             if(const auto n=graph_.node_of_object(o)){
                 NpcSenseObject v;v.id=static_cast<std::int32_t>(graph_.node(*n).id);v.class_4ea770=true;
                 v.position=v.eye=graph_.position(*n);
                 return v;
             }
-            if(!base)throw std::runtime_error("NPC perception: no object views (NpcPerceptionHost::object)");
-            return base(o);
+            if(!sense_object_base_)throw std::runtime_error("NPC perception: no object views (NpcPerceptionHost::object)");
+            return sense_object_base_(o);
         };
         h.perception=&perception_;h.sense=&*sense_;
         h.object_by_id=perception_link_.object_by_id;
@@ -416,6 +418,10 @@ void NpcAiController::pump(SoloActorSimulation& actor){
     if(keep_history_)history_.push_back(std::move(frame_));
     frame_=NpcAiControllerFrame{};
     auto pending=std::move(pending_);pending_.clear();
+    // Port-only (speed, 132vs4): no message, no host. The host's views are
+    // rebuilt by every host() call (update, always_run, nested sends), so
+    // only the route actor it records is kept.
+    if(pending.empty()){route_actor_=&actor;return;}
     auto h=host(actor);
     for(const auto& m:pending){
         frame_.delivered.push_back(m);

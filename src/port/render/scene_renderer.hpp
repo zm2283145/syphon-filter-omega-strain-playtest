@@ -215,15 +215,30 @@ public:
     const std::string& backend() const { return backend_; }
     // For a 2D pass over the last draw() (the GUI overlay, Checkpoint 122a).
     const std::shared_ptr<gfx::Device>& device() const { return device_; }
-    const gfx::Texture* render_target() const { return target_.get(); }
-    unsigned width() const { return width_; }
-    unsigned height() const { return height_; }
+    // The target being drawn and its size: the swap chain's buffer, or (132vp4) while a scaled scene is open the
+    // scene's own smaller target, which the frame's 3D passes (hooks, particles, coronas) then draw into.
+    const gfx::Texture* render_target() const { return scene_open_ ? scene_target_.get() : target_.get(); }
+    unsigned width() const { return scene_open_ ? scene_width_ : width_; }
+    unsigned height() const { return scene_open_ ? scene_height_ : height_; }
+    // Port-only (132vp4, research/VITA.md "Render scale"): the 3D scene's scale (1: the scene draws into the swap
+    // chain's buffer, as before). Below 1, draw() opens a scene of the buffer's size times `scale` (its own colour,
+    // depth and frame alpha targets) and render_target() / width() / height() name it until end_scene(), which
+    // closes it; the caller then upscales scene_view() into the buffer (GuiRenderer::draw_upscale) and draws the
+    // HUD / GUI at the buffer's full size. present() closes a scene left open. Takes effect at the next draw().
+    void set_scene_scale(float scale);
+    float scene_scale() const { return scene_scale_; }
+    bool scene_open() const { return scene_open_; }
+    void end_scene() { scene_open_ = false; }
+    // The scaled scene's colour (null at scale 1) and its size.
+    const gfx::Texture* scene_view() const { return scene_target_.get(); }
+    unsigned scene_width() const { return scene_target_ ? scene_width_ : width_; }
+    unsigned scene_height() const { return scene_target_ ? scene_height_ : height_; }
     // The last draw()'s view and projection (row vectors: clip = p * view *
     // projection, rows stored in order) and its depth buffer, for the
     // particle sprites (Checkpoint 122d).
     const std::array<float, 16>& last_view() const { return last_view_; }
     const std::array<float, 16>& last_projection() const { return last_projection_; }
-    const gfx::Texture* depth_view() const { return depth_.get(); }
+    const gfx::Texture* depth_view() const { return depth_.get(); }   // the scene's size (132vp4)
     // Checkpoint 132cp7: the GS frame's alpha byte (R8, the target's size). The frame clear 0037a5c0 (from the
     // flip 0037a9f0, once per frame) writes RGBAQ +c8 A = 0 (init 0037f5f0), so draw() clears it to 0. The model
     // draws never write it: the vision prepare 0025fbb0 ORs FBMSK +f8 (0xff000000 in mode 0, 0xffff00ff in mode 1,
@@ -238,6 +253,11 @@ private:
     const Mesh& mesh_;
     bool owned_{};   // the display was made for this renderer (its own window): no release / reset
     unsigned width_{}, height_{};
+    // 132vp4: the scene's scale and, below 1, its own colour target (depth_ / frame_alpha_ are then its size)
+    float scene_scale_ = 1.0F, scene_built_scale_ = 1.0F;
+    unsigned scene_width_{}, scene_height_{};
+    Ptr<gfx::Texture> scene_target_;
+    bool scene_open_ = false;
     std::string backend_;
     Ptr<gfx::Device> device_;
     Ptr<gfx::SwapChain> swap_chain_;
@@ -335,6 +355,7 @@ private:
     Ptr<gfx::Buffer> rewrite_buffer(Ptr<gfx::Buffer> buffer, const void* data, std::size_t size, unsigned binding, const char* label);
     Ptr<gfx::Texture> upload_texture(const Texture& texture);
     void targets();
+    void scene_targets();
     void initialize(const CollisionMesh& collision, const std::vector<Texture>& textures);
     bool lost() const;  // the device was removed: draws are skipped until reset_device (port-only, 132win2)
     // The CPU-side sources reset_device re-uploads (shared-display renderers).
