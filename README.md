@@ -137,3 +137,7 @@ If a level stopped, say which level and roughly where. Never attach game files o
 This repository contains only the port's own code and documents: no game files, extracted assets, disc image or
 executable, and none may be added. *Syphon Filter* is a trademark of Sony Interactive Entertainment. This is an
 unofficial fan project, not affiliated with or endorsed by Sony or Bend Studio.
+
+## License
+
+The port's source code is licensed under the GNU General Public License v3.0 (see LICENSE). It contains no game data: Syphon Filter: The Omega Strain belongs to its rights holders, and you need your own copy of the game disc to play.
