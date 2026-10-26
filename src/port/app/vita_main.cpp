@@ -15,6 +15,8 @@
 #include "crash_report_vita.hpp"
 #include "derived_data.hpp"
 #include "draw_prepare.hpp"
+#include "particle_vu1.hpp"
+#include "skinned_mesh.hpp"
 #include "host_window.hpp"
 #include "launcher.hpp"
 #include "disc.hpp"
@@ -558,6 +560,153 @@ struct ThreadReport {
     }
 };
 
+// 132vc1 (research/VITA.md "Render pass on the Vita's cores (132vc1)"): with each "play frames" window, how the
+// threads and cores were used (busy time from the threads' own scopes, the kernel's run clock, the cores' idle clocks)
+// and how the worker pool's calls and the particle preparation spread over them, all per frame of the window.
+void log_play_threads(unsigned frames) {
+    static std::vector<ThreadUsage> before = thread_usage();
+    static std::uint64_t idle_before[3]{};
+    static bool idle_ok = core_idle_us(idle_before);
+    static WorkerPool::Profile pool_before = WorkerPool::profile();
+    static ParticlePrepareProfile prep_before = particle_prepare_profile();
+    static std::uint64_t rollbacks_before = particle::particle_neon_rollbacks();
+    static std::uint64_t skin_neon_before = 0, skin_scalar_before = 0;
+    static ActorPiecesProfile actors_before = actor_pieces_profile();
+    if (frames == 0) skin_neon_counts(skin_neon_before, skin_scalar_before);
+    static double started = now_seconds();
+    // The A/B switch vita_test_ab_speculation.txt: the particle programs' speculative NEON iterations (132vc1,
+    // particle_vu1.cpp) on and off in turn, one window each, so one run compares the two at the same scene load.
+    static const bool ab = vita_file_size(std::string(vita_data_root) + "/vita_test_ab_speculation.txt") >= 0;
+    // vita_test_ab_pool_spin.txt: the worker pool's spins (132vc1, worker_pool.hpp) on and off in turn by window.
+    static const bool ab_spin = vita_file_size(std::string(vita_data_root) + "/vita_test_ab_pool_spin.txt") >= 0;
+    // vita_test_ab_vc1.txt (132vc1): four modes in turn, one window each: 0 the exact particle path, 1 the speculative
+    // iterations through memory, 2 the register-resident ones, 3 those with the pool's spins off (0-2 spin on).
+    static const bool ab_modes = vita_file_size(std::string(vita_data_root) + "/vita_test_ab_vc1.txt") >= 0;
+    static int mode = 2;
+    const auto apply_mode = [](int m) {
+        particle::set_particle_neon_speculation(m != 0);
+        particle::set_particle_neon_registers(m >= 2);
+        WorkerPool::set_spin(m != 3);
+    };
+    if (frames == 0) {
+        if (ab) log("play particle prepare: vita_test_ab_speculation.txt present: the speculative NEON iterations "
+                    "alternate on / off by window (test switch)");
+        if (ab_spin) log("play pool: vita_test_ab_pool_spin.txt present: the pool's spins alternate on / off by window "
+                         "(test switch)");
+        if (ab_modes) {
+            mode = 0;
+            apply_mode(mode);
+            log("play modes: vita_test_ab_vc1.txt present: modes 0 (exact particles), 1 (speculative), 2 (registers), "
+                "3 (registers, pool spin off) in turn by window (test switch)");
+        }
+        return;
+    }
+    const double wall = now_seconds() - started;
+    const double f = double(frames);
+    const auto after = thread_usage();
+    std::string line;
+    for (std::size_t i = 0; i < after.size(); ++i) {
+        const ThreadUsage& t = after[i];
+        const std::uint64_t busy0 = i < before.size() && before[i].busy_us <= t.busy_us ? before[i].busy_us : 0;
+        const std::uint64_t run0 = i < before.size() && before[i].run_us <= t.run_us ? before[i].run_us : 0;
+        if (t.busy_us == busy0 && t.run_us == run0) continue;
+        char item[128];
+        std::snprintf(item, sizeof item, "%s%s %.1f/%.1f", line.empty() ? "" : ", ", t.name.c_str(),
+                      double(t.busy_us - busy0) / 1000.0 / f, double(t.run_us - run0) / 1000.0 / f);
+        line += item;
+    }
+    std::uint64_t idle_after[3]{};
+    const bool idle = idle_ok && core_idle_us(idle_after);
+    char cores[160] = "no kernel idle clock";
+    if (idle && wall > 0.0)
+        std::snprintf(cores, sizeof cores, "core 0 %.0f%%, core 1 %.0f%%, core 2 %.0f%%",
+                      100.0 - 100.0 * double(idle_after[0] - idle_before[0]) * 1e-6 / wall,
+                      100.0 - 100.0 * double(idle_after[1] - idle_before[1]) * 1e-6 / wall,
+                      100.0 - 100.0 * double(idle_after[2] - idle_before[2]) * 1e-6 / wall);
+    log("play threads (ms/frame busy/kernel run): %s; cores busy by the idle clocks: %s; clocks ARM %d MHz, bus %d, GPU %d",
+        line.c_str(), cores, scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+        scePowerGetGpuClockFrequency());
+    const WorkerPool::Profile p = WorkerPool::profile();
+    const std::uint64_t calls = p.calls - pool_before.calls, items = p.items - pool_before.items;
+    const std::uint64_t joins = p.joins - pool_before.joins;
+    log("play pool (spin %s): %.1f parallel calls/frame, %.1f indices/frame (%.0f%% on the calling thread); caller %.2f ms/frame "
+        "in the calls, %.2f of it waiting after its last index; %.2f worker joins per call, wake-up %.0f us mean; "
+        "workers %.2f ms/frame in the calls",
+        WorkerPool::spin() ? "on" : "off", double(calls) / f, double(items) / f,
+        items ? 100.0 * double(p.caller_items - pool_before.caller_items) / double(items) : 0.0,
+        double(p.call_us - pool_before.call_us) / 1000.0 / f, double(p.tail_us - pool_before.tail_us) / 1000.0 / f,
+        calls ? double(joins) / double(calls) : 0.0, joins ? double(p.wake_us - pool_before.wake_us) / double(joins) : 0.0,
+        double(p.worker_us - pool_before.worker_us) / 1000.0 / f);
+    const ParticlePrepareProfile q = particle_prepare_profile();
+    const double work = double(q.program_us - prep_before.program_us + q.sprite_us - prep_before.sprite_us);
+    const double prep_wall = double(q.wall_us - prep_before.wall_us);
+    const std::uint64_t rollbacks = particle::particle_neon_rollbacks();
+    if (ab_modes) log("play mode %d this window (132vc1 test switch)", mode);
+    log("play particle prepare (speculation %s): %.1f calls/frame (%.1f with one batch), %.1f batches/frame (%.1f "
+        "programs, %.1f drawn), %.0f particles/frame; work ms/frame: programs %.2f, sprite programs %.2f; wall %.2f "
+        "ms/frame (x%.2f spread); %.1f speculative iterations rolled back/frame",
+        particle::particle_neon_speculation() ? "on" : "off",
+        double(q.calls - prep_before.calls) / f, double(q.single_calls - prep_before.single_calls) / f,
+        double(q.batches - prep_before.batches) / f, double(q.programs - prep_before.programs) / f,
+        double(q.drawn - prep_before.drawn) / f, double(q.particles - prep_before.particles) / f,
+        double(q.program_us - prep_before.program_us) / 1000.0 / f,
+        double(q.sprite_us - prep_before.sprite_us) / 1000.0 / f, prep_wall / 1000.0 / f,
+        prep_wall > 0 ? work / prep_wall : 0.0, double(rollbacks - rollbacks_before) / f);
+    rollbacks_before = rollbacks;
+    std::uint64_t skin_neon = 0, skin_scalar = 0;
+    skin_neon_counts(skin_neon, skin_scalar);
+    log("play skinning: %.0f chunks/frame on NEON, %.0f on the scalar path (132vc1)", double(skin_neon - skin_neon_before) / f,
+        double(skin_scalar - skin_scalar_before) / f);
+    skin_neon_before = skin_neon;
+    skin_scalar_before = skin_scalar;
+    const ActorPiecesProfile a = actor_pieces_profile();
+    log("play actors: %.1f pool tasks/frame (LOD0 %.1f, far LOD %.1f, hidden %.1f), %.0f overlay vertices/frame; work "
+        "ms/frame: LOD0 skinning %.2f, the rest of the tasks %.2f (LOD0 %.2f, far LOD %.2f, hidden %.2f) (132vc1)",
+        double(a.tasks - actors_before.tasks) / f, double(a.lod0 - actors_before.lod0) / f,
+        double(a.lod1 - actors_before.lod1) / f, double(a.hidden - actors_before.hidden) / f,
+        double(a.vertices - actors_before.vertices) / f, double(a.skin_us - actors_before.skin_us) / 1000.0 / f,
+        double(a.task_us - actors_before.task_us) / 1000.0 / f, double(a.lod0_us - actors_before.lod0_us) / 1000.0 / f,
+        double(a.lod1_us - actors_before.lod1_us) / 1000.0 / f, double(a.hidden_us - actors_before.hidden_us) / 1000.0 / f);
+    actors_before = a;
+    // 132vc1: one recorded particle batch run on this thread (no other work at the same time), every 6th window.
+    static unsigned bench_window = 0;
+    if (!ab_modes && ++bench_window % 6 == 2) {
+        double us[3]{}, one[3]{};
+        unsigned particles = 0;
+        if (particle_bench(40, us, one, particles))
+            log("play particle bench (this thread alone, %u particles x 40 runs): us/particle exact %.2f, speculative %.2f, "
+                "register-resident %.2f; the batch cut to 1 particle, us/batch: %.1f, %.1f, %.1f (132vc1)", particles, us[0],
+                us[1], us[2], one[0], one[1], one[2]);
+    }
+    // 132vc1 hw5: one far-LOD actor's overlay work alone (build_actor_mesh runs it on the next frame it has one).
+    if (!ab_modes && bench_window % 6 == 4) request_actor_bench();
+    ActorBench actor_bench;
+    if (actor_bench_take(actor_bench))
+        log("play actor bench (one far-LOD actor, this thread alone, %u runs; %u parts, %u chunks, %u vertices): us first run / "
+            "mean of the rest: palette %.0f / %.0f, skin_parts (palette included) %.0f / %.0f, character_mesh %.0f / %.0f (132vc1)",
+            actor_bench.runs, actor_bench.parts, actor_bench.chunks, actor_bench.vertices, actor_bench.palette_first,
+            actor_bench.palette_rest, actor_bench.skin_first, actor_bench.skin_rest, actor_bench.mesh_first,
+            actor_bench.mesh_rest);
+    if (actor_bench.lod0_vertices)   // hw6: the same bench's LOD0 actor
+        log("play actor bench LOD0 (one actor's geometry() skinning, this thread alone, %u runs; %u parts, %u vertices): us "
+            "first run / mean of the rest: palette %.0f / %.0f, plain parts %.0f / %.0f, face and hand parts %.0f / %.0f "
+            "(132vc1)", actor_bench.runs, actor_bench.lod0_parts, actor_bench.lod0_vertices, actor_bench.lod0_first[0],
+            actor_bench.lod0_rest[0], actor_bench.lod0_first[1], actor_bench.lod0_rest[1], actor_bench.lod0_first[2],
+            actor_bench.lod0_rest[2]);
+    if (ab) particle::set_particle_neon_speculation(!particle::particle_neon_speculation());
+    if (ab_spin) WorkerPool::set_spin(!WorkerPool::spin());
+    if (ab_modes) {
+        mode = (mode + 1) % 4;
+        apply_mode(mode);
+    }
+    before = after;
+    std::copy(std::begin(idle_after), std::end(idle_after), std::begin(idle_before));
+    idle_ok = idle;
+    pool_before = p;
+    prep_before = q;
+    started = now_seconds();
+}
+
 // Frame time statistics over a phase.
 struct FrameStats {
     std::vector<double> cpu, interval;
@@ -1085,6 +1234,14 @@ int App::play(DiscImage& disc, const std::string& iso) {
     set_vita_window_display({inner_, 960, 544, {}});
     crash::install({fs::absolute("local") / "crashes", false});
     log_memory("play host start");
+    {   // 132vc1 test switch: vita_test_worker_priority.txt holds the workers' priority (64..191; the default 144)
+        std::ifstream in(std::string(vita_data_root) + "/vita_test_worker_priority.txt");
+        int priority = 0;
+        if (in >> priority && priority >= 64 && priority <= 191) {
+            set_worker_priority(priority);
+            log("play host: vita_test_worker_priority.txt: worker threads at priority %d (test switch)", priority);
+        }
+    }
     threads_ = ThreadReport{};
     // The play loop's split (frame_profile.hpp, the --frame-overlay profile) and the OMEGA_ZONE slots, logged about
     // every 10 s with the heap and the allocations per frame: the in-level hot spots (research/VITA.md "Profiling").
@@ -1100,6 +1257,7 @@ int App::play(DiscImage& disc, const std::string& iso) {
         static RenderWindow render_window;  // 132vg2
         if (started == 0.0) {
             started = now_seconds();
+            log_play_threads(0);   // 132vc1: the baselines
             const auto g = gfx::gxm::memory_stats();
             render_window.begin(g);
             draws = g.draws_total;
@@ -1154,6 +1312,7 @@ int App::play(DiscImage& disc, const std::string& iso) {
         }
         render_window.report(g, frames);  // 132vg2
         zone_report([](const char* text) { log("%s", text); }, int(frames));
+        log_play_threads(frames);
         // 132vp1 (VITA.md "Playability, memory and coverage"): once a level is in (heap in use past 96 MB), one longer
         // report of the heap's holders, for the per-mission memory table.
         static bool level_report = false;

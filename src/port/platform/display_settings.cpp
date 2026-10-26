@@ -68,6 +68,14 @@ float vita_render_scale(float render_scale) {
     return 0.5F;
 }
 
+std::optional<PcRenderer> parse_pc_renderer(std::string_view text) {
+    if (text == "d3d11" || text == "d3d" || text == "dx11") return PcRenderer::d3d11;
+    if (text == "vulkan" || text == "vk") return PcRenderer::vulkan;
+    return std::nullopt;
+}
+
+const char* pc_renderer_name(PcRenderer renderer) { return renderer == PcRenderer::vulkan ? "vulkan" : "d3d11"; }
+
 DisplaySettings display_settings(const PortSettings& settings) {
     DisplaySettings s;
     for (const auto& [key, value] : settings.other) {
@@ -107,6 +115,10 @@ DisplaySettings display_settings(const PortSettings& settings) {
             } catch (const std::exception&) {
                 throw std::runtime_error("port settings: worker_threads must be auto or 0..64");
             }
+        } else if (key == "renderer") {  // 132vk1
+            const auto v = parse_pc_renderer(value);
+            if (!v) throw std::runtime_error("port settings: renderer must be d3d11 or vulkan");
+            s.renderer = *v;
         } else if (key == "frame_overlay_key") {
             if (value == "none") {
                 s.frame_overlay_key.reset();

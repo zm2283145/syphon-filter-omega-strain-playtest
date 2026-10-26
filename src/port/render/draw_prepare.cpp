@@ -3,8 +3,12 @@
 #include "character_model.hpp"
 
 #include "worker_pool.hpp"
+#include "zone_profile.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <exception>
 #include <optional>
 #include <stdexcept>
@@ -13,7 +17,24 @@
 #include <psp2/kernel/processmgr.h>  // 132vg2: the particle prepare's timing (PS Vita only)
 #endif
 
+#if defined(__arm__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define OMEGA_MESH_NEON 1
+#else
+#define OMEGA_MESH_NEON 0
+#endif
+
 namespace omega {
+
+#if OMEGA_MESH_NEON
+namespace {
+bool mesh_neon_mode() {
+    std::uint32_t fpscr;
+    asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    return (fpscr & 0x01f70000u) == 0x01000000u;  // FZ set; RMode nearest; Stride, Len 0
+}
+}  // namespace
+#endif
 
 DeferredDraws::DeferredDraws(particle::ParticleSystem& system, std::vector<particle::DeferredProgram>& records,
                              const WorkerPool& pool)
@@ -24,6 +45,179 @@ DeferredDraws::DeferredDraws(particle::ParticleSystem& system, std::vector<parti
 }
 
 DeferredDraws::~DeferredDraws() { system_.deferred = previous_; }
+
+#if defined(OMEGA_ZONE_PROFILE)
+namespace {
+struct PrepareCounters {
+    std::atomic<std::uint64_t> calls{0}, single_calls{0}, batches{0}, programs{0}, particles{0}, drawn{0}, program_us{0},
+        sprite_us{0}, wall_us{0};
+};
+PrepareCounters g_prepare;
+std::uint64_t prepare_now_us() { return zone::now_ns() / 1000u; }
+}  // namespace
+#endif
+
+#if defined(OMEGA_ZONE_PROFILE)
+namespace {
+struct ActorCounters {
+    std::atomic<std::uint64_t> tasks{0}, lod0{0}, lod1{0}, hidden{0}, vertices{0}, skin_us{0}, task_us{0};
+    std::atomic<std::uint64_t> lod0_us{0}, lod1_us{0}, hidden_us{0};
+};
+ActorCounters g_actors;
+std::atomic<bool> g_actor_bench_requested{false}, g_actor_bench_ready{false};
+std::mutex g_actor_bench_mutex;
+ActorBench g_actor_bench;
+}  // namespace
+#endif
+
+ActorPiecesProfile actor_pieces_profile() {
+    ActorPiecesProfile p;
+#if defined(OMEGA_ZONE_PROFILE)
+    p.tasks = g_actors.tasks.load();
+    p.lod0 = g_actors.lod0.load();
+    p.lod1 = g_actors.lod1.load();
+    p.hidden = g_actors.hidden.load();
+    p.vertices = g_actors.vertices.load();
+    p.skin_us = g_actors.skin_us.load();
+    p.task_us = g_actors.task_us.load();
+    p.lod0_us = g_actors.lod0_us.load();
+    p.lod1_us = g_actors.lod1_us.load();
+    p.hidden_us = g_actors.hidden_us.load();
+#endif
+    return p;
+}
+
+void request_actor_bench() {
+#if defined(OMEGA_ZONE_PROFILE)
+    g_actor_bench_requested.store(true);
+#endif
+}
+bool actor_bench_due() {
+#if defined(OMEGA_ZONE_PROFILE)
+    return g_actor_bench_requested.load(std::memory_order_relaxed) && g_actor_bench_requested.exchange(false);
+#else
+    return false;
+#endif
+}
+void actor_bench_store(const ActorBench& bench) {
+#if defined(OMEGA_ZONE_PROFILE)
+    std::lock_guard lock(g_actor_bench_mutex);
+    g_actor_bench = bench;
+    g_actor_bench_ready.store(true);
+#else
+    (void)bench;
+#endif
+}
+bool actor_bench_take(ActorBench& bench) {
+#if defined(OMEGA_ZONE_PROFILE)
+    if (!g_actor_bench_ready.exchange(false)) return false;
+    std::lock_guard lock(g_actor_bench_mutex);
+    bench = g_actor_bench;
+    return true;
+#else
+    (void)bench;
+    return false;
+#endif
+}
+
+void actor_pieces_count(int lod, std::size_t vertices, std::uint64_t skin_us, std::uint64_t task_us) {
+#if defined(OMEGA_ZONE_PROFILE)
+    g_actors.tasks.fetch_add(1, std::memory_order_relaxed);
+    (lod == 0 ? g_actors.lod0 : lod > 0 ? g_actors.lod1 : g_actors.hidden).fetch_add(1, std::memory_order_relaxed);
+    g_actors.vertices.fetch_add(vertices, std::memory_order_relaxed);
+    g_actors.skin_us.fetch_add(skin_us, std::memory_order_relaxed);
+    g_actors.task_us.fetch_add(task_us, std::memory_order_relaxed);
+    (lod == 0 ? g_actors.lod0_us : lod > 0 ? g_actors.lod1_us : g_actors.hidden_us).fetch_add(task_us, std::memory_order_relaxed);
+#else
+    (void)lod, (void)vertices, (void)skin_us, (void)task_us;
+#endif
+}
+
+std::uint64_t prepare_profile_clock_us() {
+#if defined(OMEGA_ZONE_PROFILE)
+    return prepare_now_us();
+#else
+    return 0;
+#endif
+}
+
+#if defined(OMEGA_ZONE_PROFILE)
+namespace {
+std::mutex g_bench_mutex;
+std::atomic<bool> g_bench_kept{false};
+particle::DeferredProgram g_bench_record;
+void bench_keep(const particle::DeferredProgram& p) {
+    if (g_bench_kept.load(std::memory_order_relaxed) || (p.block[0xb][0] & 0x7fffu) < 16) return;
+    std::lock_guard lock(g_bench_mutex);
+    if (g_bench_kept.load()) return;
+    g_bench_record = p;
+    g_bench_kept.store(true);
+}
+}  // namespace
+#endif
+
+bool particle_bench(unsigned runs, double (&us_per_particle)[3], double (&us_one_batch)[3], unsigned& particles) {
+#if defined(OMEGA_ZONE_PROFILE)
+    if (!g_bench_kept.load()) return false;
+    particle::DeferredProgram record;
+    {
+        std::lock_guard lock(g_bench_mutex);
+        record = g_bench_record;
+    }
+    particles = record.block[0xb][0] & 0x7fffu;
+    particle::DeferredProgram one = record;  // hw5: the same batch cut to its first particle
+    one.block[0xb][0] = (one.block[0xb][0] & ~0x7fffu) | 1u;
+    const bool speculation = particle::particle_neon_speculation();
+    auto state = std::make_unique<particle::Vu1State>();
+    const auto time = [&](const particle::DeferredProgram& program) {
+        std::uint64_t total = 0;
+        for (unsigned k = 0; k < runs; ++k) {
+            auto& s = *state;
+            s.vf = {};
+            s.vf[0] = {0, 0, 0, 0x3f800000u};
+            s.acc = {};
+            s.i = s.q = s.r = 0;
+            s.vi = {};
+            particle::ParticleBatch batch;
+            const std::uint64_t t0 = prepare_now_us();
+            try {
+                particle::run_deferred_program(program, batch, &s);
+            } catch (...) {
+            }
+            total += prepare_now_us() - t0;
+        }
+        return runs ? double(total) / double(runs) : 0.0;
+    };
+    for (int mode = 0; mode < 3; ++mode) {
+        particle::set_particle_neon_speculation(mode != 0);
+        particle::set_particle_neon_registers(mode == 2);
+        us_per_particle[mode] = particles ? time(record) / double(particles) : 0.0;
+        us_one_batch[mode] = time(one);
+    }
+    particle::set_particle_neon_speculation(speculation);
+    particle::set_particle_neon_registers(true);
+    return true;
+#else
+    (void)runs, (void)us_per_particle, (void)us_one_batch, (void)particles;
+    return false;
+#endif
+}
+
+ParticlePrepareProfile particle_prepare_profile() {
+    ParticlePrepareProfile p;
+#if defined(OMEGA_ZONE_PROFILE)
+    p.calls = g_prepare.calls.load();
+    p.single_calls = g_prepare.single_calls.load();
+    p.batches = g_prepare.batches.load();
+    p.programs = g_prepare.programs.load();
+    p.particles = g_prepare.particles.load();
+    p.drawn = g_prepare.drawn.load();
+    p.program_us = g_prepare.program_us.load();
+    p.sprite_us = g_prepare.sprite_us.load();
+    p.wall_us = g_prepare.wall_us.load();
+#endif
+    return p;
+}
 
 void prepare_particle_groups(WorkerPool& pool, std::vector<ParticleGroup>& groups,
                              const std::vector<particle::DeferredProgram>& records, bool skip_heat_haze) {
@@ -47,13 +241,19 @@ void prepare_particle_groups(WorkerPool& pool, std::vector<ParticleGroup>& group
         g.sprites.clear();
         for (auto& b : *g.batches) items.push_back({&g, &b, std::nullopt, nullptr, nullptr});
     }
+#if defined(OMEGA_ZONE_PROFILE)
+    const std::uint64_t wall0 = prepare_now_us();
+#endif
 #if defined(__vita__)
-    const std::uint64_t wall0 = sceKernelGetProcessTimeWide();
+    const std::uint64_t vg_wall0 = sceKernelGetProcessTimeWide();  // 132vg2
 #endif
     pool.for_each(items.size(), [&](std::size_t i) {
         Item& it = items[i];
 #if defined(__vita__)
-        std::uint64_t t0 = sceKernelGetProcessTimeWide();
+        std::uint64_t vg_t0 = sceKernelGetProcessTimeWide();  // 132vg2
+#endif
+#if defined(OMEGA_ZONE_PROFILE)
+        const std::uint64_t t0 = prepare_now_us();
 #endif
         if (const auto r = it.batch->deferred) {
             try {
@@ -64,25 +264,46 @@ void prepare_particle_groups(WorkerPool& pool, std::vector<ParticleGroup>& group
                 return;
             }
 #if defined(__vita__)
-            const std::uint64_t t1 = sceKernelGetProcessTimeWide();
-            g_particle_prepare_times.program_us += t1 - t0;
+            const std::uint64_t vg_t1 = sceKernelGetProcessTimeWide();
+            g_particle_prepare_times.program_us += vg_t1 - vg_t0;
             ++g_particle_prepare_times.programs;
-            t0 = t1;
+            vg_t0 = vg_t1;
+#endif
+#if defined(OMEGA_ZONE_PROFILE)
+            g_prepare.programs.fetch_add(1, std::memory_order_relaxed);
+            bench_keep(records[r - 1]);
 #endif
         }
+#if defined(OMEGA_ZONE_PROFILE)
+        const std::uint64_t t1 = prepare_now_us();
+        g_prepare.program_us.fetch_add(t1 - t0, std::memory_order_relaxed);
+        g_prepare.particles.fetch_add(it.batch->position.size(), std::memory_order_relaxed);
+#endif
         try {
             it.sprites = particle::particle_sprite_batch(*it.batch, it.group->cull, it.group->frame, skip_heat_haze);
         } catch (...) {
             it.sprite_error = std::current_exception();
         }
 #if defined(__vita__)
-        g_particle_prepare_times.sprite_us += sceKernelGetProcessTimeWide() - t0;
+        g_particle_prepare_times.sprite_us += sceKernelGetProcessTimeWide() - vg_t0;
+#endif
+#if defined(OMEGA_ZONE_PROFILE)
+        g_prepare.sprite_us.fetch_add(prepare_now_us() - t1, std::memory_order_relaxed);
+        if (it.sprites) g_prepare.drawn.fetch_add(1, std::memory_order_relaxed);
 #endif
     });
 #if defined(__vita__)
-    g_particle_prepare_times.wall_us += sceKernelGetProcessTimeWide() - wall0;
+    g_particle_prepare_times.wall_us += sceKernelGetProcessTimeWide() - vg_wall0;
     g_particle_prepare_times.batches += items.size();
     ++g_particle_prepare_times.calls;
+#endif
+#if defined(OMEGA_ZONE_PROFILE)
+    if (!items.empty()) {
+        g_prepare.wall_us.fetch_add(prepare_now_us() - wall0, std::memory_order_relaxed);
+        g_prepare.calls.fetch_add(1, std::memory_order_relaxed);
+        g_prepare.single_calls.fetch_add(items.size() == 1, std::memory_order_relaxed);
+        g_prepare.batches.fetch_add(items.size(), std::memory_order_relaxed);
+    }
 #endif
     // The serial order: every program ran in the draw (the first failure there), then each group's sprites.
     for (const auto& it : items)
@@ -127,21 +348,60 @@ void character_mesh(Mesh& mesh,const std::vector<AnimatedCharacterGeometry>& par
         const auto base=static_cast<std::uint32_t>(mesh.vertices.size());
         const std::vector<CharacterGoreSubtract>* part_gore=gore&&index<gore->size()&&!(*gore)[index].empty()?&(*gore)[index]:nullptr;
         if(part_gore&&part_gore->size()!=part.mesh.vertices.size())throw std::runtime_error("Character gore: subtracts differ from the part's vertices");
+#if OMEGA_MESH_NEON
+        // 132vc1 hw6 (port-side speed only; the same bounds): on the PS Vita the running bounds stay in NEON registers
+        // (std::min(a, p) is p < a ? p : a and std::max(b, p) is b < p ? p : b, lane by lane, vertex by vertex), not
+        // a VFP compare and status transfer per coordinate. Skinned positions are never denormal (flush-to-zero).
+        const bool neon_bounds=mesh_neon_mode()&&!part.mesh.vertices.empty();
+        float32x4_t lo=vdupq_n_f32(0),hi=vdupq_n_f32(0);
+        if(neon_bounds&&!first){
+            lo=float32x4_t{mesh.bounds.minimum.x,mesh.bounds.minimum.y,mesh.bounds.minimum.z,0};
+            hi=float32x4_t{mesh.bounds.maximum.x,mesh.bounds.maximum.y,mesh.bounds.maximum.z,0};
+        }
+#endif
         for(std::size_t k=0;k<part.mesh.vertices.size();++k){
             const auto& v=part.mesh.vertices[k];
             const Vec3 p{v.position[0],v.position[1],v.position[2]};
             mesh.vertices.push_back({p,{v.normal[0],v.normal[1],v.normal[2]},v.uv,base_color});
             if(part_gore){const auto s=(*part_gore)[k];
                 mesh.vertices.back().gore={s.red/128.0F,s.green_blue/128.0F,s.green_blue/128.0F};}
+#if OMEGA_MESH_NEON
+            if(neon_bounds){
+                const float32x4_t q=vld1q_f32(v.position.data());
+                if(first){lo=hi=q;first=false;}
+                else{lo=vbslq_f32(vcltq_f32(q,lo),q,lo);hi=vbslq_f32(vcltq_f32(hi,q),q,hi);}
+                continue;
+            }
+#endif
             if(first){mesh.bounds={p,p};first=false;}
             else{auto& a=mesh.bounds.minimum;auto& b=mesh.bounds.maximum;
                 a={std::min(a.x,p.x),std::min(a.y,p.y),std::min(a.z,p.z)};
                 b={std::max(b.x,p.x),std::max(b.y,p.y),std::max(b.z,p.z)};}
         }
+#if OMEGA_MESH_NEON
+        if(neon_bounds){
+            mesh.bounds.minimum={vgetq_lane_f32(lo,0),vgetq_lane_f32(lo,1),vgetq_lane_f32(lo,2)};
+            mesh.bounds.maximum={vgetq_lane_f32(hi,0),vgetq_lane_f32(hi,1),vgetq_lane_f32(hi,2)};
+        }
+#endif
         for(const auto& t:part.mesh.triangles)for(auto i:t)mesh.indices.push_back(base+i);
         const auto material_index=static_cast<std::uint32_t>(mesh.materials.size());
         MeshMaterial material;material.texture=textures&&index<textures->size()?(*textures)[index]:material_index;mesh.materials.push_back(material);
         mesh.surfaces.push_back({material_index,first_index,static_cast<std::uint32_t>(mesh.indices.size())-first_index});
+    }
+}
+
+void hidden_actor_materials(Mesh& mesh, std::size_t part_count, bool append) {
+    if (!append) {
+        mesh.vertices.clear();
+        mesh.indices.clear();
+        mesh.surfaces.clear();
+        mesh.materials.clear();
+    }
+    for (std::size_t index = 0; index < part_count; ++index) {
+        MeshMaterial hidden_material;
+        hidden_material.texture = static_cast<std::uint32_t>(mesh.materials.size());
+        mesh.materials.push_back(hidden_material);
     }
 }
 
@@ -365,4 +625,105 @@ void append_actor_piece(Mesh& mesh, const Mesh& piece, std::size_t listed_textur
     }
 }
 
+// 132vc1 (port-only): append_actor_pieces, draw_prepare.hpp.
+void append_actor_pieces(WorkerPool& pool, Mesh& mesh, std::span<const Mesh* const> pieces,
+                         std::span<const std::size_t> listed_textures,
+                         const std::function<void(std::size_t, std::size_t, std::size_t, std::size_t)>& after_piece) {
+    const std::size_t n = pieces.size();
+    if (listed_textures.size() != n) throw std::logic_error("append_actor_pieces: one texture count per piece");
+    bool skin = false;
+    std::size_t vertex_total = 0, index_total = 0;
+    for (const Mesh* piece : pieces) {
+        skin = skin || has_skin_surface(*piece);
+        vertex_total += piece->vertices.size();
+        index_total += piece->indices.size();
+    }
+    mesh.surfaces.clear();
+    mesh.materials.clear();
+    if (skin) {  // 132md8's GPU-skinned surfaces: the one-by-one appends
+        mesh.vertices.clear();
+        mesh.indices.clear();
+        for (std::size_t k = 0; k < n; ++k) {
+            const std::size_t v0 = mesh.vertices.size(), s0 = mesh.surfaces.size();
+            append_actor_piece(mesh, *pieces[k], listed_textures[k]);
+            after_piece(k, v0, mesh.vertices.size(), s0);
+        }
+        return;
+    }
+    // Sized once (a mesh kept from the last frame is only truncated: every element is written below).
+    mesh.vertices.resize(vertex_total);
+    mesh.indices.resize(index_total);
+    std::vector<std::size_t> vertex_base(n), index_base(n);
+    std::size_t vertex_cursor = 0, index_cursor = 0;
+    for (std::size_t k = 0; k < n; ++k) {
+        const Mesh& piece = *pieces[k];
+        vertex_base[k] = vertex_cursor;
+        index_base[k] = index_cursor;
+        const auto material_base = static_cast<std::uint32_t>(mesh.materials.size());
+        const std::size_t s0 = mesh.surfaces.size();
+        for (std::size_t j = 0; j < piece.materials.size(); ++j) {
+            auto m = piece.materials[j];
+            if (j >= listed_textures[k]) m.texture += material_base;
+            mesh.materials.push_back(std::move(m));
+        }
+        for (auto s : piece.surfaces) {
+            s.material += material_base;
+            s.first_index += static_cast<std::uint32_t>(index_cursor);
+            mesh.surfaces.push_back(s);
+        }
+        vertex_cursor += piece.vertices.size();
+        index_cursor += piece.indices.size();
+        after_piece(k, vertex_base[k], vertex_cursor, s0);
+    }
+    // The vertices and offset indices on the pool, each piece into its own range; a piece with a NaN position is
+    // noted (its bounds are then widened vertex by vertex below, as append_actor_piece does).
+    std::vector<std::uint8_t> nan(n, 0);
+    pool.for_each(n, [&](std::size_t k) {
+        const Mesh& piece = *pieces[k];
+        MeshVertex* out = mesh.vertices.data() + vertex_base[k];
+        bool any_nan = false;
+        for (std::size_t i = 0; i < piece.vertices.size(); ++i) {
+            out[i] = piece.vertices[i];
+            const Vec3& p = piece.vertices[i].position;
+            any_nan = any_nan || p.x != p.x || p.y != p.y || p.z != p.z;
+        }
+        nan[k] = any_nan;
+        std::uint32_t* indices = mesh.indices.data() + index_base[k];
+        const auto base = static_cast<std::uint32_t>(vertex_base[k]);
+        for (std::size_t i = 0; i < piece.indices.size(); ++i) indices[i] = base + piece.indices[i];
+    });
+    // The bounds as the appends widen them vertex by vertex: with no NaN, the running std::min / std::max over a
+    // piece's vertices from the mesh's bounds equal those of the mesh's bounds and the piece's own (character_mesh
+    // widened them over the same vertices in the same order, the first of equal values kept at every step).
+    bool first = true;
+    for (std::size_t k = 0; k < n; ++k) {
+        const Mesh& piece = *pieces[k];
+        if (piece.vertices.empty()) continue;
+        auto& a = mesh.bounds.minimum;
+        auto& b = mesh.bounds.maximum;
+        if (nan[k]) {
+            for (const auto& v : piece.vertices) {
+                const Vec3 p = v.position;
+                if (first) {
+                    mesh.bounds = {p, p};
+                    first = false;
+                } else {
+                    a = {std::min(a.x, p.x), std::min(a.y, p.y), std::min(a.z, p.z)};
+                    b = {std::max(b.x, p.x), std::max(b.y, p.y), std::max(b.z, p.z)};
+                }
+            }
+            continue;
+        }
+        const Vec3 c = piece.bounds.minimum, d = piece.bounds.maximum;
+        if (first) {
+            mesh.bounds = {c, d};
+            first = false;
+        } else {
+            a = {std::min(a.x, c.x), std::min(a.y, c.y), std::min(a.z, c.z)};
+            b = {std::max(b.x, d.x), std::max(b.y, d.y), std::max(b.z, d.z)};
+        }
+    }
+}
+
 }  // namespace omega
+

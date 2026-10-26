@@ -54,6 +54,29 @@ public:
     std::uint64_t batches() const { return batches_; }
     std::uint64_t items() const { return items_; }
 
+    // Port-only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"): the parallel calls' timing,
+    // totals since the start over every pool, kept only in the profile build (OMEGA_ZONE_PROFILE: the Vita's; zeros
+    // elsewhere). Microseconds. Does not change what a call computes.
+    struct Profile {
+        std::uint64_t calls = 0;         // for_each calls run on the workers (more than one index)
+        std::uint64_t items = 0;         // their indices
+        std::uint64_t caller_items = 0;  // ... of them run by the calling thread
+        std::uint64_t call_us = 0;       // the caller's time inside the calls
+        std::uint64_t tail_us = 0;       // ... of it waiting for the workers after its last index
+        std::uint64_t joins = 0;         // workers that woke up for a call while it was still running
+        std::uint64_t wake_us = 0;       // from a call's start to each joining worker's start
+        std::uint64_t worker_us = 0;     // the joining workers' time inside the calls
+    };
+    static Profile profile();
+
+    // Port-only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"), PS Vita only: an idle worker
+    // spins up to about 300 us for the next call before it sleeps on the condition variable, and the caller spins up
+    // to about 2 ms for the workers' last indices before it does (the hardware's wake-up through the condition
+    // variable took 113-134 us a worker, 12-14 calls a frame). On by default; the switch is the Vita app's A/B.
+    // Other platforms: no spin. Changes only when the threads run, never what a call computes.
+    static void set_spin(bool on) { spin_.store(on, std::memory_order_relaxed); }
+    static bool spin() { return spin_.load(std::memory_order_relaxed); }
+
 private:
     struct Job {
         const std::function<void(std::size_t)>* fn = nullptr;
@@ -64,8 +87,9 @@ private:
         std::size_t error_index = 0;
         std::exception_ptr error;
         std::uint64_t float_controls = 0;  // the caller's floating-point mode, which the workers run the job under
+        std::uint64_t start_us = 0;        // 132vc1: the call's start (the profile build only)
     };
-    void work(Job& job);
+    std::size_t work(Job& job);  // the indices this thread ran
     void loop();
 
     std::vector<std::thread> threads_;
@@ -75,6 +99,9 @@ private:
     Job* job_ = nullptr;
     std::uint64_t generation_ = 0;
     unsigned active_ = 0;  // workers inside the current job
+    std::atomic<std::uint64_t> published_{0};  // 132vc1: generation_, for the spins (written under mutex_)
+    std::atomic<unsigned> active_now_{0};      // 132vc1: active_, for the caller's spin (written under mutex_)
+    static inline std::atomic<bool> spin_{true};
     bool quit_ = false;
     std::uint64_t batches_ = 0, items_ = 0;
 };

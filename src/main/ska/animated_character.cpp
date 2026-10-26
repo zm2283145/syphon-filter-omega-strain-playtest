@@ -1,8 +1,10 @@
 #include "float_bits.hpp"
 #include "animated_character.hpp"
 #include "skeleton_pose.hpp"
+#include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -148,29 +150,53 @@ std::vector<SkinPaletteBone> AnimatedCharacter::placed_palette(const AnimationPl
     // incoming position/normal matrices before vertex/influence evaluation.
     // This world-space path omits the original camera/projection/lighting.
     for(auto& bone:palette){
-        bone.position=compose_world(placement,bone.position);
-        bone.normal=compose_world(normal_placement,bone.normal);
+        // 132vc1 hw6 (port-side speed only): the same products on NEON where available; any doubt: compose_world.
+        SkinMatrix m;
+        if(skin_matrix_multiply_neon(placement,bone.position,m))bone.position=m;else bone.position=compose_world(placement,bone.position);
+        if(skin_matrix_multiply_neon(normal_placement,bone.normal,m))bone.normal=m;else bone.normal=compose_world(normal_placement,bone.normal);
     }
     return palette;
 }
 std::vector<AnimatedCharacterGeometry> AnimatedCharacter::build_geometry(const AnimationPlayerState& player,const MorphHostState& morph)const{
-    std::vector<AnimatedCharacterGeometry> result;SkinnedMesh scratch;
+    std::vector<AnimatedCharacterGeometry> result;std::vector<SkinnedMesh> scratch;
     build_geometry_into(player,morph,result,scratch);
     return result;
 }
 // Checkpoint 132win10 (port-side speed only): the per-frame skinning written into a retained part list (the
 // previous frame's geometry, swapped back in by step_impl) so the vectors' capacity is reused.
 void AnimatedCharacter::build_geometry_into(const AnimationPlayerState& player,const MorphHostState& morph,
-    std::vector<AnimatedCharacterGeometry>& result,SkinnedMesh& morph_scratch)const{
+    std::vector<AnimatedCharacterGeometry>& result,std::vector<SkinnedMesh>& morph_scratch)const{
     const auto palette=placed_palette(player);
     result.resize(parts_.size());
+    // 132vc1 hw6 (port-side speed only): a deform scratch per part, so the face's and the hands' deformed copies
+    // (deform_skinned_mesh_into: result = mesh) reuse their own storage every frame instead of reallocating it.
+    if(morph_scratch.size()<parts_.size())morph_scratch.resize(parts_.size());
     for(std::size_t i=0;i<parts_.size();++i){
         const auto& part=parts_[i];
         auto& output=result[i];
         output.name=part.name;
         if(part.binding==CharacterMorphBinding::none)skin_skinned_mesh_into(part.mesh,palette,SkinMorphContext{0},output.mesh);
-        else if(part.binding==CharacterMorphBinding::face)skin_morphed_mesh_into(part.mesh,palette,*part.morph,morph_face_targets(morph),morph_scratch,output.mesh);
-        else skin_morphed_mesh_into(part.mesh,palette,*part.morph,morph_hand_targets(morph,part.binding==CharacterMorphBinding::hand0?0:1),morph_scratch,output.mesh);
+        else if(part.binding==CharacterMorphBinding::face)skin_morphed_mesh_into(part.mesh,palette,*part.morph,morph_face_targets(morph),morph_scratch[i],output.mesh);
+        else skin_morphed_mesh_into(part.mesh,palette,*part.morph,morph_hand_targets(morph,part.binding==CharacterMorphBinding::hand0?0:1),morph_scratch[i],output.mesh);
+    }
+}
+void AnimatedCharacter::timed_skinning(std::uint64_t (*clock_us)(),std::vector<AnimatedCharacterGeometry>& result,
+    std::vector<SkinnedMesh>& scratch,std::uint64_t (&us)[3])const{
+    us[0]=us[1]=us[2]=0;
+    const auto t0=clock_us();
+    const auto palette=placed_palette(model_.player());
+    us[0]=clock_us()-t0;
+    result.resize(parts_.size());
+    if(scratch.size()<parts_.size())scratch.resize(parts_.size());
+    for(std::size_t i=0;i<parts_.size();++i){
+        const auto& part=parts_[i];
+        auto& output=result[i];
+        output.name=part.name;
+        const auto t1=clock_us();
+        if(part.binding==CharacterMorphBinding::none)skin_skinned_mesh_into(part.mesh,palette,SkinMorphContext{0},output.mesh);
+        else if(part.binding==CharacterMorphBinding::face)skin_morphed_mesh_into(part.mesh,palette,*part.morph,morph_face_targets(morph_),scratch[i],output.mesh);
+        else skin_morphed_mesh_into(part.mesh,palette,*part.morph,morph_hand_targets(morph_,part.binding==CharacterMorphBinding::hand0?0:1),scratch[i],output.mesh);
+        us[part.binding==CharacterMorphBinding::none?1:2]+=clock_us()-t1;
     }
 }
 std::vector<AnimatedCharacterGeometry> AnimatedCharacter::skin_parts(std::span<const SkinnedMesh* const> meshes)const{

@@ -2,6 +2,10 @@
 #include "device_lost.hpp"
 #include "frame_fit.hpp"
 #include "gfx_d3d11.hpp"
+#include "gfx_pc_backend.hpp"
+#ifdef OMEGA_PC_VULKAN
+#include "gfx_vulkan.hpp"
+#endif
 #include "mouse_look.hpp"
 #include "texture.hpp"
 
@@ -226,6 +230,12 @@ unsigned long HostWindow::release_device() {
     if (context_) context_->ClearState();
     gfx_target_.reset();
     gfx_swap_.reset();
+    if (vulkan_) {   // 132vk1: the Vulkan device's references left (the gfx objects that still hold it)
+        const long left = gfx_ ? gfx_.use_count() - 1 : 0;
+        gfx_.reset();
+        vulkan_ = false;
+        return static_cast<unsigned long>(left);
+    }
     gfx_.reset();
     target_.Reset();
     swap_.Reset();
@@ -236,6 +246,27 @@ unsigned long HostWindow::release_device() {
 
 void HostWindow::create_device() {
     const auto size = buffer_size();
+#ifdef OMEGA_PC_VULKAN
+    // Port-only (checkpoint 132vk1, research/VULKAN.md): the Vulkan backend when chosen (--renderer vulkan, renderer=);
+    // a machine without a usable Vulkan 1.3 device falls back to Direct3D 11 below.
+    if (gfx::pc_backend() == gfx::PcBackend::vulkan) {
+        try {
+            auto made = gfx::vulkan::create_window_display(hwnd_, std::max(1u, size[0]), std::max(1u, size[1]), frame_latency_);
+            gfx_ = made.display.device;
+            gfx_swap_ = made.display.swap_chain;
+            backend_ = made.display.backend;
+            swap_description_ = made.swap_description;
+            gfx_swap_->size(width_, height_, "Vulkan back buffer size");
+            vulkan_ = true;
+            return;
+        } catch (const DeviceLost&) {
+            throw;
+        } catch (const std::exception& e) {
+            gfx::note_pc_vulkan_failure(e.what());
+            std::cout << "Host window (port-only): Vulkan unavailable (" << e.what() << "); using Direct3D 11\n";
+        }
+    }
+#endif
     DXGI_SWAP_CHAIN_DESC d{};
     d.BufferDesc.Width = std::max(1u, size[0]);
     d.BufferDesc.Height = std::max(1u, size[1]);
@@ -309,12 +340,20 @@ void HostWindow::create_device() {
 }
 
 const gfx::Texture* HostWindow::back_buffer() {
+    if (vulkan_) {   // 132vk1: the swap chain's back buffer (its size is width() x height())
+        if (!gfx_target_) gfx_target_ = gfx_swap_->buffer(true, "Vulkan back buffer", "Vulkan back buffer target");
+        return gfx_target_.get();
+    }
     ID3D11RenderTargetView* view = target();
     if (!gfx_target_) gfx_target_ = gfx::d3d11::wrap_target(gfx_, view);
     return gfx_target_.get();
 }
 
 ID3D11RenderTargetView* HostWindow::target() {
+    if (vulkan_) {   // 132vk1: no D3D11 view; the drawing code uses back_buffer()
+        back_buffer();
+        return nullptr;
+    }
     if (!target_) {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> back;
         check(swap_->GetBuffer(0, IID_PPV_ARGS(back.GetAddressOf())), "GetBuffer");
@@ -328,6 +367,10 @@ ID3D11RenderTargetView* HostWindow::target() {
 }
 
 void HostWindow::drop_target() {
+    if (vulkan_) {
+        gfx_target_.reset();
+        return;
+    }
     if (context_) {
         context_->OMSetRenderTargets(0, nullptr, nullptr);
         context_->ClearState();
@@ -342,7 +385,10 @@ bool HostWindow::sync_buffers() {
     const auto [w, h] = buffer_size();
     if (w == 0 || h == 0 || (w == width_ && h == height_)) return false;
     drop_target();
-    check(swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, swap_flags_), "ResizeBuffers");
+    if (vulkan_)
+        gfx_swap_->resize(w, h, "Resize the Vulkan back buffer");
+    else
+        check(swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, swap_flags_), "ResizeBuffers");
     width_ = w;
     height_ = h;
     return true;
@@ -358,6 +404,16 @@ PresentResult HostWindow::present(unsigned sync_interval) {
         return PresentResult::device_lost;
     }
     mask_bars();
+    if (vulkan_) {   // 132vk1
+        const auto r = gfx_swap_->present(sync_interval, "Present");
+        if (r == gfx::SwapChain::Presented::occluded) return PresentResult::occluded;
+        if (r == gfx::SwapChain::Presented::lost || device_lost_pending()) {
+            lost_reason_ = DXGI_ERROR_DEVICE_REMOVED;
+            recover_device("display device lost (Vulkan)");
+            return PresentResult::device_lost;
+        }
+        return PresentResult::ok;
+    }
     const HRESULT hr = device_result(swap_->Present(std::min(sync_interval, 4u), 0), "Present");
     if (hr == DXGI_STATUS_OCCLUDED) return PresentResult::occluded;
     if (device_lost_code(hr)) {
@@ -399,6 +455,21 @@ double HostWindow::wait_frame_latency(unsigned timeout_ms) {
 }
 
 void HostWindow::mask_bars() {
+    if (vulkan_) {   // 132vk1: the same bars through the gfx layer (CommandList::clear_rects is D3D11.1 ClearView)
+        if (!frame_masked() || !gfx_ || !gfx_target_) return;
+        const auto bars = frame_bars(width_, height_);
+        if (bars.count == 0) return;
+        gfx::Rect rects[2]{};
+        for (unsigned i = 0; i < bars.count && i < 2; ++i) {
+            const auto& r = bars.rects[i];
+            rects[i] = {int(r.x), int(r.y), int(r.x + r.width), int(r.y + r.height)};
+        }
+        const float black[]{0, 0, 0, 1};
+        gfx::CommandList list;
+        list.clear_rects(gfx_target_.get(), black, rects, bars.count);
+        gfx_->submit(list);
+        return;
+    }
     if (!frame_masked() || !context_ || !target_) return;
     const auto bars = frame_bars(width_, height_);
     if (bars.count == 0) return;
@@ -416,6 +487,26 @@ void HostWindow::mask_bars() {
 bool HostWindow::capture(const std::filesystem::path& path) try {
     if (device_lost_pending()) return false;
     mask_bars();
+    if (vulkan_) {   // 132vk1: the back buffer through a staging copy
+        const auto back = gfx_swap_->buffer(false, "Get window capture buffer", nullptr);
+        gfx::TextureDesc d = back->desc();
+        d.usage = gfx::Usage::staging;
+        d.bind = 0;
+        gfx::TextureLabels labels;
+        labels.texture = "Create window readback";
+        const auto staging = gfx_->create_texture(d, nullptr, labels);
+        gfx::CommandList list;
+        list.copy(staging.get(), back.get());
+        gfx_->submit(list);
+        std::vector<std::uint8_t> pixels(std::size_t(d.width) * d.height * 4);
+        gfx_->read(*staging, 0, [&](const std::uint8_t* data, unsigned pitch) {
+            for (unsigned y = 0; y < d.height; ++y) std::memcpy(pixels.data() + std::size_t(y) * d.width * 4, data + std::size_t(y) * pitch, d.width * 4);
+        }, "Read window frame");
+        for (std::size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 0xff;
+        std::filesystem::create_directories(path.parent_path());
+        write_bmp(path, d.width, d.height, pixels);
+        return true;
+    }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> back;
     check(swap_->GetBuffer(0, IID_PPV_ARGS(back.GetAddressOf())), "Get window capture buffer");
     D3D11_TEXTURE2D_DESC d{};

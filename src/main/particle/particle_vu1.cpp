@@ -1,8 +1,11 @@
 #include "particle_vu1.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -297,6 +300,13 @@ struct Machine {
         write(dst, out, dest);
     }
 
+    // 132vc1: the loop bodies take these through their machine (SpecMachine keeps them in NEON registers).
+    static Qword bc(const Qword& v, int k) { return {v[k], v[k], v[k], v[k]}; }
+    void mr32(Qword& r) {
+        const Qword o = r;
+        write(r, Qword{o[1], o[2], o[3], o[0]}, XYZW);
+    }
+
     Qword& mem(std::uint32_t qa) { return s.data[qa & 0x3ff]; }
     void lq(int ft, std::uint32_t qa) { write(v(ft), mem(qa), XYZW); }
     void lqi(int ft, int vi) {
@@ -384,7 +394,1139 @@ void neon_selftest() {
 }
 #endif
 
+
+// Port-side speed only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"; the same bits): the PS
+// Vita runs each particle's iteration of a program loop (and each sprite of a sprite program, and the batch cull)
+// speculatively on NEON without deciding every FMAC on its own: SpecMachine computes every FMAC as fmac_neon does,
+// writes it, and only ORs the lanes fmac_neon would have refused (an operand, the ACC of MADD / MSUB or a result with
+// exponent 255, in a dest lane) into `bad`; MAX / MINI, FTOI0, ITOF0, OPMULA / OPMSUB, MR32 and the moves also stay
+// in NEON registers, each flagging the inputs where its exact port could differ (see each). After the iteration one
+// test of `bad` decides: clean, every instruction's result is the one the exact path (Machine: fmac_neon, else the
+// lanes) gives, so the state is that path's; otherwise (or on any throw, e.g. a garbage RSQRT operand after a refused
+// lane) the registers, the two output words and the sprite output are put back as they were before the iteration
+// and the iteration runs again on Machine, the old path, which gives the result (or the error) it always gave. This
+// removes the NEON-to-core transfer and branch fmac_neon pays on every FMAC (about 100 a particle) and the core reads
+// of broadcast lanes (bc), which on the Cortex-A9 stall until the NEON pipeline has written them.
+struct Bc {
+    const Qword* v;
+    int k;
+};
+
+std::atomic<std::uint64_t> g_neon_rollbacks{0};
+std::atomic<bool> g_speculate{true};  // set_particle_neon_speculation (an A/B switch of the Vita app)
+
+#if OMEGA_PARTICLE_NEON
+struct SpecMachine : Machine {
+    uint32x4_t bad = vdupq_n_u32(0);
+
+    static Bc bc(const Qword& v, int k) { return {&v, k}; }
+    static OMEGA_PARTICLE_INLINE uint32x4_t load(const Qword& q) { return vld1q_u32(q.data()); }
+    static OMEGA_PARTICLE_INLINE uint32x4_t load(const Bc& b) { return vld1q_dup_u32(b.v->data() + b.k); }
+    static OMEGA_PARTICLE_INLINE uint32x4_t lanes(int dest) {
+        return uint32x4_t{(dest & X) ? ~0u : 0u, (dest & Y) ? ~0u : 0u, (dest & Z) ? ~0u : 0u, (dest & W) ? ~0u : 0u};
+    }
+    static OMEGA_PARTICLE_INLINE uint32x4_t e255(uint32x4_t b) {
+        const uint32x4_t e = vdupq_n_u32(0x7f800000u);
+        return vceqq_u32(vandq_u32(b, e), e);
+    }
+    static OMEGA_PARTICLE_INLINE uint32x4_t e0(uint32x4_t b) {
+        return vceqq_u32(vandq_u32(b, vdupq_n_u32(0x7f800000u)), vdupq_n_u32(0));
+    }
+    OMEGA_PARTICLE_INLINE void flag(uint32x4_t lanes_bad, uint32x4_t mask) { bad = vorrq_u32(bad, vandq_u32(lanes_bad, mask)); }
+    OMEGA_PARTICLE_INLINE void store(Qword& dst, uint32x4_t r, uint32x4_t mask, int dest) {
+        if (&dst == &s.vf[0]) return;
+        vst1q_u32(dst.data(), dest == XYZW ? r : vbslq_u32(mask, r, vld1q_u32(dst.data())));
+    }
+    bool clean() const {
+        const uint32x2_t h = vorr_u32(vget_low_u32(bad), vget_high_u32(bad));
+        return vget_lane_u32(vpmax_u32(h, h), 0) == 0;
+    }
+
+    // fmac_neon's arithmetic; its refusal test only accumulated.
+    template <class TS, class TT>
+    OMEGA_PARTICLE_INLINE void fmac(Op op, Qword& dst, const TS& S, const TT& T, int dest) {
+        const uint32x4_t mask = lanes(dest);
+        const uint32x4_t sb = load(S), tb = load(T);
+        uint32x4_t b = vorrq_u32(e255(sb), e255(tb));
+        const float32x4_t a = vreinterpretq_f32_u32(sb), c = vreinterpretq_f32_u32(tb);
+        float32x4_t r;
+        switch (op) {
+        case Op::add: r = vaddq_f32(a, c); break;
+        case Op::sub: r = vsubq_f32(a, c); break;
+        case Op::mul: r = vmulq_f32(a, c); break;
+        default: {  // MADD / MSUB: the product rounded first
+            const uint32x4_t accb = vld1q_u32(s.acc.data());
+            b = vorrq_u32(b, e255(accb));
+            const float32x4_t p = vmulq_f32(a, c), d = vreinterpretq_f32_u32(accb);
+            r = op == Op::madd ? vaddq_f32(d, p) : vsubq_f32(d, p);
+            break;
+        }
+        }
+        const uint32x4_t rb = vreinterpretq_u32_f32(r);
+        flag(vorrq_u32(b, e255(rb)), mask);
+        store(dst, rb, mask, dest);
+    }
+
+    // OPMULA / OPMSUB on (S.y, S.z, S.x) and (T.z, T.x, T.y). The exact port rounds the double product (rnd); the
+    // binary32 product is that value unless an operand or the result has exponent 255 (flagged) or it is tiny: a
+    // product of two non-zero operands that comes out with a zero exponent is flagged too (Advanced SIMD flushes a
+    // result tiny before rounding, rnd rounds first). OPMSUB's ACC - product is then fast_lane's MSUB (a difference
+    // of binary32 values tiny enough to flush is exact, so both give its signed zero).
+    OMEGA_PARTICLE_INLINE void outer(bool sub, Qword& dst, const Qword& S, const Qword& T) {
+        const uint32x4_t lane0 = {~0u, 0u, 0u, 0u}, lane2 = {0u, 0u, ~0u, 0u};
+        const uint32x4_t sb = load(S), tb = load(T);
+        const uint32x4_t s1 = vbslq_u32(lane2, vextq_u32(sb, sb, 2), vextq_u32(sb, sb, 1));
+        const uint32x4_t t1 = vbslq_u32(lane0, vextq_u32(tb, tb, 2), vextq_u32(tb, tb, 3));
+        const uint32x4_t mask = lanes(XYZ);
+        uint32x4_t b = vorrq_u32(e255(s1), e255(t1));
+        const float32x4_t p = vmulq_f32(vreinterpretq_f32_u32(s1), vreinterpretq_f32_u32(t1));
+        const uint32x4_t pb = vreinterpretq_u32_f32(p);
+        b = vorrq_u32(b, vbicq_u32(e0(pb), vorrq_u32(e0(s1), e0(t1))));
+        uint32x4_t rb = pb;
+        if (sub) {
+            const uint32x4_t accb = vld1q_u32(s.acc.data());
+            b = vorrq_u32(b, e255(accb));
+            rb = vreinterpretq_u32_f32(vsubq_f32(vreinterpretq_f32_u32(accb), p));
+        }
+        flag(vorrq_u32(b, e255(rb)), mask);
+        store(dst, rb, mask, XYZ);
+    }
+
+    // MAX / MINI: the words' sign-magnitude keys (int32: -magnitude for a set sign); equal keys with different bits
+    // (+0 / -0), which the exact port throws for, are flagged.
+    template <class TT>
+    OMEGA_PARTICLE_INLINE void minmax(bool max, Qword& dst, const Qword& S, const TT& T, int dest) {
+        const uint32x4_t mask = lanes(dest);
+        const uint32x4_t sb = load(S), tb = load(T);
+        const uint32x4_t sign = vdupq_n_u32(0x80000000u), mag = vdupq_n_u32(0x7fffffffu);
+        const int32x4_t ms = vreinterpretq_s32_u32(vandq_u32(sb, mag)), mt = vreinterpretq_s32_u32(vandq_u32(tb, mag));
+        const int32x4_t ks = vbslq_s32(vtstq_u32(sb, sign), vnegq_s32(ms), ms);
+        const int32x4_t kt = vbslq_s32(vtstq_u32(tb, sign), vnegq_s32(mt), mt);
+        const uint32x4_t pick = max ? vcgeq_s32(ks, kt) : vcleq_s32(ks, kt);
+        flag(vandq_u32(vceqq_s32(ks, kt), vmvnq_u32(vceqq_u32(sb, tb))), mask);
+        store(dst, vbslq_u32(pick, sb, tb), mask, dest);
+    }
+
+    // FTOI0: truncation with saturation, a zero exponent read as zero (Advanced SIMD flushes denormal inputs);
+    // exponent 255 (a 2^128 binade value for the VU, an infinity or NaN for NEON) is flagged.
+    OMEGA_PARTICLE_INLINE void ftoi0(Qword& dst, const Qword& S, int dest) {
+        const uint32x4_t mask = lanes(dest), sb = load(S);
+        flag(e255(sb), mask);
+        store(dst, vreinterpretq_u32_s32(vcvtq_s32_f32(vreinterpretq_f32_u32(sb))), mask, dest);
+    }
+    // ITOF0: round to nearest, as the VFP conversion under the thread's FPSCR (nearest whenever NEON is used).
+    OMEGA_PARTICLE_INLINE void itof0(Qword& dst, const Qword& S, int dest) {
+        store(dst, vreinterpretq_u32_f32(vcvtq_f32_s32(vreinterpretq_s32_u32(load(S)))), lanes(dest), dest);
+    }
+    OMEGA_PARTICLE_INLINE void write(Qword& dst, const Qword& out, int dest) { store(dst, load(out), lanes(dest), dest); }
+    OMEGA_PARTICLE_INLINE void mr32(Qword& r) {
+        const uint32x4_t v = load(r);
+        store(r, vextq_u32(v, v, 1), lanes(XYZW), XYZW);
+    }
+};
+
+// The registers before an iteration.
+struct IterationSave {
+    std::array<Qword, 32> vf;
+    Qword acc;
+    std::uint32_t i, q, r;
+    std::array<std::uint16_t, 16> vi;
+    explicit IterationSave(const Vu1State& s) : vf(s.vf), acc(s.acc), i(s.i), q(s.q), r(s.r), vi(s.vi) {}
+    void restore(Vu1State& s) const {
+        s.vf = vf;
+        s.acc = acc;
+        s.i = i;
+        s.q = q;
+        s.r = r;
+        s.vi = vi;
+    }
+    bool operator==(const IterationSave& o) const {
+        return vf == o.vf && acc == o.acc && i == o.i && q == o.q && r == o.r && vi == o.vi;
+    }
+};
+#endif
+
+#if OMEGA_PARTICLE_NEON_CHECK
+std::atomic<std::uint64_t> g_spec_checked{0};
+[[noreturn]] void spec_mismatch(const char* what) {
+    char b[160];
+    std::snprintf(b, sizeof b, "VU1 particle speculative NEON check: %s differs from the exact path (pair %03x)", what,
+                  g_pair);
+    throw std::runtime_error(b);
+}
+#endif
+
+// One iteration `body(machine)` (returning the loop's branch), speculatively on the Vita. `outputs`: the iteration
+// writes its two output words through SQI vi3 / vi4 (the particle programs); `out`: it appends to this vector (the
+// sprite programs).
+template <class Body>
+OMEGA_PARTICLE_INLINE bool iterate(Machine& m, const Body& body, bool outputs, std::vector<Qword>* out = nullptr) {
+#if OMEGA_PARTICLE_NEON
+    if (m.neon && g_speculate.load(std::memory_order_relaxed)) {
+        Vu1State& s = m.s;
+        const IterationSave save(s);
+        const std::uint32_t a3 = s.vi[3] & 0x3ffu, a4 = s.vi[4] & 0x3ffu;
+        const Qword o3 = s.data[a3], o4 = s.data[a4];
+        const std::size_t n = out ? out->size() : 0;
+        SpecMachine x{{s, true}};
+        bool again = false, ok = false;
+        try {
+            again = body(x);
+            ok = x.clean();
+        } catch (...) {
+            ok = false;
+        }
+#if OMEGA_PARTICLE_NEON_CHECK
+        // The check build: the exact iteration after every speculative one, compared when the latter was clean.
+        const IterationSave spec(s);
+        const Qword s3 = s.data[a3], s4 = s.data[a4];
+        std::vector<Qword> spec_out;
+        if (out) spec_out.assign(out->begin() + static_cast<std::ptrdiff_t>(n), out->end());
+        const bool spec_again = again;
+        if (outputs) s.data[a4] = o4, s.data[a3] = o3;
+        if (out) out->resize(n);
+        save.restore(s);
+        again = body(m);
+        if (ok) {
+            if (!(spec == IterationSave(s))) spec_mismatch("a register");
+            if (outputs && (s3 != s.data[a3] || s4 != s.data[a4])) spec_mismatch("an output word");
+            if (out && !std::equal(spec_out.begin(), spec_out.end(), out->begin() + static_cast<std::ptrdiff_t>(n), out->end()))
+                spec_mismatch("a sprite word");
+            if (spec_again != again) spec_mismatch("the loop branch");
+        } else {
+            g_neon_rollbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+        const std::uint64_t checked = g_spec_checked.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((checked & 0xffffu) == 0)
+            std::cerr << "VU1 particle speculative NEON check: " << checked << " iterations compared, "
+                      << g_neon_rollbacks.load() << " rolled back, 0 differences\n";
+        return again;
+#else
+        if (ok) return again;
+        if (outputs) s.data[a4] = o4, s.data[a3] = o3;
+        if (out) out->resize(n);
+        save.restore(s);
+        g_neon_rollbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+#else
+    (void)outputs;
+    (void)out;
+#endif
+    return body(m);
+}
+
+
+#if OMEGA_PARTICLE_NEON
+// Port-side speed only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"; the same bits): the
+// particle programs' loop iterations with the VU registers held in NEON registers for the whole iteration
+// (iteration_regs_*, generated from the loop bodies below). Each operation is SpecMachine's (the same arithmetic and
+// the same refusal conditions, accumulated in `bad`); DIV / RSQRT / SQRT, the random register and the integer
+// registers are the exact port's on lane copies; the two SQI outputs are written last. A refusal (a refusal lane,
+// RSQRT of zero, the LQ range check) leaves the state untouched and the iteration runs on iterate() as before.
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_mask() {
+    return uint32x4_t{(dest & X) ? ~0u : 0u, (dest & Y) ? ~0u : 0u, (dest & Z) ? ~0u : 0u, (dest & W) ? ~0u : 0u};
+}
+OMEGA_PARTICLE_INLINE uint32x4_t rx_e255(uint32x4_t b) {
+    const uint32x4_t e = vdupq_n_u32(0x7f800000u);
+    return vceqq_u32(vandq_u32(b, e), e);
+}
+OMEGA_PARTICLE_INLINE uint32x4_t rx_e0(uint32x4_t b) {
+    return vceqq_u32(vandq_u32(b, vdupq_n_u32(0x7f800000u)), vdupq_n_u32(0));
+}
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_merge(uint32x4_t d, uint32x4_t r) {
+    if constexpr (dest == XYZW) return r;
+    else return vbslq_u32(rx_mask<dest>(), r, d);
+}
+OMEGA_PARTICLE_INLINE bool rx_clean(uint32x4_t bad) {
+    const uint32x2_t h = vorr_u32(vget_low_u32(bad), vget_high_u32(bad));
+    return vget_lane_u32(vpmax_u32(h, h), 0) == 0;
+}
+template <int k> OMEGA_PARTICLE_INLINE uint32x4_t rx_bc(uint32x4_t v) {
+    if constexpr (k < 2) return vdupq_lane_u32(vget_low_u32(v), k);
+    else return vdupq_lane_u32(vget_high_u32(v), k - 2);
+}
+template <Op op, int dest>
+OMEGA_PARTICLE_INLINE uint32x4_t rx_fmac(uint32x4_t d, uint32x4_t sb, uint32x4_t tb, uint32x4_t accb, uint32x4_t& bad) {
+    uint32x4_t b = vorrq_u32(rx_e255(sb), rx_e255(tb));
+    const float32x4_t a = vreinterpretq_f32_u32(sb), c = vreinterpretq_f32_u32(tb);
+    float32x4_t r;
+    if constexpr (op == Op::add) r = vaddq_f32(a, c);
+    else if constexpr (op == Op::sub) r = vsubq_f32(a, c);
+    else if constexpr (op == Op::mul) r = vmulq_f32(a, c);
+    else {
+        b = vorrq_u32(b, rx_e255(accb));
+        const float32x4_t p = vmulq_f32(a, c), e = vreinterpretq_f32_u32(accb);
+        r = op == Op::madd ? vaddq_f32(e, p) : vsubq_f32(e, p);
+    }
+    const uint32x4_t rb = vreinterpretq_u32_f32(r);
+    bad = vorrq_u32(bad, vandq_u32(vorrq_u32(b, rx_e255(rb)), rx_mask<dest>()));
+    return rx_merge<dest>(d, rb);
+}
+template <bool sub>
+OMEGA_PARTICLE_INLINE uint32x4_t rx_outer(uint32x4_t d, uint32x4_t sb, uint32x4_t tb, uint32x4_t accb, uint32x4_t& bad) {
+    const uint32x4_t lane0 = {~0u, 0u, 0u, 0u}, lane2 = {0u, 0u, ~0u, 0u};
+    const uint32x4_t s1 = vbslq_u32(lane2, vextq_u32(sb, sb, 2), vextq_u32(sb, sb, 1));
+    const uint32x4_t t1 = vbslq_u32(lane0, vextq_u32(tb, tb, 2), vextq_u32(tb, tb, 3));
+    uint32x4_t b = vorrq_u32(rx_e255(s1), rx_e255(t1));
+    const float32x4_t p = vmulq_f32(vreinterpretq_f32_u32(s1), vreinterpretq_f32_u32(t1));
+    const uint32x4_t pb = vreinterpretq_u32_f32(p);
+    b = vorrq_u32(b, vbicq_u32(rx_e0(pb), vorrq_u32(rx_e0(s1), rx_e0(t1))));
+    uint32x4_t rb = pb;
+    if constexpr (sub) {
+        b = vorrq_u32(b, rx_e255(accb));
+        rb = vreinterpretq_u32_f32(vsubq_f32(vreinterpretq_f32_u32(accb), p));
+    }
+    bad = vorrq_u32(bad, vandq_u32(vorrq_u32(b, rx_e255(rb)), rx_mask<XYZ>()));
+    return rx_merge<XYZ>(d, rb);
+}
+template <bool max, int dest>
+OMEGA_PARTICLE_INLINE uint32x4_t rx_minmax(uint32x4_t d, uint32x4_t sb, uint32x4_t tb, uint32x4_t& bad) {
+    const uint32x4_t sign = vdupq_n_u32(0x80000000u), mag = vdupq_n_u32(0x7fffffffu);
+    const int32x4_t ms = vreinterpretq_s32_u32(vandq_u32(sb, mag)), mt = vreinterpretq_s32_u32(vandq_u32(tb, mag));
+    const int32x4_t ks = vbslq_s32(vtstq_u32(sb, sign), vnegq_s32(ms), ms);
+    const int32x4_t kt = vbslq_s32(vtstq_u32(tb, sign), vnegq_s32(mt), mt);
+    const uint32x4_t pick = max ? vcgeq_s32(ks, kt) : vcleq_s32(ks, kt);
+    bad = vorrq_u32(bad, vandq_u32(vandq_u32(vceqq_s32(ks, kt), vmvnq_u32(vceqq_u32(sb, tb))), rx_mask<dest>()));
+    return rx_merge<dest>(d, vbslq_u32(pick, sb, tb));
+}
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_ftoi0(uint32x4_t d, uint32x4_t sb, uint32x4_t& bad) {
+    bad = vorrq_u32(bad, vandq_u32(rx_e255(sb), rx_mask<dest>()));
+    return rx_merge<dest>(d, vreinterpretq_u32_s32(vcvtq_s32_f32(vreinterpretq_f32_u32(sb))));
+}
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_itof0(uint32x4_t d, uint32x4_t sb) {
+    return rx_merge<dest>(d, vreinterpretq_u32_f32(vcvtq_f32_s32(vreinterpretq_s32_u32(sb))));
+}
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_write(uint32x4_t d, uint32x4_t src) { return rx_merge<dest>(d, src); }
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_rget(uint32x4_t d, std::uint32_t r) {
+    return rx_merge<dest>(d, vdupq_n_u32(0x3f800000u | r));
+}
+OMEGA_PARTICLE_INLINE void rx_rnext(std::uint32_t& r) {
+    const std::uint32_t x = (r >> 4) & 1, y = (r >> 22) & 1;
+    r = ((r << 1) ^ x ^ y) & 0x7fffffu;
+}
+// Machine::div / rsqrt / sqrt (rsqrt of zero: false, the exact port throws).
+std::uint32_t rx_div(std::uint32_t sb, std::uint32_t tb) {
+    const double t = daz(tb), x = daz(sb);
+    if (t == 0) return ((std::signbit(x) != std::signbit(t)) ? 0x80000000u : 0) | kVuMax;
+    return rnd(x / t);
+}
+bool rx_rsqrt(std::uint32_t& q, std::uint32_t sb, std::uint32_t tb) {
+    const double t = daz(tb), x = daz(sb);
+    if (t == 0) return false;
+    q = rnd(x / static_cast<double>(static_cast<float>(std::sqrt(std::fabs(t)))));
+    return true;
+}
+std::uint32_t rx_sqrt(std::uint32_t tb) { return rnd(std::sqrt(std::fabs(daz(tb)))); }
+
+
+// 132vc1 hw5 (port-side speed only; the same refusals): a value's exponent-255 test accumulated into `hi` as an
+// unsigned max of (bits & 0x7fffffff) over the tested lanes; the iteration is refused when the max reaches
+// 0x7f800000 (rx_clean of the final compare). FMAC as rx_fmac with only its result tested here (the generator tests
+// each operand lane once, before its first use); FTOI0 as rx_ftoi0 with its input tested by the generator.
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_abs_mask() {
+    return uint32x4_t{(dest & X) ? 0x7fffffffu : 0u, (dest & Y) ? 0x7fffffffu : 0u, (dest & Z) ? 0x7fffffffu : 0u,
+                      (dest & W) ? 0x7fffffffu : 0u};
+}
+template <int lanes> OMEGA_PARTICLE_INLINE void rx_test(uint32x4_t v, uint32x4_t& hi) {
+    hi = vmaxq_u32(hi, vandq_u32(v, rx_abs_mask<lanes>()));
+}
+template <Op op, int dest>
+OMEGA_PARTICLE_INLINE uint32x4_t rx_fmac_t(uint32x4_t d, uint32x4_t sb, uint32x4_t tb, uint32x4_t accb, uint32x4_t& hi) {
+    const float32x4_t a = vreinterpretq_f32_u32(sb), c = vreinterpretq_f32_u32(tb);
+    float32x4_t r;
+    if constexpr (op == Op::add) r = vaddq_f32(a, c);
+    else if constexpr (op == Op::sub) r = vsubq_f32(a, c);
+    else if constexpr (op == Op::mul) r = vmulq_f32(a, c);
+    else {
+        const float32x4_t p = vmulq_f32(a, c), e = vreinterpretq_f32_u32(accb);
+        r = op == Op::madd ? vaddq_f32(e, p) : vsubq_f32(e, p);
+    }
+    const uint32x4_t rb = vreinterpretq_u32_f32(r);
+    rx_test<dest>(rb, hi);
+    return rx_merge<dest>(d, rb);
+}
+template <int dest> OMEGA_PARTICLE_INLINE uint32x4_t rx_ftoi0_t(uint32x4_t d, uint32x4_t sb) {
+    return rx_merge<dest>(d, vreinterpretq_u32_s32(vcvtq_s32_f32(vreinterpretq_f32_u32(sb))));
+}
+
+std::atomic<bool> g_regs{true};  // set_particle_neon_registers (132vc1)
+
+// One loop iteration: the register-resident one when it is taken, else iterate() (speculative / exact). The check
+// build compares the register-resident result with iterate()'s (itself checked against the exact path).
+template <class Body>
+OMEGA_PARTICLE_INLINE bool step(Machine& m, int (*regs)(Vu1State&), const Body& body) {
+    if (m.neon && g_speculate.load(std::memory_order_relaxed) && g_regs.load(std::memory_order_relaxed)) {
+        Vu1State& s = m.s;
+#if OMEGA_PARTICLE_NEON_CHECK
+        const IterationSave before(s);
+        const std::uint32_t a3 = s.vi[3] & 0x3ffu, a4 = s.vi[4] & 0x3ffu;
+        const Qword o3 = s.data[a3], o4 = s.data[a4];
+        const int got = regs(s);
+        const IterationSave after(s);
+        const Qword r3 = s.data[a3], r4 = s.data[a4];
+        s.data[a4] = o4, s.data[a3] = o3;
+        before.restore(s);
+        const bool again = iterate(m, body, true);
+        if (got >= 0) {
+            if (!(after == IterationSave(s)) || r3 != s.data[a3] || r4 != s.data[a4] || (got != 0) != again)
+                spec_mismatch("a register-resident iteration");
+        } else {
+            g_neon_rollbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+        return again;
+#else
+        const int got = regs(s);
+        if (got >= 0) return got != 0;
+        g_neon_rollbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+    return iterate(m, body, true);
+}
+#endif
+#if OMEGA_PARTICLE_NEON
+// Generated (132vc1 hw5, tools: local regs_gen2.py) from the loop body of program 0x29c above: the iteration with
+// the VU registers in NEON registers, each value tested once. -1: refused (the state is untouched); else the loop
+// branch, the state written.
+OMEGA_PARTICLE_NOINLINE int iteration_regs_29c(Vu1State& s) {
+    const uint32x4_t vf0 = {0u, 0u, 0u, 0x3f800000u};
+    uint32x4_t acc = vld1q_u32(s.acc.data());
+    std::uint32_t i = s.i, q = s.q, r = s.r;
+    std::array<std::uint16_t, 16> vi = s.vi;
+    uint32x4_t bad = vdupq_n_u32(0), hi = vdupq_n_u32(0);
+    bool refused = false;
+    std::uint32_t out_a[2];
+    uint32x4_t out_v[2];
+    int outs = 0;
+    (void)vf0;
+    uint32x4_t vf4 = vld1q_u32(s.vf[4].data());
+    uint32x4_t vf21 = vld1q_u32(s.vf[21].data());
+    q = rx_div(vgetq_lane_u32(vf4, 3), vgetq_lane_u32(vf21, 0));
+    uint32x4_t vf28 = vld1q_u32(s.vf[28].data());
+    vf28 = rx_fmac_t<Op::mul, 0x6>(vf28, vf28, vf4, acc, hi);
+    uint32x4_t vf25 = vld1q_u32(s.vf[25].data());
+    vf25 = rx_write<(0x1)>(vf25, vf28);
+    uint32x4_t vf2 = vld1q_u32(s.vf[2].data());
+    uint32x4_t vf9 = vld1q_u32(s.vf[9].data());
+    acc = rx_outer<false>(acc, vf2, vf9, acc, bad);
+    vi[5] = static_cast<std::uint16_t>(vgetq_lane_u32(vf2, 3));
+    vf9 = rx_outer<true>(vf9, vf9, vf2, acc, bad);
+    uint32x4_t vf20 = vld1q_u32(s.vf[20].data());
+    vi[6] = static_cast<std::uint16_t>(vgetq_lane_u32(vf20, 2));
+    uint32x4_t vf5 = vld1q_u32(s.vf[5].data());
+    uint32x4_t vf29 = vld1q_u32(s.vf[29].data());
+    vf21 = rx_fmac_t<Op::mul, 0x3>(vf21, vf29, vf5, acc, hi);
+    vi[2] = static_cast<std::uint16_t>(vi[2] - 1);
+    acc = rx_fmac_t<Op::add, 0xc>(acc, vf0, rx_bc<0>(vf4), acc, hi);
+    uint32x4_t vf31 = vld1q_u32(s.vf[31].data());
+    acc = rx_fmac_t<Op::msub, 0xc>(acc, vf31, rx_bc<2>(vf28), acc, hi);
+    uint32x4_t vf12 = vld1q_u32(s.vf[12].data());
+    vf12 = rx_fmac_t<Op::madd, 0xc>(vf12, vf31, vdupq_n_u32(q), acc, hi);
+    uint32x4_t vf26 = vld1q_u32(s.vf[26].data());
+    vf26 = rx_fmac_t<Op::mul, 0xe>(vf26, vf9, vf9, acc, hi);
+    i = 0x40a00000u;
+    uint32x4_t vf27 = vld1q_u32(s.vf[27].data());
+    acc = rx_fmac_t<Op::mul, 0xf>(acc, vf27, vdupq_n_u32(i), acc, hi);
+    vf27 = rx_fmac_t<Op::madd, 0xf>(vf27, vf31, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf22 = vld1q_u32(s.vf[22].data());
+    vf22 = rx_ftoi0_t<0xc>(vf22, vf12);
+    acc = rx_fmac_t<Op::add, 0x8>(acc, vf26, rx_bc<1>(vf26), acc, hi);
+    vf26 = rx_fmac_t<Op::madd, 0x8>(vf26, vf31, rx_bc<2>(vf26), acc, hi);
+    vf22 = rx_itof0<(0xc)>(vf22, vf22);
+    i = 0x40400000u;
+    acc = rx_fmac_t<Op::mul, 0xc>(acc, vf12, vdupq_n_u32(i), acc, hi);
+    vf27 = vextq_u32(vf27, vf27, 1);
+    vf29 = rx_fmac_t<Op::sub, 0x4>(vf29, vf29, rx_bc<3>(vf0), acc, hi);
+    if (!rx_rsqrt(q, vgetq_lane_u32(vf31, 0), vgetq_lane_u32(vf26, 0))) refused = true;
+    uint32x4_t vf8 = vld1q_u32(s.vf[8].data());
+    uint32x4_t vf18 = vld1q_u32(s.vf[18].data());
+    vf18 = rx_fmac_t<Op::add, 0xe>(vf18, vf0, rx_bc<1>(vf8), acc, hi);
+    vf25 = rx_fmac_t<Op::msub, 0xc>(vf25, vf22, vdupq_n_u32(i), acc, hi);
+    vf12 = rx_fmac_t<Op::sub, 0xc>(vf12, vf12, vf22, acc, hi);
+    uint32x4_t vf11 = vld1q_u32(s.vf[11].data());
+    vf9 = rx_fmac_t<Op::mul, 0x1>(vf9, vf11, rx_bc<1>(vf29), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf18, rx_bc<0>(vf8), acc, hi);
+    vf25 = rx_ftoi0_t<0x4>(vf25, vf25);
+    vf18 = rx_fmac_t<Op::madd, 0xe>(vf18, vf18, rx_bc<0>(vf12), acc, hi);
+    vf12 = rx_fmac_t<Op::sub, 0x6>(vf12, vf31, rx_bc<1>(vf28), acc, hi);
+    vi[9] = static_cast<std::uint16_t>(vgetq_lane_u32(vf25, 1));
+    vf25 = rx_itof0<(0x4)>(vf25, vf25);
+    vf18 = rx_fmac_t<Op::mul, 0xc>(vf18, vf18, rx_bc<2>(vf18), acc, hi);
+    vf9 = rx_fmac_t<Op::mul, 0xe>(vf9, vf9, vdupq_n_u32(q), acc, hi);
+    i = 0x38d1b717u;
+    vf25 = rx_fmac_t<Op::sub, 0x8>(vf25, vf25, rx_bc<1>(vf25), acc, hi);
+    const std::uint32_t qa = (0x1eu + vi[9]) & 0x3ff;
+    if (qa < 0x16 || qa > 0x20) refused = true;
+    vf26 = vld1q_u32(s.data[(qa) & 0x3ffu].data());
+    vf18 = rx_fmac_t<Op::mul, 0x8>(vf18, vf18, rx_bc<2>(vf18), acc, hi);
+    q = rx_div(vgetq_lane_u32(vf0, 3), vgetq_lane_u32(vf12, 1));
+    uint32x4_t vf19 = vld1q_u32(s.vf[19].data());
+    vf22 = rx_fmac_t<Op::sub, 0x1>(vf22, vf19, rx_bc<0>(vf22), acc, hi);
+    vf12 = rx_minmax<false, (0x8)>(vf12, vf12, rx_bc<3>(vf22), bad);
+    uint32x4_t vf1 = vld1q_u32(s.vf[1].data());
+    vf9 = rx_fmac_t<Op::mul, 0x1>(vf9, vf9, vf1, acc, hi);
+    vf12 = rx_minmax<true, (0x8)>(vf12, vf12, vdupq_n_u32(i), bad);
+    r = (r ^ vgetq_lane_u32(vf27, 0)) & 0x7fffffu;
+    vf27 = rx_rget<(0x8)>(vf27, r);
+    acc = rx_fmac_t<Op::mul, 0x4>(acc, vf31, rx_bc<0>(vf26), acc, hi);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x8)>(vf29, r);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf31, rx_bc<2>(vf26), acc, hi);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x8)>(vf28, r);
+    vf26 = rx_fmac_t<Op::madd, 0x5>(vf26, vf26, rx_bc<3>(vf25), acc, hi);
+    rx_rnext(r);
+    uint32x4_t vf30 = vld1q_u32(s.vf[30].data());
+    vf30 = rx_rget<(0x8)>(vf30, r);
+    vf12 = rx_minmax<false, (0x8)>(vf12, vf12, rx_bc<1>(vf12), bad);
+    r = (r ^ vgetq_lane_u32(vf27, 1)) & 0x7fffffu;
+    uint32x4_t vf15 = vld1q_u32(s.vf[15].data());
+    vf22 = rx_fmac_t<Op::mul, 0xf>(vf22, vf18, vf15, acc, hi);
+    vf29 = rx_rget<(0x4)>(vf29, r);
+    uint32x4_t vf16 = vld1q_u32(s.vf[16].data());
+    uint32x4_t vf23 = vld1q_u32(s.vf[23].data());
+    vf23 = rx_fmac_t<Op::mul, 0xf>(vf23, vf18, vf16, acc, hi);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x4)>(vf28, r);
+    acc = rx_fmac_t<Op::add, 0x8>(acc, vf0, rx_bc<1>(vf26), acc, hi);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x4)>(vf27, r);
+    acc = rx_fmac_t<Op::msub, 0x8>(acc, vf25, rx_bc<1>(vf26), acc, hi);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x4)>(vf30, r);
+    vf26 = rx_fmac_t<Op::madd, 0x8>(vf26, vf25, rx_bc<3>(vf26), acc, hi);
+    r = (r ^ vgetq_lane_u32(vf27, 2)) & 0x7fffffu;
+    vf12 = rx_fmac_t<Op::add, 0x2>(vf12, vf0, rx_bc<0>(vf12), acc, hi);
+    vf28 = rx_rget<(0x2)>(vf28, r);
+    uint32x4_t vf17 = vld1q_u32(s.vf[17].data());
+    uint32x4_t vf24 = vld1q_u32(s.vf[24].data());
+    vf24 = rx_fmac_t<Op::mul, 0xf>(vf24, vf18, vf17, acc, hi);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x2)>(vf27, r);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x2)>(vf29, r);
+    vf9 = rx_fmac_t<Op::mul, 0xe>(vf9, vf9, rx_bc<0>(vf26), acc, hi);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x2)>(vf30, r);
+    vf12 = rx_fmac_t<Op::mul, 0xa>(vf12, vf12, vdupq_n_u32(q), acc, hi);
+    acc = rx_fmac_t<Op::add, 0x8>(acc, vf22, rx_bc<1>(vf22), acc, hi);
+    r = (r ^ vgetq_lane_u32(vf27, 3)) & 0x7fffffu;
+    acc = rx_fmac_t<Op::madd, 0x8>(acc, vf31, rx_bc<2>(vf22), acc, hi);
+    vf27 = rx_rget<(0x1)>(vf27, r);
+    uint32x4_t vf10 = vld1q_u32(s.vf[10].data());
+    vf10 = rx_fmac_t<Op::madd, 0x8>(vf10, vf31, rx_bc<3>(vf22), acc, hi);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x1)>(vf29, r);
+    vf12 = rx_fmac_t<Op::sub, 0x5>(vf12, vf31, rx_bc<0>(vf12), acc, hi);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x1)>(vf28, r);
+    uint32x4_t vf7 = vld1q_u32(s.vf[7].data());
+    vf18 = rx_fmac_t<Op::mul, 0xf>(vf18, vf7, vf12, acc, hi);
+    acc = rx_fmac_t<Op::add, 0x4>(acc, vf23, rx_bc<0>(vf23), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0x4>(acc, vf31, rx_bc<2>(vf23), acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x4>(vf10, vf31, rx_bc<3>(vf23), acc, hi);
+    uint32x4_t vf6 = vld1q_u32(s.vf[6].data());
+    uint32x4_t vf14 = vld1q_u32(s.vf[14].data());
+    vf14 = rx_fmac_t<Op::mul, 0xc>(vf14, vf6, vf12, acc, hi);
+    vf18 = rx_minmax<false, (0xf)>(vf18, vf18, rx_bc<3>(vf0), bad);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x1)>(vf30, r);
+    acc = rx_fmac_t<Op::add, 0x2>(acc, vf24, rx_bc<0>(vf24), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0x2>(acc, vf31, rx_bc<1>(vf24), acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x2>(vf10, vf31, rx_bc<3>(vf24), acc, hi);
+    vf26 = vld1q_u32(s.data[(15) & 0x3ffu].data());
+    acc = rx_fmac_t<Op::mul, 0x3>(acc, vf6, rx_bc<3>(vf0), acc, hi);
+    vf22 = rx_fmac_t<Op::msub, 0x3>(vf22, vf6, vf18, acc, hi);
+    uint32x4_t vf3 = vld1q_u32(s.vf[3].data());
+    vf14 = rx_minmax<false, (0x1)>(vf14, vf3, rx_bc<0>(vf14), bad);
+    acc = rx_fmac_t<Op::add, 0xe>(acc, vf10, vf26, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0xe>(vf10, vf31, vf9, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf3, rx_bc<0>(vf18), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf11, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf13 = vld1q_u32(s.vf[13].data());
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf11, rx_bc<0>(vf18), acc, hi);
+    vf14 = rx_fmac_t<Op::mul, 0x4>(vf14, vf14, rx_bc<3>(vf14), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x2>(acc, vf22, rx_bc<3>(vf0), acc, hi);
+    vf22 = rx_fmac_t<Op::madd, 0x2>(vf22, vf18, rx_bc<3>(vf26), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf13, rx_bc<1>(vf18), acc, hi);
+    vf14 = rx_minmax<false, (0x1)>(vf14, vf14, rx_bc<1>(vf14), bad);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf19, rx_bc<3>(vf0), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf19, rx_bc<1>(vf18), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf22, vf0, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x1>(vf10, vf18, rx_bc<2>(vf22), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf14, rx_bc<2>(vf21), acc, hi);
+    vf14 = rx_fmac_t<Op::madd, 0x1>(vf14, vf14, vf0, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf13, rx_bc<3>(vf1), acc, hi);
+    acc = rx_fmac_t<Op::msub, 0xe>(acc, vf13, rx_bc<3>(vf9), acc, hi);
+    vf13 = rx_fmac_t<Op::madd, 0xe>(vf13, vf1, rx_bc<3>(vf0), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf10, vf21, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x1>(vf10, vf10, vf0, acc, hi);
+    i = 0x437f0000u;
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf14, vdupq_n_u32(i), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0x1>(vf13, vf14, rx_bc<2>(vf8), acc, hi);
+    i = 0x3fc00000u;
+    i = 0x3b7f9724u;
+    vf9 = rx_fmac_t<Op::mul, 0x1>(vf9, vf1, vdupq_n_u32(i), acc, hi);
+    vf13 = rx_fmac_t<Op::mul, 0x1>(vf13, vf13, rx_bc<3>(vf9), acc, hi);
+    i = 0x3fc00000u;
+    vf29 = rx_fmac_t<Op::sub, 0xb>(vf29, vf29, vdupq_n_u32(i), acc, hi);
+    vf13 = rx_minmax<true, (0x1)>(vf13, vf13, rx_bc<0>(vf0), bad);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf10, vf0, acc, hi);
+    vf10 = rx_fmac_t<Op::msub, 0x1>(vf10, vf10, vf8, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x8>(acc, vf29, rx_bc<1>(vf5), acc, hi);
+    vf13 = rx_ftoi0_t<0xf>(vf13, vf13);
+    vf10 = rx_fmac_t<Op::mul, 0xf>(vf10, vf10, rx_bc<0>(vf20), acc, hi);
+    vf21 = rx_fmac_t<Op::madd, 0x8>(vf21, vf5, rx_bc<3>(vf0), acc, hi);
+    vf28 = rx_fmac_t<Op::sub, 0xf>(vf28, vf28, rx_bc<3>(vf0), acc, hi);
+    out_a[outs] = vi[3] & 0x3ffu; out_v[outs++] = vf10; vi[3] = static_cast<std::uint16_t>(vi[3] + 1);
+    vf9 = rx_fmac_t<Op::sub, 0xe>(vf9, vf30, vdupq_n_u32(i), acc, hi);
+    const bool again = static_cast<std::int16_t>(vi[2]) > 0;
+    out_a[outs] = vi[4] & 0x3ffu; out_v[outs++] = vf13; vi[4] = static_cast<std::uint16_t>(vi[4] + 1);
+    if (refused || outs != 2 || !rx_clean(vorrq_u32(bad, vcgeq_u32(hi, vdupq_n_u32(0x7f800000u))))) return -1;
+    vst1q_u32(s.vf[1].data(), vf1);
+    vst1q_u32(s.vf[2].data(), vf2);
+    vst1q_u32(s.vf[3].data(), vf3);
+    vst1q_u32(s.vf[4].data(), vf4);
+    vst1q_u32(s.vf[5].data(), vf5);
+    vst1q_u32(s.vf[6].data(), vf6);
+    vst1q_u32(s.vf[7].data(), vf7);
+    vst1q_u32(s.vf[8].data(), vf8);
+    vst1q_u32(s.vf[9].data(), vf9);
+    vst1q_u32(s.vf[10].data(), vf10);
+    vst1q_u32(s.vf[11].data(), vf11);
+    vst1q_u32(s.vf[12].data(), vf12);
+    vst1q_u32(s.vf[13].data(), vf13);
+    vst1q_u32(s.vf[14].data(), vf14);
+    vst1q_u32(s.vf[15].data(), vf15);
+    vst1q_u32(s.vf[16].data(), vf16);
+    vst1q_u32(s.vf[17].data(), vf17);
+    vst1q_u32(s.vf[18].data(), vf18);
+    vst1q_u32(s.vf[19].data(), vf19);
+    vst1q_u32(s.vf[20].data(), vf20);
+    vst1q_u32(s.vf[21].data(), vf21);
+    vst1q_u32(s.vf[22].data(), vf22);
+    vst1q_u32(s.vf[23].data(), vf23);
+    vst1q_u32(s.vf[24].data(), vf24);
+    vst1q_u32(s.vf[25].data(), vf25);
+    vst1q_u32(s.vf[26].data(), vf26);
+    vst1q_u32(s.vf[27].data(), vf27);
+    vst1q_u32(s.vf[28].data(), vf28);
+    vst1q_u32(s.vf[29].data(), vf29);
+    vst1q_u32(s.vf[30].data(), vf30);
+    vst1q_u32(s.vf[31].data(), vf31);
+    vst1q_u32(s.acc.data(), acc);
+    s.i = i, s.q = q, s.r = r;
+    s.vi = vi;
+    vst1q_u32(s.data[out_a[0]].data(), out_v[0]);
+    vst1q_u32(s.data[out_a[1]].data(), out_v[1]);
+    return again ? 1 : 0;
+}
+
+// Generated (132vc1 hw5, tools: local regs_gen2.py) from the loop body of program 0x170 above: the iteration with
+// the VU registers in NEON registers, each value tested once. -1: refused (the state is untouched); else the loop
+// branch, the state written.
+OMEGA_PARTICLE_NOINLINE int iteration_regs_170(Vu1State& s) {
+    const uint32x4_t vf0 = {0u, 0u, 0u, 0x3f800000u};
+    uint32x4_t acc = vld1q_u32(s.acc.data());
+    std::uint32_t i = s.i, q = s.q, r = s.r;
+    std::array<std::uint16_t, 16> vi = s.vi;
+    uint32x4_t bad = vdupq_n_u32(0), hi = vdupq_n_u32(0);
+    bool refused = false;
+    std::uint32_t out_a[2];
+    uint32x4_t out_v[2];
+    int outs = 0;
+    (void)vf0;
+    vi[2] = static_cast<std::uint16_t>(vi[2] - 1);
+    uint32x4_t vf29 = vld1q_u32(s.vf[29].data());
+    vf29 = rx_fmac_t<Op::sub, 0xf>(vf29, vf29, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf19 = vld1q_u32(s.vf[19].data());
+    vi[5] = static_cast<std::uint16_t>(vgetq_lane_u32(vf19, 3));
+    uint32x4_t vf10 = vld1q_u32(s.vf[10].data());
+    uint32x4_t vf30 = vld1q_u32(s.vf[30].data());
+    vf10 = rx_fmac_t<Op::sub, 0xe>(vf10, vf30, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf24 = vld1q_u32(s.vf[24].data());
+    vi[6] = static_cast<std::uint16_t>(vgetq_lane_u32(vf24, 3));
+    uint32x4_t vf28 = vld1q_u32(s.vf[28].data());
+    vf28 = rx_fmac_t<Op::sub, 0xf>(vf28, vf28, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf6 = vld1q_u32(s.vf[6].data());
+    acc = rx_fmac_t<Op::mul, 0xf>(acc, vf29, vf6, acc, hi);
+    uint32x4_t vf5 = vld1q_u32(s.vf[5].data());
+    uint32x4_t vf21 = vld1q_u32(s.vf[21].data());
+    vf21 = rx_fmac_t<Op::madd, 0xf>(vf21, vf5, rx_bc<3>(vf0), acc, hi);
+    acc = rx_fmac_t<Op::add, 0x8>(acc, vf0, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf26 = vld1q_u32(s.vf[26].data());
+    vf26 = rx_fmac_t<Op::sub, 0x1>(vf26, vf26, vf0, acc, hi);
+    uint32x4_t vf22 = vld1q_u32(s.vf[22].data());
+    vf22 = rx_fmac_t<Op::msub, 0x8>(vf22, vf21, vf21, acc, hi);
+    uint32x4_t vf2 = vld1q_u32(s.vf[2].data());
+    acc = rx_outer<false>(acc, vf2, vf10, acc, bad);
+    vf10 = rx_outer<true>(vf10, vf10, vf2, acc, bad);
+    uint32x4_t vf8 = vld1q_u32(s.vf[8].data());
+    uint32x4_t vf20 = vld1q_u32(s.vf[20].data());
+    vf20 = rx_fmac_t<Op::mul, 0xf>(vf20, vf28, vf8, acc, hi);
+    q = rx_sqrt(vgetq_lane_u32(vf22, 0));
+    uint32x4_t vf15 = vld1q_u32(s.vf[15].data());
+    vf15 = rx_fmac_t<Op::mul, 0xe>(vf15, vf10, vf10, acc, hi);
+    uint32x4_t vf18 = vld1q_u32(s.vf[18].data());
+    vf22 = rx_fmac_t<Op::mul, 0x1>(vf22, vf18, vf30, acc, hi);
+    uint32x4_t vf7 = vld1q_u32(s.vf[7].data());
+    uint32x4_t vf23 = vld1q_u32(s.vf[23].data());
+    vf23 = rx_fmac_t<Op::mul, 0x1>(vf23, vf26, vf7, acc, hi);
+    uint32x4_t vf1 = vld1q_u32(s.vf[1].data());
+    vf22 = rx_fmac_t<Op::mul, 0x1>(vf22, vf22, vf1, acc, hi);
+    acc = rx_fmac_t<Op::add, 0x8>(acc, vf15, rx_bc<1>(vf15), acc, hi);
+    uint32x4_t vf31 = vld1q_u32(s.vf[31].data());
+    vf15 = rx_fmac_t<Op::madd, 0x8>(vf15, vf31, rx_bc<2>(vf15), acc, hi);
+    vf22 = rx_fmac_t<Op::add, 0x8>(vf22, vf0, vdupq_n_u32(q), acc, hi);
+    vf20 = rx_fmac_t<Op::add, 0xc>(vf20, vf20, vf7, acc, hi);
+    if (!rx_rsqrt(q, vgetq_lane_u32(vf0, 3), vgetq_lane_u32(vf15, 0))) refused = true;
+    uint32x4_t vf27 = vld1q_u32(s.vf[27].data());
+    vf27 = vextq_u32(vf27, vf27, 1);
+    i = 0x40a00000u;
+    acc = rx_fmac_t<Op::mul, 0xf>(acc, vf27, vdupq_n_u32(i), acc, hi);
+    vf27 = rx_fmac_t<Op::madd, 0xf>(vf27, vf31, rx_bc<3>(vf0), acc, hi);
+    i = 0x3fc00000u;
+    r = (r ^ vgetq_lane_u32(vf27, 0)) & 0x7fffffu;
+    vf30 = rx_rget<(0x8)>(vf30, r);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x8)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x8)>(vf28, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x8)>(vf27, r);
+    r = (r ^ vgetq_lane_u32(vf27, 1)) & 0x7fffffu;
+    vf29 = rx_rget<(0x4)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x4)>(vf28, r);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x4)>(vf30, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x4)>(vf27, r);
+    r = (r ^ vgetq_lane_u32(vf27, 2)) & 0x7fffffu;
+    vf28 = rx_rget<(0x2)>(vf28, r);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x2)>(vf30, r);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x2)>(vf29, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x2)>(vf27, r);
+    r = (r ^ vgetq_lane_u32(vf27, 3)) & 0x7fffffu;
+    vf30 = rx_rget<(0x1)>(vf30, r);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x1)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x1)>(vf28, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x1)>(vf27, r);
+    rx_rnext(r);
+    vf26 = rx_rget<(0x1)>(vf26, r);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf2, rx_bc<0>(vf21), acc, hi);
+    vf10 = rx_fmac_t<Op::mul, 0xe>(vf10, vf10, vdupq_n_u32(q), acc, hi);
+    i = 0x38d1b717u;
+    vf23 = rx_fmac_t<Op::add, 0x1>(vf23, vf23, rx_bc<2>(vf7), acc, hi);
+    q = rx_div(vgetq_lane_u32(vf0, 3), vgetq_lane_u32(vf21, 2));
+    vf23 = rx_fmac_t<Op::add, 0xe>(vf23, vf10, rx_bc<0>(vf0), acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0xe>(vf10, vf10, rx_bc<0>(vf22), acc, hi);
+    uint32x4_t vf4 = vld1q_u32(s.vf[4].data());
+    vf20 = rx_fmac_t<Op::mul, 0x4>(vf20, vf20, vf4, acc, hi);
+    vf10 = rx_fmac_t<Op::mul, 0xe>(vf10, vf10, rx_bc<1>(vf21), acc, hi);
+    uint32x4_t vf25 = vld1q_u32(s.vf[25].data());
+    vf25 = rx_fmac_t<Op::mul, 0xe>(vf25, vf24, rx_bc<1>(vf20), acc, hi);
+    vf10 = rx_fmac_t<Op::add, 0xe>(vf10, vf10, vf25, acc, hi);
+    vf25 = vld1q_u32(s.data[(15) & 0x3ffu].data());
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf10, rx_bc<0>(vf20), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf23, rx_bc<3>(vf23), acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0xe>(vf10, vf25, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf12 = vld1q_u32(s.vf[12].data());
+    vf12 = rx_fmac_t<Op::sub, 0x8>(vf12, vf4, rx_bc<3>(vf21), acc, hi);
+    vf12 = rx_minmax<true, (0x8)>(vf12, vf12, vdupq_n_u32(i), bad);
+    vf12 = rx_minmax<false, (0x8)>(vf12, vf12, rx_bc<2>(vf21), bad);
+    vf12 = rx_fmac_t<Op::add, 0x2>(vf12, vf0, rx_bc<0>(vf12), acc, hi);
+    vf12 = rx_fmac_t<Op::mul, 0xa>(vf12, vf12, vdupq_n_u32(q), acc, hi);
+    vf12 = rx_fmac_t<Op::sub, 0x5>(vf12, vf31, rx_bc<0>(vf12), acc, hi);
+    uint32x4_t vf9 = vld1q_u32(s.vf[9].data());
+    uint32x4_t vf14 = vld1q_u32(s.vf[14].data());
+    vf14 = rx_fmac_t<Op::mul, 0xc>(vf14, vf9, vf12, acc, hi);
+    uint32x4_t vf3 = vld1q_u32(s.vf[3].data());
+    vf14 = rx_minmax<false, (0x1)>(vf14, vf3, rx_bc<0>(vf14), bad);
+    vf14 = rx_fmac_t<Op::mul, 0x4>(vf14, vf14, rx_bc<3>(vf14), acc, hi);
+    vf14 = rx_minmax<false, (0x1)>(vf14, vf14, rx_bc<1>(vf14), bad);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf14, rx_bc<2>(vf20), acc, hi);
+    vf14 = rx_fmac_t<Op::madd, 0x1>(vf14, vf14, vf0, acc, hi);
+    i = 0x437f0000u;
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf14, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf13 = vld1q_u32(s.vf[13].data());
+    vf13 = rx_fmac_t<Op::msub, 0x1>(vf13, vf14, rx_bc<2>(vf4), acc, hi);
+    uint32x4_t vf11 = vld1q_u32(s.vf[11].data());
+    uint32x4_t vf17 = vld1q_u32(s.vf[17].data());
+    vf17 = rx_fmac_t<Op::mul, 0xf>(vf17, vf11, vf12, acc, hi);
+    vf17 = rx_minmax<false, (0xf)>(vf17, vf17, rx_bc<3>(vf0), bad);
+    acc = rx_fmac_t<Op::mul, 0x3>(acc, vf9, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf16 = vld1q_u32(s.vf[16].data());
+    vf16 = rx_fmac_t<Op::msub, 0x3>(vf16, vf9, vf17, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x2>(acc, vf16, rx_bc<3>(vf0), acc, hi);
+    vf16 = rx_fmac_t<Op::madd, 0x2>(vf16, vf17, rx_bc<3>(vf25), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf16, vf0, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x1>(vf10, vf17, rx_bc<2>(vf16), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf10, vf20, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x1>(vf10, vf10, vf0, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf10, vf0, acc, hi);
+    vf10 = rx_fmac_t<Op::msub, 0x1>(vf10, vf10, vf4, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf3, rx_bc<0>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf18, rx_bc<3>(vf0), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf18, rx_bc<0>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf13, rx_bc<1>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf19, rx_bc<3>(vf0), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf19, rx_bc<1>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf13, rx_bc<3>(vf1), acc, hi);
+    acc = rx_fmac_t<Op::msub, 0xe>(acc, vf13, rx_bc<3>(vf22), acc, hi);
+    vf13 = rx_fmac_t<Op::madd, 0xe>(vf13, vf1, rx_bc<3>(vf0), acc, hi);
+    vf10 = rx_fmac_t<Op::mul, 0xf>(vf10, vf10, rx_bc<3>(vf2), acc, hi);
+    vf13 = rx_ftoi0_t<0xf>(vf13, vf13);
+    i = 0x3fc00000u;
+    out_a[outs] = vi[3] & 0x3ffu; out_v[outs++] = vf10; vi[3] = static_cast<std::uint16_t>(vi[3] + 1);
+    const bool again = static_cast<std::int16_t>(vi[2]) > 0;
+    out_a[outs] = vi[4] & 0x3ffu; out_v[outs++] = vf13; vi[4] = static_cast<std::uint16_t>(vi[4] + 1);
+    if (refused || outs != 2 || !rx_clean(vorrq_u32(bad, vcgeq_u32(hi, vdupq_n_u32(0x7f800000u))))) return -1;
+    vst1q_u32(s.vf[1].data(), vf1);
+    vst1q_u32(s.vf[2].data(), vf2);
+    vst1q_u32(s.vf[3].data(), vf3);
+    vst1q_u32(s.vf[4].data(), vf4);
+    vst1q_u32(s.vf[5].data(), vf5);
+    vst1q_u32(s.vf[6].data(), vf6);
+    vst1q_u32(s.vf[7].data(), vf7);
+    vst1q_u32(s.vf[8].data(), vf8);
+    vst1q_u32(s.vf[9].data(), vf9);
+    vst1q_u32(s.vf[10].data(), vf10);
+    vst1q_u32(s.vf[11].data(), vf11);
+    vst1q_u32(s.vf[12].data(), vf12);
+    vst1q_u32(s.vf[13].data(), vf13);
+    vst1q_u32(s.vf[14].data(), vf14);
+    vst1q_u32(s.vf[15].data(), vf15);
+    vst1q_u32(s.vf[16].data(), vf16);
+    vst1q_u32(s.vf[17].data(), vf17);
+    vst1q_u32(s.vf[18].data(), vf18);
+    vst1q_u32(s.vf[19].data(), vf19);
+    vst1q_u32(s.vf[20].data(), vf20);
+    vst1q_u32(s.vf[21].data(), vf21);
+    vst1q_u32(s.vf[22].data(), vf22);
+    vst1q_u32(s.vf[23].data(), vf23);
+    vst1q_u32(s.vf[24].data(), vf24);
+    vst1q_u32(s.vf[25].data(), vf25);
+    vst1q_u32(s.vf[26].data(), vf26);
+    vst1q_u32(s.vf[27].data(), vf27);
+    vst1q_u32(s.vf[28].data(), vf28);
+    vst1q_u32(s.vf[29].data(), vf29);
+    vst1q_u32(s.vf[30].data(), vf30);
+    vst1q_u32(s.vf[31].data(), vf31);
+    vst1q_u32(s.acc.data(), acc);
+    s.i = i, s.q = q, s.r = r;
+    s.vi = vi;
+    vst1q_u32(s.data[out_a[0]].data(), out_v[0]);
+    vst1q_u32(s.data[out_a[1]].data(), out_v[1]);
+    return again ? 1 : 0;
+}
+
+// Generated (132vc1 hw5, tools: local regs_gen2.py) from the loop body of program 0x208 above: the iteration with
+// the VU registers in NEON registers, each value tested once. -1: refused (the state is untouched); else the loop
+// branch, the state written.
+OMEGA_PARTICLE_NOINLINE int iteration_regs_208(Vu1State& s) {
+    const uint32x4_t vf0 = {0u, 0u, 0u, 0x3f800000u};
+    uint32x4_t acc = vld1q_u32(s.acc.data());
+    std::uint32_t i = s.i, q = s.q, r = s.r;
+    std::array<std::uint16_t, 16> vi = s.vi;
+    uint32x4_t bad = vdupq_n_u32(0), hi = vdupq_n_u32(0);
+    bool refused = false;
+    std::uint32_t out_a[2];
+    uint32x4_t out_v[2];
+    int outs = 0;
+    (void)vf0;
+    vi[2] = static_cast<std::uint16_t>(vi[2] - 1);
+    uint32x4_t vf29 = vld1q_u32(s.vf[29].data());
+    vf29 = rx_fmac_t<Op::sub, 0xf>(vf29, vf29, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf19 = vld1q_u32(s.vf[19].data());
+    vi[5] = static_cast<std::uint16_t>(vgetq_lane_u32(vf19, 3));
+    uint32x4_t vf24 = vld1q_u32(s.vf[24].data());
+    vi[6] = static_cast<std::uint16_t>(vgetq_lane_u32(vf24, 3));
+    uint32x4_t vf23 = vld1q_u32(s.vf[23].data());
+    uint32x4_t vf30 = vld1q_u32(s.vf[30].data());
+    vf23 = rx_fmac_t<Op::sub, 0xe>(vf23, vf30, vdupq_n_u32(i), acc, hi);
+    vi[6] = static_cast<std::uint16_t>(vgetq_lane_u32(vf24, 3));
+    uint32x4_t vf28 = vld1q_u32(s.vf[28].data());
+    vf28 = rx_fmac_t<Op::sub, 0xf>(vf28, vf28, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf6 = vld1q_u32(s.vf[6].data());
+    acc = rx_fmac_t<Op::mul, 0xf>(acc, vf29, vf6, acc, hi);
+    uint32x4_t vf5 = vld1q_u32(s.vf[5].data());
+    uint32x4_t vf21 = vld1q_u32(s.vf[21].data());
+    vf21 = rx_fmac_t<Op::madd, 0xf>(vf21, vf5, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf15 = vld1q_u32(s.vf[15].data());
+    acc = rx_fmac_t<Op::add, 0x8>(acc, vf15, rx_bc<1>(vf15), acc, hi);
+    uint32x4_t vf22 = vld1q_u32(s.vf[22].data());
+    vf22 = rx_fmac_t<Op::madd, 0x8>(vf22, vf0, rx_bc<2>(vf15), acc, hi);
+    q = rx_div(vgetq_lane_u32(vf0, 3), vgetq_lane_u32(vf22, 0));
+    vf23 = rx_fmac_t<Op::mul, 0xe>(vf23, vf23, vf15, acc, hi);
+    uint32x4_t vf10 = vld1q_u32(s.vf[10].data());
+    vf10 = rx_fmac_t<Op::mul, 0xe>(vf10, vf23, vdupq_n_u32(q), acc, hi);
+    uint32x4_t vf26 = vld1q_u32(s.vf[26].data());
+    vf26 = rx_fmac_t<Op::sub, 0x1>(vf26, vf26, vf0, acc, hi);
+    uint32x4_t vf8 = vld1q_u32(s.vf[8].data());
+    uint32x4_t vf20 = vld1q_u32(s.vf[20].data());
+    vf20 = rx_fmac_t<Op::mul, 0xf>(vf20, vf28, vf8, acc, hi);
+    uint32x4_t vf18 = vld1q_u32(s.vf[18].data());
+    vf22 = rx_fmac_t<Op::mul, 0x1>(vf22, vf18, vf30, acc, hi);
+    uint32x4_t vf1 = vld1q_u32(s.vf[1].data());
+    vf22 = rx_fmac_t<Op::mul, 0x1>(vf22, vf22, vf1, acc, hi);
+    uint32x4_t vf7 = vld1q_u32(s.vf[7].data());
+    vf20 = rx_fmac_t<Op::add, 0xc>(vf20, vf20, vf7, acc, hi);
+    uint32x4_t vf27 = vld1q_u32(s.vf[27].data());
+    vf27 = vextq_u32(vf27, vf27, 1);
+    i = 0x40a00000u;
+    acc = rx_fmac_t<Op::mul, 0xf>(acc, vf27, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf31 = vld1q_u32(s.vf[31].data());
+    vf27 = rx_fmac_t<Op::madd, 0xf>(vf27, vf31, rx_bc<3>(vf0), acc, hi);
+    i = 0x3fc00000u;
+    r = (r ^ vgetq_lane_u32(vf27, 0)) & 0x7fffffu;
+    vf30 = rx_rget<(0x8)>(vf30, r);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x8)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x8)>(vf28, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x8)>(vf27, r);
+    r = (r ^ vgetq_lane_u32(vf27, 1)) & 0x7fffffu;
+    vf29 = rx_rget<(0x4)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x4)>(vf28, r);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x4)>(vf30, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x4)>(vf27, r);
+    r = (r ^ vgetq_lane_u32(vf27, 2)) & 0x7fffffu;
+    vf29 = rx_rget<(0x2)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x2)>(vf28, r);
+    rx_rnext(r);
+    vf30 = rx_rget<(0x2)>(vf30, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x2)>(vf27, r);
+    r = (r ^ vgetq_lane_u32(vf27, 3)) & 0x7fffffu;
+    vf30 = rx_rget<(0x1)>(vf30, r);
+    rx_rnext(r);
+    vf29 = rx_rget<(0x1)>(vf29, r);
+    rx_rnext(r);
+    vf28 = rx_rget<(0x1)>(vf28, r);
+    rx_rnext(r);
+    vf27 = rx_rget<(0x1)>(vf27, r);
+    rx_rnext(r);
+    vf26 = rx_rget<(0x1)>(vf26, r);
+    i = 0x38d1b717u;
+    q = rx_div(vgetq_lane_u32(vf0, 3), vgetq_lane_u32(vf21, 2));
+    uint32x4_t vf4 = vld1q_u32(s.vf[4].data());
+    vf20 = rx_fmac_t<Op::mul, 0x4>(vf20, vf20, vf4, acc, hi);
+    uint32x4_t vf2 = vld1q_u32(s.vf[2].data());
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf2, rx_bc<0>(vf21), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf10, rx_bc<3>(vf0), acc, hi);
+    vf10 = rx_fmac_t<Op::msub, 0xe>(vf10, vf10, rx_bc<0>(vf21), acc, hi);
+    vf10 = rx_fmac_t<Op::mul, 0xe>(vf10, vf10, rx_bc<1>(vf21), acc, hi);
+    uint32x4_t vf25 = vld1q_u32(s.vf[25].data());
+    vf25 = rx_fmac_t<Op::mul, 0xe>(vf25, vf24, rx_bc<1>(vf20), acc, hi);
+    vf10 = rx_fmac_t<Op::add, 0xe>(vf10, vf10, vf25, acc, hi);
+    vf25 = vld1q_u32(s.data[(15) & 0x3ffu].data());
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf10, rx_bc<0>(vf20), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf23, rx_bc<3>(vf0), acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0xe>(vf10, vf25, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf12 = vld1q_u32(s.vf[12].data());
+    vf12 = rx_fmac_t<Op::sub, 0x8>(vf12, vf4, rx_bc<3>(vf21), acc, hi);
+    vf12 = rx_minmax<true, (0x8)>(vf12, vf12, vdupq_n_u32(i), bad);
+    vf12 = rx_minmax<false, (0x8)>(vf12, vf12, rx_bc<2>(vf21), bad);
+    vf12 = rx_fmac_t<Op::add, 0x2>(vf12, vf0, rx_bc<0>(vf12), acc, hi);
+    vf12 = rx_fmac_t<Op::mul, 0xa>(vf12, vf12, vdupq_n_u32(q), acc, hi);
+    vf12 = rx_fmac_t<Op::sub, 0x5>(vf12, vf31, rx_bc<0>(vf12), acc, hi);
+    uint32x4_t vf9 = vld1q_u32(s.vf[9].data());
+    uint32x4_t vf14 = vld1q_u32(s.vf[14].data());
+    vf14 = rx_fmac_t<Op::mul, 0xc>(vf14, vf9, vf12, acc, hi);
+    uint32x4_t vf3 = vld1q_u32(s.vf[3].data());
+    vf14 = rx_minmax<false, (0x1)>(vf14, vf3, rx_bc<0>(vf14), bad);
+    vf14 = rx_fmac_t<Op::mul, 0x4>(vf14, vf14, rx_bc<3>(vf14), acc, hi);
+    vf14 = rx_minmax<false, (0x1)>(vf14, vf14, rx_bc<1>(vf14), bad);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf14, rx_bc<2>(vf20), acc, hi);
+    vf14 = rx_fmac_t<Op::madd, 0x1>(vf14, vf14, vf0, acc, hi);
+    i = 0x437f0000u;
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf14, vdupq_n_u32(i), acc, hi);
+    uint32x4_t vf13 = vld1q_u32(s.vf[13].data());
+    vf13 = rx_fmac_t<Op::msub, 0x1>(vf13, vf14, rx_bc<2>(vf4), acc, hi);
+    uint32x4_t vf11 = vld1q_u32(s.vf[11].data());
+    uint32x4_t vf17 = vld1q_u32(s.vf[17].data());
+    vf17 = rx_fmac_t<Op::mul, 0xf>(vf17, vf11, vf12, acc, hi);
+    vf17 = rx_minmax<false, (0xf)>(vf17, vf17, rx_bc<3>(vf0), bad);
+    acc = rx_fmac_t<Op::mul, 0x3>(acc, vf9, rx_bc<3>(vf0), acc, hi);
+    uint32x4_t vf16 = vld1q_u32(s.vf[16].data());
+    vf16 = rx_fmac_t<Op::msub, 0x3>(vf16, vf9, vf17, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x2>(acc, vf16, rx_bc<3>(vf0), acc, hi);
+    vf16 = rx_fmac_t<Op::madd, 0x2>(vf16, vf17, rx_bc<3>(vf25), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf16, vf0, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x1>(vf10, vf17, rx_bc<2>(vf16), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf10, vf20, acc, hi);
+    vf10 = rx_fmac_t<Op::madd, 0x1>(vf10, vf10, vf0, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0x1>(acc, vf10, vf0, acc, hi);
+    vf10 = rx_fmac_t<Op::msub, 0x1>(vf10, vf10, vf4, acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf3, rx_bc<0>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf18, rx_bc<3>(vf0), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf18, rx_bc<0>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf13, rx_bc<1>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xe>(acc, vf19, rx_bc<3>(vf0), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf19, rx_bc<1>(vf17), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xe>(acc, vf13, rx_bc<3>(vf1), acc, hi);
+    vf13 = rx_fmac_t<Op::msub, 0xe>(vf13, vf13, rx_bc<3>(vf22), acc, hi);
+    vf10 = rx_fmac_t<Op::mul, 0xf>(vf10, vf10, rx_bc<3>(vf2), acc, hi);
+    vf13 = rx_ftoi0_t<0xf>(vf13, vf13);
+    i = 0x3fc00000u;
+    out_a[outs] = vi[3] & 0x3ffu; out_v[outs++] = vf10; vi[3] = static_cast<std::uint16_t>(vi[3] + 1);
+    const bool again = static_cast<std::int16_t>(vi[2]) > 0;
+    out_a[outs] = vi[4] & 0x3ffu; out_v[outs++] = vf13; vi[4] = static_cast<std::uint16_t>(vi[4] + 1);
+    if (refused || outs != 2 || !rx_clean(vorrq_u32(bad, vcgeq_u32(hi, vdupq_n_u32(0x7f800000u))))) return -1;
+    vst1q_u32(s.vf[1].data(), vf1);
+    vst1q_u32(s.vf[2].data(), vf2);
+    vst1q_u32(s.vf[3].data(), vf3);
+    vst1q_u32(s.vf[4].data(), vf4);
+    vst1q_u32(s.vf[5].data(), vf5);
+    vst1q_u32(s.vf[6].data(), vf6);
+    vst1q_u32(s.vf[7].data(), vf7);
+    vst1q_u32(s.vf[8].data(), vf8);
+    vst1q_u32(s.vf[9].data(), vf9);
+    vst1q_u32(s.vf[10].data(), vf10);
+    vst1q_u32(s.vf[11].data(), vf11);
+    vst1q_u32(s.vf[12].data(), vf12);
+    vst1q_u32(s.vf[13].data(), vf13);
+    vst1q_u32(s.vf[14].data(), vf14);
+    vst1q_u32(s.vf[15].data(), vf15);
+    vst1q_u32(s.vf[16].data(), vf16);
+    vst1q_u32(s.vf[17].data(), vf17);
+    vst1q_u32(s.vf[18].data(), vf18);
+    vst1q_u32(s.vf[19].data(), vf19);
+    vst1q_u32(s.vf[20].data(), vf20);
+    vst1q_u32(s.vf[21].data(), vf21);
+    vst1q_u32(s.vf[22].data(), vf22);
+    vst1q_u32(s.vf[23].data(), vf23);
+    vst1q_u32(s.vf[24].data(), vf24);
+    vst1q_u32(s.vf[25].data(), vf25);
+    vst1q_u32(s.vf[26].data(), vf26);
+    vst1q_u32(s.vf[27].data(), vf27);
+    vst1q_u32(s.vf[28].data(), vf28);
+    vst1q_u32(s.vf[29].data(), vf29);
+    vst1q_u32(s.vf[30].data(), vf30);
+    vst1q_u32(s.vf[31].data(), vf31);
+    vst1q_u32(s.acc.data(), acc);
+    s.i = i, s.q = q, s.r = r;
+    s.vi = vi;
+    vst1q_u32(s.data[out_a[0]].data(), out_v[0]);
+    vst1q_u32(s.data[out_a[1]].data(), out_v[1]);
+    return again ? 1 : 0;
+}
+#endif
+#if OMEGA_PARTICLE_NEON
+// 132vc1 hw5 (port-side speed only, research/VITA.md "Render pass on the Vita's cores (132vc1)"; the same bits): one
+// sprite of the sprite programs 0x5e0 / 0x8a0 (run_sprite_program_into's loop body) with the registers in NEON
+// registers. Each FMAC is SpecMachine's arithmetic and its refusal lanes (an operand, the ACC of MADD or a result with
+// exponent 255, in a dest lane) are those of its result alone, as in the register-resident program iterations (an
+// infinity or NaN operand lane always gives an infinity or NaN result lane).
+// False: refused, nothing written (the state, `out`); the caller then runs the sprite on iterate() as before.
+OMEGA_PARTICLE_NOINLINE bool sprite_regs(Vu1State& s, const Qword& position, const Qword& colour, bool flipped,
+                                         std::vector<Qword>& out) {
+    uint32x4_t hi = vdupq_n_u32(0);
+    const uint32x4_t vf0 = {0u, 0u, 0u, 0x3f800000u};
+    const uint32x4_t vf15 = vld1q_u32(position.data()), vf23 = vld1q_u32(colour.data());
+    const uint32x4_t vf1 = vld1q_u32(s.vf[1].data()), vf2 = vld1q_u32(s.vf[2].data()), vf3 = vld1q_u32(s.vf[3].data());
+    const uint32x4_t vf4 = vld1q_u32(s.vf[4].data()), vf5 = vld1q_u32(s.vf[5].data()), vf6 = vld1q_u32(s.vf[6].data());
+    const uint32x4_t vf8 = vld1q_u32(s.vf[8].data()), vf11 = vld1q_u32(s.vf[11].data()), vf12 = vld1q_u32(s.vf[12].data());
+    const uint32x4_t vf30 = vld1q_u32(s.vf[30].data());
+    uint32x4_t vf9 = vld1q_u32(s.vf[9].data()), vf10 = vld1q_u32(s.vf[10].data()), vf16 = vld1q_u32(s.vf[16].data());
+    uint32x4_t vf17 = vld1q_u32(s.vf[17].data()), vf18 = vld1q_u32(s.vf[18].data()), vf19 = vld1q_u32(s.vf[19].data());
+    uint32x4_t vf20 = vld1q_u32(s.vf[20].data()), vf21 = vld1q_u32(s.vf[21].data()), vf22 = vld1q_u32(s.vf[22].data());
+    uint32x4_t vf25 = vld1q_u32(s.vf[25].data()), vf26 = vld1q_u32(s.vf[26].data());
+    uint32x4_t vf13 = vld1q_u32(s.vf[13].data()), vf14 = vld1q_u32(s.vf[14].data());
+    uint32x4_t acc = vld1q_u32(s.acc.data());
+    vf9 = rx_fmac_t<Op::mul, 0xe>(vf9, vf8, rx_bc<3>(vf15), acc, hi);
+    acc = rx_fmac_t<Op::mul, 0xf>(acc, vf1, rx_bc<0>(vf15), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xf>(acc, vf2, rx_bc<1>(vf15), acc, hi);
+    acc = rx_fmac_t<Op::madd, 0xf>(acc, vf3, rx_bc<2>(vf15), acc, hi);
+    vf16 = rx_fmac_t<Op::madd, 0xf>(vf16, vf4, rx_bc<3>(vf0), acc, hi);
+    vf10 = rx_fmac_t<Op::add, 0xe>(vf10, vf9, vf0, acc, hi);
+    // CLIPW.xyz vf16, vf16w: |x| > |w| for x, y or z (daz: a zero exponent is zero, as the flush-to-zero compare reads
+    // it; exponent 255 cannot pass the result test above).
+    const float32x4_t c16 = vreinterpretq_f32_u32(vf16);
+    const uint32x4_t out_of = vcagtq_f32(c16, vdupq_lane_f32(vget_high_f32(c16), 1));
+    const uint32x2_t ox = vorr_u32(vget_low_u32(out_of), vand_u32(vget_high_u32(out_of), uint32x2_t{~0u, 0u}));
+    const bool clipped = vget_lane_u32(vpmax_u32(ox, ox), 0) != 0;
+    const std::uint32_t adc = clipped ? 0xffff8000u : 0x00007fffu;
+    const std::uint32_t q = rx_div(0x3f800000u, vgetq_lane_u32(vf16, 3));
+    const uint32x4_t qv = vdupq_n_u32(q);
+    vf17 = rx_fmac_t<Op::mul, 0xe>(vf17, vf16, vf5, acc, hi);
+    acc = rx_fmac_t<Op::add, 0xe>(acc, vf6, vf0, acc, hi);
+    vf18 = rx_fmac_t<Op::madd, 0xe>(vf18, vf17, qv, acc, hi);
+    vf10 = rx_fmac_t<Op::mul, 0xc>(vf10, vf10, qv, acc, hi);
+    if (flipped) {
+        const uint32x4_t zw = {0u, 0u, 0x3f800000u, 0u};
+        vf13 = rx_write<0x3>(vf13, zw);
+        vf14 = rx_write<0x3>(vf14, zw);
+        vf13 = rx_fmac_t<Op::add, 0xc>(vf13, vf11, vf30, acc, hi);
+        vf14 = rx_fmac_t<Op::add, 0xc>(vf14, vf12, vf30, acc, hi);
+        vf26 = rx_fmac_t<Op::mul, 0xf>(vf26, vf13, qv, acc, hi);
+        vf25 = rx_fmac_t<Op::mul, 0xf>(vf25, vf14, qv, acc, hi);
+    } else {
+        vf25 = rx_fmac_t<Op::mul, 0xf>(vf25, vf11, qv, acc, hi);
+        vf26 = rx_fmac_t<Op::mul, 0xf>(vf26, vf12, qv, acc, hi);
+    }
+    vf19 = rx_fmac_t<Op::sub, 0xe>(vf19, vf18, vf10, acc, hi);
+    vf20 = rx_fmac_t<Op::add, 0xe>(vf20, vf18, vf10, acc, hi);
+    vf21 = vsetq_lane_u32(adc, rx_ftoi0_t<0xe>(vf21, vf19), 3);
+    vf22 = vsetq_lane_u32(adc, rx_ftoi0_t<0xe>(vf22, vf20), 3);
+    if (!rx_clean(vcgeq_u32(hi, vdupq_n_u32(0x7f800000u)))) return false;
+    vst1q_u32(s.vf[9].data(), vf9);
+    vst1q_u32(s.vf[10].data(), vf10);
+    vst1q_u32(s.vf[15].data(), vf15);
+    vst1q_u32(s.vf[16].data(), vf16);
+    vst1q_u32(s.vf[17].data(), vf17);
+    vst1q_u32(s.vf[18].data(), vf18);
+    vst1q_u32(s.vf[19].data(), vf19);
+    vst1q_u32(s.vf[20].data(), vf20);
+    vst1q_u32(s.vf[21].data(), vf21);
+    vst1q_u32(s.vf[22].data(), vf22);
+    vst1q_u32(s.vf[23].data(), vf23);
+    vst1q_u32(s.vf[25].data(), vf25);
+    vst1q_u32(s.vf[26].data(), vf26);
+    vst1q_u32(s.acc.data(), acc);
+    s.q = q;
+    if (flipped) {  // mr32.xyzw vf11 / vf12, as the loop body ends
+        vst1q_u32(s.vf[13].data(), vf13);
+        vst1q_u32(s.vf[14].data(), vf14);
+        vst1q_u32(s.vf[11].data(), vextq_u32(vf11, vf11, 1));
+        vst1q_u32(s.vf[12].data(), vextq_u32(vf12, vf12, 1));
+    }
+    const std::size_t n = out.size();
+    out.resize(n + 6);
+    vst1q_u32(out[n].data(), vf25);
+    vst1q_u32(out[n + 1].data(), vf23);
+    vst1q_u32(out[n + 2].data(), vf21);
+    vst1q_u32(out[n + 3].data(), vf26);
+    vst1q_u32(out[n + 4].data(), vf23);
+    vst1q_u32(out[n + 5].data(), vf22);
+    return true;
+}
+#endif
+
 }  // namespace
+
+std::uint64_t particle_neon_rollbacks() { return g_neon_rollbacks.load(std::memory_order_relaxed); }
+void set_particle_neon_speculation(bool on) { g_speculate.store(on, std::memory_order_relaxed); }
+bool particle_neon_speculation() { return g_speculate.load(std::memory_order_relaxed); }
+void set_particle_neon_registers(bool on) {
+#if OMEGA_PARTICLE_NEON
+    g_regs.store(on, std::memory_order_relaxed);
+#else
+    (void)on;
+#endif
+}
 
 Vu1State& thread_vu1_state() {
     thread_local std::unique_ptr<Vu1State> state;
@@ -439,121 +1581,128 @@ std::uint32_t run_particle_program(Vu1State& vu, std::uint32_t top) {
     P(0x2b8); s.vi[2] = s.vi[9] & s.vi[11];
     P(0x2b9); m.ftoi0(v(20), v(20), Z); s.vi[4] = static_cast<std::uint16_t>(s.vi[3] + s.vi[2]);
     P(0x2ba); m.ftoi0(v(2), v(2), W); s.r = v(27)[0] & 0x7fffffu;  // rinit R, vf27x
-    for (;;) {
-        P(0x2bb); m.div(v(4)[3], v(21)[0]);
-        P(0x2bc); m.fmac(Op::mul, v(28), v(28), v(4), Y | Z); m.write(v(25), v(28), W);
-        P(0x2bd); m.outer(false, acc, v(2), v(9)); m.mtir(5, v(2)[3]);
-        P(0x2be); m.outer(true, v(9), v(9), v(2)); m.mtir(6, v(20)[2]);
-        P(0x2bf); m.fmac(Op::mul, v(21), v(29), v(5), Z | W); s.vi[2] = static_cast<std::uint16_t>(s.vi[2] - 1);
-        P(0x2c0); m.fmac(Op::add, acc, v(0), bc(v(4), 0), X | Y);
-        P(0x2c1); m.fmac(Op::msub, acc, v(31), bc(v(28), 2), X | Y);
-        P(0x2c2); m.fmac(Op::madd, v(12), v(31), Q(), X | Y);
-        P(0x2c3); m.fmac(Op::mul, v(26), v(9), v(9), XYZ); s.i = 0x40a00000u;  // 5.0
-        P(0x2c4); m.fmac(Op::mul, acc, v(27), I(), XYZW);
-        P(0x2c5); m.fmac(Op::madd, v(27), v(31), bc(v(0), 3), XYZW);
-        P(0x2c6); m.ftoi0(v(22), v(12), X | Y);
-        P(0x2c7); m.fmac(Op::add, acc, v(26), bc(v(26), 1), X);
-        P(0x2c8); m.fmac(Op::madd, v(26), v(31), bc(v(26), 2), X);
-        P(0x2c9); m.itof0(v(22), v(22), X | Y); s.i = 0x40400000u;  // 3.0
-        P(0x2ca); m.fmac(Op::mul, acc, v(12), I(), X | Y);
+    // 132vc1: one particle per iteration (iterate: speculatively on the Vita).
+    const auto iteration = [&](auto& x) -> bool {
+        P(0x2bb); x.div(v(4)[3], v(21)[0]);
+        P(0x2bc); x.fmac(Op::mul, v(28), v(28), v(4), Y | Z); x.write(v(25), v(28), W);
+        P(0x2bd); x.outer(false, acc, v(2), v(9)); x.mtir(5, v(2)[3]);
+        P(0x2be); x.outer(true, v(9), v(9), v(2)); x.mtir(6, v(20)[2]);
+        P(0x2bf); x.fmac(Op::mul, v(21), v(29), v(5), Z | W); s.vi[2] = static_cast<std::uint16_t>(s.vi[2] - 1);
+        P(0x2c0); x.fmac(Op::add, acc, v(0), x.bc(v(4), 0), X | Y);
+        P(0x2c1); x.fmac(Op::msub, acc, v(31), x.bc(v(28), 2), X | Y);
+        P(0x2c2); x.fmac(Op::madd, v(12), v(31), Q(), X | Y);
+        P(0x2c3); x.fmac(Op::mul, v(26), v(9), v(9), XYZ); s.i = 0x40a00000u;  // 5.0
+        P(0x2c4); x.fmac(Op::mul, acc, v(27), I(), XYZW);
+        P(0x2c5); x.fmac(Op::madd, v(27), v(31), x.bc(v(0), 3), XYZW);
+        P(0x2c6); x.ftoi0(v(22), v(12), X | Y);
+        P(0x2c7); x.fmac(Op::add, acc, v(26), x.bc(v(26), 1), X);
+        P(0x2c8); x.fmac(Op::madd, v(26), v(31), x.bc(v(26), 2), X);
+        P(0x2c9); x.itof0(v(22), v(22), X | Y); s.i = 0x40400000u;  // 3.0
+        P(0x2ca); x.fmac(Op::mul, acc, v(12), I(), X | Y);
         {
-            const Qword o = v(27);
-            m.write(v(27), Qword{o[1], o[2], o[3], o[0]}, XYZW);  // mr32
+            x.mr32(v(27));  // mr32
         }
-        P(0x2cb); m.fmac(Op::sub, v(29), v(29), bc(v(0), 3), Y); m.rsqrt(v(31)[0], v(26)[0]);
-        P(0x2cc); m.fmac(Op::add, v(18), v(0), bc(v(8), 1), XYZ);
-        P(0x2cd); m.fmac(Op::msub, v(25), v(22), I(), X | Y);
-        P(0x2ce); m.fmac(Op::sub, v(12), v(12), v(22), X | Y);
-        P(0x2cf); m.fmac(Op::mul, v(9), v(11), bc(v(29), 1), W);
-        P(0x2d0); m.fmac(Op::mul, acc, v(18), bc(v(8), 0), XYZ);
-        P(0x2d1); m.ftoi0(v(25), v(25), Y);
-        P(0x2d2); m.fmac(Op::madd, v(18), v(18), bc(v(12), 0), XYZ);
-        P(0x2d3); m.fmac(Op::sub, v(12), v(31), bc(v(28), 1), Y | Z);
-        P(0x2d5); m.mtir(9, v(25)[1]); m.itof0(v(25), v(25), Y);  // the lower reads vf25.y first
-        P(0x2d6); m.fmac(Op::mul, v(18), v(18), bc(v(18), 2), X | Y);
-        P(0x2d8); m.fmac(Op::mul, v(9), v(9), Q(), XYZ); s.i = 0x38d1b717u;  // 1e-4
-        P(0x2d9); m.fmac(Op::sub, v(25), v(25), bc(v(25), 1), X);
+        P(0x2cb); x.fmac(Op::sub, v(29), v(29), x.bc(v(0), 3), Y); x.rsqrt(v(31)[0], v(26)[0]);
+        P(0x2cc); x.fmac(Op::add, v(18), v(0), x.bc(v(8), 1), XYZ);
+        P(0x2cd); x.fmac(Op::msub, v(25), v(22), I(), X | Y);
+        P(0x2ce); x.fmac(Op::sub, v(12), v(12), v(22), X | Y);
+        P(0x2cf); x.fmac(Op::mul, v(9), v(11), x.bc(v(29), 1), W);
+        P(0x2d0); x.fmac(Op::mul, acc, v(18), x.bc(v(8), 0), XYZ);
+        P(0x2d1); x.ftoi0(v(25), v(25), Y);
+        P(0x2d2); x.fmac(Op::madd, v(18), v(18), x.bc(v(12), 0), XYZ);
+        P(0x2d3); x.fmac(Op::sub, v(12), v(31), x.bc(v(28), 1), Y | Z);
+        P(0x2d5); x.mtir(9, v(25)[1]); x.itof0(v(25), v(25), Y);  // the lower reads vf25.y first
+        P(0x2d6); x.fmac(Op::mul, v(18), v(18), x.bc(v(18), 2), X | Y);
+        P(0x2d8); x.fmac(Op::mul, v(9), v(9), Q(), XYZ); s.i = 0x38d1b717u;  // 1e-4
+        P(0x2d9); x.fmac(Op::sub, v(25), v(25), x.bc(v(25), 1), X);
         {
             const std::uint32_t qa = (0x1eu + s.vi[9]) & 0x3ff;
             if (qa < 0x16 || qa > 0x20) fail(0x2d9, "LQ outside the uploaded definition block");
-            m.lq(26, qa);
+            x.lq(26, qa);
         }
-        P(0x2da); m.fmac(Op::mul, v(18), v(18), bc(v(18), 2), X); m.div(v(0)[3], v(12)[1]);
-        P(0x2db); m.fmac(Op::sub, v(22), v(19), bc(v(22), 0), W);
-        P(0x2dc); m.minmax(false, v(12), v(12), bc(v(22), 3), X);
-        P(0x2dd); m.fmac(Op::mul, v(9), v(9), v(1), W);
-        P(0x2e0); m.minmax(true, v(12), v(12), I(), X); m.rxor(v(27)[0]);
-        P(0x2e1); m.rget(27, X);
-        P(0x2e2); m.fmac(Op::mul, acc, v(31), bc(v(26), 0), Y); m.rnext(29, X);
-        P(0x2e3); m.fmac(Op::mul, acc, v(31), bc(v(26), 2), W); m.rnext(28, X);
-        P(0x2e4); m.fmac(Op::madd, v(26), v(26), bc(v(25), 3), Y | W); m.rnext(30, X);
-        P(0x2e5); m.minmax(false, v(12), v(12), bc(v(12), 1), X); m.rxor(v(27)[1]);
-        P(0x2e6); m.fmac(Op::mul, v(22), v(18), v(15), XYZW); m.rget(29, Y);
-        P(0x2e7); m.fmac(Op::mul, v(23), v(18), v(16), XYZW); m.rnext(28, Y);
-        P(0x2e8); m.fmac(Op::add, acc, v(0), bc(v(26), 1), X); m.rnext(27, Y);
-        P(0x2e9); m.fmac(Op::msub, acc, v(25), bc(v(26), 1), X); m.rnext(30, Y);
-        P(0x2ea); m.fmac(Op::madd, v(26), v(25), bc(v(26), 3), X); m.rxor(v(27)[2]);
-        P(0x2eb); m.fmac(Op::add, v(12), v(0), bc(v(12), 0), Z); m.rget(28, Z);
-        P(0x2ec); m.fmac(Op::mul, v(24), v(18), v(17), XYZW); m.rnext(27, Z);
-        P(0x2ed); m.rnext(29, Z);
-        P(0x2ee); m.fmac(Op::mul, v(9), v(9), bc(v(26), 0), XYZ); m.rnext(30, Z);
-        P(0x2ef); m.fmac(Op::mul, v(12), v(12), Q(), X | Z);
-        P(0x2f0); m.fmac(Op::add, acc, v(22), bc(v(22), 1), X); m.rxor(v(27)[3]);
-        P(0x2f1); m.fmac(Op::madd, acc, v(31), bc(v(22), 2), X); m.rget(27, W);
-        P(0x2f2); m.fmac(Op::madd, v(10), v(31), bc(v(22), 3), X); m.rnext(29, W);
-        P(0x2f3); m.fmac(Op::sub, v(12), v(31), bc(v(12), 0), Y | W); m.rnext(28, W);
-        P(0x2f4); m.fmac(Op::mul, v(18), v(7), v(12), XYZW);
-        P(0x2f5); m.fmac(Op::add, acc, v(23), bc(v(23), 0), Y);
-        P(0x2f6); m.fmac(Op::madd, acc, v(31), bc(v(23), 2), Y);
-        P(0x2f7); m.fmac(Op::madd, v(10), v(31), bc(v(23), 3), Y);
-        P(0x2f8); m.fmac(Op::mul, v(14), v(6), v(12), X | Y);
-        P(0x2f9); m.minmax(false, v(18), v(18), bc(v(0), 3), XYZW); m.rnext(30, W);
-        P(0x2fa); m.fmac(Op::add, acc, v(24), bc(v(24), 0), Z);
-        P(0x2fb); m.fmac(Op::madd, acc, v(31), bc(v(24), 1), Z);
-        P(0x2fc); m.fmac(Op::madd, v(10), v(31), bc(v(24), 3), Z); m.lq(26, 15);
-        P(0x2fd); m.fmac(Op::mul, acc, v(6), bc(v(0), 3), Z | W);
-        P(0x2fe); m.fmac(Op::msub, v(22), v(6), v(18), Z | W);
-        P(0x2ff); m.minmax(false, v(14), v(3), bc(v(14), 0), W);
-        P(0x300); m.fmac(Op::add, acc, v(10), v(26), XYZ);
-        P(0x301); m.fmac(Op::madd, v(10), v(31), v(9), XYZ);
-        P(0x302); m.fmac(Op::mul, acc, v(3), bc(v(18), 0), XYZ);
-        P(0x303); m.fmac(Op::madd, acc, v(11), bc(v(0), 3), XYZ);
-        P(0x304); m.fmac(Op::msub, v(13), v(11), bc(v(18), 0), XYZ);
-        P(0x305); m.fmac(Op::mul, v(14), v(14), bc(v(14), 3), Y);
-        P(0x306); m.fmac(Op::mul, acc, v(22), bc(v(0), 3), Z);
-        P(0x307); m.fmac(Op::madd, v(22), v(18), bc(v(26), 3), Z);
-        P(0x308); m.fmac(Op::mul, acc, v(13), bc(v(18), 1), XYZ);
-        P(0x309); m.minmax(false, v(14), v(14), bc(v(14), 1), W);
-        P(0x30a); m.fmac(Op::madd, acc, v(19), bc(v(0), 3), XYZ);
-        P(0x30b); m.fmac(Op::msub, v(13), v(19), bc(v(18), 1), XYZ);
-        P(0x30c); m.fmac(Op::mul, acc, v(22), v(0), W);
-        P(0x30d); m.fmac(Op::madd, v(10), v(18), bc(v(22), 2), W);
-        P(0x30e); m.fmac(Op::mul, acc, v(14), bc(v(21), 2), W);
-        P(0x30f); m.fmac(Op::madd, v(14), v(14), v(0), W);
-        P(0x310); m.fmac(Op::mul, acc, v(13), bc(v(1), 3), XYZ);
-        P(0x311); m.fmac(Op::msub, acc, v(13), bc(v(9), 3), XYZ);
-        P(0x312); m.fmac(Op::madd, v(13), v(1), bc(v(0), 3), XYZ);
-        P(0x313); m.fmac(Op::mul, acc, v(10), v(21), W);
-        P(0x314); m.fmac(Op::madd, v(10), v(10), v(0), W); s.i = 0x437f0000u;  // 255.0
-        P(0x315); m.fmac(Op::mul, acc, v(14), I(), W);
-        P(0x316); m.fmac(Op::msub, v(13), v(14), bc(v(8), 2), W); s.i = 0x3fc00000u;  // 1.5
+        P(0x2da); x.fmac(Op::mul, v(18), v(18), x.bc(v(18), 2), X); x.div(v(0)[3], v(12)[1]);
+        P(0x2db); x.fmac(Op::sub, v(22), v(19), x.bc(v(22), 0), W);
+        P(0x2dc); x.minmax(false, v(12), v(12), x.bc(v(22), 3), X);
+        P(0x2dd); x.fmac(Op::mul, v(9), v(9), v(1), W);
+        P(0x2e0); x.minmax(true, v(12), v(12), I(), X); x.rxor(v(27)[0]);
+        P(0x2e1); x.rget(27, X);
+        P(0x2e2); x.fmac(Op::mul, acc, v(31), x.bc(v(26), 0), Y); x.rnext(29, X);
+        P(0x2e3); x.fmac(Op::mul, acc, v(31), x.bc(v(26), 2), W); x.rnext(28, X);
+        P(0x2e4); x.fmac(Op::madd, v(26), v(26), x.bc(v(25), 3), Y | W); x.rnext(30, X);
+        P(0x2e5); x.minmax(false, v(12), v(12), x.bc(v(12), 1), X); x.rxor(v(27)[1]);
+        P(0x2e6); x.fmac(Op::mul, v(22), v(18), v(15), XYZW); x.rget(29, Y);
+        P(0x2e7); x.fmac(Op::mul, v(23), v(18), v(16), XYZW); x.rnext(28, Y);
+        P(0x2e8); x.fmac(Op::add, acc, v(0), x.bc(v(26), 1), X); x.rnext(27, Y);
+        P(0x2e9); x.fmac(Op::msub, acc, v(25), x.bc(v(26), 1), X); x.rnext(30, Y);
+        P(0x2ea); x.fmac(Op::madd, v(26), v(25), x.bc(v(26), 3), X); x.rxor(v(27)[2]);
+        P(0x2eb); x.fmac(Op::add, v(12), v(0), x.bc(v(12), 0), Z); x.rget(28, Z);
+        P(0x2ec); x.fmac(Op::mul, v(24), v(18), v(17), XYZW); x.rnext(27, Z);
+        P(0x2ed); x.rnext(29, Z);
+        P(0x2ee); x.fmac(Op::mul, v(9), v(9), x.bc(v(26), 0), XYZ); x.rnext(30, Z);
+        P(0x2ef); x.fmac(Op::mul, v(12), v(12), Q(), X | Z);
+        P(0x2f0); x.fmac(Op::add, acc, v(22), x.bc(v(22), 1), X); x.rxor(v(27)[3]);
+        P(0x2f1); x.fmac(Op::madd, acc, v(31), x.bc(v(22), 2), X); x.rget(27, W);
+        P(0x2f2); x.fmac(Op::madd, v(10), v(31), x.bc(v(22), 3), X); x.rnext(29, W);
+        P(0x2f3); x.fmac(Op::sub, v(12), v(31), x.bc(v(12), 0), Y | W); x.rnext(28, W);
+        P(0x2f4); x.fmac(Op::mul, v(18), v(7), v(12), XYZW);
+        P(0x2f5); x.fmac(Op::add, acc, v(23), x.bc(v(23), 0), Y);
+        P(0x2f6); x.fmac(Op::madd, acc, v(31), x.bc(v(23), 2), Y);
+        P(0x2f7); x.fmac(Op::madd, v(10), v(31), x.bc(v(23), 3), Y);
+        P(0x2f8); x.fmac(Op::mul, v(14), v(6), v(12), X | Y);
+        P(0x2f9); x.minmax(false, v(18), v(18), x.bc(v(0), 3), XYZW); x.rnext(30, W);
+        P(0x2fa); x.fmac(Op::add, acc, v(24), x.bc(v(24), 0), Z);
+        P(0x2fb); x.fmac(Op::madd, acc, v(31), x.bc(v(24), 1), Z);
+        P(0x2fc); x.fmac(Op::madd, v(10), v(31), x.bc(v(24), 3), Z); x.lq(26, 15);
+        P(0x2fd); x.fmac(Op::mul, acc, v(6), x.bc(v(0), 3), Z | W);
+        P(0x2fe); x.fmac(Op::msub, v(22), v(6), v(18), Z | W);
+        P(0x2ff); x.minmax(false, v(14), v(3), x.bc(v(14), 0), W);
+        P(0x300); x.fmac(Op::add, acc, v(10), v(26), XYZ);
+        P(0x301); x.fmac(Op::madd, v(10), v(31), v(9), XYZ);
+        P(0x302); x.fmac(Op::mul, acc, v(3), x.bc(v(18), 0), XYZ);
+        P(0x303); x.fmac(Op::madd, acc, v(11), x.bc(v(0), 3), XYZ);
+        P(0x304); x.fmac(Op::msub, v(13), v(11), x.bc(v(18), 0), XYZ);
+        P(0x305); x.fmac(Op::mul, v(14), v(14), x.bc(v(14), 3), Y);
+        P(0x306); x.fmac(Op::mul, acc, v(22), x.bc(v(0), 3), Z);
+        P(0x307); x.fmac(Op::madd, v(22), v(18), x.bc(v(26), 3), Z);
+        P(0x308); x.fmac(Op::mul, acc, v(13), x.bc(v(18), 1), XYZ);
+        P(0x309); x.minmax(false, v(14), v(14), x.bc(v(14), 1), W);
+        P(0x30a); x.fmac(Op::madd, acc, v(19), x.bc(v(0), 3), XYZ);
+        P(0x30b); x.fmac(Op::msub, v(13), v(19), x.bc(v(18), 1), XYZ);
+        P(0x30c); x.fmac(Op::mul, acc, v(22), v(0), W);
+        P(0x30d); x.fmac(Op::madd, v(10), v(18), x.bc(v(22), 2), W);
+        P(0x30e); x.fmac(Op::mul, acc, v(14), x.bc(v(21), 2), W);
+        P(0x30f); x.fmac(Op::madd, v(14), v(14), v(0), W);
+        P(0x310); x.fmac(Op::mul, acc, v(13), x.bc(v(1), 3), XYZ);
+        P(0x311); x.fmac(Op::msub, acc, v(13), x.bc(v(9), 3), XYZ);
+        P(0x312); x.fmac(Op::madd, v(13), v(1), x.bc(v(0), 3), XYZ);
+        P(0x313); x.fmac(Op::mul, acc, v(10), v(21), W);
+        P(0x314); x.fmac(Op::madd, v(10), v(10), v(0), W); s.i = 0x437f0000u;  // 255.0
+        P(0x315); x.fmac(Op::mul, acc, v(14), I(), W);
+        P(0x316); x.fmac(Op::msub, v(13), v(14), x.bc(v(8), 2), W); s.i = 0x3fc00000u;  // 1.5
         P(0x317); s.i = 0x3b7f9724u;
-        P(0x318); m.fmac(Op::mul, v(9), v(1), I(), W);
-        P(0x319); m.fmac(Op::mul, v(13), v(13), bc(v(9), 3), W); s.i = 0x3fc00000u;
-        P(0x31a); m.fmac(Op::sub, v(29), v(29), I(), X | Z | W);
-        P(0x31b); m.minmax(true, v(13), v(13), bc(v(0), 0), W);
-        P(0x31c); m.fmac(Op::mul, acc, v(10), v(0), W);
-        P(0x31d); m.fmac(Op::msub, v(10), v(10), v(8), W);
-        P(0x31e); m.fmac(Op::mul, acc, v(29), bc(v(5), 1), X);
-        P(0x31f); m.ftoi0(v(13), v(13), XYZW);
-        P(0x320); m.fmac(Op::mul, v(10), v(10), bc(v(20), 0), XYZW);
-        P(0x321); m.fmac(Op::madd, v(21), v(5), bc(v(0), 3), X);
-        P(0x322); m.fmac(Op::sub, v(28), v(28), bc(v(0), 3), XYZW); m.sqi(10, 3);
-        P(0x323); m.fmac(Op::sub, v(9), v(30), I(), XYZ);
+        P(0x318); x.fmac(Op::mul, v(9), v(1), I(), W);
+        P(0x319); x.fmac(Op::mul, v(13), v(13), x.bc(v(9), 3), W); s.i = 0x3fc00000u;
+        P(0x31a); x.fmac(Op::sub, v(29), v(29), I(), X | Z | W);
+        P(0x31b); x.minmax(true, v(13), v(13), x.bc(v(0), 0), W);
+        P(0x31c); x.fmac(Op::mul, acc, v(10), v(0), W);
+        P(0x31d); x.fmac(Op::msub, v(10), v(10), v(8), W);
+        P(0x31e); x.fmac(Op::mul, acc, v(29), x.bc(v(5), 1), X);
+        P(0x31f); x.ftoi0(v(13), v(13), XYZW);
+        P(0x320); x.fmac(Op::mul, v(10), v(10), x.bc(v(20), 0), XYZW);
+        P(0x321); x.fmac(Op::madd, v(21), v(5), x.bc(v(0), 3), X);
+        P(0x322); x.fmac(Op::sub, v(28), v(28), x.bc(v(0), 3), XYZW); x.sqi(10, 3);
+        P(0x323); x.fmac(Op::sub, v(9), v(30), I(), XYZ);
         const bool again = static_cast<std::int16_t>(s.vi[2]) > 0;  // ibgtz vi2, 0x2bb
-        P(0x324); m.sqi(13, 4);  // the delay slot
-        if (!again) break;
+        P(0x324); x.sqi(13, 4);  // the delay slot
+        return again;
+    };
+#if OMEGA_PARTICLE_NEON
+    while (step(m, iteration_regs_29c, iteration)) {
     }
+#else
+    while (iterate(m, iteration, true)) {
+    }
+#endif
     if (static_cast<std::int16_t>(s.vi[6]) > 0) return 0x1cc8;
     if (static_cast<std::int16_t>(s.vi[5]) > 0) return 0x8a0;
     return 0x5e0;
@@ -601,114 +1750,121 @@ std::uint32_t run_type0_program(Vu1State& vu, std::uint32_t top) {
     P(0x188); m.fmac(Op::add, v(26), v(27), v(0), W); s.i = 0x3fc00000u;  // 1.5
     P(0x189); m.ftoi0(v(19), v(19), W); m.write(v(28), v(27), XYZW);  // move
     P(0x18a); m.ftoi0(v(24), v(24), W); s.r = v(27)[0] & 0x7fffffu;    // rinit R, vf27x
-    for (;;) {
+    // 132vc1: one particle per iteration (iterate: speculatively on the Vita).
+    const auto iteration = [&](auto& x) -> bool {
         P(0x18b); s.vi[2] = static_cast<std::uint16_t>(s.vi[2] - 1);
-        P(0x18c); m.fmac(Op::sub, v(29), v(29), I(), XYZW); m.mtir(5, v(19)[3]);
-        P(0x18d); m.fmac(Op::sub, v(10), v(30), I(), XYZ); m.mtir(6, v(24)[3]);
-        P(0x18e); m.fmac(Op::sub, v(28), v(28), I(), XYZW);
-        P(0x18f); m.fmac(Op::mul, acc, v(29), v(6), XYZW);
-        P(0x190); m.fmac(Op::madd, v(21), v(5), bc(v(0), 3), XYZW);
-        P(0x191); m.fmac(Op::add, acc, v(0), bc(v(0), 3), X);
-        P(0x192); m.fmac(Op::sub, v(26), v(26), v(0), W);
-        P(0x193); m.fmac(Op::msub, v(22), v(21), v(21), X);
-        P(0x194); m.outer(false, acc, v(2), v(10));
-        P(0x195); m.outer(true, v(10), v(10), v(2));
-        P(0x196); m.fmac(Op::mul, v(20), v(28), v(8), XYZW); m.sqrt(v(22)[0]);
-        P(0x197); m.fmac(Op::mul, v(15), v(10), v(10), XYZ);
-        P(0x198); m.fmac(Op::mul, v(22), v(18), v(30), W);
-        P(0x199); m.fmac(Op::mul, v(23), v(26), v(7), W);
-        P(0x19a); m.fmac(Op::mul, v(22), v(22), v(1), W);
-        P(0x19b); m.fmac(Op::add, acc, v(15), bc(v(15), 1), X);
-        P(0x19c); m.fmac(Op::madd, v(15), v(31), bc(v(15), 2), X);
-        P(0x19d); m.fmac(Op::add, v(22), v(0), Q(), X);
-        P(0x19e); m.fmac(Op::add, v(20), v(20), v(7), X | Y);
-        P(0x19f); m.rsqrt(v(0)[3], v(15)[0]);
+        P(0x18c); x.fmac(Op::sub, v(29), v(29), I(), XYZW); x.mtir(5, v(19)[3]);
+        P(0x18d); x.fmac(Op::sub, v(10), v(30), I(), XYZ); x.mtir(6, v(24)[3]);
+        P(0x18e); x.fmac(Op::sub, v(28), v(28), I(), XYZW);
+        P(0x18f); x.fmac(Op::mul, acc, v(29), v(6), XYZW);
+        P(0x190); x.fmac(Op::madd, v(21), v(5), x.bc(v(0), 3), XYZW);
+        P(0x191); x.fmac(Op::add, acc, v(0), x.bc(v(0), 3), X);
+        P(0x192); x.fmac(Op::sub, v(26), v(26), v(0), W);
+        P(0x193); x.fmac(Op::msub, v(22), v(21), v(21), X);
+        P(0x194); x.outer(false, acc, v(2), v(10));
+        P(0x195); x.outer(true, v(10), v(10), v(2));
+        P(0x196); x.fmac(Op::mul, v(20), v(28), v(8), XYZW); x.sqrt(v(22)[0]);
+        P(0x197); x.fmac(Op::mul, v(15), v(10), v(10), XYZ);
+        P(0x198); x.fmac(Op::mul, v(22), v(18), v(30), W);
+        P(0x199); x.fmac(Op::mul, v(23), v(26), v(7), W);
+        P(0x19a); x.fmac(Op::mul, v(22), v(22), v(1), W);
+        P(0x19b); x.fmac(Op::add, acc, v(15), x.bc(v(15), 1), X);
+        P(0x19c); x.fmac(Op::madd, v(15), v(31), x.bc(v(15), 2), X);
+        P(0x19d); x.fmac(Op::add, v(22), v(0), Q(), X);
+        P(0x19e); x.fmac(Op::add, v(20), v(20), v(7), X | Y);
+        P(0x19f); x.rsqrt(v(0)[3], v(15)[0]);
         {
             P(0x1a0);
-            const Qword o = v(27);
-            m.write(v(27), Qword{o[1], o[2], o[3], o[0]}, XYZW);  // mr32
+            x.mr32(v(27));  // mr32
         }
         P(0x1a1); s.i = 0x40a00000u;  // 5.0
-        P(0x1a2); m.fmac(Op::mul, acc, v(27), I(), XYZW);
-        P(0x1a3); m.fmac(Op::madd, v(27), v(31), bc(v(0), 3), XYZW); s.i = 0x3fc00000u;  // 1.5
-        P(0x1a4); m.rxor(v(27)[0]);
-        P(0x1a5); m.rget(30, X);
-        P(0x1a6); m.rnext(29, X);
-        P(0x1a7); m.rnext(28, X);
-        P(0x1a8); m.rnext(27, X);
-        P(0x1a9); m.rxor(v(27)[1]);
-        P(0x1ab); m.rget(29, Y);
-        P(0x1ac); m.rnext(28, Y);
-        P(0x1ad); m.rnext(30, Y);
-        P(0x1ae); m.rnext(27, Y);
-        P(0x1af); m.rxor(v(27)[2]);
-        P(0x1b1); m.rget(28, Z);
-        P(0x1b2); m.rnext(30, Z);
-        P(0x1b3); m.rnext(29, Z);
-        P(0x1b4); m.rnext(27, Z);
-        P(0x1b6); m.rxor(v(27)[3]);
-        P(0x1b7); m.rget(30, W);
-        P(0x1b8); m.rnext(29, W);
-        P(0x1b9); m.rnext(28, W);
-        P(0x1ba); m.rnext(27, W);
-        P(0x1bb); m.rnext(26, W);
-        P(0x1bc); m.fmac(Op::mul, acc, v(2), bc(v(21), 0), XYZ);  // waitq
-        P(0x1bd); m.fmac(Op::mul, v(10), v(10), Q(), XYZ); s.i = 0x38d1b717u;  // 1e-4
-        P(0x1be); m.fmac(Op::add, v(23), v(23), bc(v(7), 2), W);
-        P(0x1bf); m.div(v(0)[3], v(21)[2]);
-        P(0x1c1); m.fmac(Op::add, v(23), v(10), bc(v(0), 0), XYZ);
-        P(0x1c2); m.fmac(Op::madd, v(10), v(10), bc(v(22), 0), XYZ);
-        P(0x1c3); m.fmac(Op::mul, v(20), v(20), v(4), Y);
-        P(0x1c5); m.fmac(Op::mul, v(10), v(10), bc(v(21), 1), XYZ);
-        P(0x1c6); m.fmac(Op::mul, v(25), v(24), bc(v(20), 1), XYZ);
-        P(0x1c7); m.fmac(Op::add, v(10), v(10), v(25), XYZ);
-        P(0x1c8); m.lq(25, 15);
-        P(0x1cb); m.fmac(Op::mul, acc, v(10), bc(v(20), 0), XYZ);
-        P(0x1cc); m.fmac(Op::madd, acc, v(23), bc(v(23), 3), XYZ);
-        P(0x1cd); m.fmac(Op::madd, v(10), v(25), bc(v(0), 3), XYZ);
-        P(0x1ce); m.fmac(Op::sub, v(12), v(4), bc(v(21), 3), X);
-        P(0x1cf); m.minmax(true, v(12), v(12), I(), X);
-        P(0x1d0); m.minmax(false, v(12), v(12), bc(v(21), 2), X);
-        P(0x1d1); m.fmac(Op::add, v(12), v(0), bc(v(12), 0), Z);
-        P(0x1d3); m.fmac(Op::mul, v(12), v(12), Q(), X | Z);  // after the waitq at 0x1d2
-        P(0x1d4); m.fmac(Op::sub, v(12), v(31), bc(v(12), 0), Y | W);
-        P(0x1d5); m.fmac(Op::mul, v(14), v(9), v(12), X | Y);
-        P(0x1d6); m.minmax(false, v(14), v(3), bc(v(14), 0), W);
-        P(0x1d7); m.fmac(Op::mul, v(14), v(14), bc(v(14), 3), Y);
-        P(0x1d8); m.minmax(false, v(14), v(14), bc(v(14), 1), W);
-        P(0x1d9); m.fmac(Op::mul, acc, v(14), bc(v(20), 2), W);
-        P(0x1da); m.fmac(Op::madd, v(14), v(14), v(0), W); s.i = 0x437f0000u;  // 255.0
-        P(0x1db); m.fmac(Op::mul, acc, v(14), I(), W);
-        P(0x1dc); m.fmac(Op::msub, v(13), v(14), bc(v(4), 2), W);
-        P(0x1dd); m.fmac(Op::mul, v(17), v(11), v(12), XYZW);
-        P(0x1de); m.minmax(false, v(17), v(17), bc(v(0), 3), XYZW);
-        P(0x1df); m.fmac(Op::mul, acc, v(9), bc(v(0), 3), Z | W);
-        P(0x1e0); m.fmac(Op::msub, v(16), v(9), v(17), Z | W);
-        P(0x1e1); m.fmac(Op::mul, acc, v(16), bc(v(0), 3), Z);
-        P(0x1e2); m.fmac(Op::madd, v(16), v(17), bc(v(25), 3), Z);
-        P(0x1e3); m.fmac(Op::mul, acc, v(16), v(0), W);
-        P(0x1e4); m.fmac(Op::madd, v(10), v(17), bc(v(16), 2), W);
-        P(0x1e5); m.fmac(Op::mul, acc, v(10), v(20), W);
-        P(0x1e6); m.fmac(Op::madd, v(10), v(10), v(0), W);
-        P(0x1e7); m.fmac(Op::mul, acc, v(10), v(0), W);
-        P(0x1e8); m.fmac(Op::msub, v(10), v(10), v(4), W);
-        P(0x1e9); m.fmac(Op::mul, acc, v(3), bc(v(17), 0), XYZ);
-        P(0x1ea); m.fmac(Op::madd, acc, v(18), bc(v(0), 3), XYZ);
-        P(0x1eb); m.fmac(Op::msub, v(13), v(18), bc(v(17), 0), XYZ);
-        P(0x1ec); m.fmac(Op::mul, acc, v(13), bc(v(17), 1), XYZ);
-        P(0x1ed); m.fmac(Op::madd, acc, v(19), bc(v(0), 3), XYZ);
-        P(0x1ee); m.fmac(Op::msub, v(13), v(19), bc(v(17), 1), XYZ);
-        P(0x1ef); m.fmac(Op::mul, acc, v(13), bc(v(1), 3), XYZ);
-        P(0x1f0); m.fmac(Op::msub, acc, v(13), bc(v(22), 3), XYZ);
-        P(0x1f1); m.fmac(Op::madd, v(13), v(1), bc(v(0), 3), XYZ);
-        P(0x1f2); m.fmac(Op::mul, v(10), v(10), bc(v(2), 3), XYZW);
-        P(0x1f3); m.ftoi0(v(13), v(13), XYZW);
+        P(0x1a2); x.fmac(Op::mul, acc, v(27), I(), XYZW);
+        P(0x1a3); x.fmac(Op::madd, v(27), v(31), x.bc(v(0), 3), XYZW); s.i = 0x3fc00000u;  // 1.5
+        P(0x1a4); x.rxor(v(27)[0]);
+        P(0x1a5); x.rget(30, X);
+        P(0x1a6); x.rnext(29, X);
+        P(0x1a7); x.rnext(28, X);
+        P(0x1a8); x.rnext(27, X);
+        P(0x1a9); x.rxor(v(27)[1]);
+        P(0x1ab); x.rget(29, Y);
+        P(0x1ac); x.rnext(28, Y);
+        P(0x1ad); x.rnext(30, Y);
+        P(0x1ae); x.rnext(27, Y);
+        P(0x1af); x.rxor(v(27)[2]);
+        P(0x1b1); x.rget(28, Z);
+        P(0x1b2); x.rnext(30, Z);
+        P(0x1b3); x.rnext(29, Z);
+        P(0x1b4); x.rnext(27, Z);
+        P(0x1b6); x.rxor(v(27)[3]);
+        P(0x1b7); x.rget(30, W);
+        P(0x1b8); x.rnext(29, W);
+        P(0x1b9); x.rnext(28, W);
+        P(0x1ba); x.rnext(27, W);
+        P(0x1bb); x.rnext(26, W);
+        P(0x1bc); x.fmac(Op::mul, acc, v(2), x.bc(v(21), 0), XYZ);  // waitq
+        P(0x1bd); x.fmac(Op::mul, v(10), v(10), Q(), XYZ); s.i = 0x38d1b717u;  // 1e-4
+        P(0x1be); x.fmac(Op::add, v(23), v(23), x.bc(v(7), 2), W);
+        P(0x1bf); x.div(v(0)[3], v(21)[2]);
+        P(0x1c1); x.fmac(Op::add, v(23), v(10), x.bc(v(0), 0), XYZ);
+        P(0x1c2); x.fmac(Op::madd, v(10), v(10), x.bc(v(22), 0), XYZ);
+        P(0x1c3); x.fmac(Op::mul, v(20), v(20), v(4), Y);
+        P(0x1c5); x.fmac(Op::mul, v(10), v(10), x.bc(v(21), 1), XYZ);
+        P(0x1c6); x.fmac(Op::mul, v(25), v(24), x.bc(v(20), 1), XYZ);
+        P(0x1c7); x.fmac(Op::add, v(10), v(10), v(25), XYZ);
+        P(0x1c8); x.lq(25, 15);
+        P(0x1cb); x.fmac(Op::mul, acc, v(10), x.bc(v(20), 0), XYZ);
+        P(0x1cc); x.fmac(Op::madd, acc, v(23), x.bc(v(23), 3), XYZ);
+        P(0x1cd); x.fmac(Op::madd, v(10), v(25), x.bc(v(0), 3), XYZ);
+        P(0x1ce); x.fmac(Op::sub, v(12), v(4), x.bc(v(21), 3), X);
+        P(0x1cf); x.minmax(true, v(12), v(12), I(), X);
+        P(0x1d0); x.minmax(false, v(12), v(12), x.bc(v(21), 2), X);
+        P(0x1d1); x.fmac(Op::add, v(12), v(0), x.bc(v(12), 0), Z);
+        P(0x1d3); x.fmac(Op::mul, v(12), v(12), Q(), X | Z);  // after the waitq at 0x1d2
+        P(0x1d4); x.fmac(Op::sub, v(12), v(31), x.bc(v(12), 0), Y | W);
+        P(0x1d5); x.fmac(Op::mul, v(14), v(9), v(12), X | Y);
+        P(0x1d6); x.minmax(false, v(14), v(3), x.bc(v(14), 0), W);
+        P(0x1d7); x.fmac(Op::mul, v(14), v(14), x.bc(v(14), 3), Y);
+        P(0x1d8); x.minmax(false, v(14), v(14), x.bc(v(14), 1), W);
+        P(0x1d9); x.fmac(Op::mul, acc, v(14), x.bc(v(20), 2), W);
+        P(0x1da); x.fmac(Op::madd, v(14), v(14), v(0), W); s.i = 0x437f0000u;  // 255.0
+        P(0x1db); x.fmac(Op::mul, acc, v(14), I(), W);
+        P(0x1dc); x.fmac(Op::msub, v(13), v(14), x.bc(v(4), 2), W);
+        P(0x1dd); x.fmac(Op::mul, v(17), v(11), v(12), XYZW);
+        P(0x1de); x.minmax(false, v(17), v(17), x.bc(v(0), 3), XYZW);
+        P(0x1df); x.fmac(Op::mul, acc, v(9), x.bc(v(0), 3), Z | W);
+        P(0x1e0); x.fmac(Op::msub, v(16), v(9), v(17), Z | W);
+        P(0x1e1); x.fmac(Op::mul, acc, v(16), x.bc(v(0), 3), Z);
+        P(0x1e2); x.fmac(Op::madd, v(16), v(17), x.bc(v(25), 3), Z);
+        P(0x1e3); x.fmac(Op::mul, acc, v(16), v(0), W);
+        P(0x1e4); x.fmac(Op::madd, v(10), v(17), x.bc(v(16), 2), W);
+        P(0x1e5); x.fmac(Op::mul, acc, v(10), v(20), W);
+        P(0x1e6); x.fmac(Op::madd, v(10), v(10), v(0), W);
+        P(0x1e7); x.fmac(Op::mul, acc, v(10), v(0), W);
+        P(0x1e8); x.fmac(Op::msub, v(10), v(10), v(4), W);
+        P(0x1e9); x.fmac(Op::mul, acc, v(3), x.bc(v(17), 0), XYZ);
+        P(0x1ea); x.fmac(Op::madd, acc, v(18), x.bc(v(0), 3), XYZ);
+        P(0x1eb); x.fmac(Op::msub, v(13), v(18), x.bc(v(17), 0), XYZ);
+        P(0x1ec); x.fmac(Op::mul, acc, v(13), x.bc(v(17), 1), XYZ);
+        P(0x1ed); x.fmac(Op::madd, acc, v(19), x.bc(v(0), 3), XYZ);
+        P(0x1ee); x.fmac(Op::msub, v(13), v(19), x.bc(v(17), 1), XYZ);
+        P(0x1ef); x.fmac(Op::mul, acc, v(13), x.bc(v(1), 3), XYZ);
+        P(0x1f0); x.fmac(Op::msub, acc, v(13), x.bc(v(22), 3), XYZ);
+        P(0x1f1); x.fmac(Op::madd, v(13), v(1), x.bc(v(0), 3), XYZ);
+        P(0x1f2); x.fmac(Op::mul, v(10), v(10), x.bc(v(2), 3), XYZW);
+        P(0x1f3); x.ftoi0(v(13), v(13), XYZW);
         P(0x1f4); s.i = 0x3fc00000u;  // 1.5
-        P(0x1f5); m.sqi(10, 3);
+        P(0x1f5); x.sqi(10, 3);
         const bool again = static_cast<std::int16_t>(s.vi[2]) > 0;  // ibgtz vi2, 0x18b
-        P(0x1f7); m.sqi(13, 4);  // the delay slot
-        if (!again) break;
+        P(0x1f7); x.sqi(13, 4);  // the delay slot
+        return again;
+    };
+#if OMEGA_PARTICLE_NEON
+    while (step(m, iteration_regs_170, iteration)) {
     }
+#else
+    while (iterate(m, iteration, true)) {
+    }
+#endif
     // 0x1f8 ibgtz vi6 -> 0x204 b 0x1cc8; 0x1fa ibgtz vi5 -> 0x200 b 0x8a0; 0x1fc b 0x5e0.
     if (static_cast<std::int16_t>(s.vi[6]) > 0) return 0x1cc8;
     if (static_cast<std::int16_t>(s.vi[5]) > 0) return 0x8a0;
@@ -760,108 +1916,115 @@ std::uint32_t run_shatter_program(Vu1State& vu, std::uint32_t top) {
     P(0x221); m.fmac(Op::add, v(26), v(27), v(0), W); s.i = 0x3fc00000u;  // 1.5
     P(0x222); m.ftoi0(v(19), v(19), W); m.write(v(28), v(27), XYZW);  // move
     P(0x223); m.ftoi0(v(24), v(24), W); s.r = v(27)[0] & 0x7fffffu;    // rinit R, vf27x
-    for (;;) {
+    // 132vc1: one particle per iteration (iterate: speculatively on the Vita).
+    const auto iteration = [&](auto& x) -> bool {
         P(0x224); s.vi[2] = static_cast<std::uint16_t>(s.vi[2] - 1);
-        P(0x225); m.fmac(Op::sub, v(29), v(29), I(), XYZW); m.mtir(5, v(19)[3]);
-        P(0x226); m.mtir(6, v(24)[3]);
-        P(0x227); m.fmac(Op::sub, v(23), v(30), I(), XYZ); m.mtir(6, v(24)[3]);
-        P(0x228); m.fmac(Op::sub, v(28), v(28), I(), XYZW);
-        P(0x229); m.fmac(Op::mul, acc, v(29), v(6), XYZW);
-        P(0x22a); m.fmac(Op::madd, v(21), v(5), bc(v(0), 3), XYZW);
-        P(0x22b); m.fmac(Op::add, acc, v(15), bc(v(15), 1), X);
-        P(0x22c); m.fmac(Op::madd, v(22), v(0), bc(v(15), 2), X);
-        P(0x22d); m.div(v(0)[3], v(22)[0]);
-        P(0x22e); m.fmac(Op::mul, v(23), v(23), v(15), XYZ);
-        P(0x230); m.fmac(Op::mul, v(10), v(23), Q(), XYZ);  // after the waitq at 0x22f
-        P(0x231); m.fmac(Op::sub, v(26), v(26), v(0), W);
-        P(0x232); m.fmac(Op::mul, v(20), v(28), v(8), XYZW);
-        P(0x233); m.fmac(Op::mul, v(22), v(18), v(30), W);
-        P(0x234); m.fmac(Op::mul, v(22), v(22), v(1), W);
-        P(0x235); m.fmac(Op::add, v(20), v(20), v(7), X | Y);
+        P(0x225); x.fmac(Op::sub, v(29), v(29), I(), XYZW); x.mtir(5, v(19)[3]);
+        P(0x226); x.mtir(6, v(24)[3]);
+        P(0x227); x.fmac(Op::sub, v(23), v(30), I(), XYZ); x.mtir(6, v(24)[3]);
+        P(0x228); x.fmac(Op::sub, v(28), v(28), I(), XYZW);
+        P(0x229); x.fmac(Op::mul, acc, v(29), v(6), XYZW);
+        P(0x22a); x.fmac(Op::madd, v(21), v(5), x.bc(v(0), 3), XYZW);
+        P(0x22b); x.fmac(Op::add, acc, v(15), x.bc(v(15), 1), X);
+        P(0x22c); x.fmac(Op::madd, v(22), v(0), x.bc(v(15), 2), X);
+        P(0x22d); x.div(v(0)[3], v(22)[0]);
+        P(0x22e); x.fmac(Op::mul, v(23), v(23), v(15), XYZ);
+        P(0x230); x.fmac(Op::mul, v(10), v(23), Q(), XYZ);  // after the waitq at 0x22f
+        P(0x231); x.fmac(Op::sub, v(26), v(26), v(0), W);
+        P(0x232); x.fmac(Op::mul, v(20), v(28), v(8), XYZW);
+        P(0x233); x.fmac(Op::mul, v(22), v(18), v(30), W);
+        P(0x234); x.fmac(Op::mul, v(22), v(22), v(1), W);
+        P(0x235); x.fmac(Op::add, v(20), v(20), v(7), X | Y);
         {
             P(0x236);
-            const Qword o = v(27);
-            m.write(v(27), Qword{o[1], o[2], o[3], o[0]}, XYZW);  // mr32
+            x.mr32(v(27));  // mr32
         }
         P(0x237); s.i = 0x40a00000u;  // 5.0
-        P(0x238); m.fmac(Op::mul, acc, v(27), I(), XYZW);
-        P(0x239); m.fmac(Op::madd, v(27), v(31), bc(v(0), 3), XYZW); s.i = 0x3fc00000u;  // 1.5
-        P(0x23a); m.rxor(v(27)[0]);
-        P(0x23b); m.rget(30, X);
-        P(0x23c); m.rnext(29, X);
-        P(0x23d); m.rnext(28, X);
-        P(0x23e); m.rnext(27, X);
-        P(0x23f); m.rxor(v(27)[1]);
-        P(0x241); m.rget(29, Y);
-        P(0x242); m.rnext(28, Y);
-        P(0x243); m.rnext(30, Y);
-        P(0x244); m.rnext(27, Y);
-        P(0x245); m.rxor(v(27)[2]);
-        P(0x247); m.rget(29, Z);
-        P(0x248); m.rnext(28, Z);
-        P(0x249); m.rnext(30, Z);
-        P(0x24a); m.rnext(27, Z);
-        P(0x24c); m.rxor(v(27)[3]);
-        P(0x24d); m.rget(30, W);
-        P(0x24e); m.rnext(29, W);
-        P(0x24f); m.rnext(28, W);
-        P(0x250); m.rnext(27, W);
-        P(0x251); m.rnext(26, W);
+        P(0x238); x.fmac(Op::mul, acc, v(27), I(), XYZW);
+        P(0x239); x.fmac(Op::madd, v(27), v(31), x.bc(v(0), 3), XYZW); s.i = 0x3fc00000u;  // 1.5
+        P(0x23a); x.rxor(v(27)[0]);
+        P(0x23b); x.rget(30, X);
+        P(0x23c); x.rnext(29, X);
+        P(0x23d); x.rnext(28, X);
+        P(0x23e); x.rnext(27, X);
+        P(0x23f); x.rxor(v(27)[1]);
+        P(0x241); x.rget(29, Y);
+        P(0x242); x.rnext(28, Y);
+        P(0x243); x.rnext(30, Y);
+        P(0x244); x.rnext(27, Y);
+        P(0x245); x.rxor(v(27)[2]);
+        P(0x247); x.rget(29, Z);
+        P(0x248); x.rnext(28, Z);
+        P(0x249); x.rnext(30, Z);
+        P(0x24a); x.rnext(27, Z);
+        P(0x24c); x.rxor(v(27)[3]);
+        P(0x24d); x.rget(30, W);
+        P(0x24e); x.rnext(29, W);
+        P(0x24f); x.rnext(28, W);
+        P(0x250); x.rnext(27, W);
+        P(0x251); x.rnext(26, W);
         P(0x252); s.i = 0x38d1b717u;  // 1e-4
-        P(0x253); m.div(v(0)[3], v(21)[2]);
-        P(0x255); m.fmac(Op::mul, v(20), v(20), v(4), Y);
-        P(0x257); m.fmac(Op::mul, acc, v(2), bc(v(21), 0), XYZ);
-        P(0x258); m.fmac(Op::madd, acc, v(10), bc(v(0), 3), XYZ);
-        P(0x259); m.fmac(Op::msub, v(10), v(10), bc(v(21), 0), XYZ);
-        P(0x25a); m.fmac(Op::mul, v(10), v(10), bc(v(21), 1), XYZ);
-        P(0x25b); m.fmac(Op::mul, v(25), v(24), bc(v(20), 1), XYZ);
-        P(0x25c); m.fmac(Op::add, v(10), v(10), v(25), XYZ);
-        P(0x25d); m.lq(25, 15);
-        P(0x260); m.fmac(Op::mul, acc, v(10), bc(v(20), 0), XYZ);
-        P(0x261); m.fmac(Op::madd, acc, v(23), bc(v(0), 3), XYZ);
-        P(0x262); m.fmac(Op::madd, v(10), v(25), bc(v(0), 3), XYZ);
-        P(0x263); m.fmac(Op::sub, v(12), v(4), bc(v(21), 3), X);
-        P(0x264); m.minmax(true, v(12), v(12), I(), X);
-        P(0x265); m.minmax(false, v(12), v(12), bc(v(21), 2), X);
-        P(0x266); m.fmac(Op::add, v(12), v(0), bc(v(12), 0), Z);
-        P(0x268); m.fmac(Op::mul, v(12), v(12), Q(), X | Z);  // after the waitq at 0x267
-        P(0x269); m.fmac(Op::sub, v(12), v(31), bc(v(12), 0), Y | W);
-        P(0x26a); m.fmac(Op::mul, v(14), v(9), v(12), X | Y);
-        P(0x26b); m.minmax(false, v(14), v(3), bc(v(14), 0), W);
-        P(0x26c); m.fmac(Op::mul, v(14), v(14), bc(v(14), 3), Y);
-        P(0x26d); m.minmax(false, v(14), v(14), bc(v(14), 1), W);
-        P(0x26e); m.fmac(Op::mul, acc, v(14), bc(v(20), 2), W);
-        P(0x26f); m.fmac(Op::madd, v(14), v(14), v(0), W); s.i = 0x437f0000u;  // 255.0
-        P(0x270); m.fmac(Op::mul, acc, v(14), I(), W);
-        P(0x271); m.fmac(Op::msub, v(13), v(14), bc(v(4), 2), W);
-        P(0x272); m.fmac(Op::mul, v(17), v(11), v(12), XYZW);
-        P(0x273); m.minmax(false, v(17), v(17), bc(v(0), 3), XYZW);
-        P(0x274); m.fmac(Op::mul, acc, v(9), bc(v(0), 3), Z | W);
-        P(0x275); m.fmac(Op::msub, v(16), v(9), v(17), Z | W);
-        P(0x276); m.fmac(Op::mul, acc, v(16), bc(v(0), 3), Z);
-        P(0x277); m.fmac(Op::madd, v(16), v(17), bc(v(25), 3), Z);
-        P(0x278); m.fmac(Op::mul, acc, v(16), v(0), W);
-        P(0x279); m.fmac(Op::madd, v(10), v(17), bc(v(16), 2), W);
-        P(0x27a); m.fmac(Op::mul, acc, v(10), v(20), W);
-        P(0x27b); m.fmac(Op::madd, v(10), v(10), v(0), W);
-        P(0x27c); m.fmac(Op::mul, acc, v(10), v(0), W);
-        P(0x27d); m.fmac(Op::msub, v(10), v(10), v(4), W);
-        P(0x27e); m.fmac(Op::mul, acc, v(3), bc(v(17), 0), XYZ);
-        P(0x27f); m.fmac(Op::madd, acc, v(18), bc(v(0), 3), XYZ);
-        P(0x280); m.fmac(Op::msub, v(13), v(18), bc(v(17), 0), XYZ);
-        P(0x281); m.fmac(Op::mul, acc, v(13), bc(v(17), 1), XYZ);
-        P(0x282); m.fmac(Op::madd, acc, v(19), bc(v(0), 3), XYZ);
-        P(0x283); m.fmac(Op::msub, v(13), v(19), bc(v(17), 1), XYZ);
-        P(0x284); m.fmac(Op::mul, acc, v(13), bc(v(1), 3), XYZ);
-        P(0x285); m.fmac(Op::msub, v(13), v(13), bc(v(22), 3), XYZ);
-        P(0x286); m.fmac(Op::mul, v(10), v(10), bc(v(2), 3), XYZW);
-        P(0x287); m.ftoi0(v(13), v(13), XYZW);
+        P(0x253); x.div(v(0)[3], v(21)[2]);
+        P(0x255); x.fmac(Op::mul, v(20), v(20), v(4), Y);
+        P(0x257); x.fmac(Op::mul, acc, v(2), x.bc(v(21), 0), XYZ);
+        P(0x258); x.fmac(Op::madd, acc, v(10), x.bc(v(0), 3), XYZ);
+        P(0x259); x.fmac(Op::msub, v(10), v(10), x.bc(v(21), 0), XYZ);
+        P(0x25a); x.fmac(Op::mul, v(10), v(10), x.bc(v(21), 1), XYZ);
+        P(0x25b); x.fmac(Op::mul, v(25), v(24), x.bc(v(20), 1), XYZ);
+        P(0x25c); x.fmac(Op::add, v(10), v(10), v(25), XYZ);
+        P(0x25d); x.lq(25, 15);
+        P(0x260); x.fmac(Op::mul, acc, v(10), x.bc(v(20), 0), XYZ);
+        P(0x261); x.fmac(Op::madd, acc, v(23), x.bc(v(0), 3), XYZ);
+        P(0x262); x.fmac(Op::madd, v(10), v(25), x.bc(v(0), 3), XYZ);
+        P(0x263); x.fmac(Op::sub, v(12), v(4), x.bc(v(21), 3), X);
+        P(0x264); x.minmax(true, v(12), v(12), I(), X);
+        P(0x265); x.minmax(false, v(12), v(12), x.bc(v(21), 2), X);
+        P(0x266); x.fmac(Op::add, v(12), v(0), x.bc(v(12), 0), Z);
+        P(0x268); x.fmac(Op::mul, v(12), v(12), Q(), X | Z);  // after the waitq at 0x267
+        P(0x269); x.fmac(Op::sub, v(12), v(31), x.bc(v(12), 0), Y | W);
+        P(0x26a); x.fmac(Op::mul, v(14), v(9), v(12), X | Y);
+        P(0x26b); x.minmax(false, v(14), v(3), x.bc(v(14), 0), W);
+        P(0x26c); x.fmac(Op::mul, v(14), v(14), x.bc(v(14), 3), Y);
+        P(0x26d); x.minmax(false, v(14), v(14), x.bc(v(14), 1), W);
+        P(0x26e); x.fmac(Op::mul, acc, v(14), x.bc(v(20), 2), W);
+        P(0x26f); x.fmac(Op::madd, v(14), v(14), v(0), W); s.i = 0x437f0000u;  // 255.0
+        P(0x270); x.fmac(Op::mul, acc, v(14), I(), W);
+        P(0x271); x.fmac(Op::msub, v(13), v(14), x.bc(v(4), 2), W);
+        P(0x272); x.fmac(Op::mul, v(17), v(11), v(12), XYZW);
+        P(0x273); x.minmax(false, v(17), v(17), x.bc(v(0), 3), XYZW);
+        P(0x274); x.fmac(Op::mul, acc, v(9), x.bc(v(0), 3), Z | W);
+        P(0x275); x.fmac(Op::msub, v(16), v(9), v(17), Z | W);
+        P(0x276); x.fmac(Op::mul, acc, v(16), x.bc(v(0), 3), Z);
+        P(0x277); x.fmac(Op::madd, v(16), v(17), x.bc(v(25), 3), Z);
+        P(0x278); x.fmac(Op::mul, acc, v(16), v(0), W);
+        P(0x279); x.fmac(Op::madd, v(10), v(17), x.bc(v(16), 2), W);
+        P(0x27a); x.fmac(Op::mul, acc, v(10), v(20), W);
+        P(0x27b); x.fmac(Op::madd, v(10), v(10), v(0), W);
+        P(0x27c); x.fmac(Op::mul, acc, v(10), v(0), W);
+        P(0x27d); x.fmac(Op::msub, v(10), v(10), v(4), W);
+        P(0x27e); x.fmac(Op::mul, acc, v(3), x.bc(v(17), 0), XYZ);
+        P(0x27f); x.fmac(Op::madd, acc, v(18), x.bc(v(0), 3), XYZ);
+        P(0x280); x.fmac(Op::msub, v(13), v(18), x.bc(v(17), 0), XYZ);
+        P(0x281); x.fmac(Op::mul, acc, v(13), x.bc(v(17), 1), XYZ);
+        P(0x282); x.fmac(Op::madd, acc, v(19), x.bc(v(0), 3), XYZ);
+        P(0x283); x.fmac(Op::msub, v(13), v(19), x.bc(v(17), 1), XYZ);
+        P(0x284); x.fmac(Op::mul, acc, v(13), x.bc(v(1), 3), XYZ);
+        P(0x285); x.fmac(Op::msub, v(13), v(13), x.bc(v(22), 3), XYZ);
+        P(0x286); x.fmac(Op::mul, v(10), v(10), x.bc(v(2), 3), XYZW);
+        P(0x287); x.ftoi0(v(13), v(13), XYZW);
         P(0x288); s.i = 0x3fc00000u;  // 1.5
-        P(0x289); m.sqi(10, 3);
+        P(0x289); x.sqi(10, 3);
         const bool again = static_cast<std::int16_t>(s.vi[2]) > 0;  // ibgtz vi2, 0x224
-        P(0x28b); m.sqi(13, 4);  // the delay slot
-        if (!again) break;
+        P(0x28b); x.sqi(13, 4);  // the delay slot
+        return again;
+    };
+#if OMEGA_PARTICLE_NEON
+    while (step(m, iteration_regs_208, iteration)) {
     }
+#else
+    while (iterate(m, iteration, true)) {
+    }
+#endif
     // 0x28c ibgtz vi6 -> 0x298 b 0x19a8; 0x28e ibgtz vi5 -> 0x294 b 0x8a0; 0x290 b 0x5e0.
     if (static_cast<std::int16_t>(s.vi[6]) > 0) return 0x19a8;
     if (static_cast<std::int16_t>(s.vi[5]) > 0) return 0x8a0;
@@ -880,24 +2043,40 @@ std::uint32_t cull_batch(const Qword& bound_min, const Qword& bound_max, const s
     static constexpr int corners[8][3] = {{10, 10, 10}, {11, 11, 11}, {10, 10, 11}, {10, 11, 10},
                                           {10, 11, 11}, {11, 10, 10}, {11, 10, 11}, {11, 11, 10}};
     std::uint32_t all = 0x3f, any = 0, below = 0;
-    for (int c = 0; c < 8; ++c) {
-        g_pair = 0x3b + 5 * c;
-        Qword clip{};
-        m.fmac(Op::mul, s.acc, s.vf[1], bc(s.vf[corners[c][0]], 0), XYZW);
-        m.fmac(Op::madd, s.acc, s.vf[2], bc(s.vf[corners[c][1]], 1), XYZW);
-        m.fmac(Op::madd, s.acc, s.vf[3], bc(s.vf[corners[c][2]], 2), XYZW);
-        m.fmac(Op::madd, clip, s.vf[4], bc(s.vf[0], 3), XYZW);
-        const double w = std::fabs(daz(clip[3]));
-        std::uint32_t j = 0;
-        for (int a = 0; a < 3; ++a) {
-            const double x = daz(clip[a]);
-            if (x > w) j |= 1u << (2 * a);
-            if (x < -w) j |= 2u << (2 * a);
+    // 132vc1: the corners speculatively on the Vita (they write only the ACC, read before written).
+    const auto clip_corners = [&](auto& x) {
+        all = 0x3f, any = 0, below = 0;
+        for (int c = 0; c < 8; ++c) {
+            g_pair = 0x3b + 5 * c;
+            Qword clip{};
+            x.fmac(Op::mul, s.acc, s.vf[1], x.bc(s.vf[corners[c][0]], 0), XYZW);
+            x.fmac(Op::madd, s.acc, s.vf[2], x.bc(s.vf[corners[c][1]], 1), XYZW);
+            x.fmac(Op::madd, s.acc, s.vf[3], x.bc(s.vf[corners[c][2]], 2), XYZW);
+            x.fmac(Op::madd, clip, s.vf[4], x.bc(s.vf[0], 3), XYZW);
+            const double w = std::fabs(daz(clip[3]));
+            std::uint32_t j = 0;
+            for (int a = 0; a < 3; ++a) {
+                const double x = daz(clip[a]);
+                if (x > w) j |= 1u << (2 * a);
+                if (x < -w) j |= 2u << (2 * a);
+            }
+            all &= j;  // iand vi3, vi3, vi1 (fcget)
+            any |= j;  // ior vi5, vi5, vi1
+            below += (j & 0x20) ? 1 : 0;  // fcand vi1, 0x20; iadd vi4, vi4, vi1
         }
-        all &= j;  // iand vi3, vi3, vi1 (fcget)
-        any |= j;  // ior vi5, vi5, vi1
-        below += (j & 0x20) ? 1 : 0;  // fcand vi1, 0x20; iadd vi4, vi4, vi1
+    };
+#if OMEGA_PARTICLE_NEON && !OMEGA_PARTICLE_NEON_CHECK
+    bool done = false;
+    if (m.neon && g_speculate.load(std::memory_order_relaxed)) {
+        SpecMachine x{{s, true}};
+        clip_corners(x);
+        done = x.clean();
+        if (!done) g_neon_rollbacks.fetch_add(1, std::memory_order_relaxed);
     }
+    if (!done) clip_corners(m);
+#else
+    clip_corners(m);
+#endif
     if (all & 0x3f) return 0;  // pair 0x70: iblez vi3 accepts only vi3 = 0
     return below ? 3 : (any & 0x3f) ? 2 : 1;
 }
@@ -910,6 +2089,13 @@ Qword sprite_scale_qword(const float (&projection)[16], float a, float b) {
 
 std::vector<Qword> run_sprite_program(std::uint32_t stop, const std::vector<Qword>& position,
                                       const std::vector<Qword>& colour, const SpriteFrame& frame) {
+    std::vector<Qword> out;
+    run_sprite_program_into(out, stop, position, colour, frame);
+    return out;
+}
+
+void run_sprite_program_into(std::vector<Qword>& out, std::uint32_t stop, const std::vector<Qword>& position,
+                             const std::vector<Qword>& colour, const SpriteFrame& frame) {
     if (stop != 0x5e0 && stop != 0x8a0) fail(stop / 8, "a sprite program other than 0x5e0 / 0x8a0");
     if (position.size() != colour.size()) throw std::runtime_error("VU1 sprite program: position/colour counts differ");
     const bool flipped = stop == 0x8a0;
@@ -944,54 +2130,75 @@ std::vector<Qword> run_sprite_program(std::uint32_t stop, const std::vector<Qwor
     }
     s.i = 0xbf800000u;  // loi -1.0
     P(flipped ? 0x123 : 0xc9); m.fmac(Op::mul, v(8), v(8), imm(s.i), Y);
-    std::vector<Qword> out;
+    out.clear();
     out.reserve(position.size() * 6);
     for (std::size_t k = 0; k < position.size(); ++k) {
-        v(15) = position[k];
-        v(23) = colour[k];
-        P(flipped ? 0x128 : 0xce); m.fmac(Op::mul, v(9), v(8), bc(v(15), 3), XYZ);
-        m.fmac(Op::mul, acc, v(1), bc(v(15), 0), XYZW);
-        m.fmac(Op::madd, acc, v(2), bc(v(15), 1), XYZW);
-        m.fmac(Op::madd, acc, v(3), bc(v(15), 2), XYZW);
-        m.fmac(Op::madd, v(16), v(4), bc(v(0), 3), XYZW);
-        m.fmac(Op::add, v(10), v(9), v(0), XYZ);
-        // CLIPW.xyz vf16, vf16w; FCAND vi1, 0x3f; IADD vi9, vi1, vi10 (0x7fff).
-        const double w = std::fabs(daz(v(16)[3]));
-        bool clipped = false;
-        for (int c = 0; c < 3; ++c) {
-            const double x = daz(v(16)[c]);
-            clipped = clipped || x > w || x < -w;
+        // 132vc1: one sprite per iteration (iterate: speculatively on the Vita).
+        const auto particle = [&](auto& x) -> bool {
+            v(15) = position[k];
+            v(23) = colour[k];
+            P(flipped ? 0x128 : 0xce); x.fmac(Op::mul, v(9), v(8), x.bc(v(15), 3), XYZ);
+            x.fmac(Op::mul, acc, v(1), x.bc(v(15), 0), XYZW);
+            x.fmac(Op::madd, acc, v(2), x.bc(v(15), 1), XYZW);
+            x.fmac(Op::madd, acc, v(3), x.bc(v(15), 2), XYZW);
+            x.fmac(Op::madd, v(16), v(4), x.bc(v(0), 3), XYZW);
+            x.fmac(Op::add, v(10), v(9), v(0), XYZ);
+            // CLIPW.xyz vf16, vf16w; FCAND vi1, 0x3f; IADD vi9, vi1, vi10 (0x7fff).
+            const double w = std::fabs(daz(v(16)[3]));
+            bool clipped = false;
+            for (int c = 0; c < 3; ++c) {
+                const double x = daz(v(16)[c]);
+                clipped = clipped || x > w || x < -w;
+            }
+            const std::uint32_t adc = clipped ? 0xffff8000u : 0x00007fffu;  // MFIR sign-extends vi9
+            x.div(v(0)[3], v(16)[3]);
+            x.fmac(Op::mul, v(17), v(16), v(5), XYZ);
+            x.fmac(Op::add, acc, v(6), v(0), XYZ);
+            x.fmac(Op::madd, v(18), v(17), imm(s.q), XYZ);
+            x.fmac(Op::mul, v(10), v(10), imm(s.q), X | Y);
+            if (flipped) {
+                P(0x138); x.write(v(13), {0, 0, 0x3f800000u, 0}, Z | W);  // mr32.zw vf13, vf0
+                x.write(v(14), {0, 0, 0x3f800000u, 0}, Z | W);
+                x.fmac(Op::add, v(13), v(11), v(30), X | Y);
+                x.fmac(Op::add, v(14), v(12), v(30), X | Y);
+                x.fmac(Op::mul, v(26), v(13), imm(s.q), XYZW);
+                x.fmac(Op::mul, v(25), v(14), imm(s.q), XYZW);
+            } else {
+                x.fmac(Op::mul, v(25), v(11), imm(s.q), XYZW);
+                x.fmac(Op::mul, v(26), v(12), imm(s.q), XYZW);
+            }
+            x.fmac(Op::sub, v(19), v(18), v(10), XYZ);
+            x.fmac(Op::add, v(20), v(18), v(10), XYZ);
+            x.ftoi0(v(21), v(19), XYZ);
+            x.ftoi0(v(22), v(20), XYZ);
+            v(21)[3] = adc;
+            v(22)[3] = adc;
+            for (int r : {25, 23, 21, 26, 23, 22}) out.push_back(v(r));
+            if (flipped) {  // mr32.xyzw vf11 / vf12 (x <- y, y <- z, z <- w, w <- x)
+                P(0x140); v(11) = {v(11)[1], v(11)[2], v(11)[3], v(11)[0]};
+                P(0x144); v(12) = {v(12)[1], v(12)[2], v(12)[3], v(12)[0]};
+            }
+            return true;
+        };
+#if OMEGA_PARTICLE_NEON
+        // 132vc1 hw5: the register-resident sprite first (refused: the sprite on iterate() as before). The check build
+        // runs both and compares the state and the output whenever the register-resident sprite was taken.
+        if (m.neon && g_speculate.load(std::memory_order_relaxed) && g_regs.load(std::memory_order_relaxed)) {
+#if OMEGA_PARTICLE_NEON_CHECK
+            auto copy = std::make_unique<Vu1State>(s);
+            std::vector<Qword> regs_out = out;
+            const bool took = sprite_regs(*copy, position[k], colour[k], flipped, regs_out);
+            iterate(m, particle, false, &out);
+            if (took && (std::memcmp(copy.get(), &s, sizeof s) != 0 || regs_out != out))
+                spec_mismatch("a register-resident sprite");
+            continue;
+#else
+            if (sprite_regs(s, position[k], colour[k], flipped, out)) continue;
+#endif
         }
-        const std::uint32_t adc = clipped ? 0xffff8000u : 0x00007fffu;  // MFIR sign-extends vi9
-        m.div(v(0)[3], v(16)[3]);
-        m.fmac(Op::mul, v(17), v(16), v(5), XYZ);
-        m.fmac(Op::add, acc, v(6), v(0), XYZ);
-        m.fmac(Op::madd, v(18), v(17), imm(s.q), XYZ);
-        m.fmac(Op::mul, v(10), v(10), imm(s.q), X | Y);
-        if (flipped) {
-            P(0x138); m.write(v(13), {0, 0, 0x3f800000u, 0}, Z | W);  // mr32.zw vf13, vf0
-            m.write(v(14), {0, 0, 0x3f800000u, 0}, Z | W);
-            m.fmac(Op::add, v(13), v(11), v(30), X | Y);
-            m.fmac(Op::add, v(14), v(12), v(30), X | Y);
-            m.fmac(Op::mul, v(26), v(13), imm(s.q), XYZW);
-            m.fmac(Op::mul, v(25), v(14), imm(s.q), XYZW);
-        } else {
-            m.fmac(Op::mul, v(25), v(11), imm(s.q), XYZW);
-            m.fmac(Op::mul, v(26), v(12), imm(s.q), XYZW);
-        }
-        m.fmac(Op::sub, v(19), v(18), v(10), XYZ);
-        m.fmac(Op::add, v(20), v(18), v(10), XYZ);
-        m.ftoi0(v(21), v(19), XYZ);
-        m.ftoi0(v(22), v(20), XYZ);
-        v(21)[3] = adc;
-        v(22)[3] = adc;
-        for (int r : {25, 23, 21, 26, 23, 22}) out.push_back(v(r));
-        if (flipped) {  // mr32.xyzw vf11 / vf12 (x <- y, y <- z, z <- w, w <- x)
-            P(0x140); v(11) = {v(11)[1], v(11)[2], v(11)[3], v(11)[0]};
-            P(0x144); v(12) = {v(12)[1], v(12)[2], v(12)[3], v(12)[0]};
-        }
+#endif
+        iterate(m, particle, false, &out);
     }
-    return out;
 }
 
 Qword heat_haze_clip_qword(float a, float b) {
@@ -1007,6 +2214,13 @@ Qword heat_haze_uv_qword(std::int32_t width, std::int32_t height) {
 
 std::vector<Qword> run_heat_haze_program(const std::vector<Qword>& position, const std::vector<Qword>& colour,
                                          const SpriteFrame& frame, const Qword& tag) {
+    std::vector<Qword> out;
+    run_heat_haze_program_into(out, position, colour, frame, tag);
+    return out;
+}
+
+void run_heat_haze_program_into(std::vector<Qword>& out, const std::vector<Qword>& position,
+                                const std::vector<Qword>& colour, const SpriteFrame& frame, const Qword& tag) {
     if (position.size() != colour.size()) throw std::runtime_error("VU1 heat-haze program: position/colour counts differ");
     Vu1State& state = thread_vu1_state();
     Machine m{state};
@@ -1048,59 +2262,64 @@ std::vector<Qword> run_heat_haze_program(const std::vector<Qword>& position, con
     v(30) = {v(30)[1], v(30)[2], v(30)[3], v(30)[0]};  // mr32 vf30, vf30
     P(0x3b2); m.ftoi0(v(30), v(7), Z | W);
     s.i = 0x3c800000u;        // loi 1 / 64
-    std::vector<Qword> out;
+    out.clear();
     out.reserve(position.size() * 14);
     // The clip-flag register (fcset 0 in the setup): CLIPW shifts a six-bit
     // judgment in per particle; FCAND 0x3ffff reads this one and the two before.
-    std::uint32_t clip_flags = 0;
+    std::uint32_t clip_flags = 0, next_flags = 0;
     for (std::size_t k = 0; k < position.size(); ++k) {
-        v(15) = position[k];
-        v(23) = colour[k];
-        P(0x3b7); m.fmac(Op::mul, acc, v(1), bc(v(15), 0), XYZW);
-        m.fmac(Op::madd, acc, v(2), bc(v(15), 1), XYZW);
-        m.fmac(Op::madd, acc, v(3), bc(v(15), 2), XYZW);
-        m.fmac(Op::madd, v(16), v(4), bc(v(0), 3), XYZW);
-        P(0x3bb); m.fmac(Op::mul, v(7), v(27), bc(v(15), 3), X | Y);
-        P(0x3bc); m.fmac(Op::mul, v(8), v(28), bc(v(15), 3), X | Y);
-        P(0x3bf);
-        const double w = std::fabs(daz(v(16)[3]));
-        std::uint32_t j = 0;
-        for (int c = 0; c < 3; ++c) {
-            const double x = daz(v(16)[c]);
-            if (x > w) j |= 1u << (2 * c);
-            if (x < -w) j |= 2u << (2 * c);
-        }
-        m.div(v(0)[3], v(16)[3]);
-        P(0x3c0); m.fmac(Op::mul, v(17), v(16), v(5), XYZ);
-        P(0x3c1); m.fmac(Op::mul, v(13), v(16), v(10), X | Y);
-        const std::uint32_t flags = ((clip_flags << 6) | j) & 0xffffffu;
-        // FCAND vi1, 0x3ffff; IADD vi1, vi1, vi10 (0x7fff); MFIR sign-extends.
-        const std::uint32_t adc = (flags & 0x3ffffu) ? 0xffff8000u : 0x00007fffu;
-        P(0x3c5); m.fmac(Op::add, acc, v(6), v(0), XYZ);
-        P(0x3c6); m.fmac(Op::madd, v(18), v(17), imm(s.q), XYZ);
-        P(0x3c7); m.fmac(Op::add, acc, v(11), v(0), X | Y);
-        P(0x3c8); m.fmac(Op::madd, v(14), v(13), imm(s.q), X | Y);
-        P(0x3c9); m.fmac(Op::mul, v(7), v(7), imm(s.q), X | Y);
-        P(0x3ca); m.fmac(Op::mul, acc, v(8), imm(s.q), X | Y);
-        P(0x3cb); m.fmac(Op::madd, v(8), v(31), imm(s.i), X | Y);
-        P(0x3cc); m.fmac(Op::mul, v(9), v(12), imm(s.q), XYZW);
-        m.write(v(19), v(18), Z);
-        P(0x3cd); m.fmac(Op::mul, v(13), v(24), imm(s.q), XYZW);
-        m.write(v(20), v(18), Z);
-        P(0x3ce); m.fmac(Op::sub, v(19), v(18), v(7), X | Y);
-        P(0x3cf); m.fmac(Op::add, v(20), v(18), v(7), X | Y);
-        P(0x3d0); m.fmac(Op::sub, v(25), v(14), v(8), X | Y);
-        P(0x3d1); m.fmac(Op::add, v(26), v(14), v(8), X | Y);
-        P(0x3d2); m.ftoi0(v(21), v(19), XYZ);
-        P(0x3d3); m.ftoi0(v(22), v(20), XYZ);
-        v(21)[3] = adc;
-        v(22)[3] = adc;
-        clip_flags = flags;
-        for (int r : {29, 9, 23, 21, 13, 23, 22, 30, 25, 23, 21, 26, 23, 22}) out.push_back(v(r));
+        // 132vc1: one particle per iteration (iterate: speculatively on the Vita).
+        const auto particle = [&](auto& x) -> bool {
+            v(15) = position[k];
+            v(23) = colour[k];
+            P(0x3b7); x.fmac(Op::mul, acc, v(1), x.bc(v(15), 0), XYZW);
+            x.fmac(Op::madd, acc, v(2), x.bc(v(15), 1), XYZW);
+            x.fmac(Op::madd, acc, v(3), x.bc(v(15), 2), XYZW);
+            x.fmac(Op::madd, v(16), v(4), x.bc(v(0), 3), XYZW);
+            P(0x3bb); x.fmac(Op::mul, v(7), v(27), x.bc(v(15), 3), X | Y);
+            P(0x3bc); x.fmac(Op::mul, v(8), v(28), x.bc(v(15), 3), X | Y);
+            P(0x3bf);
+            const double w = std::fabs(daz(v(16)[3]));
+            std::uint32_t j = 0;
+            for (int c = 0; c < 3; ++c) {
+                const double x = daz(v(16)[c]);
+                if (x > w) j |= 1u << (2 * c);
+                if (x < -w) j |= 2u << (2 * c);
+            }
+            x.div(v(0)[3], v(16)[3]);
+            P(0x3c0); x.fmac(Op::mul, v(17), v(16), v(5), XYZ);
+            P(0x3c1); x.fmac(Op::mul, v(13), v(16), v(10), X | Y);
+            const std::uint32_t flags = ((clip_flags << 6) | j) & 0xffffffu;
+            // FCAND vi1, 0x3ffff; IADD vi1, vi1, vi10 (0x7fff); MFIR sign-extends.
+            const std::uint32_t adc = (flags & 0x3ffffu) ? 0xffff8000u : 0x00007fffu;
+            P(0x3c5); x.fmac(Op::add, acc, v(6), v(0), XYZ);
+            P(0x3c6); x.fmac(Op::madd, v(18), v(17), imm(s.q), XYZ);
+            P(0x3c7); x.fmac(Op::add, acc, v(11), v(0), X | Y);
+            P(0x3c8); x.fmac(Op::madd, v(14), v(13), imm(s.q), X | Y);
+            P(0x3c9); x.fmac(Op::mul, v(7), v(7), imm(s.q), X | Y);
+            P(0x3ca); x.fmac(Op::mul, acc, v(8), imm(s.q), X | Y);
+            P(0x3cb); x.fmac(Op::madd, v(8), v(31), imm(s.i), X | Y);
+            P(0x3cc); x.fmac(Op::mul, v(9), v(12), imm(s.q), XYZW);
+            x.write(v(19), v(18), Z);
+            P(0x3cd); x.fmac(Op::mul, v(13), v(24), imm(s.q), XYZW);
+            x.write(v(20), v(18), Z);
+            P(0x3ce); x.fmac(Op::sub, v(19), v(18), v(7), X | Y);
+            P(0x3cf); x.fmac(Op::add, v(20), v(18), v(7), X | Y);
+            P(0x3d0); x.fmac(Op::sub, v(25), v(14), v(8), X | Y);
+            P(0x3d1); x.fmac(Op::add, v(26), v(14), v(8), X | Y);
+            P(0x3d2); x.ftoi0(v(21), v(19), XYZ);
+            P(0x3d3); x.ftoi0(v(22), v(20), XYZ);
+            v(21)[3] = adc;
+            v(22)[3] = adc;
+            next_flags = flags;
+            for (int r : {29, 9, 23, 21, 13, 23, 22, 30, 25, 23, 21, 26, 23, 22}) out.push_back(v(r));
+            return true;
+        };
+        iterate(m, particle, false, &out);
+        clip_flags = next_flags;
     }
     // Pairs 0x3e5..0x3e7: isw.x 0x8001 (the EOP bit) into the last GIF tag, -7(vi8).
     if (!out.empty()) out[out.size() - 7][0] = 0x8001u;
-    return out;
 }
 
 }  // namespace omega::particle

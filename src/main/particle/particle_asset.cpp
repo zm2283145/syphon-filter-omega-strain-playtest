@@ -175,15 +175,18 @@ std::optional<ParticleSpriteBatch> particle_sprite_batch(const ParticleBatch& b,
         if (b.def && !haze) std::memcpy(&out.alpha, b.def->bytes.data() + 0xd0, 8);
         out.mode = cull_batch(b.bound_min, b.bound_max, cull);
         if (out.mode == 0) return std::nullopt;
-        std::vector<Qword> q;
+        // 132vc1 (port-side speed only, research/VITA.md "Render pass on the Vita's cores (132vc1)"): the program's
+        // words in this thread's buffer, reused from batch to batch (the PS Vita's three cores share newlib's heap lock).
+        thread_local std::vector<Qword> words;
+        std::vector<Qword>& q = words;
         try {
             if (haze) {
                 // TOP+5: the template's def+d0 qword, the two GIF tags (particle_emitter's heatHaze words).
                 Qword tag;
                 std::memcpy(tag.data(), b.def->bytes.data() + 0xd0, 16);
-                q = run_heat_haze_program(b.position, b.colour, frame, tag);
+                run_heat_haze_program_into(q, b.position, b.colour, frame, tag);
             } else {
-                q = run_sprite_program(b.stop, b.position, b.colour, frame);
+                run_sprite_program_into(q, b.stop, b.position, b.colour, frame);
             }
         } catch (const std::runtime_error& e) {
             // Name the batch: the definition, its emitter vtable (type 0 / 1) and the first position whose
@@ -218,6 +221,7 @@ std::optional<ParticleSpriteBatch> particle_sprite_batch(const ParticleBatch& b,
         if (haze) {
             // tag0, STQ0, RGBAQ, XYZ0, STQ1, RGBAQ, XYZ1, tag1, ST0, RGBAQ, XYZ0, ST1, RGBAQ, XYZ1: both sprites
             // share the corners and the ADC word.
+            out.sprites.reserve(q.size() / 14);  // 132vc1: one block (the same sprites)
             for (std::size_t i = 0; i + 14 <= q.size(); i += 14) {
                 const bool in_range = range(i / 14);
                 if (q[i + 6][3] == 0xffff8000u) {
@@ -238,6 +242,7 @@ std::optional<ParticleSpriteBatch> particle_sprite_batch(const ParticleBatch& b,
             }
             return out;
         }
+        out.sprites.reserve(q.size() / 6);  // 132vc1: one block (the same sprites)
         for (std::size_t i = 0; i + 6 <= q.size(); i += 6) {
             // STQ0, RGBAQ, XYZ0, STQ1, RGBAQ, XYZ1
             const bool in_range = range(i / 6);

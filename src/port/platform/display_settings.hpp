@@ -28,6 +28,8 @@
 //                                  the particle programs; worker_pool.hpp, draw_prepare.hpp), merged in the original
 //                                  order; default auto (hardware threads - 1, at most 7); 0 runs the old
 //                                  single-threaded path (the --worker-threads 0 flag too)
+//   renderer=d3d11|vulkan           132vk1, the PC: the renderer backend (gfx_pc_backend.hpp; default d3d11, the reference;
+//                                  vulkan when the build has it, else d3d11), read at start (--renderer too)
 // None of these changes the game's state or timing: they are the presentation of the frame only.
 
 #include "frame_fit.hpp"
@@ -52,6 +54,8 @@ inline constexpr bool display_default_movie_zoom = false;
 inline constexpr FrameAspect display_default_aspect = FrameAspect::pillarbox;
 inline constexpr bool display_default_movie_zoom = false;
 #endif
+// 132vk1 (port-only, the PC): renderer=.
+enum class PcRenderer : std::uint8_t { d3d11, vulkan };
 
 struct DisplaySettings {
     FrameAspect aspect = display_default_aspect;
@@ -64,6 +68,7 @@ struct DisplaySettings {
     std::optional<std::uint8_t> frame_overlay_key = std::uint8_t{0x72};  // VK_F3; nullopt: no key
     bool render_thread = true;  // 132mt2
     int worker_threads = -1;    // 132mt3: -1 auto (WorkerPool::default_workers)
+    PcRenderer renderer = PcRenderer::d3d11;  // 132vk1
 };
 
 // Throws on a malformed value (the message names the key).
@@ -82,5 +87,8 @@ std::optional<MovieFit> parse_movie_fit(std::string_view text);
 std::optional<float> parse_render_scale(std::string_view text);
 // 132vp4: the PS Vita's scene scale for a render scale: 1 (100 %) from 0.875 up, 0.75 (75 %) from 0.625, else 0.5.
 float vita_render_scale(float render_scale);
+// 132vk1: "d3d11" (or "d3d", "dx11") / "vulkan" (or "vk") (renderer=, --renderer); nullopt otherwise.
+std::optional<PcRenderer> parse_pc_renderer(std::string_view text);
+const char* pc_renderer_name(PcRenderer renderer);
 
 }  // namespace omega

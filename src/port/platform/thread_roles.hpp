@@ -24,6 +24,9 @@ const char* thread_role_name(ThreadRole role);
 // The user core (0..2) the role is pinned to on the Vita (a worker's home core; it may also run on core 1).
 unsigned thread_role_core(ThreadRole role);
 
+// Port-only (132vc1), PS Vita: the priority the pool's worker threads take, the running ones and later ones (64..191). A test switch of
+// the Vita app (vita_test_worker_priority.txt); a no-op elsewhere.
+void set_worker_priority(int priority);
 // Called once by a thread at the top of its body (name: for the report, e.g. "worker 1").
 void enter_thread_role(ThreadRole role, const std::string& name);
 

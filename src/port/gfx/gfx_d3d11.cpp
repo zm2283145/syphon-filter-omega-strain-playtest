@@ -667,6 +667,4 @@ ID3D11Texture2D* native_texture(const Texture& texture) { return static_cast<con
 
 }  // namespace omega::gfx::d3d11
 
-namespace omega::gfx {
-std::shared_ptr<Device> create_offscreen_device(const char* label) { return d3d11::create_offscreen_device(label); }
-}  // namespace omega::gfx
+// Port-only (132vk1): gfx::create_offscreen_device (the chosen PC backend's) is in gfx_pc_backend.cpp.

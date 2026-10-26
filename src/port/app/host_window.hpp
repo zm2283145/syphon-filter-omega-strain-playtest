@@ -271,6 +271,7 @@ private:
     std::string backend_;
     unsigned width_ = 0, height_ = 0;
     float render_scale_ = 1.0F;
+    bool vulkan_ = false;   // 132vk1 (port-only): gfx_ / gfx_swap_ are the Vulkan backend's (device_ / context_ / swap_ null)
     HostWindowOptions::SwapEffect swap_effect_ = HostWindowOptions::SwapEffect::flip_discard;
     unsigned frame_latency_ = 1;
     bool waitable_ = false;

@@ -55,8 +55,8 @@ constexpr std::array<const char*, PortSettingsPage::page_count> page_names{
     "DISPLAY", "INPUT", "PLAY KEYS 1", "PLAY KEYS 2", "PLAY KEYS 3", "PLAY KEYS 4", "MENU KEYS 1", "MENU KEYS 2", "MODS"};
 constexpr std::array<const char*, 8> display_rows{"FULLSCREEN",    "VSYNC",       "ASPECT",   "RENDER SCALE",
                                                  "FRAME OVERLAY", "OVERLAY KEY", "BG AUDIO", "HUD MARGIN"};
-constexpr std::array<const char*, 7> input_rows{"MOUSE LOOK", "SENSITIVITY", "INVERT Y", "PAD PROMPT", "RESET KEYS",
-                                                "FIELD OF VIEW", "MOVIES"};  // 132ws3 / 132vt2a2: the DISPLAY page is full
+constexpr std::array<const char*, 8> input_rows{"MOUSE LOOK", "SENSITIVITY", "INVERT Y", "PAD PROMPT", "RESET KEYS",
+                                                "FIELD OF VIEW", "MOVIES", "RENDERER"};  // 132ws3 / 132vt2a2 / 132vk1: the DISPLAY page is full
 constexpr std::array<MovieFit, 3> movie_fits{MovieFit::fill, MovieFit::bars, MovieFit::stretch};  // 132vt2a2: movies=
 constexpr std::array<float, 8> render_scales{0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 3.0F, 4.0F};
 // 132vp4: the Vita's (the scene scale; press steps down: 100 -> 75 -> 50 -> 100 %)
@@ -165,7 +165,7 @@ std::vector<PortSettingsPage::Binding> PortSettingsPage::bindings_on(std::int32_
 namespace {
 // Port-only (Vita): the PC rows set_pc_rows(false) hides, by their place in the page's full row list.
 constexpr std::array<std::size_t, 1> display_pc_rows{5};           // OVERLAY KEY
-constexpr std::array<std::size_t, 4> input_pc_rows{0, 1, 2, 4};    // MOUSE LOOK, SENSITIVITY, INVERT Y, RESET KEYS
+constexpr std::array<std::size_t, 5> input_pc_rows{0, 1, 2, 4, 7}; // MOUSE LOOK, SENSITIVITY, INVERT Y, RESET KEYS, RENDERER
 }  // namespace
 
 std::int32_t PortSettingsPage::rows_on_page() const {
@@ -324,6 +324,7 @@ std::string PortSettingsPage::value(std::int32_t row) const {
             return n == 0 ? std::string("DEFAULT") : "CUSTOM (" + std::to_string(n) + ")";
         }
         case 5: return std::to_string(display_settings(s).fov) + "%";  // 132ws3
+        case 7: return display_settings(s).renderer == PcRenderer::vulkan ? "VULKAN" : "DIRECT3D 11";  // 132vk1 (PC)
         default: {  // 132vt2a2
             std::string v = frame_movie_fit_name(display_settings(s).movie_fit);
             std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
@@ -494,6 +495,12 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
             const unsigned v = fovs[at == fovs.size() ? 3 : step<fovs.size()>(at, forward)];
             set_port_setting(s, "fov", std::to_string(v));
             commit(s, "FIELD OF VIEW " + std::to_string(v) + "%");
+            return true;
+        }
+        case 7: {  // 132vk1 (port-only, PC): the renderer backend, used from the next start (research/VULKAN.md)
+            const bool vulkan = display_settings(s).renderer == PcRenderer::vulkan;
+            set_port_setting(s, "renderer", vulkan ? "d3d11" : "vulkan");
+            commit(s, std::string("RENDERER ") + (vulkan ? "DIRECT3D 11" : "VULKAN") + " (from the next start)");
             return true;
         }
         default: {  // 132vt2a2: the wide movies' fit (fill, bars, stretch)

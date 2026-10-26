@@ -782,6 +782,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     // original's EQMODIFY boxes; the 132h ascending order showed the unlit -z side in front.
     std::size_t index = 0;
     const auto& batches = list.batches;
+    OMEGA_ZONE_LAPS(gr_laps);  // 132vc1: the batches' vertices (the zone report; empty off the Vita)
     while (index < batches.size()) {
         const GuiDrawBatch& b = batches[index];
         const std::size_t first = vertices.size();
@@ -981,6 +982,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         add(view_of(b.slot), false, b.flush != 0x4118e0 || (b.filter & 0x20) != 0, first);
         edge_extend(b, first, view_of(b.slot), false, b.flush != 0x4118e0 || (b.filter & 0x20) != 0);
     }
+    OMEGA_ZONE_LAP(gr_laps, "gr.batches");
     wide_backdrop_ = backdrop_rows >= wide_backdrop_rows;
     if (segments.empty()) return;  // 132md7: a frame of retained batches alone has no frame vertices
     const gfx::Viewport fitted = viewport(width, height, true), whole = viewport(width, height, false);

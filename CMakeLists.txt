@@ -461,7 +461,18 @@ if(WIN32)
 # Checkpoint 132mt1 (port-only): the renderer abstraction layer's Direct3D 11 backend (src/port/gfx, research/RENDERER.md);
 # every target that draws links it.
 # Checkpoint 132mt2: the render thread (gfx_render_thread, backend-neutral) goes with it.
-set(OMEGA_GFX_D3D11_SOURCES src/port/gfx/gfx_d3d11.cpp src/port/gfx/gfx_d3d11_shaders.cpp src/port/gfx/gfx_render_thread.cpp)
+set(OMEGA_GFX_D3D11_SOURCES src/port/gfx/gfx_d3d11.cpp src/port/gfx/gfx_d3d11_shaders.cpp src/port/gfx/gfx_render_thread.cpp
+    src/port/gfx/gfx_pc_backend.cpp)
+# Checkpoint 132vk1 (port-only, research/VULKAN.md): the PC's second renderer backend, native Vulkan 1.3 beside
+# Direct3D 11 (--renderer vulkan / renderer=vulkan; D3D11 stays the default). It needs nothing installed beyond the GPU
+# driver: the vulkan-1.dll loader is opened at run time, the Khronos headers are vendored (vendor/vulkan-headers) and the
+# SPIR-V is embedded (gfx_vulkan_spirv.cpp, made by tools/build_vulkan_spirv.py from the D3D11 HLSL).
+option(OMEGA_PC_VULKAN "Build the PC Vulkan renderer backend (--renderer vulkan)" ON)
+if(OMEGA_PC_VULKAN)
+    list(APPEND OMEGA_GFX_D3D11_SOURCES src/port/gfx/gfx_vulkan.cpp src/port/gfx/gfx_vulkan_spirv.cpp)
+    set_source_files_properties(src/port/gfx/gfx_vulkan.cpp PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/vendor/vulkan-headers/include")
+    add_compile_definitions(OMEGA_PC_VULKAN=1)
+endif()
 add_executable(omega_frontend_formats src/port/app/frontend_formats_main.cpp src/port/render/gui_renderer.cpp
     src/port/app/host_window.cpp src/port/app/loading_screen_host.cpp src/port/platform/crash_report.cpp
     ${OMEGA_GFX_D3D11_SOURCES})
@@ -642,7 +653,7 @@ target_sources(omega_core_tests PRIVATE tests/input_device_tests.cpp tests/port_
         target_sources(omega_core_tests PRIVATE src/port/app/frontend_disc.cpp src/port/app/agent_preview.cpp src/port/render/gui_renderer.cpp
             src/port/app/host_window.cpp src/port/app/loading_screen_host.cpp
             src/port/render/scene_renderer.cpp src/port/render/corona_renderer.cpp tests/corona_device_tests.cpp
-            src/port/render/frame_overlay.cpp tests/frame_overlay_tests.cpp tests/gfx_render_thread_tests.cpp tests/gfx_skinning_capability_tests.cpp tests/gfx_texture_blocks_tests.cpp ${OMEGA_GFX_D3D11_SOURCES}
+            src/port/render/frame_overlay.cpp tests/frame_overlay_tests.cpp tests/gfx_render_thread_tests.cpp tests/gfx_skinning_capability_tests.cpp tests/gfx_texture_blocks_tests.cpp tests/gfx_vulkan_tests.cpp ${OMEGA_GFX_D3D11_SOURCES}
             src/port/platform/audio_device.cpp tests/audio_device_tests.cpp
             src/port/app/launcher.cpp src/port/app/launcher_mod_panel.cpp tests/launcher_tests.cpp tests/launcher_mod_panel_tests.cpp
             src/port/platform/crash_report.cpp tests/crash_report_tests.cpp

@@ -42,6 +42,17 @@ struct Vu1State {
 // the next call on the thread.
 Vu1State& thread_vu1_state();
 
+// Port-side speed only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"): the PS Vita's speculative
+// NEON iterations (a particle of a program or a sprite program, a batch cull) that were run again on the exact path
+// since the start (0 where the speculative path is not built).
+std::uint64_t particle_neon_rollbacks();
+// On by default; off: every iteration on the exact path as before 132vc1 (the Vita app's A/B switch). Any thread.
+void set_particle_neon_speculation(bool on);
+bool particle_neon_speculation();
+// 132vc1: the register-resident iterations of the programs' loops (generated, particle_vu1.cpp), part of the
+// speculation (on by default); off: the speculative iterations through memory. Any thread.
+void set_particle_neon_registers(bool on);
+
 // Runs 0x29c with TOP = `top` (XTOP). Inputs: data 0xf..0x20 (the 003a0050
 // uploads), TOP+0xb (low 15 bits of x: the particle count n) and TOP+0xc (the
 // random-table qword). Outputs: n qwords vf10 at TOP+0xc and n qwords vf13 at
@@ -120,6 +131,9 @@ std::uint32_t cull_batch(const Qword& bound_min, const Qword& bound_max, const s
 // bit (the GS does not draw the sprite). Throws for other stops.
 std::vector<Qword> run_sprite_program(std::uint32_t stop, const std::vector<Qword>& position,
                                       const std::vector<Qword>& colour, const SpriteFrame& frame);
+// Port-side speed only (132vc1): the same words into `out` (cleared first; its storage reused).
+void run_sprite_program_into(std::vector<Qword>& out, std::uint32_t stop, const std::vector<Qword>& position,
+                             const std::vector<Qword>& colour, const SpriteFrame& frame);
 
 // Checkpoint 132cp4: 0037d090's VU data 0x2c, (0.5 * a, -0.5 * b, 1.0, 1.0)
 // with a / b the renderer's stack tops (r+0x68 / r+0x78 at index r+0x88, the
@@ -143,5 +157,8 @@ Qword heat_haze_uv_qword(std::int32_t width, std::int32_t height);
 // particle's second tag gets x = 0x8001 (EOP, pair 0x3e7).
 std::vector<Qword> run_heat_haze_program(const std::vector<Qword>& position, const std::vector<Qword>& colour,
                                          const SpriteFrame& frame, const Qword& tag);
+// Port-side speed only (132vc1): the same words into `out` (cleared first; its storage reused).
+void run_heat_haze_program_into(std::vector<Qword>& out, const std::vector<Qword>& position,
+                                const std::vector<Qword>& colour, const SpriteFrame& frame, const Qword& tag);
 
 }  // namespace omega::particle

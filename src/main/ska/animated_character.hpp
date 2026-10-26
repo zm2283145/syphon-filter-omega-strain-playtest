@@ -87,6 +87,11 @@ public:
     // Port-only (checkpoint 132md2, mod model replacement): the committed pose's placed palette, the one geometry()
     // and skin_parts skin by. Not game code.
     std::vector<SkinPaletteBone> committed_palette() const;
+    // Port-only (132vc1 hw6, a profile bench; not game code): geometry()'s skinning of the committed pose and morph
+    // into `output` (scratch: one SkinnedMesh per part), timed with clock_us: us[0] the placed palette, us[1] the
+    // parts without a morph binding, us[2] the face / hand parts (their deform included).
+    void timed_skinning(std::uint64_t (*clock_us)(),std::vector<AnimatedCharacterGeometry>& output,
+                        std::vector<SkinnedMesh>& scratch,std::uint64_t (&us)[3]) const;
     void set_morph_state(const MorphHostState& state);
     void set_base_shape(std::uint8_t shape,bool enabled);
     // 00391810 (start_ms: +2d6c) and the speech pointer +2d68 cleared (001c76c0 / 001c8e10).
@@ -151,7 +156,7 @@ private:
     // Checkpoint 132win10 (port-side speed only): the previous frame's geometry and the morph deformation's
     // mesh, kept for their storage (step_impl skins into spare_geometry_ and swaps it with geometry_ at commit).
     mutable std::vector<AnimatedCharacterGeometry> spare_geometry_;
-    mutable SkinnedMesh morph_scratch_;
+    mutable std::vector<SkinnedMesh> morph_scratch_;   // 132vc1 hw6: one per part (a deformed copy reuses its storage)
     AnimationModel* candidate_{};
     AnimationModel& command_model();
     void require_idle() const;
@@ -165,6 +170,6 @@ private:
     std::vector<SkinPaletteBone> placed_palette(const AnimationPlayerState& player) const;
     std::vector<AnimatedCharacterGeometry> build_geometry(const AnimationPlayerState& player,const MorphHostState& morph) const;
     void build_geometry_into(const AnimationPlayerState& player,const MorphHostState& morph,
-        std::vector<AnimatedCharacterGeometry>& output,SkinnedMesh& morph_scratch) const;
+        std::vector<AnimatedCharacterGeometry>& output,std::vector<SkinnedMesh>& morph_scratch) const;
 };
 }

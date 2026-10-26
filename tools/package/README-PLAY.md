@@ -18,7 +18,8 @@ mouse bindings, mouse look, the cheats menu, the Port Settings page, mods) is ma
 | `MANIFEST.txt` | Every packaged file with its size and SHA-256. |
 
 Requirements: 64-bit Windows 10 or 11 with a Direct3D 11 GPU. The shader compiler (`D3DCompiler_47.dll`) and the
-C runtime (UCRT) are part of Windows 10 and 11.
+C runtime (UCRT) are part of Windows 10 and 11. The optional Vulkan renderer (port-only, see `renderer` under the
+settings) needs a GPU driver with Vulkan 1.3; nothing else is installed for it.
 
 ## First run (port-only launcher)
 
@@ -133,6 +134,7 @@ below except `window`, `iso`, `iso_verified`, `partner_friendly_fire`, `partner_
 | `mouse_invert_y` | `0` / `1` (0): invert the mouse's vertical look | Port Settings |
 | `aspect` | `pillarbox` / `4:3` / `stretch` (pillarbox): how the 4:3 picture fills a wider or narrower window; see below | `--aspect`, Port Settings |
 | `render_scale` | `0.25` .. `4` (1): the internal resolution as a multiple of the window size (below 1 is faster and softer, above 1 smoother) | `--render-scale`, Port Settings |
+| `renderer` | `d3d11` / `vulkan` (d3d11): the renderer (port-only). Direct3D 11 is the reference; Vulkan draws the same picture through a native Vulkan 1.3 renderer. Read at start; without a Vulkan 1.3 driver the game logs why and uses Direct3D 11 | `--renderer d3d11\|vulkan`, Port Settings (INPUT page, RENDERER; from the next start) |
 | `frame_overlay` | `0` / `1` (0): the frame-time overlay (menus and levels) | the overlay key, `--frame-overlay`, Port Settings |
 | `frame_overlay_key` | a key name or `none` (F3): the overlay's on / off key | Port Settings |
 | `mods` | `0` / `1` (1): use the mods in the mods folder (0: your disc's assets only); see "Mods" | `--no-mods`; the settings file only (read at start) |
@@ -212,8 +214,8 @@ CPU PARTNER; opening it leaves the Options without saving them, as backing out d
 entry **Port Settings** in a level. It uses the game's own menu look and sounds:
 
 - **DISPLAY**: fullscreen, VSYNC, aspect, render scale, the frame overlay and its key, BG AUDIO (`background_audio`);
-- **INPUT**: mouse look, its sensitivity and Y inversion, the pad prompt ("controller not detected"), and RESET KEYS
-  (back to the default bindings);
+- **INPUT**: mouse look, its sensitivity and Y inversion, the pad prompt ("controller not detected"), RESET KEYS
+  (back to the default bindings), FIELD OF VIEW, MOVIES and RENDERER (Direct3D 11 or Vulkan, used from the next start);
 - **PLAY KEYS 1..4** and **MENU KEYS 1..2**: the keyboard / mouse binding of every button.
 
 L1 / R1 (or the PAGE row) turn the page, Left / Right change a value, Cross toggles it. On a key row, Cross waits for

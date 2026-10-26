@@ -85,6 +85,52 @@ struct ParticleGroup {
 // each in batch order (groups in order).
 void prepare_particle_groups(WorkerPool& pool, std::vector<ParticleGroup>& groups,
                              const std::vector<particle::DeferredProgram>& records, bool skip_heat_haze);
+// Port-only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"): prepare_particle_groups' timing,
+// totals since the start, kept only in the profile build (OMEGA_ZONE_PROFILE: the Vita's; zeros elsewhere).
+// Microseconds; program_us / sprite_us add every thread's time (the work), wall_us is the callers' (the wait).
+struct ParticlePrepareProfile {
+    std::uint64_t calls = 0;        // prepare_particle_groups calls with at least one batch
+    std::uint64_t single_calls = 0; // ... with one batch (nothing to spread)
+    std::uint64_t batches = 0;
+    std::uint64_t programs = 0;     // recorded MSCALs run (run_deferred_program)
+    std::uint64_t particles = 0;    // the programs' particles (the sprite programs' inputs)
+    std::uint64_t drawn = 0;        // sprite batches kept (not culled)
+    std::uint64_t program_us = 0, sprite_us = 0, wall_us = 0;
+};
+ParticlePrepareProfile particle_prepare_profile();
+// Port-only (132vc1): build_actor_mesh's pool tasks (play_main), the same profile build only. skin_us: the LOD0
+// skinning (AnimatedCharacter::geometry's deferred materialisation, timed first); task_us: the rest of the task (gore,
+// the far LOD's skin_parts, character_mesh). All threads' time.
+struct ActorPiecesProfile {
+    std::uint64_t tasks = 0, lod0 = 0, lod1 = 0, hidden = 0, vertices = 0, skin_us = 0, task_us = 0;
+    std::uint64_t lod0_us = 0, lod1_us = 0, hidden_us = 0;  // task_us by the task's kind
+};
+// Port-only (132vc1 hw5), the profile build: one far-LOD actor's overlay work run on one thread with nothing else at
+// the same time, `runs` times (build_actor_mesh, on request): the placed palette, skin_parts and character_mesh in
+// microseconds, the first run (the caches as the frame left them) and the mean of the others.
+struct ActorBench {
+    unsigned runs = 0, parts = 0, chunks = 0, vertices = 0;
+    double palette_first = 0, skin_first = 0, mesh_first = 0, palette_rest = 0, skin_rest = 0, mesh_rest = 0;
+    // hw6: one LOD0 actor's geometry() skinning (AnimatedCharacter::timed_skinning), the same runs: palette, the parts
+    // without morph, the face / hand parts; first run and the mean of the others. lod0_vertices 0: none was drawn.
+    unsigned lod0_parts = 0, lod0_vertices = 0;
+    double lod0_first[3]{}, lod0_rest[3]{};
+};
+void request_actor_bench();
+bool actor_bench_due();  // true once per request
+void actor_bench_store(const ActorBench& bench);
+bool actor_bench_take(ActorBench& bench);  // the stored result, once
+ActorPiecesProfile actor_pieces_profile();
+// Adds one task's figures (lod: 0, 1, or -1 hidden).
+void actor_pieces_count(int lod, std::size_t vertices, std::uint64_t skin_us, std::uint64_t task_us);
+// The profile clock in microseconds (0 without OMEGA_ZONE_PROFILE).
+std::uint64_t prepare_profile_clock_us();
+// Port-only (132vc1), the profile build: the first recorded MSCAL of 16 particles or more that prepare_particle_groups
+// met is kept; particle_bench runs it `runs` times on the calling thread in each particle mode (0 exact, 1 the
+// speculative iterations, 2 the register-resident ones; the modes are restored after) and gives microseconds per
+// particle (program and batch read-back). False when nothing was kept yet. hw5: us_one_batch is the same record cut
+// to one particle, in microseconds per batch (the batch's fixed cost plus one particle).
+bool particle_bench(unsigned runs, double (&us_per_particle)[3], double (&us_one_batch)[3], unsigned& particles);
 // One group: the drawn sprite batches of `batches`.
 std::vector<particle::ParticleSpriteBatch> prepare_particle_sprites(WorkerPool& pool,
                                                                     std::vector<particle::ParticleBatch>& batches,
@@ -104,6 +150,11 @@ std::vector<particle::ParticleSpriteBatch> prepare_particle_sprites(WorkerPool& 
 // (character_gore_vertices; empty: none) for a LOD0 draw.
 void character_mesh(Mesh& mesh,const std::vector<AnimatedCharacterGeometry>& parts,const std::vector<bool>& textured_parts,bool append=false,bool visible=true,
                     const std::vector<std::uint32_t>* textures=nullptr,const std::vector<std::vector<CharacterGoreSubtract>>* gore=nullptr);
+
+// Port-only (132vc1): character_mesh(mesh, parts, textured, append, visible = false) for `part_count` parts without
+// the parts' geometry: a hidden actor keeps one material slot per part (texture = its index), nothing else, so its
+// caller need not materialise the actor's deferred skinning (AnimatedCharacter::geometry) to draw nothing.
+void hidden_actor_materials(Mesh& mesh, std::size_t part_count, bool append);
 
 // Appends `piece` (one character_mesh call's output on an empty mesh) to `mesh` as that call with append on `mesh`
 // gives: vertices as they are, indices + the vertex offset, surfaces with the material and index offsets, materials
@@ -144,5 +195,15 @@ PartSource replacement_source(const gfx::ReplacementDraw& draw);
 void append_actor_piece(WorkerPool& pool, Mesh& mesh, const Mesh& piece, std::size_t listed_textures);
 // 132md8: the mesh has a GPU-skinned surface (bounds without vertices).
 bool has_skin_surface(const Mesh& mesh);
+
+// Port-only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"): `mesh` cleared, then for each piece
+// k in order append_actor_piece(mesh, *pieces[k], listed_textures[k]) followed by after_piece(k, v0, v1, s0) (its
+// vertices [v0, v1), its first surface s0; after_piece may reorder the surfaces from s0, as play_main's record() does),
+// with the same result: the materials and surfaces appended on this thread, the vertices and offset indices copied
+// by the pool into a mesh sized once, the bounds widened from each piece's own (vertex by vertex for a piece with a
+// NaN position). A piece with a GPU-skinned surface (132md8) makes it the one-by-one appends.
+void append_actor_pieces(WorkerPool& pool, Mesh& mesh, std::span<const Mesh* const> pieces,
+                         std::span<const std::size_t> listed_textures,
+                         const std::function<void(std::size_t, std::size_t, std::size_t, std::size_t)>& after_piece);
 
 }  // namespace omega

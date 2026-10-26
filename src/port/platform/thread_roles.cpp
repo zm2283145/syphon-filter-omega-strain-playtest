@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <cstdint>
 
+#include <atomic>
 #include <mutex>
 #endif
 
@@ -40,7 +41,10 @@ namespace {
 
 // Priorities: the Vita's user range is 64 (highest) .. 191 (lowest); the main thread starts at 0x10000100 (the
 // "default" relative value, 160 here). Audio must not starve behind the worker sharing its core, so it runs higher.
+std::atomic<int> g_worker_priority{0};  // 132vc1: set_worker_priority (0: the default below)
+
 int role_priority(ThreadRole role) {
+    if ((role == ThreadRole::worker) && g_worker_priority.load() != 0) return g_worker_priority.load();
     switch (role) {
         case ThreadRole::audio: return 64;
         case ThreadRole::render: return 96;
@@ -72,6 +76,15 @@ void mark_gone(void* slot) {
 }
 
 }  // namespace
+
+void set_worker_priority(int priority) {
+    g_worker_priority.store(priority);
+    // The pool's workers already running (the app's pool is made before the play host starts) take it too.
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (Entry& e : g_threads)
+        if (!e.gone && e.usage.role == ThreadRole::worker && e.usage.name.rfind("worker ", 0) == 0)
+            sceKernelChangeThreadPriority(e.id, priority);
+}
 
 void enter_thread_role(ThreadRole role, const std::string& name) {
     std::call_once(g_exit_once, [] { pthread_key_create(&g_exit_key, mark_gone); });
@@ -151,6 +164,7 @@ ThreadBusyScope::~ThreadBusyScope() { count_busy_time(sceKernelGetProcessTimeWid
 
 #else
 
+void set_worker_priority(int) {}
 void enter_thread_role(ThreadRole, const std::string&) {}
 void count_busy_time(std::uint64_t) {}
 std::vector<ThreadUsage> thread_usage() { return {}; }

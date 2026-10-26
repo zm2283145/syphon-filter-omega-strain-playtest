@@ -2,8 +2,21 @@
 #include "zone_profile.hpp"
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <algorithm>
+#if defined(__arm__) && defined(__ARM_NEON) && !defined(OMEGA_SKIN_NO_NEON)
+#include <arm_neon.h>
+#define OMEGA_SKIN_NEON 1
+#include <atomic>
+#if defined(OMEGA_SKIN_NEON_CHECK)
+#include <cstring>
+#include <iostream>
+#endif
+#else
+#define OMEGA_SKIN_NEON 0
+#endif
 
 namespace omega {
 namespace {
@@ -190,6 +203,57 @@ SkinnedMesh decode_skinned_mesh(std::span<const std::uint8_t> bytes, std::uint32
     return mesh;
 }
 
+#if OMEGA_SKIN_NEON
+namespace {
+bool palette_neon_mode() {
+    std::uint32_t fpscr;
+    asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    return (fpscr & 0x01f70000u) == 0x01000000u;  // FZ set; RMode nearest; Stride, Len 0
+}
+inline uint32x4_t matrix_nonfinite(float32x4_t v) {
+    const uint32x4_t e = vdupq_n_u32(0x7f800000u);
+    return vceqq_u32(vandq_u32(vreinterpretq_u32_f32(v), e), e);
+}
+inline bool matrix_clean(uint32x4_t bad) {
+    const uint32x2_t h = vorr_u32(vget_low_u32(bad), vget_high_u32(bad));
+    return vget_lane_u32(vpmax_u32(h, h), 0) == 0;
+}
+}  // namespace
+#endif
+
+bool skin_matrix_multiply_neon(const SkinMatrix& left, const SkinMatrix& right, SkinMatrix& out) {
+#if OMEGA_SKIN_NEON
+    if (!palette_neon_mode()) return false;
+    // multiply(): result[c*4+r] = ((l[r]*R[c*4] + l[4+r]*R[c*4+1]) + l[8+r]*R[c*4+2]) + l[12+r]*R[c*4+3], every
+    // product and sum checked finite; the rows r are the four lanes. Inputs are checked too (an infinity in a column
+    // of `right` meeting a zero would give a NaN anyway, but the scalar path throws on its inputs' products first).
+    const float32x4_t l0 = vld1q_f32(left.data()), l1 = vld1q_f32(left.data() + 4), l2 = vld1q_f32(left.data() + 8),
+                      l3 = vld1q_f32(left.data() + 12);
+    uint32x4_t bad = vorrq_u32(vorrq_u32(matrix_nonfinite(l0), matrix_nonfinite(l1)),
+                               vorrq_u32(matrix_nonfinite(l2), matrix_nonfinite(l3)));
+    for (std::size_t c = 0; c < 4; ++c) {
+        const float32x4_t rc = vld1q_f32(right.data() + c * 4);
+        bad = vorrq_u32(bad, matrix_nonfinite(rc));
+        float32x4_t v = vmulq_n_f32(l0, right[c * 4]);
+        bad = vorrq_u32(bad, matrix_nonfinite(v));
+        float32x4_t p = vmulq_n_f32(l1, right[c * 4 + 1]);
+        v = vaddq_f32(v, p);
+        bad = vorrq_u32(bad, vorrq_u32(matrix_nonfinite(p), matrix_nonfinite(v)));
+        p = vmulq_n_f32(l2, right[c * 4 + 2]);
+        v = vaddq_f32(v, p);
+        bad = vorrq_u32(bad, vorrq_u32(matrix_nonfinite(p), matrix_nonfinite(v)));
+        p = vmulq_n_f32(l3, right[c * 4 + 3]);
+        v = vaddq_f32(v, p);
+        bad = vorrq_u32(bad, vorrq_u32(matrix_nonfinite(p), matrix_nonfinite(v)));
+        vst1q_f32(out.data() + c * 4, v);
+    }
+    return matrix_clean(bad);
+#else
+    (void)left, (void)right, (void)out;
+    return false;
+#endif
+}
+
 std::vector<SkinPaletteBone> make_skin_palette(std::span<const SkinMatrix> world,
     std::span<const SkinMatrix> inverse_bind, std::span<const SkinMatrix> scales) {
     check(!world.empty() && world.size() <= 21 && world.size() == inverse_bind.size() &&
@@ -197,6 +261,18 @@ std::vector<SkinPaletteBone> make_skin_palette(std::span<const SkinMatrix> world
     std::vector<SkinPaletteBone> result;
     result.reserve(world.size());
     for (std::size_t i = 0; i < world.size(); ++i) {
+#if OMEGA_SKIN_NEON
+        {   // 132vc1 hw6 (port-side speed only): the same products on NEON; any doubt runs the scalar bone below
+            SkinMatrix normal, position, scaled;
+            if (skin_matrix_multiply_neon(world[i], inverse_bind[i], normal) &&
+                (scales.empty() ? (position = normal, true)
+                                : skin_matrix_multiply_neon(scales[i], inverse_bind[i], scaled) &&
+                                      skin_matrix_multiply_neon(world[i], scaled, position))) {
+                result.push_back({position, normal});
+                continue;
+            }
+        }
+#endif
         matrix_check(world[i]); matrix_check(inverse_bind[i]);
         if (!scales.empty()) matrix_check(scales[i]);
         const auto normal = multiply(world[i], inverse_bind[i]);
@@ -210,8 +286,8 @@ namespace {
 // Checkpoint 132win9 (port-side speed only): skin_mesh_chunk's body writing into value-initialised storage the
 // caller owns (skin_skinned_mesh writes each chunk straight into the mesh's vertex array instead of a vector per
 // chunk); the same checks in the same order and the same arithmetic.
-void skin_chunk_into(const SkinChunk& chunk, std::span<const SkinPaletteBone> palette,
-                     std::optional<SkinMorphContext> morph, std::span<SkinnedVertex> output) {
+void skin_chunk_scalar(const SkinChunk& chunk, std::span<const SkinPaletteBone> palette,
+                       std::optional<SkinMorphContext> morph, std::span<SkinnedVertex> output) {
     check(!morph || morph->active_targets == 0, "SKM active morph targets are not supported");
     const auto entry=chunk.microprogram_entry;
     if (entry == 12 || entry == 14) {
@@ -275,7 +351,146 @@ void skin_chunk_into(const SkinChunk& chunk, std::span<const SkinPaletteBone> pa
         }
     }
 }
+
+#if OMEGA_SKIN_NEON
+// Port-side speed only (132vc1, research/VITA.md "Render pass on the Vita's cores (132vc1)"; the same bits): the PS
+// Vita skins a chunk's groups four lanes at a time. Each lane is the scalar path's arithmetic in its order (column 0
+// times x, plus column 1 times y, plus column 2 times z, plus column 3 for a point; then the weight; then the sum
+// over the groups), each operation a binary32 one: VMUL / VADD round like the VFP instructions, and Advanced SIMD's
+// flush-to-zero is the VFP's under the play threads' FPSCR (FZ set, round to nearest), the only mode this path runs
+// in (skin_neon_mode). The scalar path's checks are evaluated as conditions: a structural one that fails, an input
+// or a result that is not finite (an infinity or NaN reaches the outputs, which are checked) or any other doubt
+// returns false before or after writing, and the caller then runs the scalar path on value-initialised outputs,
+// which gives the result or the error it always gave.
+std::atomic<std::uint64_t> g_skin_neon_chunks{0}, g_skin_scalar_chunks{0};
+bool skin_neon_mode() {
+    std::uint32_t fpscr;
+    asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+    return (fpscr & 0x01f70000u) == 0x01000000u;  // FZ set; RMode nearest; Stride, Len 0
+}
+inline uint32x4_t skin_nonfinite(float32x4_t v) {
+    const uint32x4_t e = vdupq_n_u32(0x7f800000u);
+    return vceqq_u32(vandq_u32(vreinterpretq_u32_f32(v), e), e);
+}
+bool skin_chunk_neon(const SkinChunk& chunk, std::span<const SkinPaletteBone> palette, bool has_morph,
+                     std::span<SkinnedVertex> output) {
+    const auto entry = chunk.microprogram_entry;
+    if (!(entry == 8 || entry == 10 || entry == 16 || entry == 18 || entry == 20 || entry == 22 || entry == 24 ||
+          entry == 26 || entry == 28 || entry == 30))
+        return false;
+    if ((entry == 16 || entry == 18 || entry == 20 || entry == 22) && !has_morph) return false;
+    if ((entry == 8 || entry == 10 || entry == 16 || entry == 18) && chunk.groups.size() != 1) return false;
+    if (chunk.vertices.empty() || chunk.vertices.size() > 30 || chunk.groups.empty() || chunk.groups.size() > 8 ||
+        output.size() != chunk.vertices.size())
+        return false;
+    static_assert(sizeof(SkinVertex) == 32 && sizeof(SkinnedVertex) == 40, "SkinVertex / SkinnedVertex layout");
+    uint32x4_t bad = vdupq_n_u32(0);
+    for (std::size_t i = 0; i < chunk.vertices.size(); ++i) {
+        const float* v = &chunk.vertices[i].position.x;  // position xyz, normal xyz, uv
+        bad = vorrq_u32(bad, vorrq_u32(skin_nonfinite(vld1q_f32(v)), skin_nonfinite(vld1q_f32(v + 4))));
+        output[i].uv = chunk.vertices[i].uv;
+    }
+    for (std::size_t g = 0; g < chunk.groups.size(); ++g) {
+        const auto& group = chunk.groups[g];
+        if (!(group.bone < palette.size() && !group.weights.empty() && group.first_vertex <= output.size() &&
+              group.weights.size() <= output.size() - group.first_vertex))
+            return false;
+        if (g == 0 && group.first_vertex != 0) return false;
+        const auto& bone = palette[group.bone];
+        const float* pm = bone.position.data();
+        const float* nm = bone.normal.data();
+        const float32x4_t p0 = vld1q_f32(pm), p1 = vld1q_f32(pm + 4), p2 = vld1q_f32(pm + 8), p3 = vld1q_f32(pm + 12);
+        const float32x4_t n0 = vld1q_f32(nm), n1 = vld1q_f32(nm + 4), n2 = vld1q_f32(nm + 8), n3 = vld1q_f32(nm + 12);
+        bad = vorrq_u32(bad, vorrq_u32(vorrq_u32(skin_nonfinite(p0), skin_nonfinite(p1)),
+                                       vorrq_u32(skin_nonfinite(p2), skin_nonfinite(p3))));
+        bad = vorrq_u32(bad, vorrq_u32(vorrq_u32(skin_nonfinite(n0), skin_nonfinite(n1)),
+                                       vorrq_u32(skin_nonfinite(n2), skin_nonfinite(n3))));
+        const bool weighted = chunk.groups.size() != 1;
+        if (!weighted)
+            for (const float& weight : group.weights) {
+                // the scalar check (an infinity or NaN is not 1 either), on the bits: 1.0f has one encoding, and an
+                // integer compare needs no VFP compare and status transfer (132vc1 hw6)
+                std::uint32_t bits;
+                std::memcpy(&bits, &weight, sizeof bits);
+                if (bits != 0x3f800000u) return false;
+            }
+        const std::size_t affected = weighted ? group.weights.size() : output.size();
+        for (std::size_t k = 0; k < affected; ++k) {
+            const std::size_t index = group.first_vertex + k;
+            const SkinVertex& in = chunk.vertices[index];
+            float32x4_t p = vmulq_n_f32(p0, in.position.x);
+            p = vaddq_f32(p, vmulq_n_f32(p1, in.position.y));
+            p = vaddq_f32(p, vmulq_n_f32(p2, in.position.z));
+            p = vaddq_f32(p, p3);
+            float32x4_t n = vmulq_n_f32(n0, in.normal.x);
+            n = vaddq_f32(n, vmulq_n_f32(n1, in.normal.y));
+            n = vaddq_f32(n, vmulq_n_f32(n2, in.normal.z));
+            if (weighted) {
+                const float weight = group.weights[k];
+                bad = vorrq_u32(bad, skin_nonfinite(vdupq_n_f32(weight)));
+                p = vmulq_n_f32(p, weight);
+                n = vmulq_n_f32(n, weight);
+            }
+            float* out_p = output[index].position.data();
+            float* out_n = output[index].normal.data();
+            if (g != 0) {
+                p = vaddq_f32(vld1q_f32(out_p), p);
+                n = vaddq_f32(vld1q_f32(out_n), n);
+            }
+            // An infinity or NaN anywhere in the lane's operations stays one in its result (no later operation
+            // here turns it finite), so checking the results checks every operation the scalar path checks.
+            bad = vorrq_u32(bad, vorrq_u32(skin_nonfinite(p), skin_nonfinite(n)));
+            vst1q_f32(out_p, p);
+            vst1q_f32(out_n, n);
+        }
+    }
+    const uint32x2_t h = vorr_u32(vget_low_u32(bad), vget_high_u32(bad));
+    return vget_lane_u32(vpmax_u32(h, h), 0) == 0;
+}
+#endif
+
+void skin_chunk_into(const SkinChunk& chunk, std::span<const SkinPaletteBone> palette,
+                     std::optional<SkinMorphContext> morph, std::span<SkinnedVertex> output) {
+#if OMEGA_SKIN_NEON
+    if ((!morph || morph->active_targets == 0) && chunk.microprogram_entry != 12 && chunk.microprogram_entry != 14 &&
+        skin_neon_mode()) {
+#if defined(OMEGA_SKIN_NEON_CHECK)
+        // The check build (-DOMEGA_SKIN_NEON_CHECK): a chunk NEON took is skinned again by the scalar path and compared.
+        const std::vector<SkinnedVertex> before(output.begin(), output.end());
+        if (skin_chunk_neon(chunk, palette, morph.has_value(), output)) {
+            const std::vector<SkinnedVertex> neon(output.begin(), output.end());
+            std::copy(before.begin(), before.end(), output.begin());
+            skin_chunk_scalar(chunk, palette, morph, output);
+            if (std::memcmp(neon.data(), output.data(), neon.size() * sizeof(SkinnedVertex)) != 0)
+                fail("SKM NEON skinning check: a chunk differs from the scalar path");
+            g_skin_neon_chunks.fetch_add(1, std::memory_order_relaxed);
+            static std::atomic<std::uint64_t> checked{0};
+            if ((checked.fetch_add(1, std::memory_order_relaxed) & 0xffffu) == 0xffffu)
+                std::cerr << "SKM NEON skinning check: " << checked.load() << " chunks compared, 0 differences\n";
+            return;
+        }
+#else
+        if (skin_chunk_neon(chunk, palette, morph.has_value(), output)) {
+            g_skin_neon_chunks.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+#endif
+        std::fill(output.begin(), output.end(), SkinnedVertex{});  // as the caller's resize left them
+    }
+    g_skin_scalar_chunks.fetch_add(1, std::memory_order_relaxed);
+#endif
+    skin_chunk_scalar(chunk, palette, morph, output);
+}
 }  // namespace
+
+void skin_neon_counts(std::uint64_t& neon, std::uint64_t& scalar) {
+#if OMEGA_SKIN_NEON
+    neon = g_skin_neon_chunks.load(std::memory_order_relaxed);
+    scalar = g_skin_scalar_chunks.load(std::memory_order_relaxed);
+#else
+    neon = scalar = 0;
+#endif
+}
 
 std::vector<SkinnedVertex> skin_mesh_chunk(const SkinChunk& chunk,
     std::span<const SkinPaletteBone> palette, std::optional<SkinMorphContext> morph) {
@@ -321,6 +536,14 @@ void skin_skinned_mesh_into(const SkinnedMesh& mesh, std::span<const SkinPalette
     result.triangle_chunks.reserve(primitive_total);
     for (std::size_t c = 0; c < mesh.chunks.size(); ++c) {
         const auto& chunk = mesh.chunks[c];
+#if OMEGA_SKIN_NEON
+        if (c + 1 < mesh.chunks.size()) {  // 132vc1 hw5 (port-side speed only): the next chunk's inputs on their way
+            const auto& next = mesh.chunks[c + 1];
+            const char* in = reinterpret_cast<const char*>(next.vertices.data());
+            for (std::size_t b = 0; b < next.vertices.size() * sizeof(SkinVertex); b += 32) __builtin_prefetch(in + b);
+            for (const auto& group : next.groups) __builtin_prefetch(group.weights.data());
+        }
+#endif
         const auto first = result.vertices.size(), count = chunk.vertices.size();
         result.vertices.resize(first + count);
         skin_chunk_into(chunk, palette, morph, std::span<SkinnedVertex>(result.vertices).subspan(first, count));

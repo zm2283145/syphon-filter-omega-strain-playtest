@@ -10,7 +10,8 @@
 //   DISPLAY    fullscreen, vsync, aspect, render_scale, frame_overlay, frame_overlay_key, background_audio (132win12)
 //   INPUT      mouse_look, mouse_sensitivity, mouse_invert_y, controller_prompt, reset the key bindings, fov (132ws3:
 //              FIELD OF VIEW, 70..150%, the wide view's; here because DISPLAY's eight rows fill the screen), movies
-//              (132vt2a2: MOVIES, FILL / BARS / STRETCH, the wide movies' fit)
+//              (132vt2a2: MOVIES, FILL / BARS / STRETCH, the wide movies' fit), renderer (132vk1, the PC: RENDERER,
+//              DIRECT3D 11 / VULKAN, from the next start; research/VULKAN.md)
 //   PLAY KEYS  bind.play.<button> (16), bind.play.stick_left / stick_right.<dir> (8), walk, menu_dpad.<dir> (4)
 //   MENU KEYS  bind.menu.<button> (16)
 //   MODS       (checkpoint 132md4) mods (ALL MODS) and one row per mod folder of the mods folder (mod.<folder>=0|1,

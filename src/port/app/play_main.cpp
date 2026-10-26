@@ -39,6 +39,9 @@
 #include "profile_awards.hpp"
 #include "loading_screen_host.hpp"
 #include "host_window.hpp"
+#ifdef _WIN32
+#include "gfx_pc_backend.hpp"   // port-only (132vk1): --renderer / renderer=
+#endif
 #include "pacing_probe.hpp"
 #include "card_tools.hpp"
 #include "card_backup.hpp"
@@ -3094,6 +3097,7 @@ struct PlayGuiOverlay{
         draw_frame=frame;
         draw_dt=dt;
         host.ms=now_ms;
+        OMEGA_ZONE_LAPS(gui_laps);   // 132vc1: render.gui_overlay's parts (the zone report; empty off the Vita)
         if(gs)sync_interact(*gs);
         sync_timers(timer_model);
         decor.bridge_begin_update(rt);
@@ -3102,6 +3106,7 @@ struct PlayGuiOverlay{
         for(;host_log_seen<host.log.size();++host_log_seen)
             std::cout<<"GUI host at frame "<<frame<<": "<<host.log[host_log_seen]<<"\n";
         upload();
+        OMEGA_ZONE_LAP(gui_laps,"gui.update");
         // Port-only (132vf4, research/VITA.md "Front-end speed (132vf4)"): the overlay's list keeps last frame's batches
         // as spares (GuiDrawList::recycle), so the HUD and loadout draws reuse their storage instead of allocating.
         GuiDrawList& list=draw_list;
@@ -3187,6 +3192,7 @@ struct PlayGuiOverlay{
             draw_state.port_anchor=0;
             hud_wide_tags(hud_first);
         }
+        OMEGA_ZONE_LAP(gui_laps,"gui.hud_screen");
         // Checkpoint 132f3b: GuiWeaponDisplay's model (00440580): the gates on model +417, +54 == 1.0 and the
         // bounds +3e0 / +3f0 (min.x <= max.x), then the fit matrices and 003836b0(model, 2, a2, 1).
         drawer.weapon_display_draw=[this,guns](GuiDrawList& out,IeDrawState* st,const gui::Widget& w){
@@ -3238,7 +3244,9 @@ struct PlayGuiOverlay{
             }
             stats_figures_draw(out,screen,guns);
         };
+        OMEGA_ZONE_LAP(gui_laps,"gui.callbacks");
         drawer.draw_canvas(list,rt,now_ms);
+        OMEGA_ZONE_LAP(gui_laps,"gui.canvas");
         if(map_shown){
             if(wide_hud)draw_state.port_anchor_root=hud_wide_root();
             const std::size_t hud_first=list.batches.size();
@@ -3285,12 +3293,14 @@ struct PlayGuiOverlay{
                 }
             }
         }
+        OMEGA_ZONE_LAP(gui_laps,"gui.texts");
         const std::uint64_t covered=renderer.frame_cover_draws();
         // port-only (132ws5): while a 4:3 backdrop (the loadout screen) shows, the draw is the front end's wide menu
         // draw (GuiRenderer::set_wide_menu, research/FRONTEND.md "Checkpoint 132ws5"): its art extended to the window's
         // edges, its header and legend spread. Wide only; the first backdrop frame keeps 132ws's side fill.
         renderer.set_wide_menu(wide_menu_next);
         renderer.draw(list,scene.render_target(),scene.width(),scene.height(),view);
+        OMEGA_ZONE_LAP(gui_laps,"gui.render");
         wide_menu_next=renderer.wide_backdrop();
         // port-only (132ws): a 4:3 backdrop gets the side fill, unless (132ws5) the wide menu draw extended its art
         if(renderer.wide_backdrop()&&(!renderer.wide_menu()||renderer.wide_edge_images()==0)){
@@ -3890,6 +3900,7 @@ std::vector<std::uint32_t> object_dump_ids;   // --object-dump (diagnostic, 132u
         std::optional<unsigned> hud_margin_flag;std::optional<bool> movie_fill_flag;std::optional<MovieFit> movies_flag;   // --hud-margin / --movie-fill (port-only, 132ws); --movies (132vt2a2)
         std::optional<unsigned> fov_flag;   // --fov (port-only, 132ws3)
         std::optional<bool> render_thread_flag;   // --render-thread 0|1 (port-only, checkpoint 132mt2; else render_thread=)
+        std::optional<PcRenderer> renderer_flag;   // --renderer d3d11|vulkan (port-only, checkpoint 132vk1; else renderer=)
         std::optional<fs::path> mods_flag;bool no_mods_flag=false;   // --mods <folder> / --no-mods (port-only, checkpoint 132md1)
         bool mods_cpu_skinning=false;   // --mods-cpu-skinning (port-only, checkpoint 132md8): no GPU skinning of replacement parts
         bool mods_lod=true;   // --mods-lod auto|off (port-only, checkpoint 132md11): automatic levels of detail of dense parts
@@ -4223,6 +4234,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 render_scale_flag=parse_render_scale(narrow(value()));
                 if(!render_scale_flag)throw std::runtime_error("--render-scale needs a number from 0.25 to 4");
             }
+            else if(arg==L"--renderer"){   // port-only (132vk1, research/VULKAN.md)
+                renderer_flag=parse_pc_renderer(narrow(value()));
+                if(!renderer_flag)throw std::runtime_error("--renderer needs d3d11 or vulkan");
+            }
             else if(arg==L"--frame-overlay")frame_overlay_flag=true;
             else if(arg==L"--test-overlay-key")test_overlay_key.insert(std::stoull(value()));
             else if(arg==L"--frontend-test-overlay-key")frontend_test_overlay_key.insert(std::stoll(value()));
@@ -4373,6 +4388,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "wide's movies scaled to the window's width (top and bottom cut), 4:3 with bars, or stretched. --fov <70..150> [fov=, default 100,\n"
                     "the original]: wide's field of view (132ws3; the drawn view only, in % of the original's view tangent).\n"
                     "--render-scale <0.25..4> [render_scale=, default 1]: the internal resolution over the window's client size.\n"
+                    "--renderer d3d11|vulkan [renderer=, default d3d11] (132vk1): the PC renderer backend (Direct3D 11, the reference;\n"
+                    "Vulkan 1.3 in builds with OMEGA_PC_VULKAN, falling back to Direct3D 11 without a usable device).\n"
                     "--frame-overlay [frame_overlay=0|1, default 0]: the frame-time overlay in play (sim / script / render /\n"
                     "present ms, averaged over half a second); F3 toggles it in play [frame_overlay_key=<key>|none].\n"
                     "Checkpoint 132win11 (port-only): the overlay shows in the front end too (step / draw / present ms); its key\n"
@@ -4645,6 +4662,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(movie_fill_flag)display.movie_zoom=*movie_fill_flag;
             if(movies_flag)display.movie_fit=*movies_flag;
             if(fov_flag)display.fov=*fov_flag;
+            if(renderer_flag)display.renderer=*renderer_flag;
+#ifdef _WIN32
+            // Port-only (132vk1, research/VULKAN.md): the PC renderer backend for every device made from here on (the game
+            // window's, the offscreen GUI devices). Vulkan needs a build with OMEGA_PC_VULKAN; a machine without a usable
+            // Vulkan 1.3 device falls back to Direct3D 11 when the window is made (logged there).
+            if(display.renderer==PcRenderer::vulkan&&!gfx::pc_vulkan_built())
+                std::cout<<"Renderer (port-only): vulkan requested, but this build has no Vulkan backend (OMEGA_PC_VULKAN off); Direct3D 11\n";
+            gfx::set_pc_backend(display.renderer==PcRenderer::vulkan&&gfx::pc_vulkan_built()?gfx::PcBackend::vulkan:gfx::PcBackend::d3d11);
+            if(gfx::pc_backend()==gfx::PcBackend::vulkan)std::cout<<"Renderer (port-only): Vulkan\n";
+#endif
             frame_aspect_setting()=display.aspect;   // the front end's and the play's frame fit (frame_fit.hpp)
             frame_hud_margin_setting()=display.hud_margin;   // 132ws: wide's companions
             frame_movie_zoom_setting()=display.movie_zoom;
@@ -11290,7 +11317,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             overlay_skins.clear();gpu_skinned=cpu_skinned=0;
             if(lod_geometry.size()<npcs.size()+1)lod_geometry.resize(npcs.size()+1);
             if(model_geometry.size()<npcs.size()+1)model_geometry.resize(npcs.size()+1);
-            const auto record=[&](std::size_t actor,std::size_t v0,std::size_t s0){
+            const auto record=[&](std::size_t actor,std::size_t v0,std::size_t s0,std::size_t v1=SIZE_MAX){   // v1: the vertex end (132vc1)
                 const auto sort=man_sort_of(actor);
                 const auto n=mesh.surfaces.size()-s0;
                 if(sort.positions.size()!=n)throw std::runtime_error("003870c0: actor "+std::to_string(actor)+" draws "+std::to_string(n)+" parts with "+
@@ -11300,7 +11327,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::stable_sort(parts.begin(),parts.end(),[&](std::uint32_t a,std::uint32_t b){return sort.positions[a]<sort.positions[b];});
                 const std::vector<std::remove_cvref_t<decltype(mesh.surfaces[0])>> drawn(mesh.surfaces.begin()+static_cast<std::ptrdiff_t>(s0),mesh.surfaces.end());
                 for(std::size_t j=0;j<n;++j)mesh.surfaces[s0+j]=drawn[parts[j]];
-                actor_mesh_ranges.push_back({actor,static_cast<std::uint32_t>(v0),static_cast<std::uint32_t>(mesh.vertices.size()-v0),
+                actor_mesh_ranges.push_back({actor,static_cast<std::uint32_t>(v0),static_cast<std::uint32_t>((v1==SIZE_MAX?mesh.vertices.size():v1)-v0),
                                              static_cast<std::uint32_t>(s0),static_cast<std::uint32_t>(n),std::move(parts)});};
             // 0013e1b0 draws an actor only with +2c, +2d, !+2e (and +2f, taken as set once present).
             if(workers.workers()==0){
@@ -11315,7 +11342,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 ++lod_slot;
                 const bool visible=activate_all||actors.actor(npc.actor).eligible();
                 const auto v0=mesh.vertices.size(),s0=mesh.surfaces.size();
-                if(!visible)character_mesh(mesh,npc.character->geometry(),npc.textured,true,false);
+                if(!visible)hidden_actor_materials(mesh,npc.character->parts().size(),true);   // 132vc1: no skinning for it
                 else if(npc.draw_lod==0){const auto* gore=actor_gore(*npc.character,npc.actor,gore_scratch,gore_tally);
                     character_mesh(mesh,modded(*npc.character,npc.models.get(),false,npc.character->geometry(),model_geometry[lod_slot],&gore_scratch),npc.textured,true,true,nullptr,gore);}
                 else{npc.character->skin_parts(npc.lod1,lod_geometry[lod_slot]);
@@ -11345,7 +11372,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         return;
                     }
                     const auto& npc=npcs[k-1];
-                    if(!visible[k])character_mesh(piece,npc.character->geometry(),npc.textured,false,false);
+                    if(!visible[k])hidden_actor_materials(piece,npc.character->parts().size(),false);   // 132vc1: no skinning for it
                     else if(npc.draw_lod==0){const auto* gore=actor_gore(*npc.character,npc.actor,actor_gore_slots[k],tallies[k]);
                         if(split)modded_mesh(piece,*npc.character,*npc.models,false,npc.character->geometry(),&actor_gore_slots[k],npc.textured,nullptr,gore);
                         else character_mesh(piece,modded(*npc.character,npc.models.get(),false,npc.character->geometry(),model_geometry[k],&actor_gore_slots[k]),npc.textured,false,true,nullptr,gore);}
@@ -11358,7 +11385,71 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 bool any_split=false;
                 for(std::size_t k=0;k<n;++k)
                     if(k==0?player_models!=nullptr:visible[k]&&npcs[k-1].models!=nullptr){split[k]=1;any_split=true;actor_task(k,true,k==0?mesh:actor_pieces[k]);}
-                workers.for_each(n,[&](std::size_t k){if(!split[k])actor_task(k,false,actor_pieces[k]);});
+#if defined(OMEGA_ZONE_PROFILE)
+                if(actor_bench_due()){   // 132vc1 hw5: one far-LOD actor's overlay work on this thread alone (vita_main asks)
+                    static std::vector<omega::AnimatedCharacterGeometry> bench_geometry;static Mesh bench_piece;
+                    static std::vector<omega::SkinnedMesh> bench_scratch;
+                    ActorBench b;b.runs=8;bool any=false;
+                    for(std::size_t k=1;k<n;++k){   // hw6: one LOD0 actor's geometry() skinning alone
+                        if(!visible[k]||split[k]||npcs[k-1].draw_lod!=0)continue;
+                        for(unsigned run=0;run<b.runs;++run){
+                            std::uint64_t us[3];
+                            npcs[k-1].character->timed_skinning(&prepare_profile_clock_us,bench_geometry,bench_scratch,us);
+                            for(int j=0;j<3;++j){if(run==0)b.lod0_first[j]=double(us[j]);else b.lod0_rest[j]+=double(us[j])/(b.runs-1);}
+                        }
+                        b.lod0_parts=static_cast<unsigned>(bench_geometry.size());
+                        for(const auto& g:bench_geometry)b.lod0_vertices+=static_cast<unsigned>(g.mesh.vertices.size());
+                        any=true;break;
+                    }
+                    for(std::size_t k=1;k<n;++k){
+                        if(!visible[k]||split[k]||npcs[k-1].draw_lod==0)continue;
+                        const auto& npc=npcs[k-1];any=true;
+                        for(unsigned run=0;run<b.runs;++run){
+                            const auto t0=prepare_profile_clock_us();
+                            (void)npc.character->committed_palette();
+                            const auto t1=prepare_profile_clock_us();
+                            npc.character->skin_parts(npc.lod1,bench_geometry);
+                            const auto t2=prepare_profile_clock_us();
+                            character_mesh(bench_piece,bench_geometry,npc.textured,false,true,&npc.lod1_textures);
+                            const auto t3=prepare_profile_clock_us();
+                            if(run==0){b.palette_first=double(t1-t0);b.skin_first=double(t2-t1);b.mesh_first=double(t3-t2);}
+                            else{b.palette_rest+=double(t1-t0)/(b.runs-1);b.skin_rest+=double(t2-t1)/(b.runs-1);b.mesh_rest+=double(t3-t2)/(b.runs-1);}
+                        }
+                        b.parts=static_cast<unsigned>(bench_geometry.size());
+                        for(const auto* m:npc.lod1)if(m)b.chunks+=static_cast<unsigned>(m->chunks.size());
+                        b.vertices=static_cast<unsigned>(bench_piece.vertices.size());
+                        break;
+                    }
+                    if(any)actor_bench_store(b);
+                }
+#endif
+                {OMEGA_ZONE("actors.pieces");   // 132vc1: the actors' pieces on the pool
+#if defined(OMEGA_ZONE_PROFILE)
+                workers.for_each(n,[&](std::size_t k){if(split[k])return;   // 132vc1: the task's parts timed (profile build)
+                    const int lod=!visible[k]?-1:k==0?player_draw_lod:npcs[k-1].draw_lod;
+                    const auto t0=prepare_profile_clock_us();
+                    if(lod==0)(void)(k==0?character:*npcs[k-1].character).geometry();   // the deferred skinning, as the task would
+                    const auto t1=prepare_profile_clock_us();
+                    actor_task(k,false,actor_pieces[k]);
+                    actor_pieces_count(lod,actor_pieces[k].vertices.size(),t1-t0,prepare_profile_clock_us()-t1);});}
+#else
+                workers.for_each(n,[&](std::size_t k){if(!split[k])actor_task(k,false,actor_pieces[k]);});}
+#endif
+                OMEGA_ZONE("actors.append");   // 132vc1: the pieces appended and sorted on this thread
+                if(!any_split){
+                    // 132vc1 (port-only, research/VITA.md "Render pass on the Vita's cores (132vc1)"): the same appends with
+                    // the vertices and offset indices copied on the pool (append_actor_pieces); record() after each piece.
+                    std::vector<const Mesh*> pieces(n);std::vector<std::size_t> listed(n);
+                    for(std::size_t k=0;k<n;++k){
+                        pieces[k]=&actor_pieces[k];
+                        listed[k]=k==0?(player_draw_lod!=0?player_lod1_textures.size():0)
+                            :(visible[k]&&npcs[k-1].draw_lod!=0?npcs[k-1].lod1_textures.size():0);
+                    }
+                    append_actor_pieces(workers,mesh,pieces,listed,[&](std::size_t k,std::size_t v0,std::size_t v1,std::size_t s0){
+                        gore_vertex_draws+=tallies[k][0];gore_actor_draws+=tallies[k][1];
+                        if(visible[k])record(k==0?0:npcs[k-1].actor,v0,s0,v1);
+                    });
+                }else{
                 if(!split[0]){mesh.vertices.clear();mesh.indices.clear();mesh.surfaces.clear();mesh.materials.clear();}   // character_mesh(append false)
                 for(std::size_t k=0;k<n;++k){
                     // The far-LOD texture list character_mesh was given (its first materials keep those textures).
@@ -11371,7 +11462,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     gore_vertex_draws+=tallies[k][0];gore_actor_draws+=tallies[k][1];
                     if(visible[k])record(k==0?0:npcs[k-1].actor,v0,s0);
                 }
+                }
             }
+            OMEGA_ZONE("actors.attachments");   // 132vc1: guns, backpacks, projectiles
             append_guns(mesh);
             append_backpacks(mesh);
             append_projectiles(mesh);
@@ -18346,6 +18439,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             backpack_clip=scene_view_clip;
             backpack_clip_wide=scene_view_clip&&(frame_wide_cull_x_scale(state.renderer->width(),state.renderer->height())!=1.0F||frame_fov_scale(state.renderer->width(),state.renderer->height())!=1.0F);
             if(game_camera)backpack_camera=game_camera->first;else backpack_camera.reset();
+            OMEGA_ZONE_LAP(render_laps,"render.actor_gate");   // 132vc1: the draw gates, culls and LODs before the build
             build_actor_mesh(actor_mesh);
             OMEGA_ZONE_LAP(render_laps,"render.actors");
             // Checkpoint 132cp5: the night / thermal shading of the man draw (skm_vision_shading.hpp).
@@ -19681,6 +19775,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cerr<<"  indexed draws/frame "<<double(gfx::CommandList::indexed_draws.load())/double(frame)<<", merged/frame "
                     <<double(gfx::CommandList::merged_draws.load())/double(frame)<<"\n";
             for(auto* s:slots)std::cerr<<"  "<<s->name<<" "<<s->ns/1e6/double(frame)<<" x"<<double(s->calls)/double(frame)<<"\n";
+            // 132vc1: the pool's and the particle preparation's totals (the Vita logs them per window).
+            const auto pp=WorkerPool::profile();const auto pq=particle_prepare_profile();const double fr=double(frame);
+            std::cerr<<"  pool: calls/frame "<<pp.calls/fr<<", indices/frame "<<pp.items/fr<<" (caller "<<pp.caller_items/fr<<"), caller ms/frame "
+                <<pp.call_us/1e3/fr<<" (tail wait "<<pp.tail_us/1e3/fr<<"), joins/call "<<(pp.calls?double(pp.joins)/double(pp.calls):0.0)
+                <<", wake us "<<(pp.joins?double(pp.wake_us)/double(pp.joins):0.0)<<", worker ms/frame "<<pp.worker_us/1e3/fr<<"\n";
+            std::cerr<<"  particle prepare: calls/frame "<<pq.calls/fr<<" (single "<<pq.single_calls/fr<<"), batches/frame "<<pq.batches/fr
+                <<" (programs "<<pq.programs/fr<<", drawn "<<pq.drawn/fr<<"), particles/frame "<<pq.particles/fr<<", program ms/frame "
+                <<pq.program_us/1e3/fr<<", sprite ms/frame "<<pq.sprite_us/1e3/fr<<", wall ms/frame "<<pq.wall_us/1e3/fr<<"\n";
         }
 #endif
         if(mission_host){

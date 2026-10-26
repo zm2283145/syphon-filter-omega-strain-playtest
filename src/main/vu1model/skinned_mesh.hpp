@@ -56,6 +56,15 @@ struct SkinnedMeshGeometry {
 // are inferred from on-disc bytes. All game-derived results belong under local/.
 SkinnedMesh decode_skinned_mesh(std::span<const std::uint8_t> bytes,
                                std::uint32_t bone_count = 21);
+// Port-side speed only (132vc1): the chunks skinned on the PS Vita's NEON path and on the scalar path since the start
+// (both 0 where the NEON path is not built).
+void skin_neon_counts(std::uint64_t& neon, std::uint64_t& scalar);
+// Port-only (132vc1 hw6, port-side speed only; the same bits): left * right column by column on Advanced SIMD (the
+// PS Vita), each product and sum rounded as the scalar matrix products of make_skin_palette and the character's
+// placement do (VMUL then VADD in their order, flush-to-zero as the play threads' VFP mode). False, `out` unspecified,
+// when it is not available (another target, another FPSCR mode) or when an input, a product or a sum is an infinity
+// or NaN: the caller then runs its scalar product, which gives its result or its error as before.
+bool skin_matrix_multiply_neon(const SkinMatrix& left, const SkinMatrix& right, SkinMatrix& out);
 // Model-space palette: W*(S*B), normal W*B. Empty scales means identity.
 std::vector<SkinPaletteBone> make_skin_palette(std::span<const SkinMatrix> world,
     std::span<const SkinMatrix> inverse_bind, std::span<const SkinMatrix> scales = {});
