@@ -1,11 +1,13 @@
 #pragma once
 // Port-only (checkpoint 132vt2, research/VITA.md "The play host"): the few DirectXMath names scene_renderer.cpp uses
-// for its camera matrices, for the PS Vita build (the Windows build includes <DirectXMath.h>). Each function
+// for its camera matrices, for the non-Windows builds (the PS Vita; 132ps5c: the PS5) (the Windows build includes
+// <DirectXMath.h>). Portable scalar C++ with no platform API (moved from src/port/vita in 132ps5c). Each function
 // reproduces the operation order of DirectXMath's SSE2 path, which the x64 build compiles (no /arch flag), so the
 // matrices are the same floats on both targets when the inputs are: XMMatrixMultiply adds (x*r0 + z*r2) + (y*r1 +
 // w*r3); XMVector3Dot is (x*x' + y*y') + z*z'; XMVectorNegate is 0 - v (+0 for a zero lane, as _mm_sub_ps);
 // XMScalarSinCos is DirectXMath's 11/10-degree minimax polynomial, not the C library's sin/cos. Cortex-A9's VFPv3 /
 // NEON multiply-accumulate is unfused (it rounds the product), so a contracted a*b+c still rounds as the SSE pair.
+// The PS5 (x86-64, clang) compiles it without FMA and with -ffp-contract=off (cmake/ps5/OmegaPs5.cmake).
 // Never part of the Windows build.
 
 #include <cmath>

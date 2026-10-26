@@ -1,5 +1,6 @@
 // Port-only (checkpoint 132md16): see data_overrides.hpp.
 #include "data_overrides.hpp"
+#include "number_parse.hpp"  // port-only (132ps5c): from_chars of floats on the PS5
 
 #include "population.hpp"
 #include "weapon_aim.hpp"
@@ -271,7 +272,7 @@ std::vector<DataOverride> parse_data_overrides(std::string_view text, std::strin
         }
         double value = 0;
         if (field->type == T::f32) {
-            const auto [ptr, error] = std::from_chars(value_text.data(), value_text.data() + value_text.size(), value);
+            const auto [ptr, error] = omega::from_chars_number(value_text.data(), value_text.data() + value_text.size(), value);
             if (value_text.empty() || error != std::errc{} || ptr != value_text.data() + value_text.size() || !std::isfinite(value))
                 throw std::runtime_error(where + std::string(field->name) + " is a number ('" + value_text + "')");
         } else {

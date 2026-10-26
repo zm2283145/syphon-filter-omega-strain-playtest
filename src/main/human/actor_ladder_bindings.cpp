@@ -1,4 +1,5 @@
 #include "actor_ladder_bindings.hpp"
+#include "number_parse.hpp"  // port-only (132ps5c): from_chars of floats on the PS5
 #include <charconv>
 #include <cmath>
 #include <sstream>
@@ -27,7 +28,7 @@ public:
     }
     template<class T> T number() {
         const auto text = token(); T value{};
-        const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+        const auto result = omega::from_chars_number(text.data(), text.data() + text.size(), value);
         if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) fail("invalid number");
         return value;
     }

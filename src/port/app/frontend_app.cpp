@@ -41,6 +41,8 @@
 #include <windows.h>
 #include <psapi.h>
 #include <wrl/client.h>
+#elif defined(OMEGA_PS5)
+#include "win32_ps5.hpp"   // port-only (132ps5c): the PS5 build's stand-ins
 #else
 #include "win32_vita.hpp"  // port-only (132vt2): the PS Vita build's stand-ins
 #endif

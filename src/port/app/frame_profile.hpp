@@ -14,6 +14,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(OMEGA_PS5)
+#include "win32_ps5.hpp"   // port-only (132ps5c): QueryPerformanceCounter on the PS5
 #else
 #include "win32_vita.hpp"  // port-only (132vt2): QueryPerformanceCounter on the PS Vita
 #endif

@@ -13,6 +13,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(VITA)
     include(cmake/vita/OmegaVita.cmake)
 endif()
+# Checkpoint 132ps5c (port-only): the PS5 build (ps5-payload-sdk + ps5-opengl; research/PS5.md, tools/build_ps5.ps1).
+if(OMEGA_PS5)
+    include(cmake/ps5/OmegaPs5.cmake)
+endif()
 
 add_library(omega_core
     src/port/platform/worker_pool.cpp
@@ -653,4 +657,7 @@ target_sources(omega_core_tests PRIVATE tests/input_device_tests.cpp tests/port_
 endif()
 if(VITA)
     include(cmake/vita/OmegaVitaTargets.cmake)
+endif()
+if(OMEGA_PS5)
+    include(cmake/ps5/OmegaPs5Targets.cmake)
 endif()

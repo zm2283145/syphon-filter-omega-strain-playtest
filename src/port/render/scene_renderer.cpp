@@ -9,7 +9,7 @@
 #ifdef _WIN32
 #include <DirectXMath.h>
 #else
-#include "directxmath_vita.hpp"  // port-only (132vt2): the PS Vita build's camera-matrix subset
+#include "directxmath_portable.hpp"  // port-only (132vt2, 132ps5c): the non-Windows builds' camera-matrix subset
 #endif
 
 #include <algorithm>

@@ -1,6 +1,7 @@
 #include "derived_data.hpp"
 
 #include "windows_hash.hpp"
+#include "number_parse.hpp"  // port-only (132ps5c): from_chars of floats on the PS5
 
 #include <algorithm>
 #include <charconv>
@@ -899,7 +900,7 @@ SkasConfig parse_skas(std::span<const std::uint8_t> data) {
         std::string_view number = tokens[5];
         if (!number.empty() && number[0] == '+') number.remove_prefix(1);
         double value = 0;
-        const auto [end, error] = std::from_chars(number.data(), number.data() + number.size(), value);
+        const auto [end, error] = omega::from_chars_number(number.data(), number.data() + number.size(), value);
         if (error != std::errc() || end != number.data() + number.size() || number.empty())
             throw std::runtime_error("Invalid SKAS default duration");
         config.default_crossfade_duration = f32(value);

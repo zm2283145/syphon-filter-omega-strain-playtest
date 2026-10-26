@@ -98,6 +98,31 @@ Needs, on Windows:
 
 The package is `local\build-vita\omega_vita.vpk`. Add `-Reconfigure` after a toolchain change.
 
+The native GXM renderer is a second package (title SFOS00004, installs beside the first): configure
+`local\build-vita-gxm` with `-DOMEGA_VITA_RENDERER=gxm -DOMEGA_VITA_TITLE_ID=SFOS00004 -DBUILD_TESTING=OFF` and the
+VitaSDK toolchain file, then build its `omega_vita.vpk` target.
+
+### PS5 (homebrew)
+
+Needs Linux or WSL (Ubuntu 24.04) with clang 18 / LLVM 18, CMake, Ninja, make, Python 3 and rsync, plus the PS5
+homebrew toolchain in `~/ps5`: the public [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) v0.42, the
+ps5-native-app-boilerplate (revision 4f531c4) and the ps5-opengl SDK 1.0.1 (`tools/ps5/setup_ps5_toolchain.sh`
+unpacks them; the last two are not publicly downloadable at the moment). Then, from Windows:
+
+```powershell
+.\tools\build_ps5.ps1
+```
+
+or on Linux `cmake -S . -B local/build-ps5 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/ps5/ps5.toolchain.cmake
+-DCMAKE_BUILD_TYPE=Release` and `cmake --build local/build-ps5 --target omega_ps5_package`. The folder title is
+`PPSA99720` (`local\build-ps5\PPSA99720`, or `local/build-ps5/app/dist/PPSA99720`).
+
+### Automatic builds
+
+Every push builds the Windows package and both Vita packages on GitHub Actions (`.github/workflows/build.yml`; the
+files are under each run's **Artifacts**). The PS5 job runs only on a self-hosted runner with the PS5 toolchain
+(the repository variable `PS5_RUNNER` names its label).
+
 ## Reporting problems
 
 Open an issue saying what you did and what happened, with the log:

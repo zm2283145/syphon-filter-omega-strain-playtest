@@ -245,7 +245,7 @@ void LoadingScreenHost::run() {
         std::uint64_t vblank_count = 0;  // port-only (132mt1): the fixed clock of --loading-capture-frame
         const bool fixed_clock = options_.capture_frame >= 0;
         const auto ticks = [&] {  // 10 us ticks
-            if (fixed_clock) return vblank_count * 1001000ULL / 600ULL;
+            if (fixed_clock) return static_cast<std::uint64_t>(vblank_count * 1001000ULL / 600ULL);
             return static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count() / 10);
         };

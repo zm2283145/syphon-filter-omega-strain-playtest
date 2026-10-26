@@ -41,11 +41,23 @@ namespace omega {
 
 struct PortSettings;
 
+// Port-only (132ps5c hw7): the PS5 (a 16:9 television, like the Vita's 16:9 screen) defaults to wide with the movies
+// filling the screen (movies=fill); the loading and briefing screens keep their 4:3 picture whole (movie_fill=bars:
+// zoom cut the briefing's text off, hw10). The port settings file's aspect= / movies= / movie_fill= still select
+// the others. Other targets: unchanged.
+#if defined(OMEGA_PS5)
+inline constexpr FrameAspect display_default_aspect = FrameAspect::wide;
+inline constexpr bool display_default_movie_zoom = false;
+#else
+inline constexpr FrameAspect display_default_aspect = FrameAspect::pillarbox;
+inline constexpr bool display_default_movie_zoom = false;
+#endif
+
 struct DisplaySettings {
-    FrameAspect aspect = FrameAspect::pillarbox;
+    FrameAspect aspect = display_default_aspect;
     unsigned hud_margin = 0;  // 132ws: percent
     unsigned fov = frame_fov_original;  // 132ws3: percent
-    bool movie_zoom = false;  // 132ws: movie_fill=zoom
+    bool movie_zoom = display_default_movie_zoom;  // 132ws: movie_fill=zoom
     MovieFit movie_fit = MovieFit::fill;  // 132vt2a2: movies=
     float render_scale = 1.0F;
     bool frame_overlay = false;

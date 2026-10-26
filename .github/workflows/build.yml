@@ -1,0 +1,122 @@
+# Play-test repository CI (copied to .github/workflows/build.yml by the development repository's
+# tools/publish/publish_playtest.ps1; edit it there). Builds the PC release package, the PS Vita .vpk files (vitaGL and
+# GXM renderers) and, on a runner with the PS5 toolchain, the PS5 folder title. No tests (this repository has none)
+# and no game data: the games read the player's own disc image at run time.
+# Runners: GitHub-hosted by default; the repository variables WINDOWS_RUNNER / LINUX_RUNNER name a self-hosted runner
+# label instead. The PS5 job runs only when the variable PS5_RUNNER names a runner with the PS5 toolchain installed
+# (its OpenGL SDK and app template are not publicly downloadable).
+name: Build
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  # Builds take over 25 minutes: on main a newer push queues behind the running build instead of cancelling it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows:
+    name: PC (Windows, Release)
+    runs-on: ${{ vars.WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 150
+    env:
+      SCCACHE_GHA_ENABLED: 'true'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          "VS_PATH=$vs" | Out-File -Append $env:GITHUB_ENV
+          $cm = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake'
+          $cmake = Join-Path $cm 'CMake\bin\cmake.exe'
+          $ninja = Join-Path $cm 'Ninja\ninja.exe'
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $build = 'local\build-native\Release'
+          $cmd = "call `"$vcvars`" >nul && `"$cmake`" -S . -B $build -G Ninja `"-DCMAKE_MAKE_PROGRAM=$ninja`" " +
+                 "-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_CXX_COMPILER_LAUNCHER=sccache && " +
+                 "`"$cmake`" --build $build --parallel --target omega_strain omega_mod_tool omega_play omega_server"
+          & $env:ComSpec /d /c $cmd
+          if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = & .\tools\package_release.ps1 -Zip -VsPath $env:VS_PATH
+          $out
+          if ($out[-1] -ne 'EXIT 0') { throw 'package_release failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OmegaStrain-windows-${{ github.sha }}
+          path: local/package/OmegaStrain/
+          retention-days: 30
+
+  vita:
+    name: PS Vita ${{ matrix.renderer }} (.vpk)
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    container:
+      image: vitasdk/vitasdk:latest
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # vitaGL: the default renderer (title SFOS00001); GXM: the native renderer (title SFOS00004, installs beside it).
+          - renderer: vitaGL
+            build: local/build-vita
+            flags: ''
+            artifact: omega_vita
+          - renderer: GXM
+            build: local/build-vita-gxm
+            flags: -DOMEGA_VITA_RENDERER=gxm -DOMEGA_VITA_TITLE_ID=SFOS00004
+            artifact: omega_vita_gxm
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure and build
+        run: |
+          cmake -S . -B "${{ matrix.build }}" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF ${{ matrix.flags }}
+          cmake --build "${{ matrix.build }}" --parallel "$(nproc)" --target omega_vita.vpk
+          ls -l "${{ matrix.build }}/omega_vita.vpk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ github.sha }}
+          path: ${{ matrix.build }}/omega_vita.vpk
+          retention-days: 30
+
+  ps5:
+    name: PS5 (folder title PPSA99720)
+    # Only on a runner with the toolchain (tools/ps5/setup_ps5_toolchain.sh: ps5-payload-sdk v0.42, the native-app
+    # boilerplate 4f531c4, the ps5-opengl SDK 1.0.1, clang 18 / LLVM 18 tools, ninja, cmake, python3, make, rsync).
+    if: ${{ vars.PS5_RUNNER != '' }}
+    runs-on: ${{ vars.PS5_RUNNER }}
+    timeout-minutes: 150
+    env:
+      # Optional overrides of the toolchain locations (default ~/ps5/bp, ~/ps5/ps5-opengl-sdk-1.0.1/sdk,
+      # ~/ps5/gl/ps5-opengl: cmake/ps5/ps5.toolchain.cmake).
+      PS5_NATIVE_APP_TEMPLATE: ${{ vars.PS5_NATIVE_APP_TEMPLATE }}
+      PS5_OPENGL_PREFIX: ${{ vars.PS5_OPENGL_PREFIX }}
+      PS5_OPENGL_SRC: ${{ vars.PS5_OPENGL_SRC }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure and build
+        run: |
+          chmod +x tools/ps5/*.sh
+          set -- -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/ps5/ps5.toolchain.cmake" -DCMAKE_BUILD_TYPE=Release
+          if [ -n "$PS5_NATIVE_APP_TEMPLATE" ]; then set -- "$@" -DPS5_NATIVE_APP_TEMPLATE="$PS5_NATIVE_APP_TEMPLATE"; fi
+          if [ -n "$PS5_OPENGL_PREFIX" ]; then set -- "$@" -DPS5_OPENGL_PREFIX="$PS5_OPENGL_PREFIX"; fi
+          if [ -n "$PS5_OPENGL_SRC" ]; then set -- "$@" -DPS5_OPENGL_SRC="$PS5_OPENGL_SRC"; fi
+          cmake -S . -B local/build-ps5 -G Ninja "$@"
+          cmake --build local/build-ps5 --parallel "$(nproc)" --target omega_ps5_package
+          ls -l local/build-ps5/app/dist/PPSA99720/eboot.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omega_ps5-PPSA99720-${{ github.sha }}
+          path: local/build-ps5/app/dist/PPSA99720/
+          retention-days: 30

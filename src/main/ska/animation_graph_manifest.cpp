@@ -1,4 +1,5 @@
 #include "animation_graph_manifest.hpp"
+#include "number_parse.hpp"  // port-only (132ps5c): from_chars of floats on the PS5
 #include <charconv>
 #include <algorithm>
 #include <cmath>
@@ -30,7 +31,7 @@ public:
     template<class Number> Number number() {
         const auto text = token();
         Number result{};
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
+        const auto parsed = omega::from_chars_number(text.data(), text.data() + text.size(), result);
         if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
             throw std::runtime_error("Animation graph manifest: invalid number");
         return result;

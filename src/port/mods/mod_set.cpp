@@ -1064,7 +1064,7 @@ std::string signature(const ModSet* set) {
             return;
         }
         const auto time = std::filesystem::last_write_time(path, error);
-        out += " " + std::to_string(size) + "@" + std::to_string(error ? 0 : time.time_since_epoch().count());
+        out += " " + std::to_string(size) + "@" + std::to_string(error ? 0 : static_cast<long long>(time.time_since_epoch().count()));
     };
     // A file of a folder mod is stamped; an archive's members are covered by the archive's stamp.
     const auto source = [&](const std::filesystem::path& path, const Mod* mod) {

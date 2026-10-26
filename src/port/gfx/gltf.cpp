@@ -1,4 +1,5 @@
 #include "gltf.hpp"
+#include "number_parse.hpp"  // port-only (132ps5c): from_chars of floats on the PS5
 #include "mod_archive.hpp"
 
 #include <algorithm>
@@ -147,7 +148,7 @@ struct Parser {
                                         text[at] == 'E' || text[at] == '-' || text[at] == '+'))
                 ++at;
             double number = 0;
-            const auto parsed = std::from_chars(text.data() + start, text.data() + at, number);
+            const auto parsed = omega::from_chars_number(text.data() + start, text.data() + at, number);
             if (start == at || parsed.ec != std::errc() || parsed.ptr != text.data() + at || !std::isfinite(number))
                 fail("JSON bad value at byte " + std::to_string(start));
             result = Json(number);

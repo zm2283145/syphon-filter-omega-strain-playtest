@@ -156,10 +156,13 @@
 #include "card_wait_poll.hpp"
 #include "figure_camera.hpp"
 #include "caster_bounds.hpp"
+#include "number_parse.hpp"   // port-only (132ps5c): from_chars of floats on the PS5
 
 #ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
+#elif defined(OMEGA_PS5)
+#include "win32_ps5.hpp"    // port-only (132ps5c): the PS5's fixed screen as the window
 #else
 #include "win32_vita.hpp"   // port-only (132vt2): the PS Vita's fixed screen as the window
 #include "vita_file.hpp"    // port-only (132vl1): the load's card read counters and test switches
@@ -311,7 +314,7 @@ private:
 };
 template<class T>T number(const std::wstring& text){
     const auto s=narrow(text);T value{};
-    auto r=std::from_chars(s.data(),s.data()+s.size(),value);
+    auto r=omega::from_chars_number(s.data(),s.data()+s.size(),value);
     if(r.ec!=std::errc{}||r.ptr!=s.data()+s.size())throw std::runtime_error("Invalid number: "+s);
     return value;
 }
@@ -3906,7 +3909,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::optional<float> options_gamma;bool objects=false,hidden=false,textured=false,first_pass=false,no_coronas=false;unsigned max_frames=0;std::set<unsigned> captures;float ledge_survey=0;bool hotbox_survey=false;bool shadows_on=true;unsigned shadow_capture=0;bool shadow_debug=false;std::optional<std::array<float,4>> start_override;bool activate_all=false;std::optional<std::int32_t> npc_serial;bool mission_scripts=false;bool script_start_calls=false;
         bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
         std::optional<float> fixed_dt;std::wstring dt_trace_path;
+#if defined(OMEGA_PS5)
+        // Port-only (132ps5c hw10): the PS5's GL 4.6 frames take about 60 ms, so 4 catch-up steps a loop (66.7 ms) let
+        // the 60 Hz simulation fall behind real time (58.6 steps a second in hw9: the sound ring underran every few
+        // seconds). Up to 6 keeps it at real time for loops up to 100 ms; each step is the same step (pacing only).
+        int max_steps_per_loop=6;bool measured_dt=false;   // port-only (132vt2d): --max-steps, --measured-dt
+#else
         int max_steps_per_loop=4;bool measured_dt=false;   // port-only (132vt2d): --max-steps, --measured-dt
+#endif
 #if defined(__vita__)
         bool terrain_light_memo_on=true;   // port-only (132vt2d): --terrain-light-memo (also the pass's fast reject)
         set_terrain_light_fast_reject(true);
@@ -19865,7 +19875,7 @@ int wmain(int argc,wchar_t** argv){
 }
 #else
 // Port-only (132vt2, research/VITA.md "The play host"): the PS Vita app (vita_main.cpp) runs the play host with the
-// launcher's argument list after its own disc check.
+// launcher's argument list after its own disc check; 132ps5c: so does the PS5 app (ps5_main.cpp, research/PS5.md).
 int omega_play_entry(int argc,wchar_t** argv){
     const int code=play_main(argc,argv);
     omega::crash::disarm_shutdown();   // 132ws8: the Vita app's own error screen may follow

@@ -5,3 +5,4 @@
 *.md text eol=lf
 *.yml text eol=lf
 tools/deploy/* text eol=lf
+tools/ps5/*.sh text eol=lf
