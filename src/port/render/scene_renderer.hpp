@@ -146,6 +146,10 @@ public:
     // another renderer of a shared display); resize() or the next draw() makes them again.
     void release_targets();
     void draw(const OrbitCamera& camera, const SceneOptions& options);
+    // Checkpoint 132fe1: the frame clear alone (as draw() begins: 0037a5c0 from the flip 0037a9f0) for a frame the
+    // original draws without its scene frame (the level-start loadout, state 0x12: 00132e50 does not run). It clears
+    // the back buffer and the frame alpha; no scene is opened (no upscale follows).
+    void clear_frame();
     // Refresh a CPU-skinned mesh after its existing vertex/index arrays change.
     void refresh_geometry();
     // Re-upload vertices [first, first + count) of the main mesh after their

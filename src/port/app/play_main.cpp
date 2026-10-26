@@ -12771,7 +12771,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::array<std::uint8_t,2> vibration_shown{};   // the last port-0 actuator bytes printed
         bool gamepad_start_held=false;
         std::size_t script_index=0;unsigned script_left=script.empty()?0:script[0].frames;
-        unsigned frame=0,quick_turns=0,world_steps=0;bool running=true;float camera_yaw=0;bool camera_set=false;bool checkpoint_label_shown=false;std::optional<GuiRenderer> fade_renderer;std::uint8_t fade_logged=0;
+        unsigned frame=0,quick_turns=0,world_steps=0,scene_frames_skipped=0;bool scene_resume_reported=false;bool running=true;float camera_yaw=0;bool camera_set=false;bool checkpoint_label_shown=false;std::optional<GuiRenderer> fade_renderer;std::uint8_t fade_logged=0;
         // PORT-ONLY test (132ln5h8): --frames-hold-file. Checked only once the --frames limit is reached.
         bool frames_hold_logged=false;
         const auto frames_hold_released=[&](unsigned at){
@@ -19222,6 +19222,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 default:throw std::runtime_error("Scene draw hook "+std::to_string(id)+" is not hosted");
                 }
             };
+            // Checkpoint 132fe1: the scene frame runs only where the original's runs. Game_MainUpdate 00167e60 calls
+            // the render pass 00132e50 (the only caller of the scene frame's walk 001330ec -> 0013d950 -> 0013e1b0) at
+            // 0x00169048, inside the block 00168dc8..001690f0 that runs for G+50 = 0x0f or 0x13 alone. While the
+            // level-start loadout is up (state 0x12, the pending byte 004ffc29 = 1) the block 00168550 runs instead:
+            // the flip 0037a9f0 (its frame clear 0037a5c0), the GUI frame (0040f3e0, 00419260, 00415870, +60) and the
+            // sound message, so the PS2 shows the screen over the cleared frame, never the level. Here that is every
+            // frame before the level pass's first world step (no game camera yet: the camera before the start
+            // scripts, which the port's default view stood in for, behind and around the 4:3 GUI). The diagnostic
+            // orbit view (port-only) still draws.
+            const bool scene_frame=game_camera.has_value()||state.orbit;
+            if(!scene_frame&&scene_frames_skipped++==0)
+                std::cout<<"Scene frame not drawn at frame "<<frame<<" (132fe1): no world step yet (state 0x12, loadout 004ffc29 pending); "
+                         <<"00132e50 runs only in states 0x0f / 0x13 (00168dc8, call at 0x00169048): the frame clear 0037a5c0 and the GUI draw\n";
+            if(scene_frame&&scene_frames_skipped>0&&!scene_resume_reported){
+                scene_resume_reported=true;
+                std::cout<<"Scene frame drawn again at frame "<<frame<<" (132fe1) after "<<scene_frames_skipped<<" frame(s) without it (the first world step)\n";
+            }
             {
                 struct HookScope{SceneRenderer& renderer;~HookScope(){renderer.set_draw_hook({});}} hook_scope{*state.renderer};
 #ifdef __vita__
@@ -19238,8 +19255,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                 }
 #endif
-                state.renderer->set_draw_hook(run_hook);in_scene_draw=true;
-                state.renderer->draw(*state.camera,{textured,state.wire,false,true,state.vertex_light,textured&&!first_pass});
+                if(scene_frame){
+                    state.renderer->set_draw_hook(run_hook);in_scene_draw=true;
+                    state.renderer->draw(*state.camera,{textured,state.wire,false,true,state.vertex_light,textured&&!first_pass});
+                }else state.renderer->clear_frame();   // 132fe1: state 0x12 (above)
             }
             OMEGA_ZONE_LAP(render_laps,"render.scene_draw");
             in_scene_draw=false;
@@ -19249,10 +19268,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"--test-device-lost-mid (port-only diagnostic) at frame "<<frame<<": the next D3D call reports the device removed\n";
             }
             std::vector<std::uint32_t> hooks_after;
-            for(const auto id:scene_draw_hook_order)if(!hooks_run.count(id)){hooks_after.push_back(id);run_hook(id);}
+            if(scene_frame)for(const auto id:scene_draw_hook_order)if(!hooks_run.count(id)){hooks_after.push_back(id);run_hook(id);}   // 132fe1: the scene frame's steps
             // Planned particle objects the scene draw did not reach (a lost device) draw after it; those past list
             // 5120's 0x400 slots (0013e374) stay undrawn.
-            for(std::size_t k=0;k<scene_particles.size();++k)if(scene_particles[k].state==1)draw_scene_particle(k);
+            if(scene_frame)for(std::size_t k=0;k<scene_particles.size();++k)if(scene_particles[k].state==1)draw_scene_particle(k);
             report_particles();
             {
                 std::ostringstream s;s<<std::hex;

@@ -951,6 +951,24 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
     throw;
 }
 
+void SceneRenderer::clear_frame() try {
+    scene_open_ = false;
+    if (lost()) return;
+    if (!target_) {
+        swap_chain_->size(width_, height_, "Read the swap chain");
+        targets();
+    }
+    const float background[]{0.025F, 0.032F, 0.045F, 1};   // draw()'s clear colour
+    const float zero[]{0, 0, 0, 0};
+    auto& l = list_;
+    l.clear();
+    if (frame_alpha_) l.clear_target({frame_alpha_.get(), 0}, zero);   // 0037a5c0: RGBAQ +c8 A = 0
+    l.clear_target({target_.get(), 0}, background);
+    device_->submit(l);
+} catch (const DeviceLost&) {
+    list_.clear();
+}
+
 void SceneRenderer::refresh_geometry() try {
     vertices_.reset();  // port-only: the old copies freed first (a Vita level's 34 MB mesh fits the GPU pools once)
     indices_.reset();
