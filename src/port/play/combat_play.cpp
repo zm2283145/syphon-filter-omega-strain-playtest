@@ -1216,12 +1216,15 @@ struct CombatPlaySession::Impl {
         h.eye_c0=[this](std::uint64_t o,std::int32_t sub){
             if(const auto g=gob(o))return g->eye;                                 // 0014d340: +e4
             return actors->eye_c0(index(o),sub);};
-        // Virtual +e0: an actor's 00133e00 (SoloActorSimulation::position_e0). A node's (004d95b0: 0015bec0),
-        // the lit spot's (004dff50) and a GOB's (base 004df740), both 003cd420, are not hosted.
+        // Virtual +e0: an actor's 00133e00 (SoloActorSimulation::position_e0). A node's (004d95b0) is
+        // 0015bec0 cNode_v36: the translation +80 as a point (w 1). The lit spot's (004dff50) and a
+        // GOB's (base 004df740) are 003cd420: the +50 transform's world row 3 (+40 of its cached
+        // matrix +10, refreshed through +50 when dirty), VF0 (0,0,0,1) without a transform; the
+        // same row 003cd260 (+e4) and 003cd1c0 (+e8) read.
         h.point_e0=[this](std::uint64_t o)->RootVector{
-            if(node_at(o))fail("the point +e0 of a node (0015bec0) is not hosted");
-            if(spot_owner(o))fail("the point +e0 of a lit spot (003cd420, vtable 004dff50) is not hosted");
-            if(gob(o))fail("the point +e0 of a GOB (003cd420 on the base vtable 004df740) is not hosted");
+            if(const auto* n=node_at(o))return RootVector{n->position[0],n->position[1],n->position[2],1.0F};
+            if(const auto s=spot_owner(o))return spot_position(*s);
+            if(const auto g=gob(o))return g->position;                             // +e8 row 3
             return world.actor(index(o)).position_e0();};
         return h;
     }

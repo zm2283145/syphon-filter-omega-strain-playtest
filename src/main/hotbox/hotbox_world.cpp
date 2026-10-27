@@ -24,7 +24,8 @@ bool actor_link_type(std::uint32_t t){return t==1||t==6||t==7;}
 // Object-interaction boxes: their links may name mission objects.
 bool interaction_type(std::uint32_t t){return t==8||t==12;}
 // Type 11: the camera zone (00172878 / 0017230c), its first link a CAM: camera.
-bool hosted_type(std::uint32_t t){return link_message_type(t)||interaction_type(t)||t==9||t==11||t==13||t==14||t==15||t==16||t==17;}
+// Type 5: the environment switch (00172688 / 001721e0 -> 001781a0), its first link an ENV object.
+bool hosted_type(std::uint32_t t){return link_message_type(t)||interaction_type(t)||t==5||t==9||t==11||t==13||t==14||t==15||t==16||t==17;}
 bool is_camera(const std::vector<std::uint32_t>& cameras,std::uint32_t key){
     return std::find(cameras.begin(),cameras.end(),key)!=cameras.end();
 }
@@ -43,12 +44,13 @@ std::optional<std::size_t> HotboxWorld::find(std::uint32_t id) const{
 }
 
 HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records,bool activated,const std::vector<std::uint32_t>& objects,
-                               const std::vector<std::uint32_t>& link_actors,const std::vector<std::uint32_t>& cameras){
+                               const std::vector<std::uint32_t>& link_actors,const std::vector<std::uint32_t>& cameras,
+                               const std::vector<std::uint32_t>& environments){
     HotboxWorld w;
     for(const auto& r:records){
         if(!hosted_type(r.type))
-            throw std::runtime_error("Hotbox type "+std::to_string(r.type)+" is not hosted (only 1, 3, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 and 17;"
-                                     " 00172400 / 00171ed0 cases 2, 4, 5, 10)");
+            throw std::runtime_error("Hotbox type "+std::to_string(r.type)+" is not hosted (only 1, 3, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 and 17;"
+                                     " 00172400 / 00171ed0 cases 2, 4, 10)");
         if(r.id_category>=0x100||r.id_index>=0x10000)
             throw std::runtime_error("Hotbox ID outside the registry key range of 0040c480");
         if(w.find(r.id))throw std::runtime_error("Duplicate hotbox ID");
@@ -70,6 +72,15 @@ HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records,bool
         for(const auto& l:r.links){
             const auto key=registry_key(l[0],l[1]);
             if(!key)continue;
+            if(r.type==5){
+                // 00172688 hands +60 entry 0 to 001781a0 as the environment without a class test: an earlier box
+                // there would be read as one. The ENV: records register before the BOX loader (001c4190).
+                if(std::find(environments.begin(),environments.end(),*key)==environments.end())
+                    throw std::runtime_error("Type-5 hotbox link to an object that is not an ENV environment"
+                                             " (00172688 passes +60 entry 0 to 001781a0 unchecked)");
+                b.link_keys.push_back(*key);
+                continue;
+            }
             if(const auto target=w.find(*key)){
                 b.links.push_back(*target);b.link_keys.push_back(*key);
                 continue;
@@ -113,10 +124,19 @@ HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records,bool
 }
 
 std::vector<PopulationHotbox> select_hosted_hotboxes(const std::vector<PopulationHotbox>& records,const std::vector<std::uint32_t>& objects,
-                                                     const std::vector<std::uint32_t>& link_actors,const std::vector<std::uint32_t>& cameras){
+                                                     const std::vector<std::uint32_t>& link_actors,const std::vector<std::uint32_t>& cameras,
+                                                     const std::vector<std::uint32_t>& environments){
     std::vector<PopulationHotbox> out;
     for(const auto& r:records){
         if(!hosted_type(r.type))continue;
+        if(r.type==5){                                     // links other than environments throw at build
+            bool resolved=true;
+            for(const auto& l:r.links){
+                const auto key=registry_key(l[0],l[1]);
+                if(key&&std::find(environments.begin(),environments.end(),*key)==environments.end())resolved=false;
+            }
+            if(!resolved)continue;
+        }
         if(r.type==11){                                    // links other than earlier boxes and cameras throw at build
             bool resolved=true;
             for(const auto& l:r.links){
@@ -311,6 +331,7 @@ std::optional<HotboxActorEvent> receive_hotbox_event(const HotboxWorld& w,std::s
         }
         if(type==17)return std::nullopt;                                   // table 0049c8e0: 00172908
         if(type==11)return std::nullopt;                                   // 00172878: the camera (hotbox_camera_action)
+        if(type==5)return std::nullopt;                                    // 00172688: the environment (hotbox_environment_action)
         // 00172450 (1, 6; reads the occupant's player index for the
         // messages), 00172598 (3), 00172908 (7): nothing for the actor. A
         // type-3 box's links get the GOBJTriggerEventMsgs of
@@ -321,6 +342,7 @@ std::optional<HotboxActorEvent> receive_hotbox_event(const HotboxWorld& w,std::s
         if(interaction_type(type)||type==13||type==14||type==0x12)return HotboxActorEvent{type,2,b.record.parameter}; // 00172220
         if(type==17)return std::nullopt;                                   // table 0049c890: 00172330
         if(type==11)return std::nullopt;                                   // 0017230c: the camera (hotbox_camera_action)
+        if(type==5)return std::nullopt;                                    // 001721e0: the environment (hotbox_environment_action)
         // 00171f30 (1), 00172088 (7): +2c via virtual +0x6c (0015bfa0), then
         // the link loop; 00172330 (3, 6): nothing.
         if(link_message_type(type))return std::nullopt;
@@ -333,6 +355,17 @@ std::optional<HotboxCameraAction> hotbox_camera_action(const HotboxWorld& w,std:
     if(b.record.type!=11||!b.first_link_camera||b.link_keys.empty())return std::nullopt;
     if(payload==0)return HotboxCameraAction{true,b.link_keys[0]};         // 00172878..001728a0: 00131320(G, +60[0])
     if(payload==2)return HotboxCameraAction{false,b.link_keys[0]};        // 0017230c..00172328: 001310f0(G, +68[0])
+    return std::nullopt;
+}
+
+std::optional<HotboxEnvironmentAction> hotbox_environment_action(const HotboxWorld& w,std::size_t index,std::uint8_t payload){
+    const auto& b=w.boxes.at(index);
+    if(b.record.type!=5)return std::nullopt;
+    if(payload==0){                                                        // 00172688: only with a link
+        if(b.link_keys.empty())return std::nullopt;
+        return HotboxEnvironmentAction{false,b.link_keys[0]};
+    }
+    if(payload==2)return HotboxEnvironmentAction{true,0};                  // 001721e0: the controller's first environment
     return std::nullopt;
 }
 

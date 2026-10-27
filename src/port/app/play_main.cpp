@@ -837,10 +837,9 @@ struct SimulationScriptWorld final:MissionScriptWorld{
         return omega::load_level_animation(name,models,*level_clips,[this](const std::string& member){
             return decode_animation_clip(level_disc->archive_member({"GAMEDATA","COMMON","SKALEVEL.HOG"},member),level_bone_count);});
     }
-    // Checkpoint 132ms8: the type-5 environment-switch boxes (enter 00172688 / exit 001721e0 -> 001781a0) are not
-    // in the hosted world: their switch is not ported and the first environment stays current (INTERACTABLES.md,
-    // LEVEL_LIGHTS.md). Enable / Disable(Hotbox) 0016fcd0 / 0016fbb0 -> virtual +64 / +68 on such a box writes its
-    // +2c only; that byte is kept here (its readers, the tracker's eligibility for the switch, are the unported part).
+    // Checkpoint 132ms8: Enable / Disable(Hotbox) 0016fcd0 / 0016fbb0 -> virtual +64 / +68 writes a box's +2c. Since
+    // 132fx4 the type-5 environment-switch boxes are hosted (hotbox_environment_action); this map only keeps the
+    // byte of a type-5 box the solo host still drops (a link that is not an ENV object).
     std::map<Word,bool> environment_boxes_2c;
     bool set_hotbox_enabled(Word box,bool enabled) override{
         const auto index=sim.hotboxes().find(box);
@@ -5560,7 +5559,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // with the camera matrix's translation cleared) and drawn first, without the depth test or write.
         struct SkyDraw{std::uint32_t key{};std::vector<SkyLayer> layers;std::vector<std::string> names;
             std::vector<Mesh> local;std::vector<std::size_t> first_vertex,first_material;std::vector<std::uint32_t> first_surface,surface_count;};
-        std::optional<SkyDraw> sky_draw;
+        // Checkpoint 132fx4: a SkyDraw per sky an environment links (00178630 +a4: the first sky object of its category);
+        // sky_draw is the current environment's (001781a0 hides the old sky and shows the new one), null without one.
+        std::vector<SkyDraw> sky_draws;std::vector<std::optional<std::size_t>> sky_of_environment;SkyDraw* sky_draw=nullptr;
         if(objects){
             const auto section=std::find_if(population.sections.begin(),population.sections.end(),
                 [](const PopulationSection& s){return s.tag=="SKY";});
@@ -5569,19 +5570,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto skies=build_sky_definitions(decode_sky_records(
                     std::span<const std::uint8_t>(population_bytes).subspan(section->offset+8,section->end-section->offset-8),section->count));
                 const auto sky_lights=load_level_lights(population_light_sources(population));
-                std::optional<std::size_t> chosen;std::uint32_t category=0;
-                if(sky_lights.current_environment){
-                    category=sky_lights.environments.at(*sky_lights.current_environment).id_category&0xffU;
-                    for(std::size_t k=0;k<skies.size()&&!chosen;++k)if(skies[k].category()==category)chosen=k;
-                }
                 VITA_LOAD_PHASE(disc,"NIE models to the skybox");
                 std::cout<<"Skybox (001c1b60): "<<skies.size()<<" sky object(s) from "<<section->count<<" SKY: records;";
                 for(const auto& s:skies)std::cout<<" key 0x"<<std::hex<<s.key<<std::dec<<" ("<<s.layers.size()<<" layers)";
                 std::cout<<"\n";
-                if(chosen){
-                    SkyDraw draw;draw.key=skies[*chosen].key;
+                std::uint32_t category=0;
+                std::vector<std::size_t> built;   // the sky index of each sky_draws entry
+                const auto build_sky=[&](std::size_t k,std::uint32_t category){
+                    SkyDraw draw;draw.key=skies[k].key;
                     std::vector<SkyModelBox> boxes;
-                    for(const auto& p:skies[*chosen].layers){
+                    for(const auto& p:skies[k].layers){
                         const auto dot=p.name.rfind('.');
                         if(dot==std::string::npos)throw std::runtime_error("003bbdc0: sky layer "+p.name+" has no extension (00129088)");
                         const auto name=uppercase_asset(p.name.substr(0,dot));
@@ -5605,7 +5603,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             scene_model_bucket(vum.header_flags),vum.declared_bounds,std::nullopt));
                         scene_models.back().hidden=true;   // drawn ahead of the scene frame's lists
                     }
-                    draw.layers=setup_sky_layers(skies[*chosen],boxes);
+                    draw.layers=setup_sky_layers(skies[k],boxes);
                     std::cout<<"Skybox: key 0x"<<std::hex<<draw.key<<std::dec<<" present with environment category "<<category<<" (00178630 +a4):";
                     for(std::size_t i=0;i<draw.layers.size();++i){
                         const auto& l=draw.layers[i];
@@ -5613,8 +5611,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             <<" speed "<<l.speed<<" ("<<draw.surface_count[i]<<" surfaces)";
                     }
                     std::cout<<"\n";
-                    sky_draw=std::move(draw);
-                }else std::cout<<"Skybox: no sky of environment category "<<category<<(sky_lights.current_environment?"":" (no current environment)")<<": none drawn\n";
+                    return draw;
+                };
+                for(const auto& env:sky_lights.environments){
+                    category=env.id_category&0xffU;
+                    std::optional<std::size_t> chosen;
+                    for(std::size_t k=0;k<skies.size()&&!chosen;++k)if(skies[k].category()==category)chosen=k;
+                    if(!chosen){sky_of_environment.push_back(std::nullopt);continue;}
+                    const auto at=std::find(built.begin(),built.end(),*chosen);
+                    if(at!=built.end()){sky_of_environment.push_back(static_cast<std::size_t>(at-built.begin()));continue;}
+                    built.push_back(*chosen);sky_draws.push_back(build_sky(*chosen,category));
+                    sky_of_environment.push_back(sky_draws.size()-1);
+                }
+                if(sky_lights.current_environment)category=sky_lights.environments.at(*sky_lights.current_environment).id_category&0xffU;
+                if(sky_lights.current_environment&&sky_of_environment.at(*sky_lights.current_environment))
+                    sky_draw=&sky_draws[*sky_of_environment[*sky_lights.current_environment]];
+                if(!sky_draw)std::cout<<"Skybox: no sky of environment category "<<category<<(sky_lights.current_environment?"":" (no current environment)")<<": none drawn\n";
             }
         }
 #ifdef __vita__
@@ -6875,7 +6887,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(const auto& s:population.sound_objects)config.hotbox_link_actors.push_back(s.id);
         }
         for(const auto& c:population.cameras)config.hotbox_link_cameras.push_back(c.id);
-        config.hotboxes=select_hosted_hotboxes(population.hotboxes,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras);
+        for(const auto& e:population.environments)config.hotbox_link_environments.push_back(e.id());   // ENV: loads before BOX:
+        config.hotboxes=select_hosted_hotboxes(population.hotboxes,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras,
+                                               config.hotbox_link_environments);
         if(hotbox_survey){
             std::cout<<"Hotboxes: "<<population.hotboxes.size()<<" records, "<<config.hotboxes.size()<<" hosted (types 1/3/6/7 unlinked, 8/12 resolved, 9, 13, 15, 16, 17)\n";
             for(const auto& b:config.hotboxes){
@@ -10358,6 +10372,37 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(lights.dirty_42){m.dirty_42=true;lights.dirty_42=0;}
         };
         if(play_particles)play_particles->lights=&shadow_scene.lights();        // game::SpawnLight (00231f00)
+        // Checkpoint 132fx4: a type-5 box's environment switch (00172688 enter: its first link; 001721e0 exit: the
+        // controller's first environment, func_00172360(004ffbd4, 0)) through 001781a0 on the level's lights. The old
+        // environment's sky is hidden and the new one's shown (sky_draw follows the current environment); the light
+        // objects it switched take their +2d (the zone tracker's presence). The blend and the far distance 0053834c
+        // follow in the world update (00178440 / 00133420).
+        const auto environment_switch=[&](const HotboxEnvironmentAction& a){
+            auto& lights=shadow_scene.lights();
+            if(lights.environments.empty())
+                throw std::runtime_error("unhosted(0x001781a0): a type-5 box with no registered ENV object (the controller's list is empty)");
+            std::size_t index=0;
+            if(!a.first){
+                const auto it=std::find_if(lights.environments.begin(),lights.environments.end(),
+                    [&](const PopulationEnvironment& e){return e.id()==a.environment;});
+                if(it==lights.environments.end())throw std::runtime_error("00172688: type-5 box link "+std::to_string(a.environment)+" is not an ENV object");
+                index=static_cast<std::size_t>(it-lights.environments.begin());
+            }
+            const auto before=lights.current_environment;
+            set_current_environment(lights,index);
+            for(const auto& s:lights.environment_switches)if(zone_tracker)zone_tracker->set_member_present(s.id,s.on);
+            const auto switches=lights.environment_switches;lights.environment_switches.clear();
+            if(lights.current_environment==before)return;
+            sky_draw=index<sky_of_environment.size()&&sky_of_environment[index]?&sky_draws[*sky_of_environment[index]]:nullptr;
+            const auto& b=lights.environment_blend;
+            std::cout<<"Environment (001781a0): "<<lights.environments[index].id()<<" current"<<(a.first?" (the first, box exit)":"")
+                     <<", "<<switches.size()<<" light objects switched";
+            for(const auto& s:switches)std::cout<<" "<<s.id<<(s.on?" on":" off");
+            std::cout<<", blend over "<<b.duration_18<<" s, ambient +0x84 ("<<b.ambient_from_58[0]<<", "<<b.ambient_from_58[1]<<", "
+                     <<b.ambient_from_58[2]<<") -> ("<<b.ambient_to_64[0]<<", "<<b.ambient_to_64[1]<<", "<<b.ambient_to_64[2]<<"), sky "
+                     <<(sky_draw?std::to_string(sky_draw->key):std::string("none"))<<"\n";
+        };
+        for(std::size_t a=0;a<actors.size();++a)actors.actor(a).set_environment_sink(environment_switch);
         // Checkpoint 132cp9: 003767e0 for the calls the PNT lights' enable 00371b00 / disable 00371a60 queued:
         // the model's +0x68 bit, then every copy's colour bytes (wrapping adds / subtracts), then the vertex
         // colours (byte / 128) of the batches the terrain light pass did not relight last (it restores and
@@ -14999,6 +15044,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         std::cout<<"NI light "<<l.light<<(l.on?" on":" off")<<" (point pool "<<l.index<<") at frame "<<frame<<"\n";
                     ni_events->take_blasts();
                 }
+                // 00133420's head: the environment blend 00178440, then the far distance 0053834c = the current +0x64.
+                update_environment_blend(shadow_scene.lights(),step_dt);
+                update_level_fog(shadow_scene.lights());   // XLib_UpdateFogParms (00538370 / 00538380), before the traversal
+                npc_system.far_distance=level_far_distance(shadow_scene.lights());
                 // 003bc520 (the sky's vt +48): every layer's motion 003bcb90, once per frame.
                 if(sky_draw)for(auto& layer:sky_draw->layers)update_sky_layer(layer);
                 if(play_particles&&!play_particles->shatters.empty()){
@@ -17615,6 +17664,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 }
                             }
                         };
+                    shadow_scene.set_shadow_mode(level_frame_mode(shadow_scene.lights()));   // 00132e50: 005392d0 each frame
                     const ShadowSceneFrame shadows=shadow_scene.build(shadow_in);
                     shadow_draw.buffers.clear();shadow_draw.receivers.clear();
                     const auto flat=[](const ShadowMatrix& m){std::array<float,16> r{};
@@ -18659,7 +18709,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             ++wide_edge_filed[0];
                         if(c.code&0x10){
                             // 003a1cf4..003a1e04: base [00538370] + scale [00538380] / w (renderer +180 / +190, 001339b0).
-                            if(!particle_fog)particle_fog=level_fog(shadow_scene.lights());
+                            if(!particle_fog){
+                                particle_fog=frame_fog(shadow_scene.lights());
+                                if(!particle_fog)throw std::runtime_error("Particle fog: the environment's fog terms are undefined (001339b0: equal near and far, or overflow)");
+                            }
                             o.fade=shadow_fog_factor(*scene_clip,particle_fog->base,particle_fog->scale,{node[3][0],node[3][1],node[3][2],1.0F});
                         }
                     }
@@ -19249,8 +19302,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(!lights.current_environment||*lights.current_environment>=lights.environments.size())
                     throw std::runtime_error("003781b0: no current environment for the fog near +0x158");
                 auto& cc=corona_camera;cc.near_plane=shadow_settings.near_plane;cc.far_plane=level_camera_far(lights);
-                cc.fog=(level_frame_mode(lights)&0x180)!=0;cc.fog_near=lights.environments[*lights.current_environment].values[5];
-                const auto fog=level_fog(lights);cc.fog_base=fog.base;cc.fog_scale=fog.scale;
+                cc.fog=(level_frame_mode(lights)&0x180)!=0;cc.fog_near=frame_z_near(lights);   // +0x158 (the world update head's)
+                const auto fog=frame_fog(lights);
+                if(!fog)throw std::runtime_error("Corona fog: the environment's fog terms are undefined (001339b0: equal near and far, or overflow)");
+                cc.fog_base=fog->base;cc.fog_scale=fog->scale;
                 corona_groups[3]=corona_calls.size();
                 vision_coronas=vision.size();
             }

@@ -401,6 +401,7 @@ struct SoloActorSimulation::Impl {
     SoloActorSimulation::HotboxLinkSink link_sink;
     SoloActorSimulation::LinkMessageScriptFilter link_filter;
     SoloActorSimulation::HotboxTriggerSink trigger_sink;
+    SoloActorSimulation::EnvironmentSink environment_sink;            // type-5 boxes (001781a0)
     SoloActorSimulation::BoxTriggerScriptFilter box_trigger_filter;
     SoloActorSimulation::ObjectExists object_exists;
     SoloActorSimulation::ObjectTrigger object_trigger;
@@ -1684,6 +1685,12 @@ void SoloActorSimulation::Impl::deliver_queued(){
                     if(!trigger_sink)throw std::runtime_error("Solo actor: GOBJTriggerEventMsg (00172598) to "+std::to_string(t.receiver)+" without a hotbox trigger sink");
                     trigger_sink(t);
                 }
+            // 00172688 / 001721e0: a type-5 box switches the current environment (001781a0, the host's controller).
+            if(const auto e=hotbox_environment_action(hotbox_world,m.box,m.payload)){
+                if(!environment_sink)throw std::runtime_error("unhosted(0x001781a0): Solo actor: a type-5 hotbox's environment switch needs the environment controller");
+                environment_sink(*e);
+                if(current)current->hotbox_environments.push_back(*e);
+            }
             // 00172878 / 0017230c: a type-11 box's CAM: camera onto / off the game world's active object list.
             if(const auto c=hotbox_camera_action(hotbox_world,m.box,m.payload)){
                 if(c->push)push_actor_world_object(world_objects,c->camera,world_stack_host());
@@ -3113,7 +3120,8 @@ SoloActorSimulation::SoloActorSimulation(SoloActorWorldLink link,const SoloActor
         if(config.gender_3260)s.health.gender_3260=*config.gender_3260;   // 001b3460 (model init, after 001b5fe0)
     }
     s.jump.fall_start_30a4=config.fall_start_30a4;
-    s.hotbox_world=build_hotbox_world(config.hotboxes,true,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras);
+    s.hotbox_world=build_hotbox_world(config.hotboxes,true,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras,
+                                      config.hotbox_link_environments);
     auto floor_state=make_initial_root_animation();const float half_yaw=config.yaw_degrees*3.14159265F/360.0F;
     set_root_placement(floor_state,{0,0,std::sin(half_yaw),std::cos(half_yaw)},config.start);
     s.floor_root=s.roots.add(floor_state);
@@ -3517,6 +3525,7 @@ void SoloActorSimulation::queue_link_message(bool enable){
 }
 void SoloActorSimulation::set_link_message_filter(LinkMessageScriptFilter filter){impl_->link_filter=std::move(filter);}
 void SoloActorSimulation::set_hotbox_trigger_sink(HotboxTriggerSink sink){impl_->trigger_sink=std::move(sink);}
+void SoloActorSimulation::set_environment_sink(EnvironmentSink sink){impl_->environment_sink=std::move(sink);}
 void SoloActorSimulation::queue_box_trigger(const HotboxType3Trigger& trigger){
     Impl::QueuedMessage m;m.kind=Impl::QueuedMessage::Kind::box_trigger;m.box_trigger=trigger;
     impl_->queue.push_back(std::move(m));

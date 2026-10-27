@@ -195,7 +195,7 @@ ShadowSceneFrame ShadowScene::build(const ShadowSceneFrameInput& in){
     const Camera camera=this->camera(in.camera_world,in.half_angle);
     out.camera_view=camera.view;
     out.far_plane=camera.far_plane;
-    try{out.fog=level_fog(lights_);}catch(const std::runtime_error&){out.fog.reset();}  // 00133574..00133648 (no environment already threw above)
+    out.fog=frame_fog(lights_);   // 00133574..00133648 (the world update head's terms; no environment already threw above)
     out.camera_projection=camera.projection;
     out.camera_clip=camera.clip;
     out.lights=light_table(in.camera_world,in.half_angle);                                // 0013e820 -> 00373670

@@ -215,6 +215,8 @@ public:
     struct Camera { ShadowMatrix view,projection,clip; float far_plane{}; };
     Camera camera(const std::array<std::array<float,4>,4>& camera_world,float half_angle) const;
     LevelLights& lights() { return lights_; }
+    // The draw mode word 005392d0 the frame setup 00132e50 stores every frame (level_frame_mode).
+    void set_shadow_mode(std::uint32_t mode) { settings_.shadow.mode = mode; }
     const ShadowReceiverTable& receivers() const { return receivers_; }
     // A GOB sub-instance's +0x38 (ShadowReceiverInstance::walked) and its GOB's
     // current +0x50 matrix (pathed GOBs move). Throw for a filed instance.

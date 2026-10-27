@@ -54,6 +54,8 @@ struct LevelLightRef { LevelLightPool pool{}; std::size_t index{}; };
 // A registered light object (kind 6, 0040c9d0): every PNT record and the first
 // four DIR records, in that order.
 struct LevelLightObject { std::uint32_t id{}; LevelLightRef light; };
+// Renderer fog terms +0x180 (base) / +0x190 (scale); see renderer_fog below.
+struct LevelFog { float base{},scale{}; };
 struct LevelLights {
     // Manager +0x0/+0x10, +0x4/+0x14, +0x8/+0x18, +0xc/+0x1c. Absent pools are empty.
     std::vector<LevelLight> ambient,directional,point,spot;
@@ -74,6 +76,33 @@ struct LevelLights {
     // The light objects the first ENV activated at load (001781a0: virtual +5c, whose 003ce980 sets the
     // object's +2d), in its reference order.
     std::vector<std::uint32_t> environment_activated;
+    // The environment controller 004ffbd4 past +0xc (decomp: EnvController_ActivateFirst 001781a0 = cEnvMan::SetCurrent,
+    // its blend step 00178440, World_UpdateFrame 00133420, World_RenderPass 00132e50): the blend byte +10, time +14,
+    // duration +18, fraction +1c, then the outgoing / incoming +0x80 (+20 / +24), +0x60 (+28 / +2c), +0x68 (+30 / +34),
+    // +0x6c (+38 / +3c), +0x70 colour (+40 / +4c) and +0x84 ambient colour (+58 / +64).
+    struct EnvironmentBlend {
+        bool active_10{};
+        float time_14{},duration_18{},fraction_1c{};
+        float value80_from_20{},value80_to_24{},z_near_from_28{},z_near_to_2c{};
+        float fog_near_from_30{},fog_near_to_34{},fog_far_from_38{},fog_far_to_3c{};
+        std::array<float,3> colour_from_40{},colour_to_4c{},ambient_from_58{},ambient_to_64{};
+    };
+    EnvironmentBlend environment_blend;
+    // D_00554ED4: 001781a0 stores the new environment's +0x80 there when it is not negative.
+    std::optional<float> environment_value_80;
+    // Checkpoint 132fx4: the renderer fog terms +0x180 / +0x190 as the world update's head wrote them this frame
+    // (cGameSystem_NextFrame 00133420: cEnvMan_NextFrame, then XLib_UpdateFogParms, before the object traversal
+    // whose hotbox events switch the environment); fog_180_written false before the first update_level_fog.
+    // nullopt: the terms were undefined (renderer_fog threw).
+    bool fog_180_written{};
+    std::optional<LevelFog> fog_180;
+    // The near distance renderer +0x158 (D_00538348) the same head wrote: the current +0x60, or while blending
+    // +28 + +1c * (+2c - +28).
+    float z_near_158{};
+    // The light-object switches a set_current_environment made, in order (vcall +0x60 on the old environment's
+    // references, then +0x5c on the new one's), for the host's presence bookkeeping (their +2d); the host clears it.
+    struct EnvironmentObjectSwitch { std::uint32_t id{}; bool on{}; };
+    std::vector<EnvironmentObjectSwitch> environment_switches;
     std::vector<LevelLight>& pool(LevelLightPool p);
     const std::vector<LevelLight>& pool(LevelLightPool p) const;
     LevelLight& light(const LevelLightRef& r);
@@ -138,6 +167,16 @@ bool is_level_light_object(const LevelLights& lights,std::uint32_t id);
 // 00371a60 as above (the queued calls carry `object_id`), the other pools'
 // +0x1c and dirty_42 only.
 void switch_level_light(LevelLights& lights,const LevelLightRef& ref,bool on,std::uint32_t object_id);
+// 001781a0 (cEnvMan::SetCurrent) with environments[index]: nothing when it is already current. Otherwise each of
+// the old environment's resolved references gets vcall +0x60 (its light off), its sky is hidden (the host's: the
+// sky follows current_environment), the blend starts (time 0, duration = the running blend's fraction or 1.0,
+// fraction 0, the old and new values, active), the new environment becomes current, its references get vcall
+// +0x5c (light on), the ambient light (type 1, id 1) takes its +0x84 colour and weight, and a non-negative +0x80
+// goes to environment_value_80. Throws for an index outside the registered environments.
+void set_current_environment(LevelLights& lights,std::size_t index);
+// 00178440, once per world update before the fog terms: while blending, time += dt; below the duration the
+// fraction is time / duration, otherwise time = duration = 0, fraction = 1 and the blend ends.
+void update_environment_blend(LevelLights& lights,float dt);
 // The camera far distance of the frame setup (00132ff0..0013300c): 12 plus
 // the current environment's +0x64. Throws without a current environment.
 float level_camera_far(const LevelLights& lights);
@@ -146,26 +185,34 @@ float level_camera_far(const LevelLights& lights);
 // while the environment controller is not blending (its +60 goes to 00538348).
 // Throws without a current environment.
 float level_far_distance(const LevelLights& lights);
-// The draw mode word 005392d0 the frame setup stores (00132e60..00132ed4)
-// while the environment controller is not blending: 0x75, plus 0x100 (fog
-// byte +0x7c set) or 0x80 when the current environment's +0x6c is above 0.
-// Throws without a current environment. (The blending branch interpolates
-// controller +0x38/+0x3c and is not modelled.)
+// The draw mode word 005392d0 the frame setup stores (00132e60..00132ed4):
+// 0x75, plus 0x100 (fog byte +0x7c set) or 0x80 when the far fog value is
+// above 0: the current environment's +0x6c, or while the controller blends
+// +38 + +1c * (+3c - +38). Throws without a current environment.
 std::uint32_t level_frame_mode(const LevelLights& lights);
 // Renderer fog terms +0x180 (base) / +0x190 (scale) from 001339b0: with
 // a = 255*(1-d0), b = 255*(1-d1), n = +0x158, f = +0x15c:
 //   base = ((a+b) + ((b-a)*(f+n))/(f-n)) / 2,  scale = ((f*n)*(a-b)) / (f-n),
 // so base + scale/w is a at w = n and b at w = f (the fog factor 003d3700
 // clamps it to 0..255; 255 = no fog). Throws when f == n or a result is not finite.
-struct LevelFog { float base{},scale{}; };
 LevelFog renderer_fog(float near_distance,float far_distance,float near_density,float far_density);
-// The frame's fog terms (00133574..00133648, the world update 00133420 while
-// the environment controller is not blending): renderer +0x150 = current
-// environment +0x68, +0x154 = +0x6c, +0x158 = +0x60, +0x15c = +0x64, then
-// 001339b0. Throws without a current environment. (The blending branch
-// interpolates controller +0x28..+0x3c by +0x1c and is not modelled; nor is
-// the world +0x67 branch at 00133444, which skips this setup.)
+// The frame's fog terms (00133574..00133648, the world update 00133420):
+// renderer +0x150 = +0x68, +0x154 = +0x6c, +0x158 = +0x60 of the current
+// environment, or while the controller blends a + f * (b - a) of +30/+34,
+// +38/+3c and +28/+2c with f = +1c; +0x15c = the current +0x64 always; then
+// 001339b0. Throws without a current environment. (The world +0x67 branch at
+// 00133444, which skips this setup, is not modelled.)
 LevelFog level_fog(const LevelLights& lights);
+// Checkpoint 132fx4: the world update head's XLib_UpdateFogParms (cGameSystem_NextFrame, after cEnvMan_NextFrame):
+// level_fog into fog_180 (nullopt when it throws). Run once per world update after update_environment_blend.
+void update_level_fog(LevelLights& lights);
+// The frame's fog terms the renderer reads (00538370 / 00538380): fog_180 once update_level_fog has run (an
+// environment switched later in the frame takes effect at the next update), else level_fog now (nullopt when it
+// throws).
+std::optional<LevelFog> frame_fog(const LevelLights& lights);
+// The frame's renderer +0x158: z_near_158 once update_level_fog has run, else the current (or blended) +0x60
+// now. Throws without a current environment.
+float frame_z_near(const LevelLights& lights);
 // 0037f740: the virtual screen (table 004bc1d0: 1280x720, 640x512, 640x480,
 // 640x360, 320x240) is the last entry, walking down from the first, that
 // still holds the frame buffer (width <= w and height <= h); the aspect

@@ -241,6 +241,8 @@ struct SoloActorConfig {
     std::vector<std::uint32_t> hotbox_link_objects;
     // The CAM: records' keys a type-11 box may link to (build_hotbox_world).
     std::vector<std::uint32_t> hotbox_link_cameras;
+    // The ENV: records' keys a type-5 box may link to (build_hotbox_world).
+    std::vector<std::uint32_t> hotbox_link_environments;
     // Registry keys of the actors (NPC records) type-1/6/7 box links may name;
     // their EnableMsg/DisableMsg go to the hotbox link sink.
     std::vector<std::uint32_t> hotbox_link_actors;
@@ -446,6 +448,7 @@ struct SoloActorFrame {
     std::vector<HotboxTrackerEvent> hotbox_events;
     std::vector<HotboxActorEvent> hotbox_codes;
     std::vector<HotboxCameraAction> hotbox_cameras;   // type-11 camera pushes / removals (00172878 / 0017230c)
+    std::vector<HotboxEnvironmentAction> hotbox_environments;   // type-5 environment switches (00172688 / 001721e0)
     // Box events (from the tracker) the script filter took this step; the
     // box's native receiver did not run for them.
     std::vector<HotboxTrackerEvent> hotbox_script_events;
@@ -1106,6 +1109,10 @@ public:
     // sink such a message throws.
     using HotboxTriggerSink=std::function<void(const HotboxType3Trigger&)>;
     void set_hotbox_trigger_sink(HotboxTriggerSink sink);
+    // A type-5 box's environment switch (00172688 / 001721e0 -> 001781a0 on the controller 004ffbd4), called in
+    // the pump; without a sink such a box event throws.
+    using EnvironmentSink=std::function<void(const HotboxEnvironmentAction&)>;
+    void set_environment_sink(EnvironmentSink sink);
     // 003c9420(trigger, actor, 0): delivered by the next pump. The actor's
     // script filter (003cc850 -> 003e1aa0, type GOBJTriggerEventMsg) first;
     // unhandled, 001b3b60 (no branch for key 004f5440) passes it to 003cea10

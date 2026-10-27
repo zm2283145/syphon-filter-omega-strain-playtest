@@ -205,6 +205,7 @@ LevelLights load_level_lights(const LevelLightSources& src,const std::vector<Lev
             l.weight=colour_weight(l.colour);
             break;
         }
+        if(!(env.value_80<0.0F))out.environment_value_80=env.value_80;         // 001783e4..001783f8
     }
     return out;
 }
@@ -239,6 +240,49 @@ void activate_level_light_object(LevelLights& lights,std::uint32_t id){
 void deactivate_level_light_object(LevelLights& lights,std::uint32_t id){
     set_light_object(lights,light_object(lights,id),false);                  // 00179b70 / 001791c0 -> vcall +0x30
 }
+void set_current_environment(LevelLights& lights,std::size_t index){
+    require(index<lights.environments.size(),"001781a0 with an environment outside the registered ENV objects");
+    if(lights.current_environment==index)return;                               // 001781b8
+    auto& b=lights.environment_blend;
+    const auto switch_references=[&lights](const PopulationEnvironment& env,bool on){
+        for(std::uint32_t ref:env.references){                                  // +0x90..+0x9c (0040c480 at 00178918)
+            const auto hits=find_objects(lights,env.id_category,ref,0);
+            if(hits.empty())continue;
+            const auto& o=lights.objects[hits[0].index];
+            set_light_object(lights,o,on);                                      // vcall +0x5c / +0x60
+            lights.environment_switches.push_back({o.id,on});
+        }
+    };
+    if(lights.current_environment){
+        const PopulationEnvironment& old=lights.environments.at(*lights.current_environment);
+        switch_references(old,false);                                           // 001781e0..00178210, then the sky +a4
+        const PopulationEnvironment& e=lights.environments[index];
+        b.time_14=0.0F;
+        b.duration_18=b.active_10?mul(b.fraction_1c,1.0F):1.0F;
+        b.fraction_1c=0.0F;
+        b.value80_from_20=old.value_80;b.z_near_from_28=old.values[5];b.fog_near_from_30=old.values[3];b.fog_far_from_38=old.values[4];
+        b.colour_from_40={old.values[0],old.values[1],old.values[2]};b.ambient_from_58={old.values[7],old.values[8],old.values[9]};
+        b.value80_to_24=e.value_80;b.z_near_to_2c=e.values[5];b.fog_near_to_34=e.values[3];b.fog_far_to_3c=e.values[4];
+        b.colour_to_4c={e.values[0],e.values[1],e.values[2]};b.ambient_to_64={e.values[7],e.values[8],e.values[9]};
+        b.active_10=true;
+    }
+    lights.current_environment=index;
+    const PopulationEnvironment& env=lights.environments[index];
+    switch_references(env,true);                                                // 001782f0..00178320
+    for(auto& l:lights.ambient)if(l.id==1&&l.type==1){                          // 00178328: 00373bc0(mgr, 1, 1)
+        l.colour={env.values[7],env.values[8],env.values[9],0.0F};
+        l.weight=colour_weight(l.colour);
+        break;
+    }
+    if(!(env.value_80<0.0F))lights.environment_value_80=env.value_80;          // 001783e4..001783f8
+}
+void update_environment_blend(LevelLights& lights,float dt){
+    auto& b=lights.environment_blend;
+    if(!b.active_10)return;
+    b.time_14=add(b.time_14,dt);
+    if(b.time_14<b.duration_18)b.fraction_1c=fdiv(b.time_14,b.duration_18);
+    else{b.time_14=0.0F;b.duration_18=0.0F;b.fraction_1c=1.0F;b.active_10=false;}
+}
 float level_camera_far(const LevelLights& lights){
     require(lights.current_environment.has_value()&&*lights.current_environment<lights.environments.size(),
         "no current environment for the camera far distance");
@@ -255,8 +299,11 @@ std::uint32_t level_frame_mode(const LevelLights& lights){
     require(lights.current_environment.has_value()&&*lights.current_environment<lights.environments.size(),
         "no current environment for the frame mode");
     const PopulationEnvironment& env=lights.environments[*lights.current_environment];
+    const auto& b=lights.environment_blend;
     std::uint32_t mode=0x75;                                                    // 00132e6c
-    if(!(env.values[4]<=0.0F))mode|=env.fog_mode?0x100U:0x80U;                  // +0x6c (00132e94..00132ec8)
+    // 00132e70..00132e88: blending, +38 + +1c * (+3c - +38); else the current +0x6c (00132e94).
+    const float fog_far=b.active_10?add(b.fog_far_from_38,mul(b.fraction_1c,sub(b.fog_far_to_3c,b.fog_far_from_38))):env.values[4];
+    if(!(fog_far<=0.0F))mode|=env.fog_mode?0x100U:0x80U;                        // 00132ea0..00132ec8 (+0x7c of the current)
     return mode;
 }
 
@@ -274,8 +321,34 @@ LevelFog level_fog(const LevelLights& lights){
     require(lights.current_environment.has_value()&&*lights.current_environment<lights.environments.size(),
         "no current environment for the fog terms");
     const PopulationEnvironment& env=lights.environments[*lights.current_environment];
-    // values: +0x70 +0x74 +0x78 +0x68 +0x6c +0x60 +0x64 ...; 001335d8..00133648.
-    return renderer_fog(env.values[5],env.values[6],env.values[3],env.values[4]);
+    const auto& b=lights.environment_blend;
+    // values: +0x70 +0x74 +0x78 +0x68 +0x6c +0x60 +0x64 ...; 001335d8..00133648. World_UpdateFrame's Lerp(a, b, t)
+    // = a + t * (b - a) for the near distance and both densities while blending; the far distance is never blended.
+    const auto lerp=[](float from,float to,float t){return add(from,mul(t,sub(to,from)));};
+    if(!b.active_10)return renderer_fog(env.values[5],env.values[6],env.values[3],env.values[4]);
+    return renderer_fog(lerp(b.z_near_from_28,b.z_near_to_2c,b.fraction_1c),env.values[6],
+                        lerp(b.fog_near_from_30,b.fog_near_to_34,b.fraction_1c),lerp(b.fog_far_from_38,b.fog_far_to_3c,b.fraction_1c));
+}
+namespace {
+float blended_z_near(const LevelLights& lights){
+    require(lights.current_environment.has_value()&&*lights.current_environment<lights.environments.size(),
+        "no current environment for the near distance");
+    const auto& b=lights.environment_blend;
+    if(!b.active_10)return lights.environments[*lights.current_environment].values[5];
+    return add(b.z_near_from_28,mul(b.fraction_1c,sub(b.z_near_to_2c,b.z_near_from_28)));   // ZNear: Lerp
+}
+}
+float frame_z_near(const LevelLights& lights){
+    return lights.fog_180_written?lights.z_near_158:blended_z_near(lights);
+}
+void update_level_fog(LevelLights& lights){
+    lights.z_near_158=blended_z_near(lights);
+    lights.fog_180_written=true;
+    try{lights.fog_180=level_fog(lights);}catch(const std::runtime_error&){lights.fog_180.reset();}
+}
+std::optional<LevelFog> frame_fog(const LevelLights& lights){
+    if(lights.fog_180_written)return lights.fog_180;
+    try{return level_fog(lights);}catch(const std::runtime_error&){return std::nullopt;}
 }
 float renderer_aspect(int width,int height){                                      // 0037f740
     static constexpr std::array<std::array<float,2>,5> screens{{{1280,720},{640,512},{640,480},{640,360},{320,240}}};   // 004bc1d0

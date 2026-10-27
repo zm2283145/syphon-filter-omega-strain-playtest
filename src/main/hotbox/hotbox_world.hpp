@@ -17,7 +17,8 @@
 // weather record 00232f10 reads; enter/exit 001726b0 / 00172220 send code 14
 // to the actor, which the player component ignores; checkpoint 132ms2),
 // 15/16 (running-jump zones) and 17
-// (their targets, no messages). The
+// (their targets, no messages), 5 (the environment switch: hotbox_environment_action)
+// and 11 (the camera zone: hotbox_camera_action). The
 // other types, type 3 with links and 1/6/7 with other links send mission
 // messages and throw when a world is built with them; select_hosted_hotboxes
 // keeps the hosted ones. Run-time boxes (MakeNPCInteractable, 00170460) are
@@ -87,19 +88,24 @@ struct HotboxWorld {
 // link_actors are the keys of the actors (NPC records, registered by
 // 001c3940 before the BOX loader) a type-1/6/7 box may link to. cameras are
 // the CAM: records' keys (001c0920 registers them before the BOX loader) a
-// type-11 box may link to; its other links must be earlier boxes.
+// type-11 box may link to; its other links must be earlier boxes. environments
+// are the ENV: records' keys (registered before the BOX loader too), the only
+// links a type-5 box may have.
 HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records, bool activated,
                                const std::vector<std::uint32_t>& objects = {},
                                const std::vector<std::uint32_t>& link_actors = {},
-                               const std::vector<std::uint32_t>& cameras = {});
+                               const std::vector<std::uint32_t>& cameras = {},
+                               const std::vector<std::uint32_t>& environments = {});
 // The records of types 1, 3, 6 and 7 without a non-null link pair, 1, 6 and
 // 7 whose links are all link_actors, 8 and 12 whose links all resolve (to an
 // earlier kept box or one of objects), 11 whose links are earlier kept boxes
-// or cameras, 9, 13, 15, 16 and 17 (host choice for the solo simulation).
+// or cameras, 5 whose links are environments, 9, 13, 15, 16 and 17 (host
+// choice for the solo simulation).
 std::vector<PopulationHotbox> select_hosted_hotboxes(const std::vector<PopulationHotbox>& records,
                                                      const std::vector<std::uint32_t>& objects = {},
                                                      const std::vector<std::uint32_t>& link_actors = {},
-                                                     const std::vector<std::uint32_t>& cameras = {});
+                                                     const std::vector<std::uint32_t>& cameras = {},
+                                                     const std::vector<std::uint32_t>& environments = {});
 // The link messages of boxes of types 1, 6 and 7 (NPC_ACTIVATION_AND_RESPAWN.md
 // section 1; interpreter goldens): EnableMsg (cEnableMsg, key 0055d4b8,
 // vtable 004e0880, +24 = 003fb340 of the occupant's key, +1c = 0x40, byte
@@ -262,6 +268,17 @@ struct HotboxCameraAction {
     bool operator==(const HotboxCameraAction&) const = default;
 };
 std::optional<HotboxCameraAction> hotbox_camera_action(const HotboxWorld& world, std::size_t box, std::uint8_t payload);
+// Type 5 (the environment switch; decomp func_00172400.c case 5, hotbox_171ED0.c
+// case 5): enter (00172688) with a link makes the first link current through
+// 001781a0 on the controller 004ffbd4 (set_current_environment); exit (001721e0)
+// makes the controller's first registered environment current. Nothing for
+// other types, an enter without links, or other payloads.
+struct HotboxEnvironmentAction {
+    bool first{};                        // true: the controller's first environment (exit)
+    std::uint32_t environment{};         // otherwise the ENV record's +0x0c key
+    bool operator==(const HotboxEnvironmentAction&) const = default;
+};
+std::optional<HotboxEnvironmentAction> hotbox_environment_action(const HotboxWorld& world, std::size_t box, std::uint8_t payload);
 
 // 00171260(tracker, 0), the Triangle's box selection: none unless the timer
 // +0x24 is <= 0 (c.ole.s: NaN fails, a denormal counts as 0). Otherwise the

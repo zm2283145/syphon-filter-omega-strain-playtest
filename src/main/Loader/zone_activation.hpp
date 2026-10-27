@@ -110,6 +110,8 @@ public:
     // A member whose own constructor set +2d before the first update (the
     // INV: crate: 00257f30's box block calls virtual +5c 003ce980).
     void mark_present(std::uint32_t key) { set_present(key, true); }
+    // A member's +2d written outside the tracker (001781a0's light objects: vcall +5c sets it, +60 clears it).
+    void set_member_present(std::uint32_t key, bool present) { set_present(key, present); }
     std::size_t zone() const { return zone_; }
     bool forced() const { return forced_; }
     // 00173980: the zone's members ordered for activation (the first n
