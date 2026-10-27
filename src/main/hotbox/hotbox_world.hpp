@@ -51,6 +51,9 @@ struct Hotbox {
     // ClearInteractMessage 0016fb60 stores 0. Read by the HUD update for the
     // selected interaction box (0024ee38: when 0, GetString("Interact")).
     std::optional<std::string> interact_message_a0;
+    // Type 11: the first resolved link (+60 entry 0) is a CAM: camera, class
+    // byte +49 = 9 (its constructor 0017e3f0 passes 9 to cGOBJ_ctor).
+    bool first_link_camera{};
     // Removed from the global list 004ee688 by 00170db0 (the index stays).
     bool deleted{};
     bool eligible() const { return !deleted && activated_2d && enabled_2c && !removed_2e; }
@@ -82,17 +85,21 @@ struct HotboxWorld {
 // vt+64 / vt+68 (research/ELEVATORS.md); the host builds the list
 // (play_main) and applies those as set_hotbox_enabled.
 // link_actors are the keys of the actors (NPC records, registered by
-// 001c3940 before the BOX loader) a type-1/6/7 box may link to.
+// 001c3940 before the BOX loader) a type-1/6/7 box may link to. cameras are
+// the CAM: records' keys (001c0920 registers them before the BOX loader) a
+// type-11 box may link to; its other links must be earlier boxes.
 HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records, bool activated,
                                const std::vector<std::uint32_t>& objects = {},
-                               const std::vector<std::uint32_t>& link_actors = {});
+                               const std::vector<std::uint32_t>& link_actors = {},
+                               const std::vector<std::uint32_t>& cameras = {});
 // The records of types 1, 3, 6 and 7 without a non-null link pair, 1, 6 and
 // 7 whose links are all link_actors, 8 and 12 whose links all resolve (to an
-// earlier kept box or one of objects), 9, 13, 15, 16 and 17 (host choice for the
-// solo simulation).
+// earlier kept box or one of objects), 11 whose links are earlier kept boxes
+// or cameras, 9, 13, 15, 16 and 17 (host choice for the solo simulation).
 std::vector<PopulationHotbox> select_hosted_hotboxes(const std::vector<PopulationHotbox>& records,
                                                      const std::vector<std::uint32_t>& objects = {},
-                                                     const std::vector<std::uint32_t>& link_actors = {});
+                                                     const std::vector<std::uint32_t>& link_actors = {},
+                                                     const std::vector<std::uint32_t>& cameras = {});
 // The link messages of boxes of types 1, 6 and 7 (NPC_ACTIVATION_AND_RESPAWN.md
 // section 1; interpreter goldens): EnableMsg (cEnableMsg, key 0055d4b8,
 // vtable 004e0880, +24 = 003fb340 of the occupant's key, +1c = 0x40, byte
@@ -243,6 +250,18 @@ struct HotboxActorEvent {
 // This is the box's native receiver (+0x0c); the pump calls it only when no
 // script handler took the event.
 std::optional<HotboxActorEvent> receive_hotbox_event(const HotboxWorld& world, std::size_t box, std::uint8_t payload);
+// Type 11 (the camera zone; decomp src/main/hotbox/func_00172400.c case 11,
+// hotbox_171ED0.c case 11): enter (00172878) pushes the first link onto the
+// game world's active object list with 00131320 when its class byte +49 is 9
+// (a CAM: camera, which then becomes the view); exit (0017230c) removes it
+// with 001310f0. Nothing for other types, a type-11 box without links or one
+// whose first link is a box (class 8), or other payloads.
+struct HotboxCameraAction {
+    bool push{};                         // true: 00131320; false: 001310f0
+    std::uint32_t camera{};              // the CAM: record's +0x0c key
+    bool operator==(const HotboxCameraAction&) const = default;
+};
+std::optional<HotboxCameraAction> hotbox_camera_action(const HotboxWorld& world, std::size_t box, std::uint8_t payload);
 
 // 00171260(tracker, 0), the Triangle's box selection: none unless the timer
 // +0x24 is <= 0 (c.ole.s: NaN fails, a denormal counts as 0). Otherwise the

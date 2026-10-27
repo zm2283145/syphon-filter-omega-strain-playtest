@@ -1684,6 +1684,12 @@ void SoloActorSimulation::Impl::deliver_queued(){
                     if(!trigger_sink)throw std::runtime_error("Solo actor: GOBJTriggerEventMsg (00172598) to "+std::to_string(t.receiver)+" without a hotbox trigger sink");
                     trigger_sink(t);
                 }
+            // 00172878 / 0017230c: a type-11 box's CAM: camera onto / off the game world's active object list.
+            if(const auto c=hotbox_camera_action(hotbox_world,m.box,m.payload)){
+                if(c->push)push_actor_world_object(world_objects,c->camera,world_stack_host());
+                else remove_actor_world_object(world_objects,c->camera,world_stack_host());
+                if(current)current->hotbox_cameras.push_back(*c);
+            }
             if(const auto e=receive_hotbox_event(hotbox_world,m.box,m.payload)){
                 QueuedMessage a;a.kind=K::actor_hotbox;a.code=static_cast<std::int32_t>(e->code);a.payload=e->payload;a.word=e->word_2c;
                 queue.push_back(a);                        // transport 0: the next pump delivers it
@@ -1836,7 +1842,7 @@ void SoloActorSimulation::Impl::apply_component_code(std::int32_t code){
         // meaning is not identified, ACTOR_TELEPORT.md open questions).
         change(0x800U,false);
         return;
-    default:throw std::runtime_error("Solo actor: player component message "+std::to_string(code)+" is not hosted");
+    default:return;                                                     // 00176660: other codes return 0 (unhandled, no effect)
     }
 }
 // 00191100 on root +3298 ('ladd'), then root +160 = 0; mirrored into the model's anchor.
@@ -3107,7 +3113,7 @@ SoloActorSimulation::SoloActorSimulation(SoloActorWorldLink link,const SoloActor
         if(config.gender_3260)s.health.gender_3260=*config.gender_3260;   // 001b3460 (model init, after 001b5fe0)
     }
     s.jump.fall_start_30a4=config.fall_start_30a4;
-    s.hotbox_world=build_hotbox_world(config.hotboxes,true,config.hotbox_link_objects,config.hotbox_link_actors);
+    s.hotbox_world=build_hotbox_world(config.hotboxes,true,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras);
     auto floor_state=make_initial_root_animation();const float half_yaw=config.yaw_degrees*3.14159265F/360.0F;
     set_root_placement(floor_state,{0,0,std::sin(half_yaw),std::cos(half_yaw)},config.start);
     s.floor_root=s.roots.add(floor_state);
@@ -3208,18 +3214,23 @@ void SoloActorSimulation::Impl::reset_physical_component(){
 // hosted.
 void SoloActorSimulation::activate(){
     auto& s=*impl_;
+    // 001b5640..001b5668 (decomp src/main/human/func_001B5560.c): with +14 set and the +58 controller's vt+4c
+    // (IsPlayer) true, the new +3314 +8 = 2 and the new +3310 +14 = 3. The port's SecondaryComponent has no +8
+    // (nothing ported reads it; the first activation's value is not modelled either), so only +14 is stored.
+    const auto player_component_bytes=[&s]{
+        if(s.actions.byte_14&&s.player())s.frame_state.response.physical.shape_14=3;
+    };
     if(s.byte_2d&&!s.deactivated){
-        if(s.player())throw std::runtime_error("Solo actor: the player's re-activation (001b5560 +3314 +8 / +3310 +14) is not hosted");
         if(!s.activation_hook)throw std::runtime_error("Solo actor: activation of a present actor needs the +3314 recreation and 001977f0 (set_activation_hook)");
         if(s.frame_state.response.physical.e4!=actor_unavailable_height)
             throw std::runtime_error("Solo actor: activation of a present actor leaks the old +3310 with its water effect (not hosted)");
         s.reset_physical_component();
+        player_component_bytes();
     }
     if(s.deactivated){
-        // 001b5640..: the player's +3314 +8 = 2 and +3310 +14 = 3 are not hosted.
-        if(s.player())throw std::runtime_error("Solo actor: the player's re-activation (001b5560 +3314 +8 / +3310 +14) is not hosted");
         if(!s.activation_hook)throw std::runtime_error("Solo actor: re-activation needs the +3314 recreation and 001977f0 (set_activation_hook)");
         s.reset_physical_component();
+        player_component_bytes();
         s.deactivated=false;
     }
     if(s.activation_hook){
@@ -3768,10 +3779,9 @@ void SoloActorSimulation::Impl::deliver_object_action(const SoloActorSimulation:
 // (key 004f5440, vtable 004daf10) with transport 0: action 2 (NotifyDone) /
 // 3 (NotifyInterrupted), +28 = 0, +2c = 0, +30 = the actor's key.
 void SoloActorSimulation::Impl::deliver_object_code(std::uint64_t object,std::int32_t code){
-    if(code!=0xf&&code!=0xd&&code!=0xe)
-        throw std::runtime_error("Solo actor: interact-object CAS code "+std::to_string(code)+" is not hosted");
+    // Any other code: 00216580's CAS switch falls out (return 1), nothing.
     if(object_code_receiver)object_code_receiver(object,code);
-    if(code==0xe)return;
+    if(code!=0xf&&code!=0xd)return;
     if(object>std::numeric_limits<std::uint32_t>::max())
         throw std::runtime_error("Solo actor: interact object key outside the population range");
     QueuedMessage m;m.kind=QueuedMessage::Kind::trigger;

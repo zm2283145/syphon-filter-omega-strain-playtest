@@ -60,6 +60,10 @@ public:
     using OtherLinkReceiver = std::function<bool(const HotboxLinkMessage&)>;
     void route_link_message(const HotboxLinkMessage& message);
     void connect_hotbox_links(SoloActorSimulation& box_owner, OtherLinkReceiver other = {});
+    // A type-3 box's GOBJTriggerEventMsg (00172598) to a link that is not a hosted NPC (the play's SND: objects,
+    // checkpoint 132fx4): true when the receiver took it; otherwise the NPC lookup throws.
+    using OtherTriggerReceiver = std::function<bool(const HotboxType3Trigger&)>;
+    void set_other_trigger_receiver(OtherTriggerReceiver other) { other_trigger_receiver_ = std::move(other); }
     NpcAiComponent* component(Word npc) override;
     void activate(Word npc) override;
     bool activate_component(Word npc) override;
@@ -251,6 +255,7 @@ private:
     std::function<void(std::size_t actor, bool on)> goggles_;
     DamageHost damage_;
     OtherLinkReceiver other_link_receiver_;
+    OtherTriggerReceiver other_trigger_receiver_;
     std::function<std::optional<Word>(std::uint64_t)> other_source_;
     std::function<bool(std::uint64_t)> unnamed_source_;
     std::function<std::optional<std::uint64_t>(Word)> object_handle_;

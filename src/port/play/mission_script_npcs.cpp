@@ -112,7 +112,10 @@ void ActorWorldScriptNpcs::connect_hotbox_links(SoloActorSimulation& box_owner, 
     box_owner.set_hotbox_link_sink([this](const HotboxLinkMessage& m) { route_link_message(m); });
     // 00172598's GOBJTriggerEventMsg to a type-3 box's link (MakeNPCInteractable: the NPC actor).
     box_owner.set_hotbox_trigger_sink(
-        [this](const HotboxType3Trigger& t) { world_.actor(entry(t.receiver).actor).queue_box_trigger(t); });
+        [this](const HotboxType3Trigger& t) {
+            if (!npcs_.count(t.receiver) && other_trigger_receiver_ && other_trigger_receiver_(t)) return;
+            world_.actor(entry(t.receiver).actor).queue_box_trigger(t);
+        });
     for (const auto& m : box_owner.hotbox_load_link_messages()) route_link_message(m);
 }
 

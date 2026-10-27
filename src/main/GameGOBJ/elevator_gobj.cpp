@@ -457,6 +457,12 @@ void ElevatorGOBJ::receive_other() {
     notice(LiftEvent::Kind::Forward, 0, 0);
 }
 
+void ElevatorGOBJ::receive_forwarded_trigger() {
+    state_.stopped = false;                              // 0021909c: +dc = 0
+    notice(LiftEvent::Kind::PathedNotice, 1, -1);        // 002190b0..002190e0
+    state_.progress = 0.F;                               // 002190f4: +e0 = 0
+}
+
 // 00214aa0: +790 (the network lift, 002136f0) stays 0 solo, so 002ec460 is not reached. -0xff: nothing.
 // Otherwise 003c9e30(*004f5440), vtable 004daf10, +24 = 1, +28 = the floor, +2c = 0, +30 = the reply's +24
 // agent's +c (0 without one), 003c9420(msg, lift, 0) and 003c9d60.

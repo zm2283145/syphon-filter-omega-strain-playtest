@@ -55,7 +55,8 @@ std::vector<InteractPairingSend> interact_pairing_trigger(InteractPairingState& 
 
 struct InteractPairingCodeResult {
     // 003e6690(actor, 1) for each of these (0xd: the other agents of an
-    // interrupted pair). Not hosted: the caller throws when this is not empty.
+    // interrupted pair): the action-0x28 request (+28 kind 2, +2c = 1, the
+    // game::StopPerformingAction message) to each actor, transport 0.
     std::vector<std::uint64_t> interrupted;
     // The trigger the object sends itself in solo or as the host (+30 = the
     // sender): 3 after 0xd, 2 after 0xf; nullopt for 0xe.
@@ -68,7 +69,7 @@ struct InteractPairingCodeResult {
 
 // 00216580's CAS branch (key 0055a1d8): `code` (+24) from `sender` (+2c).
 // 0xe forwards +bc (nothing when it is null); 0xd (line 0x4f7) and 0xf (line
-// 0x526) free it first. Throws for any other code.
+// 0x526) free it first. Any other code does nothing (the switch falls out).
 InteractPairingCodeResult interact_pairing_code(InteractPairingState& state, std::int32_t code, std::uint64_t sender);
 
 // 00216580's trigger branch (key 004f5440): ignored while +bc holds a clone

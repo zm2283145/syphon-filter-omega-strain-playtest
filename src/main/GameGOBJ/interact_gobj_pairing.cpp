@@ -81,8 +81,8 @@ InteractPairingCodeResult interact_pairing_code(InteractPairingState& state, std
         if (!state.first_b4 && !state.second_b8) state.done_b0 = false;
         result.self_trigger = 2;
         return result;
-    default:
-        throw std::runtime_error("InteractGOBJ 00216580: CAS code " + std::to_string(code) + " is not 0xd/0xe/0xf");
+    default: // 00216580: any other CAS kind falls out of the switch and returns 1 (nothing)
+        return result;
     }
 }
 

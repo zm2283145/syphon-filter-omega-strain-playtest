@@ -6874,7 +6874,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // Checkpoint 132vo2: SND: loads before BOX: too (001c3390); its receiver 00212c80 is hosted.
             for(const auto& s:population.sound_objects)config.hotbox_link_actors.push_back(s.id);
         }
-        config.hotboxes=select_hosted_hotboxes(population.hotboxes,config.hotbox_link_objects,config.hotbox_link_actors);
+        for(const auto& c:population.cameras)config.hotbox_link_cameras.push_back(c.id);
+        config.hotboxes=select_hosted_hotboxes(population.hotboxes,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras);
         if(hotbox_survey){
             std::cout<<"Hotboxes: "<<population.hotboxes.size()<<" records, "<<config.hotboxes.size()<<" hosted (types 1/3/6/7 unlinked, 8/12 resolved, 9, 13, 15, 16, 17)\n";
             for(const auto& b:config.hotboxes){
@@ -7622,6 +7623,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 auto& lift=lift_world.add(o.id,ElevatorGOBJ(o,boxes.size()));
                 lift_recipients[o.id]=boxes;
+                // The lift's +7c references as 00219070's class-0xb pass reads them (a forwarded trigger).
+                for(const auto& r:o.references)if(r[0]<0x100&&r[1]<0x10000)pathed_references[o.id].push_back((r[0]<<16)|r[1]);
                 // The rider handles (+84) are backpacks (002561d0): live while the backpack's +c is the handle's id.
                 lift.set_rider_view([&combat_session](const LiftRider& r){
                     if(!combat_session||!combat_session->hosts_backpacks())
@@ -10125,8 +10128,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     const auto r=interact_pairing_code(state,code,self);
                     std::cout<<"InteractGOBJ "<<object<<" (00216580) CAS 0x"<<std::hex<<code<<std::dec<<" from agent "<<self
                              <<" (pair "<<state.first_b4<<"/"<<state.second_b8<<(state.done_b0?" done":"")<<")\n";
-                    if(!r.interrupted.empty())
-                        throw std::runtime_error("InteractGOBJ 00216580: 003e6690 to the other agents of an interrupted pair is not hosted");
+                    // 0xd: 003e6690(rider, 1) for each other agent of the pair: the action-0x28 request (+28 kind 2,
+                    // +2c = 1; 003e6690 builds the game::StopPerformingAction message), transport 0.
+                    for(const auto a:r.interrupted){
+                        std::cout<<"InteractGOBJ "<<object<<" 0xd: 003e6690 to agent "<<a<<" (action 0x28, kind 2)\n";
+                        agent_sim(a).queue_cancel_request(2,1);
+                    }
                     if(r.forward){
                         // 002166a8: 003c9420(+bc, +a0[i], 0) for i < +9c, the kept references (00216ae0: the record's
                         // references minus the last two), posted for the next pump.
@@ -10198,6 +10205,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(sound_world&&sound_world->contains(m.receiver)){sound_link_msgs.emplace_back(m.receiver,m.enable);return true;}
                     if(!generator_world->find(m.receiver))return false;
                     generator_link_msgs.emplace_back(m.receiver,m.enable);return true;
+                });
+                // Checkpoint 132fx4: a type-3 box's enter (00172598) sends each link a GOBJTriggerEventMsg (0, 0, box),
+                // transport 0; an SND: object's receiver 00212c80 takes it in the next pump (TOKYO's two such boxes).
+                script_npcs_host->set_other_trigger_receiver([&](const HotboxType3Trigger& t){
+                    if(!sound_world||!sound_world->contains(t.receiver))return false;
+                    sound_triggers.push_back(t.receiver);
+                    std::cout<<"Hotbox "<<t.key_30<<" (00172598): GOBJTriggerEventMsg -> sound object "<<t.receiver<<" (queued)\n";
+                    return true;
                 });
                 generator_load_links_left=generator_link_msgs.size();
                 std::cout<<"Hotbox link messages: "<<sim.hotbox_load_link_messages().size()-generator_link_msgs.size()-sound_link_msgs.size()
@@ -14562,6 +14577,46 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(b.outcome.record.death_code)std::cout<<" (death code "<<*b.outcome.record.death_code<<")";
                     std::cout<<"\n";
                 }
+                // Checkpoint 132el8: a lift's door extra holds the +e4 descriptor 00215b88 builds for it (00215c90:
+                // 001ca010(d, 0, "O_PASSENG_OPEN" 004a4610, the extra, 0)); every other PathedGOBJ's +e4 is 0 (00219c88).
+                // 00219070 (0021910c..00219160) and 00216cd8 play it: 0020f990(msg, +e4, the extra), +20 = 1, 003c9420(msg,
+                // 004ffb50, 1), delivered at once (EE goldens tests/pathed_mode3_goldens.hpp: the sound rows).
+                const auto door_extra_sound=[&](std::uint32_t object,const char* at){
+                    bool extra=false;
+                    for(const auto& o:population.objects)if(o.kind==3)for(const auto& x:o.extra_references)extra|=((x[0]<<16)|x[1])==object;
+                    if(!extra)return;
+                    std::cout<<"Pathed object "<<object<<" ("<<at<<"): play 0020f990 +e4 'O_PASSENG_OPEN' (lift door extra) -> 004ffb50 at frame "<<frame<<"\n";
+                    if(!game_sound)return;
+                    const auto desc=game_sound->request(0,"O_PASSENG_OPEN",object,0);
+                    auto m=game_sound->owned_play(desc,object);
+                    m.flag_20=1;
+                    game_sound->deliver(m);
+                };
+                // 00219070's native effects after it restarts the motion: the +e4 sound, then the class-0xb reference
+                // triggers (queued: `queue` is the list the next pump delivers).
+                const auto pathed_native_effects=[&](std::uint32_t receiver,std::vector<std::uint32_t>& queue){
+                    door_extra_sound(receiver,"00219070");
+                    // Checkpoint 132sx12: 00219168..00219230: for each +7c reference in order, its class byte +49 (lbu: a
+                    // null reference faults); class 0xb (an SND: SoundGOBJ, 00212ee0) gets a GOBJTriggerEventMsg (key
+                    // 004f5440, vtable 004daf10, +24 / +28 / +2c / +30 = 0) by 003c9420(msg, ref, 0): queued for the next
+                    // pump, where 00212c80 takes it (no script is bound to an SND: object). GOB records (0021add0: 0xf,
+                    // 0xe for no_vum), nodes (0xa), NIE: objects (0x10), terrain (1) and boxes (8) are skipped.
+                    if(!pathed_references.contains(receiver))return;
+                    for(const auto key:pathed_references.at(receiver)){
+                        if(sound_world&&sound_world->contains(key)){
+                            queue.push_back(key);
+                            std::cout<<"Pathed object "<<receiver<<" (00219070): GOBJTriggerEventMsg -> sound object "<<key<<" (queued)\n";
+                            continue;
+                        }
+                        const bool other_class=std::any_of(population.objects.begin(),population.objects.end(),[key](const PopulationObject& x){return x.id==key;})
+                            ||std::any_of(population.nodes.begin(),population.nodes.end(),[key](const auto& x){return x.id==key;})
+                            ||std::any_of(population.event_objects.begin(),population.event_objects.end(),[key](const auto& x){return x.id==key;})
+                            ||std::any_of(population.terrain.begin(),population.terrain.end(),[key](const auto& x){return x.id==key;})
+                            ||std::any_of(population.hotboxes.begin(),population.hotboxes.end(),[key](const auto& x){return x.id==key;});
+                        if(!other_class)throw std::runtime_error("Pathed object "+std::to_string(receiver)+": 00219194 reads the class (+49) of reference "
+                            +std::to_string(key)+", which the port does not establish (a null or unhosted record)");
+                    }
+                };
                 // The lifts' events (ElevatorGOBJ, research/ELEVATORS.md): a pose moves the COL and the drawn model as a
                 // pathed object's does; vt+64 / vt+68 on the +118 recipient boxes; the sounds go to 004ffb50 with
                 // transport 1 (delivered at once); the notices to itself are posted (transport 0) for the next pump.
@@ -14733,51 +14788,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const bool taken=lift.receive_trigger(t.clone.action,static_cast<std::int32_t>(t.clone.word_28),agent,
                                                               static_cast<std::uint32_t>(t.clone.actor));
                         std::cout<<": 00214640, state "<<lift.state().busy<<", floor "<<lift.current_floor()<<" -> "<<lift.destination_floor()<<"\n";
-                        if(!taken)throw std::runtime_error("Lift "+std::to_string(t.lift)+": trigger "+std::to_string(t.clone.action)+
-                                                           " forwarded to the PathedGOBJ receiver 00219070 (not hosted)");
-                        drain_lift(t.lift,lift,false);
+                        if(!taken){
+                            // 00214640's default case: PathObj_Receive 00219070 on the lift restarts its motion (+dc 0,
+                            // PathedNotice 1 to itself, +e0 0), plays +e4 (0 for a lift) and triggers its class-0xb
+                            // (SND:) references (queued for the next pump).
+                            std::cout<<"Lift "<<t.lift<<": trigger "<<t.clone.action<<" forwarded to 00219070 (restart, PathedNotice 1)\n";
+                            lift.receive_forwarded_trigger();
+                            pathed_native_effects(t.lift,sound_triggers_next);
+                        }
+                        drain_lift(t.lift,lift,!taken);
                     }
                 }
-                // Checkpoint 132el8: a lift's door extra holds the +e4 descriptor 00215b88 builds for it (00215c90:
-                // 001ca010(d, 0, "O_PASSENG_OPEN" 004a4610, the extra, 0)); every other PathedGOBJ's +e4 is 0 (00219c88).
-                // 00219070 (0021910c..00219160) and 00216cd8 play it: 0020f990(msg, +e4, the extra), +20 = 1, 003c9420(msg,
-                // 004ffb50, 1), delivered at once (EE goldens tests/pathed_mode3_goldens.hpp: the sound rows).
-                const auto door_extra_sound=[&](std::uint32_t object,const char* at){
-                    bool extra=false;
-                    for(const auto& o:population.objects)if(o.kind==3)for(const auto& x:o.extra_references)extra|=((x[0]<<16)|x[1])==object;
-                    if(!extra)return;
-                    std::cout<<"Pathed object "<<object<<" ("<<at<<"): play 0020f990 +e4 'O_PASSENG_OPEN' (lift door extra) -> 004ffb50 at frame "<<frame<<"\n";
-                    if(!game_sound)return;
-                    const auto desc=game_sound->request(0,"O_PASSENG_OPEN",object,0);
-                    auto m=game_sound->owned_play(desc,object);
-                    m.flag_20=1;
-                    game_sound->deliver(m);
-                };
-                // 00219070's native effects after it restarts the motion: the +e4 sound, then the class-0xb reference
-                // triggers (queued: `queue` is the list the next pump delivers).
-                const auto pathed_native_effects=[&](std::uint32_t receiver,std::vector<std::uint32_t>& queue){
-                    door_extra_sound(receiver,"00219070");
-                    // Checkpoint 132sx12: 00219168..00219230: for each +7c reference in order, its class byte +49 (lbu: a
-                    // null reference faults); class 0xb (an SND: SoundGOBJ, 00212ee0) gets a GOBJTriggerEventMsg (key
-                    // 004f5440, vtable 004daf10, +24 / +28 / +2c / +30 = 0) by 003c9420(msg, ref, 0): queued for the next
-                    // pump, where 00212c80 takes it (no script is bound to an SND: object). GOB records (0021add0: 0xf,
-                    // 0xe for no_vum), nodes (0xa), NIE: objects (0x10), terrain (1) and boxes (8) are skipped.
-                    if(!pathed_references.contains(receiver))return;
-                    for(const auto key:pathed_references.at(receiver)){
-                        if(sound_world&&sound_world->contains(key)){
-                            queue.push_back(key);
-                            std::cout<<"Pathed object "<<receiver<<" (00219070): GOBJTriggerEventMsg -> sound object "<<key<<" (queued)\n";
-                            continue;
-                        }
-                        const bool other_class=std::any_of(population.objects.begin(),population.objects.end(),[key](const PopulationObject& x){return x.id==key;})
-                            ||std::any_of(population.nodes.begin(),population.nodes.end(),[key](const auto& x){return x.id==key;})
-                            ||std::any_of(population.event_objects.begin(),population.event_objects.end(),[key](const auto& x){return x.id==key;})
-                            ||std::any_of(population.terrain.begin(),population.terrain.end(),[key](const auto& x){return x.id==key;})
-                            ||std::any_of(population.hotboxes.begin(),population.hotboxes.end(),[key](const auto& x){return x.id==key;});
-                        if(!other_class)throw std::runtime_error("Pathed object "+std::to_string(receiver)+": 00219194 reads the class (+49) of reference "
-                            +std::to_string(key)+", which the port does not establish (a null or unhosted record)");
-                    }
-                };
                 // The pathed objects' queued notices in this frame's message pump (before the actors' messages).
                 if(mission_host)for(const auto& d:pathed_objects.pump()){
                     if(d.message.kind==ObjectMessage::Kind::trigger){
@@ -17273,6 +17294,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 for(const auto& c:result.object_codes)
                     std::cout<<"Object code 0x"<<std::hex<<c.code<<std::dec<<" -> "<<c.object<<" at frame "<<frame<<"\n";
+                for(const auto& c:result.hotbox_cameras)   // checkpoint 132fx4: type-11 boxes
+                    std::cout<<"Hotbox camera "<<c.camera<<(c.push?" pushed (00172878 -> 00131320)":" removed (0017230c -> 001310f0)")
+                             <<" at frame "<<frame<<"\n";
                 for(const auto& e:result.world_object_events)
                     std::cout<<"World object "<<e.object<<(e.activate?" activated":" deactivated")<<" at frame "<<frame<<" (not run)\n";
                 if(result.checkpoint_added){

@@ -239,6 +239,8 @@ struct SoloActorConfig {
     // Registry keys of the mission objects (GOB:) loaded before the boxes;
     // type-8/12 box links may name them (build_hotbox_world).
     std::vector<std::uint32_t> hotbox_link_objects;
+    // The CAM: records' keys a type-11 box may link to (build_hotbox_world).
+    std::vector<std::uint32_t> hotbox_link_cameras;
     // Registry keys of the actors (NPC records) type-1/6/7 box links may name;
     // their EnableMsg/DisableMsg go to the hotbox link sink.
     std::vector<std::uint32_t> hotbox_link_actors;
@@ -443,6 +445,7 @@ struct SoloActorFrame {
     // steps after the tracker saw the change.
     std::vector<HotboxTrackerEvent> hotbox_events;
     std::vector<HotboxActorEvent> hotbox_codes;
+    std::vector<HotboxCameraAction> hotbox_cameras;   // type-11 camera pushes / removals (00172878 / 0017230c)
     // Box events (from the tracker) the script filter took this step; the
     // box's native receiver did not run for them.
     std::vector<HotboxTrackerEvent> hotbox_script_events;
@@ -1460,9 +1463,10 @@ void fire_ignite();
     // creates +3310 / +3314: the constructor state stands for the first
     // activation's; after a deactivation, and for an NPC that is already
     // present (001b53d0 has no +2d test; the old components leak), the physical
-    // component is reset to the 001eb990 state (an NPC's only: the player's
-    // +3314 +8 / +3310 +14 stores throw, as does a present NPC with a water
-    // height, whose leaked water effect is not hosted). The presence hook
+    // component is reset to the 001eb990 state (for the player, +14 set and
+    // its controller the player, then +3310 +14 = 3; the +3314 +8 = 2 store has
+    // no field here). A present actor with a water height throws: its leaked
+    // water effect is not hosted. The presence hook
     // dedupes like 0022c650 and the AI's Activate returns while +159 is clear.
     // With an activation hook (required after a deactivation or when present)
     // its result is +31b2 (001977f0 at 001b571c) and +3524 +a0 = 0 (001b5730).

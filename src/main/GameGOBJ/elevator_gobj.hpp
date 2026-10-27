@@ -124,6 +124,12 @@ public:
     // 00214640 with any other message type: forwarded to 00219070 (a Forward
     // event).
     void receive_other();
+    // 00219070's trigger branch (0021909c..00219230) for a trigger 00214640
+    // forwarded (receive_trigger returned false): +dc = 0, a PathedNotice
+    // (004dae90, +24 = 1, +28 = -1) to the lift (transport 0), +e0 = 0. The
+    // caller plays +e4 (0 for a lift) and sends the class-0xb references a
+    // GOBJTriggerEventMsg (decomp src/main/GameGOBJ/GameGOBJ_219070.c).
+    void receive_forwarded_trigger();
     // 00214640 with a MSGGAME_MENU_CHOICE (*004f7e48) from the floor chooser:
     // 00214aa0. A floor of -0xff (closed) does nothing; any other posts a
     // Trigger event (action 1 to that floor, the agent when `agent`). Solo:
