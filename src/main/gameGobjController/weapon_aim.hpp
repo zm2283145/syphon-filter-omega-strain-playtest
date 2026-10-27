@@ -64,6 +64,10 @@ struct WeaponAimInput {
     WeaponAimShooter shooter;
     bool target_manager_22cb10{};       // 0022cb10(004f77c0, shooter, target, 0, 0) (only read with a target)
     ToHitSettings settings;
+    // The engine variables read on every call (132fx2): PlayerAimTimePct 0048acc8 (0022FAD8, a player's aim
+    // time) and globalNpcSkill 0048acc0 (0022FC84, an NPC's skill); their registered values are 1.0.
+    float player_aim_time_pct{1.0F};
+    float global_npc_skill{1.0F};
 };
 // Target controller virtual +a0(target controller, controller, amount,
 // subtarget, progress): the "being aimed at" notice.
@@ -78,6 +82,8 @@ std::optional<WeaponAimNotice> update_weapon_aim(WeaponAimState& state,const Wea
 // 003ea4a0: an NPC (controller +54 clear) with progress < 0.9 (00493988)
 // misses without drawing; otherwise one 00127dd0 draw r and
 // hit = float(r) / 2^31 < progress x accuracy.
-bool weapon_hit_roll(const WeaponAimState& state,bool player,const std::function<std::uint32_t()>& random);
+// npc_threshold: NpcDmgAimThresh 00493988, read on every roll (registered 0.9; 132fx2).
+bool weapon_hit_roll(const WeaponAimState& state,bool player,const std::function<std::uint32_t()>& random,
+    float npc_threshold=0.9F);
 
 }

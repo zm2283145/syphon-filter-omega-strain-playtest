@@ -237,6 +237,12 @@ void npc_select_item(NpcAiComponent& c,std::int32_t item,WeaponInventoryOps& inv
     else inventory.equip_first();                                            // 00143c50
     npc_reroll_burst(c,inventory,actor_id,random);
 }
+void npc_set_desired_distance(NpcAiComponent& c,std::int32_t priority,float center,float width){
+    if(priority>=c.query_priority_ac){                                       // 0014b700: slt a1, +ac
+        const float half=0.5F*width;
+        c.query_70=center-half;c.query_74=center+half;c.query_priority_ac=priority;
+    }
+}
 void npc_reroll_burst(NpcAiComponent& c,WeaponInventoryOps& inventory,std::uint32_t actor_id,
     const std::function<std::uint32_t()>& random){
     if(inventory.inventory().current_84!=weapon_no_slot){                     // 001b16c0

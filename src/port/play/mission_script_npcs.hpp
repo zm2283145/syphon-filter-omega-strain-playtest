@@ -132,6 +132,8 @@ public:
     // On the NPC's controller; false while its combat link is not set.
     bool add_weapon(Word npc, std::int32_t item) override;
     bool draw_weapon(Word npc, std::int32_t item) override;
+    bool change_weapon(Word npc) override;
+    std::optional<float> aim_percent(Word npc) override;
     // cNPC_Kill 0014b370 on the NPC's actor through the damage host
     // (set_damage_host: the play's combat actors' virtual +100, source =
     // victim); false without one.

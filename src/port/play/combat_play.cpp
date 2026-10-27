@@ -1281,7 +1281,9 @@ struct CombatPlaySession::Impl {
         in.now_ms=input.now_ms;
         if(item>=0)in.record=&db.record(item);
         in.subtarget=subtarget;
-        in.settings=config.to_hit;
+        in.settings=config.to_hit_live?config.to_hit_live():config.to_hit;   // 0022FAE8: *D_0048ACB8 each call (132fx2)
+        if(config.player_aim_time_pct)in.player_aim_time_pct=config.player_aim_time_pct();
+        if(config.global_npc_skill)in.global_npc_skill=config.global_npc_skill();
         if(target){
             WeaponAimTarget wt;
             wt.object=target;
@@ -1295,7 +1297,7 @@ struct CombatPlaySession::Impl {
                 wt.eye_c0=actors->eye_c0(t,-1);
                 wt.stance_c8=actor_stance_c8(world.actor(t).state_words().current_3204);
                 wt.size_cc=target_size_cc(subtarget);
-                wt.stealth_44=0;
+                wt.stealth_44=config.stealth_44?config.stealth_44(t):0;           // 0022FA8C: target +44 (132fx2)
                 wt.controller=WeaponAimTargetController{world.actor(t).player_controller(),world.actor(t).byte_14()!=0,velocity_74(t)};
             }
             in.target=wt;
@@ -1921,6 +1923,7 @@ CombatPlaySession::CombatPlaySession(ActorWorld& world,const WeaponDatabase& dat
         if(const auto b=self->combat->bullet_event_cursor())return ActorHitEffect::Cursor{*b,true};
         return ActorHitEffect::Cursor{self->frame.events.size(),false};});
     s.combat->set_weapon_models(s.config.weapon_models);
+    if(s.config.npc_dmg_aim_thresh)s.combat->set_npc_dmg_aim_thresh(s.config.npc_dmg_aim_thresh);
     s.combat->construct_inventories(s.config.with_object);
     s.shake.assign(n,0.0F);
     for(std::size_t a=0;a<n;++a)s.create_flashlight(a);                  // 001b5fe0 -> 0045bad0

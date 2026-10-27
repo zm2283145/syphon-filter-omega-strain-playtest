@@ -79,6 +79,8 @@ void ActorWorldScriptNpcs::connect_one(Word npc, const Entry& e) {
     });
     // cAIModeChangeMsg (004ea3e8) to the AI component: +24 the new mode.
     e.controller->set_mode_change_filter([&host, id](std::uint8_t mode) { return host.deliver_ai_mode_change(id, mode); });
+    // AITimeElapsedMsg (004ff280) to the AI component (132fx2).
+    e.controller->set_time_elapsed_filter([&host, id] { return host.deliver_ai_time_elapsed(id); });
 }
 
 void ActorWorldScriptNpcs::connect(MissionScriptHost& host) {
@@ -468,6 +470,19 @@ bool ActorWorldScriptNpcs::draw_weapon(Word npc, std::int32_t item) {
     if (!c.weapons_hosted()) return false;
     c.script_draw_weapon(item);
     return true;
+}
+
+bool ActorWorldScriptNpcs::change_weapon(Word npc) {
+    auto& c = *entry(npc).controller;
+    if (!c.weapons_hosted()) return false;
+    c.script_change_weapon();
+    return true;
+}
+
+std::optional<float> ActorWorldScriptNpcs::aim_percent(Word npc) {
+    auto& c = *entry(npc).controller;
+    if (!c.weapons_hosted()) return std::nullopt;
+    return c.script_aim_percent();
 }
 
 bool ActorWorldScriptNpcs::kill(Word npc) {

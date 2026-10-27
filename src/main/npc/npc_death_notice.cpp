@@ -61,7 +61,8 @@ void npc_death_notice(NpcAiComponent& c,NpcPerception& p,WeaponInventoryOps& inv
         c.force_delay_134=trunc_word(c.fire_delay_8c);                         // delay 0.0: +8c
         add(ev,K::death_burst,c.field_a8);
     }
-    inv.randomize_dropped_ammunition(need(h.random,"random"));                 // 00142170
+    if(h.ammo_pct){const auto pct=h.ammo_pct();inv.randomize_dropped_ammunition(need(h.random,"random"),pct[0],pct[1]);}   // 00142170
+    else inv.randomize_dropped_ammunition(need(h.random,"random"));                                                       // 00142170
     perception_clear(p);                                                       // 0016dc60
     add(ev,K::perception_cleared);
     const bool present=h.actor_root[1]!=0&&h.actor_root[0]!=0&&h.actor_root[2]==0;

@@ -71,6 +71,8 @@ struct NpcDeathNoticeHost {
     // statistic event, 00333ee0 reads 0x19 (null throws when a player kill is noted).
     AgentStatistics* statistics{};
     std::function<std::uint32_t()> random;                     // 00127dd0
+    // 132fx2: MinNpcAmmoPct / MaxNpcAmmoPct (00489c18 / 00489c20) for 00142170, read live; unset: 0.05 / 0.3.
+    std::function<std::array<float,2>()> ammo_pct;
     // The think list's entries for this actor (0015ad70 removes them).
     std::function<std::int32_t()> remove_from_think_list;
     std::function<void()> append_to_dead_list;                 // 0014ab90(004ea370, &component)

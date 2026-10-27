@@ -191,7 +191,10 @@ public:
     // to the clip size and the rest is spare, and while spare rounds remain a
     // second draw moves trunc(clip size x r / 2^31) rounds from the clip to
     // the spare. Draws come from the game RNG (00127dd0).
-    void randomize_dropped_ammunition(const std::function<std::uint32_t()>& random);
+    // lo / hi: MinNpcAmmoPct 00489c18 / MaxNpcAmmoPct 00489c20, read on every call (registered 0.05 / 0.3;
+    // TOKYO, UKRAINE and YEMEN1 write them; 132fx2).
+    void randomize_dropped_ammunition(const std::function<std::uint32_t()>& random,
+        float lo=std::bit_cast<float>(0x3d4ccccdU),float hi=std::bit_cast<float>(0x3e99999aU));
     // The ammunition services of a backpack pickup (Checkpoint 121f,
     // tests/weapon_backpack_goldens.hpp). Records are compared as the
     // 00147840 lookups they are (an item outside the table is record 0).

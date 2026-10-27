@@ -10,9 +10,9 @@
 // notifications to the actor (Activated, WaypointReached,
 // DestinationReached; transport 0) are queued on the actor
 // (SoloActorSimulation::queue_ai_notification), whose pump offers them to
-// its script filter; TimeElapsed (to the component) is only recorded. The
-// weapon-fired notice (to the component, transport 0) is queued with the
-// component's messages and offered to its script filter by the pump.
+// its script filter. The weapon-fired and TimeElapsed notices (to the
+// component, transport 0) are queued with the component's messages and
+// offered to its script filter by the pump.
 #include "actor_world.hpp"
 #include "npc_ai.hpp"
 #include "npc_attack.hpp"
@@ -294,6 +294,13 @@ public:
     // the new mode, read by GetAiMode 0014a6e0). Unhandled it goes to
     // 00151d30, whose default handler 003cb210 returns 0 for it.
     void set_mode_change_filter(std::function<bool(std::uint8_t mode)> filter){mode_change_filter_=std::move(filter);}
+    // 132fx2: the same filter for AITimeElapsedMsg (004ff280; 0016f2d0 when the script timer +58 set by
+    // SendTimeElapsedMessage 0016ab50 crosses 0). Unhandled, 003cb210 drops it.
+    void set_time_elapsed_filter(std::function<bool()> filter){time_elapsed_filter_=std::move(filter);}
+    // 132fx2: ChangeWeapon(NPC) 001499e0 -> +1b0 = 0014b9e0.
+    void script_change_weapon();
+    // 132fx2: GetAimPercent(NPC) 00149120 -> +1e4 = 00149150: the aim block's +20 (progress).
+    float script_aim_percent() const;
     // The actor was created by a generator (001b7b00), not the level load:
     // an unwritten route buffer's point then throws (NpcAiHost::level_loaded).
     void set_generator_spawned(){level_loaded_=false;}
@@ -525,6 +532,7 @@ private:
     bool port_remote_controlled_{};
     NetworkHooks network_hooks_;
     std::optional<float> port_last_dt_;                                         // port-only (132uk6d): port_route_to_point's f20
+    float port_logic_dt_{};                                                     // port-only (132fx2): dt of the world steps since the last AI frame
     bool port_hold_fire_{};std::uint32_t port_held_shots_{};
     NpcAiComponent component_;
     float aggressiveness_6c_{};
@@ -540,6 +548,7 @@ private:
     std::function<bool(std::uint64_t,bool)> weapon_fired_filter_;
     std::function<bool(std::uint64_t)> pickupable_awareness_filter_;
     std::function<bool(std::uint8_t)> mode_change_filter_;
+    std::function<bool()> time_elapsed_filter_;
     std::optional<NpcPerceptionHost> sense_;
     std::function<std::optional<NpcSenseObject>(std::uint64_t)> sense_object_base_;   // sense_'s own views (host(); 132vs4)
     std::unique_ptr<NpcAttackHost> attack_;

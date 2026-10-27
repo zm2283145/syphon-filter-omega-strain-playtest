@@ -126,6 +126,8 @@ public:
     // reads the attached model. Without it the tables stay empty and an attach
     // is refused (check_inventory_events).
     void set_weapon_models(WeaponModelLibrary* library);
+    // 132fx2: NpcDmgAimThresh 00493988 for the hit roll 003ea4a0, read on every roll; unset: 0.9 (registered).
+    void set_npc_dmg_aim_thresh(std::function<float()> value){npc_dmg_aim_thresh_=std::move(value);}
     WeaponModelLibrary* weapon_models() const{return models_;}
     // check_inventory_events, except with the library (the events ran).
     void check_events(const std::vector<WeaponInventoryEvent>& events) const;
@@ -237,6 +239,7 @@ private:
     std::uint64_t& random_;
     std::vector<WeaponInventory> inventories_;
     std::vector<WeaponAimState> aims_;
+    std::function<float()> npc_dmg_aim_thresh_;
     std::vector<WeaponInventoryHost> inventory_hosts_;
     WeaponModelLibrary* models_{};
     std::vector<ModelAttachTable> attach_;

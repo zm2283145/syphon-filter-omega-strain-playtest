@@ -54,7 +54,10 @@ struct NpcAiMessage {
     // Like weapon_fired the pump offers it to the script filter (0014a6c0);
     // the sender at 0016cd80 is the only reference to the key, so 00151d30
     // and the mode handlers drop it (003cb210).
-    enum class Kind : std::uint8_t {ai,path,mode_change,controller,los_result,weapon_fired,body_toss,pickupable_awareness} kind{};
+    // time_elapsed (132fx2): AITimeElapsedMsg (004ff280, vtable 004dcc10, no fields past the header) that
+    // cAI::NextFrame 0016f2d0 sends to the component when the script timer +58 crosses 0; the pump offers it
+    // to the script filter (0014a6c0) and the base handler 003cb210 drops it unhandled.
+    enum class Kind : std::uint8_t {ai,path,mode_change,controller,los_result,weapon_fired,body_toss,pickupable_awareness,time_elapsed} kind{};
     std::uint8_t event{};
     std::int32_t value{-1};
     std::int32_t word_2c{};                                   // AI event 7: the cause (0016cf10); path event 0: a node search's second node (N5c); not written by other senders
@@ -206,6 +209,9 @@ struct NpcAiComponent {
     // N5c: +70 / +74 the node searches' query distances (00158bc0: -100.0,
     // 100.0; interpreter).
     float query_70{-100.0F},query_74{100.0F};
+    // +ac: the priority of +70 / +74 (0014b700 stores only when its priority is at least +ac). 00158bc0
+    // writes 0, then calls +15c with priority 0x14 (0.0, 200.0), so a constructed component holds 20 (132fx2).
+    std::int32_t query_priority_ac{0x14};
     float throw_scatter_90{4.0F},throw_angle_94{35.0F},switch_distance_b8{};
     std::array<std::uint32_t,9> allowed_regions_bc{0xffffffffU,0xffffffffU,0xffffffffU,0xffffffffU,0xffffffffU,0xffffffffU,
         0xffffffffU,0xffffffffU,0xffffffffU};
@@ -327,6 +333,18 @@ struct NpcAiSystem {
     NpcAiComponent* thinker{};
     std::optional<std::uint32_t> selected_frame;
     std::uint32_t frame{};
+    // PORT-ONLY (132fx2): world steps per AI logic frame. The original steps a level at 30 Hz (the world
+    // frame counter 005383c8 advances 30 per second, research/EMULATOR_COMPARISON.md) and runs the AI
+    // component's update 00159590 once per logic frame: 0022f5b0 subtracts its NPC penalties per call
+    // (0022FF28: penalty * rate_scale, no dt), +e8 counts calls, the fire notice 0014f460 counts frames of
+    // 005383c8 (0x5a). The PC play steps the world at 1/60 s; with 2 the controllers run the update (and
+    // the activation radius check) on every second world step with the two steps' dt, and `frame` is the
+    // world counter / 2, so every per-call and frame-counted AI quantity keeps the original's real-time
+    // rate. 1 (the default: the 30 Hz Vita play, --dt 0.033367 / --dt-trace, the goldens): every step.
+    std::uint32_t port_logic_divider{1};
+    // 132fx2: MinNpcAmmoPct / MaxNpcAmmoPct (00489c18 / 00489c20) the death notice's 00142170 reads; unset:
+    // their registered values.
+    std::function<std::array<float,2>()> npc_ammo_pct;
     float far_distance{};
     // 004ea350 (00158a80: 4): the cap of the generator spawn check 0021edf0;
     // SetMaxActiveNpcCount (00149450 -> 0014b340) stores it and ignores its
@@ -522,6 +540,9 @@ bool npc_controller_message(NpcAiComponent& c,std::int32_t code,NpcAiHost& host)
 // else +a4 = 0; +a8 = 0. The RNG is drawn only when armed.
 void npc_select_item(NpcAiComponent& c,std::int32_t item,WeaponInventoryOps& inventory,std::uint32_t actor_id,
     const std::function<std::uint32_t()>& random);
+// 132fx2: virtual +15c = 0014b700(c, priority a1, f12, f13): when a1 >= +ac, +70 = f12 - 0.5 f13, +74 =
+// f12 + 0.5 f13 and +ac = a1 (SetDesiredDistance 00149f20 passes 100 and the script's two floats).
+void npc_set_desired_distance(NpcAiComponent& c,std::int32_t priority,float center,float width);
 // The burst reroll shared by 0014bae0's and 0014bbd0's tails (from 001b16c0).
 void npc_reroll_burst(NpcAiComponent& c,WeaponInventoryOps& inventory,std::uint32_t actor_id,
     const std::function<std::uint32_t()>& random);

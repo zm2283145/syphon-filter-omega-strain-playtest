@@ -368,11 +368,11 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
                 p->queue_running_jump(s.action,s.point);
             }else p->receive_actor_action(s.action,false);
         }
-        // The script notifications to the actor (+30) go to its queue; the
-        // TimeElapsed notice (to the component, whose base handler 003cb210
-        // ignores it) and immediate messages need nothing here (the latter
-        // are delivered by the caller). The weapon-fired notice (0014f460 ->
-        // 0026f110, 004ff2a0) goes to the component's queue with transport 0.
+        // The script notifications to the actor (+30) go to its queue;
+        // immediate messages need nothing here (they are delivered by the
+        // caller). The weapon-fired notice (0014f460 -> 0026f110, 004ff2a0)
+        // and the TimeElapsed notice (0016f2d0, 004ff280) go to the
+        // component's queue with transport 0.
         else if(s.kind==NpcAiSend::Kind::script&&s.key==npc_script_weapon_fired){
             if(s.transport!=0)throw std::runtime_error("NPC AI: an immediate weapon-fired notice is not hosted");
             NpcAiMessage m;m.kind=NpcAiMessage::Kind::weapon_fired;m.object=s.object;m.thrown_30=s.byte_38!=0;
@@ -384,7 +384,13 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
             NpcAiMessage m;m.kind=NpcAiMessage::Kind::pickupable_awareness;m.object=s.object;
             queue_.push_back(m);
         }
-        else if(s.kind==NpcAiSend::Kind::script&&s.key!=npc_script_time_elapsed){
+        // 0016f2d0: Event_Send(AITimeElapsedMsg, self, 0) to the component (132fx2).
+        else if(s.kind==NpcAiSend::Kind::script&&s.key==npc_script_time_elapsed){
+            if(s.transport!=0)throw std::runtime_error("NPC AI: an immediate TimeElapsed notice (004ff280) is not hosted");
+            NpcAiMessage m;m.kind=NpcAiMessage::Kind::time_elapsed;
+            queue_.push_back(m);
+        }
+        else if(s.kind==NpcAiSend::Kind::script){
             if(s.transport!=0)throw std::runtime_error("NPC AI: an immediate script notification is not hosted");
             ActorAiNotification n;n.key=s.key;n.node=s.node;n.node2=s.node2;
             if(s.key==npc_script_new_awareness){n.object=s.object;n.value=s.cause;}  // +24 the object, +28 the cause
@@ -406,9 +412,19 @@ void NpcAiController::set_combat_link(NpcCombatLink link){
     if(combat_.inventory)if(auto* inv=combat_.inventory())inv->infinite_reserve_99=true;
     if(combat_.fire_notice_hook)combat_.fire_notice_hook([this](std::uint64_t target,bool continuation){fire_notice(target,continuation);});
 }
+namespace {
+// PORT-ONLY (132fx2, NpcAiSystem::port_logic_divider): the AI's logic frame (005383c8) and whether this
+// world step runs it.
+std::uint32_t npc_logic_divider(const NpcAiSystem& s){return s.port_logic_divider>1?s.port_logic_divider:1U;}
+std::uint32_t npc_logic_frame(const NpcAiSystem& s,const SoloActorSimulation& a){return a.frame_counter()/npc_logic_divider(s);}
+bool npc_logic_step(const NpcAiSystem& s,const SoloActorSimulation& a){
+    const auto d=npc_logic_divider(s);
+    return a.frame_counter()%d==d-1U;
+}
+}
 void NpcAiController::fire_notice(std::uint64_t target,bool continuation){
     if(!route_actor_)throw std::runtime_error("NPC AI: a fire notice before the controller saw its actor");
-    system_.frame=route_actor_->frame_counter();                               // 005383c8
+    system_.frame=npc_logic_frame(system_,*route_actor_);                       // 005383c8
     auto h=host(*route_actor_);
     if(!h.attack)throw std::runtime_error("NPC AI: the fire notice +cc (0014f460) needs the attack stages' host (combat and perception links)");
     npc_fire_notice(component_,system_,target,continuation,h);
@@ -436,6 +452,12 @@ void NpcAiController::pump(SoloActorSimulation& actor){
             frame_.pickupable_awareness.push_back({m.object,handled});
             if(handled)continue;
         }
+        if(m.kind==NpcAiMessage::Kind::time_elapsed){
+            // 003c8de0: the script filter +38 (0014a6c0) first; 00151d30 never loads the key and the base
+            // handler 003cb210 drops it, so nothing follows either way (132fx2).
+            (void)(time_elapsed_filter_&&time_elapsed_filter_());
+            continue;
+        }
         if(m.kind==NpcAiMessage::Kind::mode_change){
             const bool handled=mode_change_filter_&&mode_change_filter_(m.event);
             frame_.mode_change.push_back({m.event,handled});
@@ -445,9 +467,10 @@ void NpcAiController::pump(SoloActorSimulation& actor){
     }
 }
 void NpcAiController::always_run(SoloActorSimulation& actor,float){
-    system_.frame=actor.frame_counter();                                       // 005383c8
+    system_.frame=npc_logic_frame(system_,actor);                              // 005383c8
     if(port_remote_controlled_)return;                                         // PORT-ONLY (132ln5h)
     if(remote_)return;                                                         // 132ln5h13: the remote controller (npc_remote.hpp)
+    if(!npc_logic_step(system_,actor))return;                                  // PORT-ONLY (132fx2): once per logic frame
     if(!(component_.flags_141&0x80U))return;
     auto h=host(actor);
     NpcAiRadiusHost r;r.actor_id=actor_id_;
@@ -461,7 +484,14 @@ void NpcAiController::always_run(SoloActorSimulation& actor,float){
     check_npc_activation_radius(component_,system_,h,r);
 }
 void NpcAiController::update(SoloActorSimulation& actor,float dt){
-    system_.frame=actor.frame_counter();
+    // PORT-ONLY (132fx2): the update 00159590 runs once per logic frame with that frame's dt
+    // (NpcAiSystem::port_logic_divider); with divider 1 every step, as before.
+    if(npc_logic_divider(system_)>1){
+        port_logic_dt_+=dt;
+        if(!npc_logic_step(system_,actor))return;
+        dt=port_logic_dt_;port_logic_dt_=0;
+    }
+    system_.frame=npc_logic_frame(system_,actor);
     if(port_remote_controlled_)return;                                         // PORT-ONLY (132ln5h)
     port_last_dt_=dt;
     if(remote_){remote_update(actor,dt);return;}                               // 002d5160 (132ln5h13)
@@ -578,6 +608,7 @@ void NpcAiController::death_notice_7c(SoloActorSimulation& actor,const ActorDeat
     h.actor_3468=actor.pickupable_3468();h.actor_3488=0;
     if(combat_.secondary)h.secondary=combat_.secondary();
     h.killer=combat_.killer;h.killer_hostile=combat_.killer_hostile;h.statistics=combat_.statistics;h.random=combat_.random;
+    h.ammo_pct=system_.npc_ammo_pct;
     NpcAiComponent* self=&component_;
     h.remove_from_think_list=[this,self]{                                    // 0015ad70
         auto& list=system_.think_list;std::int32_t n=0;
@@ -609,6 +640,18 @@ void NpcAiController::port_add_weapon_loaded(std::int32_t item){
 }
 void NpcAiController::script_draw_weapon(std::int32_t item){
     script_weapon("DrawWeapon 0014bae0",[&](WeaponInventoryOps& ops){npc_select_item(component_,item,ops,actor_id_,combat_.random);});
+}
+void NpcAiController::script_change_weapon(){
+    // 0014b9e0: 00143a60(inv, 1); again when the current slot +84 is then 6 (none); the burst reroll.
+    script_weapon("ChangeWeapon 0014b9e0",[&](WeaponInventoryOps& ops){
+        ops.cycle(true);
+        if(ops.inventory().current_84==weapon_no_slot)ops.cycle(true);
+        npc_reroll_burst(component_,ops,actor_id_,combat_.random);
+    });
+}
+float NpcAiController::script_aim_percent() const{
+    if(!combat_.aim_block)throw std::runtime_error("NPC AI: GetAimPercent 00149150 needs the aim block +20 (NpcCombatLink::aim_block)");
+    return combat_.aim_block()[0];
 }
 void NpcAiController::script_store_weapon(){
     script_weapon("StoreWeapon 0014bbd0",[&](WeaponInventoryOps& ops){npc_store_weapon(component_,ops,actor_id_,combat_.random);});

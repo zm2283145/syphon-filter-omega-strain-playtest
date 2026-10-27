@@ -768,6 +768,16 @@ bool MissionScriptHost::deliver_ai_weapon_fired(Word npc, bool has_target, std::
     return context_.deliver(receiver, std::move(message));
 }
 
+bool MissionScriptHost::deliver_ai_time_elapsed(Word npc) {
+    if (!started_) throw std::runtime_error("AI notification before the mission scripts started");
+    const auto [label, receiver] = objects_.receiver(npc);
+    if (label != "ai") throw std::runtime_error("AI notification to a record without an AI component: " + std::to_string(npc));
+    const StageScope scope(stage_, "AITimeElapsedMsg -> " + std::to_string(npc));
+    // 0016f2d0 sends the bare message (vtable 004dcc10): no getter reads a field of it.
+    ScriptContext::Message message{"AITimeElapsedMsg", {}};
+    return context_.deliver(receiver, std::move(message));
+}
+
 namespace {
 // An Attacker (00408080: 003cc800(+28), the identity) the port can name: an actor, a FIR: zone (00261df0's
 // damage), a population / event object (a GOB's blast, 0021a200 with the object as the source) or a node
@@ -2123,11 +2133,13 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         "ResumeAITravelSpeed", "ResendNewAwarenessMessage", "SetAimMode", "SetAimSubtarget", "RemoveAwareness", "InViewCone",
         "SetViewConeRadius", "SetViewConeAngle", "SetNotTaserable", "SetFireInvulnerability", "StopMovement", "GetNextNode",
         "SetGrenadeThrowAngle", "SendNewAwarenessOfPlayers", "RemoveGroupFromPathRegion", "SetWeaponPreference",
-        "GetDestinationNode", "GetWeapon", "CarryBodyToNode", "Follow"};
+        "GetDestinationNode", "GetWeapon", "CarryBodyToNode", "Follow",
+        // 132fx2: 0016ab50, 00149f20, 00149860, 001499e0, 001491a0, 00149120.
+        "SendTimeElapsedMessage", "SetDesiredDistance", "SetWeaponPreferenceDistance", "ChangeWeapon", "SetDarkness", "GetAimPercent"};
     static const std::set<std::string> receiver_only{"ActivateAnon", "DeactivateForAllPlayers", "AddAwarenessOfPlayers",
         "ResumeAITargeting", "ResumeAIMode", "LookAround", "StopAndLookAround", "ResumeAILookAt", "DontDropWeapons", "SetOnFire",
         "ResumeMovement", "SetUnconscious", "ActivateByRadiusOff", "StoreWeapon", "ResumeAIAiming", "ClearTarget",
-        "ResumeAITravelSpeed", "SendNewAwarenessOfPlayers"};
+        "ResumeAITravelSpeed", "SendNewAwarenessOfPlayers", "ChangeWeapon"};
     const bool ai_team = name == "Team" && function.parameters.size() == 1 && script.type_key(function.parameters[0]) == "object:AI";
     const bool ai_activate = name == "Activate" && function.parameters.size() == 2 &&
                              script.type_key(function.parameters[0]) == "object:NPC";
@@ -2160,7 +2172,7 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                                script.type_key(function.parameters[0]) == "object:NPC");
     if (ai_natives.contains(name) || ai_team || ai_activate || ai_activate_one || ai_deactivate || ai_reset || ai_deactivate_gobj ||
         ai_kill || ai_force_fire || ai_remove_weapon) {
-        const std::string receiver_type = name == "SetTeam" || ai_team ? "object:AI" : "object:NPC";
+        const std::string receiver_type = name == "SetTeam" || ai_team || name == "SendTimeElapsedMessage" ? "object:AI" : "object:NPC";
         if (receiver_only.contains(name) || ai_kill || ai_activate_one || ai_deactivate || ai_reset)
             require_signature(script, function, 4, {receiver_type});
         else if (name == "AddAwareness" || name == "SetTarget" || name == "SetGrenadeTarget")
@@ -2214,6 +2226,9 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         // Checkpoint 132uk2: DrawWeapon(NPC) (00149a50: +1ac with a1 = -1, v0 = 0; UKRAINE's Savin).
         else if (name == "DrawWeapon" && function.parameters.size() == 1) require_signature(script, function, 4, {receiver_type});
         else if (name == "SetFiringThreshold") require_signature(script, function, 2, {receiver_type, "primitive:2"});
+        else if (name == "SetDesiredDistance") require_signature(script, function, 4, {receiver_type, "primitive:2", "primitive:2"});
+        else if (name == "SetDarkness") require_signature(script, function, 4, {receiver_type, "primitive:1"});
+        else if (name == "GetAimPercent") require_signature(script, function, 2, {receiver_type});
         else if (ai_force_fire_item)
             require_signature(script, function, 4, {receiver_type, "primitive:1", "primitive:1", "primitive:2"});
         else if (name == "SetTeam" || name == "SetNotGasable" || name == "SetMaxActiveNpcCount" || name == "AddWeapon" ||
@@ -2429,6 +2444,35 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (name == "AddWeapon") {
             applied = npcs->add_weapon(handle->id, word_signed(number(arguments.at(1))));    // 00149970 -> +1b8 = 0014b890
             return std::nullopt;
+        }
+        // 132fx2: SendTimeElapsedMessage(AI, float) 0016ab50: the component's +58 = the float, v0 = 0.
+        if (name == "SendTimeElapsedMessage") {
+            component->script_timer_58 = real(1);
+            return std::nullopt;
+        }
+        // 132fx2: SetDesiredDistance(NPC, f12, f13) 00149f20 -> +15c = 0014b700(c, 100, f12, f13).
+        if (name == "SetDesiredDistance") {
+            npc_set_desired_distance(*component, 100, real(1), real(2));
+            return std::nullopt;
+        }
+        // 132fx2: SetWeaponPreferenceDistance(NPC, float) 00149860 -> +1c8 = 001498a0: +b8 = the float.
+        if (name == "SetWeaponPreferenceDistance") {
+            component->switch_distance_b8 = real(1);
+            return std::nullopt;
+        }
+        // 132fx2: SetDarkness(NPC, int) 001491a0 -> +1dc = 001491e0, empty for cNPC.
+        if (name == "SetDarkness") return std::nullopt;
+        if (name == "ChangeWeapon") {
+            applied = npcs->change_weapon(handle->id);                       // 001499e0 -> +1b0 = 0014b9e0
+            return std::nullopt;
+        }
+        if (name == "GetAimPercent") {
+            const auto percent = npcs->aim_percent(handle->id);              // 00149120 -> +1e4 = 00149150 (+20)
+            if (!percent) {
+                applied = false;
+                throw std::runtime_error("GetAimPercent(NPC): the world does not host the NPC's aim block: " + std::to_string(handle->id));
+            }
+            return bits(*percent);
         }
         if (name == "DrawWeapon") {
             // 00149a10 -> +1ac = 0014bae0 with the item; the one-argument form 00149a50 passes -1 (Checkpoint 132uk2).

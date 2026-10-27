@@ -156,7 +156,8 @@ WeaponDischargeHost CombatWorld::discharge_host(std::size_t actor,std::vector<Co
     WeaponDischargeHost h;
     h.random=[this]{return next_game_random(random_);};
     h.shot_frame=[this,actor](bool second,bool aim_view){return actors_.shot_frame(actor,second,aim_view);};
-    h.hit_roll=[this,actor]{return weapon_hit_roll(aims_.at(actor),actors_.player(actor),[this]{return next_game_random(random_);});};
+    h.hit_roll=[this,actor]{return weapon_hit_roll(aims_.at(actor),actors_.player(actor),[this]{return next_game_random(random_);},
+        npc_dmg_aim_thresh_?npc_dmg_aim_thresh_():0.9F);};
     h.bullet=[this,actor,&events](const ShotRequest& r){
         std::vector<BulletEvent> be;
         const auto handle=pool_.request(r,db_,pool_host(events),be);

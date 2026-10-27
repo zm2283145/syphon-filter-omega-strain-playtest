@@ -208,6 +208,15 @@ struct CombatPlayConfig {
     // answers; smaller values throw.
     std::int32_t frame_0055a818{-1};
     ToHitSettings to_hit{};                                      // game::ToHit (0048ac80)
+    // 132fx2: 0022f5b0 reads game::ToHit through D_0048ACB8 on every call (0022FAE8): set, the aim reads
+    // the scripts' live struct (MissionScriptHost::to_hit) each call instead of to_hit.
+    std::function<ToHitSettings()> to_hit_live;
+    // 132fx2: the engine variables the aim and the hit roll read on every call: PlayerAimTimePct 0048acc8
+    // (0022FAD8), globalNpcSkill 0048acc0 (0022FC84), NpcDmgAimThresh 00493988 (003ea4a0); unset: 1.0, 1.0, 0.9.
+    std::function<float()> player_aim_time_pct,global_npc_skill,npc_dmg_aim_thresh;
+    // 132fx2: an actor target's stealth +44 for 0022FA8C (k = (1 + s/100)^2 on the aim time and accuracy), from
+    // the stealth pass 00133ab0. Unset (no stealth pass hosted): 0, the constructor's value (003cf0e0).
+    std::function<std::int32_t(std::size_t actor)> stealth_44;
     bool effects_not_drawn{};                                    // ActorWorldCombatConfig::effects_not_drawn
     std::function<std::int32_t(std::int32_t index)> effect_table;   // ActorWorldCombatConfig::effect_table (Checkpoint 131b)
     std::function<std::uint32_t(std::size_t actor)> scene_cull_38;  // ActorWorldCombatConfig::scene_cull_38 (Checkpoint 122f)

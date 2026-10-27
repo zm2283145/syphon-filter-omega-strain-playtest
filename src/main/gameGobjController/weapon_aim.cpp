@@ -69,7 +69,7 @@ std::optional<WeaponAimNotice> update_weapon_aim(WeaponAimState& state,const Wea
     }
     float k=1.0F+game_int_to_float(target.stealth_44)/100.0F;k=k*k;
     if(!ignore_size){aim_time=aim_time*k;accuracy=accuracy/k;}
-    if(in.shooter.player_54)aim_time=aim_time*1.0F;     // 0048acc8
+    if(in.shooter.player_54)aim_time=aim_time*in.player_aim_time_pct;   // 0048acc8 PlayerAimTimePct
     else aim_time=aim_time+t.npc_extra_aim_time;
     const float rate_scale=aim_time!=0.0F?1.0F/aim_time:10.0F;
     float rate=dt*rate_scale;
@@ -83,7 +83,7 @@ std::optional<WeaponAimNotice> update_weapon_aim(WeaponAimState& state,const Wea
     }
     float skill=state.skill_38;
     if(!in.shooter.player_54){
-        skill=skill*1.0F;                                 // 0048acc0
+        skill=skill*in.global_npc_skill;                  // 0048acc0 globalNpcSkill
         if(d<t.npc_near_dist)skill=skill*t.npc_near_mul;
     }
     rate=rate*(skill*target.size_cc);
@@ -117,8 +117,8 @@ std::optional<WeaponAimNotice> update_weapon_aim(WeaponAimState& state,const Wea
     return finish(progress,accuracy);
 }
 
-bool weapon_hit_roll(const WeaponAimState& state,bool player,const std::function<std::uint32_t()>& random){
-    if(!player&&state.progress_20<0.9F)return false;      // 00493988
+bool weapon_hit_roll(const WeaponAimState& state,bool player,const std::function<std::uint32_t()>& random,float npc_threshold){
+    if(!player&&state.progress_20<npc_threshold)return false;   // 00493988 NpcDmgAimThresh
     const float chance=state.progress_20*state.accuracy_24;
     if(!random)throw std::runtime_error("Weapon hit roll: no game RNG");
     const float draw=game_int_to_float(static_cast<std::int32_t>(random()))/2147483648.0F;

@@ -377,6 +377,10 @@ public:
     // world does not host the NPC's weapon inventory (the call is deferred).
     virtual bool add_weapon(Word, std::int32_t) { return false; }
     virtual bool draw_weapon(Word, std::int32_t) { return false; }
+    // 132fx2: ChangeWeapon (001499e0 -> +1b0 = 0014b9e0; false: deferred) and GetAimPercent (00149120 ->
+    // +1e4 = 00149150, the aim block +20; nullopt: the native throws).
+    virtual bool change_weapon(Word) { return false; }
+    virtual std::optional<float> aim_percent(Word) { return std::nullopt; }
     // Kill (00149fb0 -> component +168 = cNPC_Kill 0014b370): unless the
     // actor's life state (+108) is 3 with +33a5 clear, its damage virtual
     // +100(actor, actor, 2, 0xa, 0, 0, 0, float(cvt.w.s(+40))). false when the
@@ -976,6 +980,8 @@ public:
     // == 1 with a firer, 0 without. The other getters (+28 WeaponId, +2c) are
     // not read by a ported handler and are absent (a read throws).
     bool deliver_ai_weapon_fired(Word npc, bool has_target, std::optional<Word> target, bool thrown = false);
+    // 132fx2: AITimeElapsedMsg (004ff280, vtable 004dcc10: no fields past the header) to the NPC's AI component.
+    bool deliver_ai_time_elapsed(Word npc);
     // AIDeadMsg (key 004ff278, vtable 004dccf0; the AI death notice 0014f680):
     // Attacker (0026f060 -> 003cc800, the identity of +24, the killer: null
     // without one, an NPC record's actor, or the local player's actor for

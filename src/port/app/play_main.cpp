@@ -6298,6 +6298,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const std::int32_t coop_port_first=coop_overlay_first>=0?coop_overlay_first
             :coop_partner&&coop_breadcrumbs_on?static_cast<std::int32_t>(coop_crumb_first):-1;
         NpcAiSystem npc_system;
+        // PORT-ONLY (132fx2): the AI runs at the original's 30 logic frames per second (NpcAiSystem::
+        // port_logic_divider): every second step of the default 1/60 s world, every step at --dt 0.033367,
+        // with --dt-trace (the emulator's own steps) and with --measured-dt (one step a loop).
+        if(dt_trace.empty()&&!measured_dt){
+            const long steps=std::lround(0.033367/static_cast<double>(config.dt));
+            npc_system.port_logic_divider=static_cast<std::uint32_t>(std::max(1L,steps));
+        }
+        std::cout<<"NPC AI (port-only): one AI logic frame per "<<npc_system.port_logic_divider<<" world step(s) (the original's 30 Hz)\n";
         // The route manager 004ed9b0 (npc_route.hpp, N5a) over the node collection and the GRP: regions
         // (001c0ee0); the controllers link it through NpcAiSystem::routes (MoveToNode, mode 7).
         NpcRegions npc_regions;npc_regions.groups=decode_population_groups(population_bytes,population);
@@ -9114,6 +9122,31 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     const auto it=npc_scene_38.find(actor);
                     return it==npc_scene_38.end()?0x80U:it->second;};
                 cc.frame_rate_1e8=[&video_rate_1e8]{return video_rate_1e8;};
+                // 132fx2: the aim 0022f5b0 and the hit roll 003ea4a0 read game::ToHit and their engine variables
+                // live from the scripts' cells on every call (mods' [tohit] overrides are already in the struct).
+                if(mission_host){
+                    cc.to_hit_live=[&mission_host]{
+                        const auto& s=mission_host->to_hit();
+                        const auto f=[&s](const char* n){return std::bit_cast<float>(std::get<Word>(s.field(n).value));};
+                        ToHitSettings t;
+                        t.run_acc_factor=f("runAccFactor");t.run_aim_factor=f("runAimFactor");
+                        t.kneel_acc_factor=f("kneelAccFactor");t.kneel_aim_factor=f("kneelAimFactor");
+                        t.moving_targ_acc_factor=f("movingTargAccFactor");t.crouch_targ_acc_factor=f("crouchTargAccFactor");
+                        t.roll_targ_acc_factor=f("rollTargAccFactor");t.max_velocity=f("maxVelocity");
+                        t.npc_extra_aim_time=f("npcExtraAimTime");t.npc_moving_targ_val=f("npcMovingTargVal");
+                        t.npc_rolling_targ_val=f("npcRollingTargVal");t.reload_aim_loss=f("reloadAimLoss");
+                        t.npc_near_dist=f("npcNearDist");t.npc_near_mul=f("npcNearMul");
+                        return t;};
+                    const auto engine_float=[&mission_host](const char* name){
+                        return std::bit_cast<float>(std::get<Word>(mission_host->context().engine_variable(name)));};
+                    cc.player_aim_time_pct=[engine_float]{return engine_float("game::PlayerAimTimePct");};
+                    cc.global_npc_skill=[engine_float]{return engine_float("game::globalNpcSkill");};
+                    cc.npc_dmg_aim_thresh=[engine_float]{return engine_float("game::NpcDmgAimThresh");};
+                    npc_system.npc_ammo_pct=[engine_float]{
+                        return std::array<float,2>{engine_float("game::MinNpcAmmoPct"),engine_float("game::MaxNpcAmmoPct")};};
+                }
+                // 132fx2: the target's stealth +44 for the aim (0022FA8C), from the stealth pass when it runs.
+                cc.stealth_44=[&stealth](std::size_t a)->std::int32_t{return stealth?stealth->value(a):0;};
                 cc.weapon_models=weapon_library.get();
                 // Checkpoint 131c: 00276460's static impact presentation (the material row of the hit surface), with
                 // the effect service and 004089f0's resolved table.
@@ -17287,12 +17320,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(stealth_wanted||particle_light_wanted){
                     if(!mission_host)throw std::runtime_error("Stealth pass: game::DarknessDecreaser needs the mission scripts");
                     const auto darkness=static_cast<std::int32_t>(std::get<Word>(mission_host->context().engine_variable("game::DarknessDecreaser")));
-                    if(!stealth_darkness){
-                        stealth_darkness=darkness;
-                        if(!stealth)stealth=std::make_unique<StealthLighting>(actors.size());
-                        stealth->set_thresholds(StealthThresholds{darkness,90});
-                    }else if(darkness!=*stealth_darkness)
-                        throw std::runtime_error("Stealth pass: game::DarknessDecreaser changed after the first pass (not hosted)");
+                    // 132fx2: 00133ab0 reads *00489bb0 and *00489bb8 (NpcDarknessDecreaser) on every pass.
+                    const auto npc_darkness=static_cast<std::int32_t>(std::get<Word>(mission_host->context().engine_variable("game::NpcDarknessDecreaser")));
+                    stealth_darkness=darkness;
+                    if(!stealth)stealth=std::make_unique<StealthLighting>(actors.size());
+                    stealth->set_thresholds(StealthThresholds{darkness,npc_darkness});
                     if(!stealth_table)throw std::logic_error(stealth_table_unknown?"Stealth pass: the light table of the loadout screen's first frame (002c0380 before any figure draw 002bfa90: record +0x100 not modelled)":"Stealth pass: no light table");
                     {
                         std::vector<StealthActor> sa(actors.size());

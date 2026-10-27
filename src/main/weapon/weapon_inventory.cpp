@@ -48,10 +48,10 @@ bool WeaponInventoryOps::full_auto() const{
     return db_.record(inv_.slots[inv_.current_84].item).full_auto_78()==1;
 }
 
-void WeaponInventoryOps::randomize_dropped_ammunition(const std::function<std::uint32_t()>& random){
+void WeaponInventoryOps::randomize_dropped_ammunition(const std::function<std::uint32_t()>& random,float lo,float hi){
     if(!random)throw std::runtime_error("Weapon inventory 00142170: the game RNG is required");
     const float two31=std::bit_cast<float>(0x4f000000U);                   // 2^31
-    const float lo=std::bit_cast<float>(0x3d4ccccdU),hi=std::bit_cast<float>(0x3e99999aU);   // 00489c18 / 00489c20
+    // lo / hi: *00489c18 / *00489c20 (MinNpcAmmoPct / MaxNpcAmmoPct).
     auto trunc_word=[](float v){
         if(!(v>-2147483648.0F&&v<2147483648.0F))throw std::runtime_error("Weapon inventory 00142170: an amount outside the cvt.w.s range");
         return static_cast<std::int32_t>(v);
