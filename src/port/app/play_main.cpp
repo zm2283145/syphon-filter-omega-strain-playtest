@@ -6885,11 +6885,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(const auto& g:population.generators)config.hotbox_link_actors.push_back(g.id);
             // Checkpoint 132vo2: SND: loads before BOX: too (001c3390); its receiver 00212c80 is hosted.
             for(const auto& s:population.sound_objects)config.hotbox_link_actors.push_back(s.id);
+            // Checkpoint 132fx4: the InteractGOBJs (GOB: kind 5, loaded before BOX:); 00216580 passes EnableMsg /
+            // DisableMsg to the default receiver 003cea10 (TORONTO1's one type-7 box linked to an InteractGOBJ).
+            for(const auto& o:population.objects)if(o.kind==5)config.hotbox_link_gobs.push_back(o.id);
+            // Checkpoint 132fx4: the PathedGOBJs (GOB: kind 2) a type-3 box may link to; 00219070 takes the box's
+            // GOBJTriggerEventMsg after the script filter (TOKYO's one such box).
+            for(const auto& o:population.objects)if(o.kind==2)config.hotbox_trigger_gobs.push_back(o.id);
         }
         for(const auto& c:population.cameras)config.hotbox_link_cameras.push_back(c.id);
         for(const auto& e:population.environments)config.hotbox_link_environments.push_back(e.id());   // ENV: loads before BOX:
         config.hotboxes=select_hosted_hotboxes(population.hotboxes,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras,
-                                               config.hotbox_link_environments);
+                                               config.hotbox_link_environments,config.hotbox_link_gobs,config.hotbox_trigger_gobs);
         if(hotbox_survey){
             std::cout<<"Hotboxes: "<<population.hotboxes.size()<<" records, "<<config.hotboxes.size()<<" hosted (types 1/3/6/7 unlinked, 8/12 resolved, 9, 13, 15, 16, 17)\n";
             for(const auto& b:config.hotboxes){
@@ -7486,6 +7492,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // boxes' EnableMsg / DisableMsg (transport 0) to them, queued for the next pump.
         std::optional<SoundGobjWorld> sound_world;
         std::vector<std::pair<std::uint32_t,bool>> sound_link_msgs;
+        // Checkpoint 132fx4: the type-1/6/7 boxes' EnableMsg / DisableMsg to the InteractGOBJs (the load-time ones
+        // first), queued for the next pump.
+        std::vector<std::pair<std::uint32_t,bool>> gob_link_msgs;std::size_t gob_load_links_left=0;
         // Checkpoint 132bp: the pickup menu's CrateInteractMsgs (003c9420(msg, bp, 0)), queued for the next pump.
         std::vector<CombatCrateMessage> crate_msgs;
         // Checkpoint 132zf5: the kind-5 take's InventoryMsgs (003c9420(msg, bp, 0)), queued for the next pump.
@@ -10217,21 +10226,32 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(script_npcs_host){
                 script_npcs_host->connect_hotbox_links(sim,[&](const HotboxLinkMessage& m){
                     if(sound_world&&sound_world->contains(m.receiver)){sound_link_msgs.emplace_back(m.receiver,m.enable);return true;}
+                    if(std::find(config.hotbox_link_gobs.begin(),config.hotbox_link_gobs.end(),m.receiver)!=config.hotbox_link_gobs.end()){
+                        gob_link_msgs.emplace_back(m.receiver,m.enable);return true;}
                     if(!generator_world->find(m.receiver))return false;
                     generator_link_msgs.emplace_back(m.receiver,m.enable);return true;
                 });
                 // Checkpoint 132fx4: a type-3 box's enter (00172598) sends each link a GOBJTriggerEventMsg (0, 0, box),
                 // transport 0; an SND: object's receiver 00212c80 takes it in the next pump (TOKYO's two such boxes).
                 script_npcs_host->set_other_trigger_receiver([&](const HotboxType3Trigger& t){
+                    // Checkpoint 132fx4: a PathedGOBJ link (TOKYO): the message (+24 0, +28 0, +30 the box) joins the
+                    // object's queue (transport 0); the pump offers it to the script filter, then 00219070.
+                    if(std::find(config.hotbox_trigger_gobs.begin(),config.hotbox_trigger_gobs.end(),t.receiver)!=config.hotbox_trigger_gobs.end()){
+                        ObjectMessage m;m.kind=ObjectMessage::Kind::trigger;m.action=static_cast<int>(t.action_24);m.word_28=t.word_28;m.actor_30=t.key_30;
+                        pathed_objects.send(t.receiver,m);
+                        std::cout<<"Hotbox "<<t.key_30<<" (00172598): GOBJTriggerEventMsg -> pathed object "<<t.receiver<<" (queued)\n";
+                        return true;
+                    }
                     if(!sound_world||!sound_world->contains(t.receiver))return false;
                     sound_triggers.push_back(t.receiver);
                     std::cout<<"Hotbox "<<t.key_30<<" (00172598): GOBJTriggerEventMsg -> sound object "<<t.receiver<<" (queued)\n";
                     return true;
                 });
                 generator_load_links_left=generator_link_msgs.size();
-                std::cout<<"Hotbox link messages: "<<sim.hotbox_load_link_messages().size()-generator_link_msgs.size()-sound_link_msgs.size()
+                gob_load_links_left=gob_link_msgs.size();
+                std::cout<<"Hotbox link messages: "<<sim.hotbox_load_link_messages().size()-generator_link_msgs.size()-sound_link_msgs.size()-gob_link_msgs.size()
                     <<" load-time DisableMsgs to the NPC actors, "<<generator_link_msgs.size()<<" to generators, "
-                    <<sound_link_msgs.size()<<" to sound objects\n";
+                    <<sound_link_msgs.size()<<" to sound objects, "<<gob_link_msgs.size()<<" to InteractGOBJs\n";
             }
             for(const auto& o:population.objects)if(o.kind==2&&pathed_objects.motion(o.id).moving())
                 std::cout<<"Pathed object "<<o.id<<" set moving toward waypoint "<<pathed_objects.motion(o.id).state().stop_target<<" at level start\n";
@@ -14910,6 +14930,35 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         std::cout<<(enable?"EnableMsg":"DisableMsg")<<" -> sound object "<<key<<" "<<r.name<<" at frame "<<frame
                                  <<": 00212c80 "<<(enable?"play":"stop")<<"\n";
                         sound_world->message(key,enable?SoundGobjWorld::Message::enable_55d4b8:SoundGobjWorld::Message::disable_55d498);
+                    }
+                }
+                // Checkpoint 132fx4: the boxes' EnableMsg / DisableMsg to the InteractGOBJs. Each is offered to the object's
+                // script filter first; unhandled, 00216580 passes it to 003cea10 (decomp cGOBJ_HandleMessage): Live =
+                // +2d && +2c && !+2e; EnableMsg: when not Live, virtual +5c(1) (cGameGOBJ_Activate 0021ac20 -> cGOBJ_Activate:
+                // +2d = 1), then +2c = 1; DisableMsg: when Live, virtual +60(1) (cGameGOBJ_Deactivate 0021abc0: +2d = 0),
+                // then +2c = 0. The load loop's (cHotbox_ctor 00172ae0) reach the object before any zone activation, while
+                // +2d is cGOBJ_ctor's 0: only +2c is written. The target manager's removal in 0021abc0
+                // (cTargetManager_RemoveGobj) has no port counterpart for an InteractGOBJ.
+                if(mission_host&&!gob_link_msgs.empty()){
+                    const auto queued=std::move(gob_link_msgs);gob_link_msgs.clear();
+                    for(const auto& [key,enable]:queued){
+                        const bool load_time=gob_load_links_left>0;
+                        if(load_time)--gob_load_links_left;
+                        if(load_time&&enable)throw std::runtime_error("InteractGOBJ "+std::to_string(key)+": a load-time EnableMsg (00172ae0 sends only DisableMsgs)");
+                        const bool handled=mission_host->deliver_object_link_message(key,enable);
+                        const bool before_2c=mission_host->object_enabled_2c(key);
+                        const bool before_2d=zone_tracker&&zone_tracker->present(key);
+                        if(!handled){
+                            const bool live=!load_time&&before_2d&&before_2c;
+                            if(enable&&!live&&zone_tracker)zone_tracker->set_member_present(key,true);
+                            if(!enable&&live&&zone_tracker)zone_tracker->set_member_present(key,false);
+                            mission_host->set_object_enabled_2c(key,enable);
+                        }
+                        std::cout<<(enable?"EnableMsg":"DisableMsg")<<" -> InteractGOBJ "<<key<<" at frame "<<frame
+                                 <<(handled?": script handler":load_time?": 003cea10 (load: +2d 0), +2c ":": 003cea10 +2c ")
+                                 <<(handled?std::string():std::to_string(before_2c)+" -> "+std::to_string(int(mission_host->object_enabled_2c(key)))
+                                    +(load_time?std::string():", +2d "+std::to_string(int(before_2d))+" -> "
+                                      +std::to_string(int(zone_tracker&&zone_tracker->present(key)))))<<"\n";
                     }
                 }
                 // Checkpoint 132bp: the CrateInteractMsgs the pickup menu sent last frame. The script handler is selected

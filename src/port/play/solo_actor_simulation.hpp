@@ -246,6 +246,12 @@ struct SoloActorConfig {
     // Registry keys of the actors (NPC records) type-1/6/7 box links may name;
     // their EnableMsg/DisableMsg go to the hotbox link sink.
     std::vector<std::uint32_t> hotbox_link_actors;
+    // Checkpoint 132fx4: the world objects (GOB:) type-1/6/7 box links may name besides the actors (the host's
+    // InteractGOBJs); their EnableMsg/DisableMsg go to the hotbox link sink too (build_hotbox_world link_gobs).
+    std::vector<std::uint32_t> hotbox_link_gobs;
+    // Checkpoint 132fx4: the world objects (GOB:) type-3 box links may name besides the actors (the host's
+    // PathedGOBJs); their GOBJTriggerEventMsg goes to the hotbox trigger sink (build_hotbox_world trigger_gobs).
+    std::vector<std::uint32_t> hotbox_trigger_gobs;
     // The population record's two parameter words (health, armor; the
     // player is record 0). Required with an animation model: the life state
     // (virtual +108) every actor-logic stage reads depends on +40. The solo

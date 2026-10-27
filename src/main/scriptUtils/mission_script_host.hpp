@@ -1085,6 +1085,9 @@ public:
     // filter first (003c8de0); unhandled, the native receiver 00221610 takes it
     // (generator_receive_link_message). No getter is answered.
     bool deliver_generator_link_message(Word generator, bool enable);
+    // Checkpoint 132fx4: a type-1/6/7 box's EnableMsg / DisableMsg to a world object (an InteractGOBJ), offered
+    // to the object's script filter; false when no handler takes it (the host then runs 003cea10).
+    bool deliver_object_link_message(Word object, bool enable);
     // The revive's NotifyCheckpointMsg (key 004f7938, vtable 004db8b0, no
     // getters) through 003e1aa0 with the actor projected to its controller
     // (00175fd0 for the player component): the player without an argument,
@@ -1199,6 +1202,9 @@ public:
         const auto found = enabled_2c_.find(object);
         return found == enabled_2c_.end() || found->second;
     }
+    // Checkpoint 132fx4: +2c as the default receiver 003cea10 writes it for an EnableMsg / DisableMsg (the
+    // host's box link messages); the same byte object_enabled_2c reads.
+    void set_object_enabled_2c(Word object, bool enable) { enabled_2c_[object] = enable; }
     // The script context's callback list (0055a2e0), which the event pump
     // advances; explosion events (003ea1d0) are queued on it.
     ScriptScheduler& events() { return context_.schedules(); }

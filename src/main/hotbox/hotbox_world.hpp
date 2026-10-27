@@ -90,14 +90,22 @@ struct HotboxWorld {
 // the CAM: records' keys (001c0920 registers them before the BOX loader) a
 // type-11 box may link to; its other links must be earlier boxes. environments
 // are the ENV: records' keys (registered before the BOX loader too), the only
-// links a type-5 box may have.
+// links a type-5 box may have. link_gobs are the world objects (GOB:,
+// registered before the BOX loader) a type-1/6/7 box may link to besides the
+// actors: their EnableMsg / DisableMsg reach the default receiver 003cea10
+// (checkpoint 132fx4: the InteractGOBJ, whose 00216580 passes them on).
+// trigger_gobs are the world objects a type-3 box may link to besides the
+// actors: their GOBJTriggerEventMsg (00172598) goes to the hotbox trigger
+// sink (checkpoint 132fx4: the PathedGOBJs, whose 00219070 takes it).
 HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records, bool activated,
                                const std::vector<std::uint32_t>& objects = {},
                                const std::vector<std::uint32_t>& link_actors = {},
                                const std::vector<std::uint32_t>& cameras = {},
-                               const std::vector<std::uint32_t>& environments = {});
+                               const std::vector<std::uint32_t>& environments = {},
+                               const std::vector<std::uint32_t>& link_gobs = {},
+                               const std::vector<std::uint32_t>& trigger_gobs = {});
 // The records of types 1, 3, 6 and 7 without a non-null link pair, 1, 6 and
-// 7 whose links are all link_actors, 8 and 12 whose links all resolve (to an
+// 7 whose links are all link_actors or link_gobs, 8 and 12 whose links all resolve (to an
 // earlier kept box or one of objects), 11 whose links are earlier kept boxes
 // or cameras, 5 whose links are environments, 9, 13, 15, 16 and 17 (host
 // choice for the solo simulation).
@@ -105,7 +113,9 @@ std::vector<PopulationHotbox> select_hosted_hotboxes(const std::vector<Populatio
                                                      const std::vector<std::uint32_t>& objects = {},
                                                      const std::vector<std::uint32_t>& link_actors = {},
                                                      const std::vector<std::uint32_t>& cameras = {},
-                                                     const std::vector<std::uint32_t>& environments = {});
+                                                     const std::vector<std::uint32_t>& environments = {},
+                                                     const std::vector<std::uint32_t>& link_gobs = {},
+                                                     const std::vector<std::uint32_t>& trigger_gobs = {});
 // The link messages of boxes of types 1, 6 and 7 (NPC_ACTIVATION_AND_RESPAWN.md
 // section 1; interpreter goldens): EnableMsg (cEnableMsg, key 0055d4b8,
 // vtable 004e0880, +24 = 003fb340 of the occupant's key, +1c = 0x40, byte

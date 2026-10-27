@@ -889,8 +889,9 @@ bool MissionScriptHost::deliver_pathed_notice(Word object, const ObjectMessage& 
         // its cloned Triangle trigger: Action 00210c70 the +24 byte, Data 00210c50 the +28 word, Who the +30 agent.
         if (notice.actor_30 > 0xffffffffULL) throw std::runtime_error("Pathed object trigger from an unkeyed agent");
         const auto actor = static_cast<Word>(notice.actor_30);
-        if (actor && actor != objects_.player && objects_.receiver(actor).first != "ai")
-            throw std::runtime_error("Pathed object trigger from a record that is not an NPC: " + std::to_string(actor));
+        // Checkpoint 132fx4: a type-3 box's GOBJTriggerEventMsg (00172598) carries the box at +30: Who answers it.
+        if (actor && actor != objects_.player && objects_.receiver(actor).first != "ai" && objects_.receiver(actor).first != "hotbox")
+            throw std::runtime_error("Pathed object trigger from a record that is neither an NPC nor a box: " + std::to_string(actor));
         const StageScope scope(stage_, "GOBJTriggerEventMsg " + std::to_string(notice.action) + " -> " + std::to_string(object) + " (" + label + ")");
         const Value who = actor ? Value(objects_.objects.resolve(actor | 0x80000000U)) : Value(RuntimeObjectHandle{});
         ScriptContext::Message message{"GOBJTriggerEventMsg", {{"Action", Value(Word{static_cast<Word>(notice.action) & 0xffU})},
@@ -1009,6 +1010,16 @@ bool MissionScriptHost::deliver_generator_link_message(Word generator, bool enab
     if (label != "generator") throw std::runtime_error("Hotbox link message to a record that is not a generator: " + std::to_string(generator));
     const char* type = enable ? "EnableMsg" : "DisableMsg";
     const StageScope scope(stage_, std::string(type) + " -> " + std::to_string(generator));
+    return context_.deliver(receiver, ScriptContext::Message{type, {}});
+}
+
+bool MissionScriptHost::deliver_object_link_message(Word object, bool enable) {
+    if (!started_) throw std::runtime_error("Hotbox link message before the mission scripts started");
+    const auto [label, receiver] = objects_.receiver(object);
+    if (label != "object/InteractGOBJ")
+        throw std::runtime_error("Hotbox link message to a record that is not an InteractGOBJ: " + std::to_string(object) + " (" + label + ")");
+    const char* type = enable ? "EnableMsg" : "DisableMsg";
+    const StageScope scope(stage_, std::string(type) + " -> " + std::to_string(object));
     return context_.deliver(receiver, ScriptContext::Message{type, {}});
 }
 

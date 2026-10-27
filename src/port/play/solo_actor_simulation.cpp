@@ -3121,7 +3121,7 @@ SoloActorSimulation::SoloActorSimulation(SoloActorWorldLink link,const SoloActor
     }
     s.jump.fall_start_30a4=config.fall_start_30a4;
     s.hotbox_world=build_hotbox_world(config.hotboxes,true,config.hotbox_link_objects,config.hotbox_link_actors,config.hotbox_link_cameras,
-                                      config.hotbox_link_environments);
+                                      config.hotbox_link_environments,config.hotbox_link_gobs,config.hotbox_trigger_gobs);
     auto floor_state=make_initial_root_animation();const float half_yaw=config.yaw_degrees*3.14159265F/360.0F;
     set_root_placement(floor_state,{0,0,std::sin(half_yaw),std::cos(half_yaw)},config.start);
     s.floor_root=s.roots.add(floor_state);

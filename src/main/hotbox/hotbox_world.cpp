@@ -45,7 +45,8 @@ std::optional<std::size_t> HotboxWorld::find(std::uint32_t id) const{
 
 HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records,bool activated,const std::vector<std::uint32_t>& objects,
                                const std::vector<std::uint32_t>& link_actors,const std::vector<std::uint32_t>& cameras,
-                               const std::vector<std::uint32_t>& environments){
+                               const std::vector<std::uint32_t>& environments,const std::vector<std::uint32_t>& link_gobs,
+                               const std::vector<std::uint32_t>& trigger_gobs){
     HotboxWorld w;
     for(const auto& r:records){
         if(!hosted_type(r.type))
@@ -94,13 +95,16 @@ HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records,bool
                 b.link_keys.push_back(*key);
                 continue;
             }
-            if(r.type==3&&std::find(link_actors.begin(),link_actors.end(),*key)!=link_actors.end()){
+            if(r.type==3&&(std::find(link_actors.begin(),link_actors.end(),*key)!=link_actors.end()||
+                           std::find(trigger_gobs.begin(),trigger_gobs.end(),*key)!=trigger_gobs.end())){
                 b.link_keys.push_back(*key);                                   // 00172598: a GOBJTriggerEventMsg on enter
                 continue;
             }
             if(actor_link_type(r.type)){
-                if(std::find(link_actors.begin(),link_actors.end(),*key)==link_actors.end())
-                    throw std::runtime_error("Type-"+std::to_string(r.type)+" hotbox link to an object that is not a hosted actor (EnableMsg/DisableMsg receiver)");
+                if(std::find(link_actors.begin(),link_actors.end(),*key)==link_actors.end()&&
+                   std::find(link_gobs.begin(),link_gobs.end(),*key)==link_gobs.end())
+                    throw std::runtime_error("Type-"+std::to_string(r.type)+" hotbox link to an object that is neither a hosted actor nor a hosted"
+                                             " world object (EnableMsg/DisableMsg receiver)");
                 b.link_keys.push_back(*key);
                 continue;
             }
@@ -125,7 +129,8 @@ HotboxWorld build_hotbox_world(const std::vector<PopulationHotbox>& records,bool
 
 std::vector<PopulationHotbox> select_hosted_hotboxes(const std::vector<PopulationHotbox>& records,const std::vector<std::uint32_t>& objects,
                                                      const std::vector<std::uint32_t>& link_actors,const std::vector<std::uint32_t>& cameras,
-                                                     const std::vector<std::uint32_t>& environments){
+                                                     const std::vector<std::uint32_t>& environments,const std::vector<std::uint32_t>& link_gobs,
+                                                     const std::vector<std::uint32_t>& trigger_gobs){
     std::vector<PopulationHotbox> out;
     for(const auto& r:records){
         if(!hosted_type(r.type))continue;
@@ -152,7 +157,10 @@ std::vector<PopulationHotbox> select_hosted_hotboxes(const std::vector<Populatio
             for(const auto& l:r.links){
                 const auto key=registry_key(l[0],l[1]);
                 if(!key)continue;
-                if(!(actor_link_type(r.type)||r.type==3)||std::find(link_actors.begin(),link_actors.end(),*key)==link_actors.end())hosted=false;
+                const bool actor=std::find(link_actors.begin(),link_actors.end(),*key)!=link_actors.end();
+                const bool gob=actor_link_type(r.type)&&std::find(link_gobs.begin(),link_gobs.end(),*key)!=link_gobs.end();
+                const bool trigger=r.type==3&&std::find(trigger_gobs.begin(),trigger_gobs.end(),*key)!=trigger_gobs.end();
+                if(!(actor_link_type(r.type)||r.type==3)||!(actor||gob||trigger))hosted=false;
             }
             if(!hosted)continue;
         }
