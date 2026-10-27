@@ -112,6 +112,9 @@ struct ParticleBatch {
     // Port-only (checkpoint 132mt3): 1 + the index of its DeferredProgram record while that has not run
     // (ParticleSystem::deferred); 0 for a batch its program has filled.
     std::uint32_t deferred = 0;
+    // Checkpoint 132fx3: 003a1ad0's attach matrix (an attached type-0 emitter's em+e0, rows) the batch is drawn
+    // under in place of the instance matrix; nullopt: the instance matrix.
+    std::optional<std::array<std::array<float, 4>, 4>> attach;
 };
 
 // Port-only (checkpoint 132mt3, research/THREADING.md step 5): one MSCAL of the draws 003a0050 / 00398590 / 0039c680
@@ -262,9 +265,13 @@ public:
     // 003a2400(inst, matrix, flag, f12 = dt) with the emitters' vtable +10
     // (003a0540 type 1, 00398b20 type 0). `matrix` is the 64-byte node world
     // (node+10, rows) the type-0 update and the attach offset read; null
-    // throws (00394590) only when one of them needs it. flag != 0 (wind)
-    // throws.
-    void update(EffectInstance& inst, const std::uint8_t* matrix, std::uint32_t flag, float dt);
+    // throws (00394590) only when one of them needs it. flag != 0 is the
+    // original's non-null velocity argument a2 (00235f60 passes one): with
+    // `velocity` set, an emitter whose def+68 (wind) is above 0.01 adds it
+    // (type 0: 00398b20; type 1: the spring 003a0540). A non-zero flag
+    // without the vector throws, naming the address.
+    void update(EffectInstance& inst, const std::uint8_t* matrix, std::uint32_t flag, float dt,
+                const std::array<float, 4>* velocity = nullptr);
     // 003a0050(em, 2, f12 = t, f13, f14 = scale, f15 = alpha); `night_vision`
     // is the byte at 0053b540.
     void draw(Emitter& em, float t, float f13, float scale, float alpha, std::vector<ParticleBatch>& out);
@@ -373,6 +380,7 @@ private:
 
     std::vector<ParticleDefinition*> defs_;
     RandomTable table_;
+    const std::array<float, 4>* update_velocity_ = nullptr;  // update()'s velocity while it runs
 };
 
 }  // namespace omega::particle

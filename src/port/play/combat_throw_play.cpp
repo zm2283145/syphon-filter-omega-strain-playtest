@@ -138,11 +138,8 @@ struct CombatThrows::Impl final:AreaWorld {
     std::map<std::uint32_t,CombatThrows::FireEmitter> emitters;   // the particle emitters (presentation)
     std::uint32_t next_emitter{1};
     std::vector<std::int16_t> glow;                          // actor +2df6 (model +2d96)
-    // The render model's attach points (actor +60 +2410, ten words; 00392380
-    // zeroes them and record +13c parts are never loaded natively, so every
-    // point stays null) and the hand weights 0038c5e0 refreshes (+23d0..+23ec).
-    std::vector<ActorModelSlots> models;
-    std::vector<MorphHostState> hands;
+    // Checkpoint 132fx3: the render model's attach points (actor +60 +2410) are CombatWorld's attach table, which
+    // the inventory, the draw, the grip and the muzzle read; the receiver's tokens act on it (receiver_host).
     std::unique_ptr<ThrowWorld> world;
     CombatThrowFrame frame;
 
@@ -257,6 +254,7 @@ struct CombatThrows::Impl final:AreaWorld {
         h.create_emitter=[this,a,key](std::string_view name,const FireMatrix& m,float weight){
             const auto e=next_emitter++;
             emitters[e]=CombatThrows::FireEmitter{a,key,std::string(name),m,weight};
+            if(c.particles.create)emitters[e].particle=c.particles.create(name,m,weight);   // 132fx3: 003a2dd0
             frame.emitter_events.push_back({a,"create",e,std::string(name)});
             return e;
         };
@@ -267,12 +265,20 @@ struct CombatThrows::Impl final:AreaWorld {
         };
         h.destroy_emitter=[this,a,live](std::uint32_t e){
             frame.emitter_events.push_back({a,"destroy",e,live(e).name});
+            if(live(e).particle&&c.particles.destroy)c.particles.destroy(live(e).particle);   // 132fx3: 003a2ba0
             emitters.erase(e);
         };
-        h.fade_emitter=[this,a,live](std::uint32_t e){live(e).faded=true;frame.emitter_events.push_back({a,"fade",e,live(e).name});};
-        h.move_emitter=[live](std::uint32_t e,float,const FireMatrix& m,const RootVector& v){live(e).matrix=m;live(e).velocity=v;};
-        h.emitter_strength=[live](std::uint32_t e,float f12){live(e).strength=f12;};
-        h.emitter_floor=[live](std::uint32_t e,float f){live(e).floor_5c=f;};
+        h.fade_emitter=[this,a,live](std::uint32_t e){
+            live(e).faded=true;frame.emitter_events.push_back({a,"fade",e,live(e).name});
+            if(live(e).particle&&c.particles.fade)c.particles.fade(live(e).particle);};
+        // 00235f60 always passes &vel (zero without the record's +19) to 003a2400.
+        h.move_emitter=[this,live](std::uint32_t e,float dt,const FireMatrix& m,const RootVector& v){
+            auto& em=live(e);em.matrix=m;em.velocity=v;
+            if(em.particle&&c.particles.update)c.particles.update(em.particle,m,&em.velocity,dt);};
+        h.emitter_strength=[this,live](std::uint32_t e,float f12){
+            live(e).strength=f12;if(live(e).particle&&c.particles.strength)c.particles.strength(live(e).particle,f12);};
+        h.emitter_floor=[this,live](std::uint32_t e,float f){
+            live(e).floor_5c=f;if(live(e).particle&&c.particles.floor)c.particles.floor(live(e).particle,f);};
         return h;
     }
     // The fire zone's update 00261df0 over the registered targets 004f78dc.
@@ -567,7 +573,18 @@ struct CombatThrows::Impl final:AreaWorld {
         // 00394270 / 003941a0 with +60 = -1 and +64 = 0 (00236810): 003ce980 / 003ce790 (+2d = 1 / 0).
         h.activate=[record,live](std::uint32_t o){live(o).active=true;record("on",o);};
         h.deactivate=[record,live](std::uint32_t o){live(o).active=false;record("off",o);};
-        h.release=[record,live](std::uint32_t o,float delay){live(o).released=true;record("release",o,0,0,delay);};
+        // 003cb230 deletes it `delay` later; its destructor 00236580 kills each record's live instance
+        // (003a2ba0 + 0036b130). Port-only: the host's instances go at the release (the object is off by then).
+        h.release=[this,record,live](std::uint32_t o,float delay){
+            auto& obj=live(o);obj.released=true;record("release",o,0,0,delay);
+            if(obj.effect)for(const auto& st:obj.effect->states_7c){
+                const auto at=emitters.find(st.emitter_0);
+                if(st.emitter_0&&at!=emitters.end()&&at->second.particle){
+                    if(c.particles.destroy)c.particles.destroy(at->second.particle);
+                    at->second.particle=0;
+                }
+            }
+        };
         h.stop_sound=[record](std::string_view name){record("stop_sound:"+std::string(name),0);};
         return h;
     }
@@ -883,15 +900,30 @@ struct CombatThrows::Impl final:AreaWorld {
         h.node_position=[this](std::uint64_t o,std::int32_t node){return aw().actor(index(o)).skeleton_node_world_position(node);};
         h.position=[this](std::uint64_t o){return rows_of(root_placement_matrix(aw().actor(index(o)).floor_root_placement()))[3];};
         h.random=[this]{return next_game_random(aw().random());};
-        // The wire / spark particles (Tazer_Line_glo1, 003a2dd0) are presentation: a handle and the events.
+        // The wire / spark particles (Tazer_Line_glo1, 003a2dd0) are presentation: a handle and the events, and
+        // (Checkpoint 132fx3) the host's instance: 00265b90 (line 0xc6) and 00263890 (line 0x23b) both take
+        // f12 = *0048b1a0 (0.8) and the 003a35c0 name 004a8200; 003a2400 runs with a null velocity (a2 = 0).
         h.create_effect=[this,a](std::int32_t line,const AirTaserMatrix& m){
             const auto e=next_taser_effect++;
             taser_event(a,"create effect",e,static_cast<std::uint32_t>(line),m[3]);
+            if(c.particles.create)if(const auto p=c.particles.create("Tazer_Line_glo1",m,air_taser_effect_scale))taser_particles[e]=p;
             return e;
         };
-        h.update_effect=[](std::uint64_t,const AirTaserMatrix&,float){};
-        h.destroy_effect=[this,a](std::uint64_t e,std::int32_t line){taser_event(a,"destroy effect",e,static_cast<std::uint32_t>(line));};
-        h.burn=[this,a](const AirTaserMatrix& m){taser_event(a,"burn",0,0,m[3]);};
+        h.update_effect=[this](std::uint64_t e,const AirTaserMatrix& m,float dt){
+            const auto at=taser_particles.find(e);
+            if(at!=taser_particles.end()&&c.particles.update)c.particles.update(at->second,m,nullptr,dt);
+        };
+        h.destroy_effect=[this,a](std::uint64_t e,std::int32_t line){
+            taser_event(a,"destroy effect",e,static_cast<std::uint32_t>(line));
+            const auto at=taser_particles.find(e);
+            if(at!=taser_particles.end()){
+                if(c.particles.destroy)c.particles.destroy(at->second);
+                taser_particles.erase(at);
+            }
+        };
+        h.burn=[this,a](const AirTaserMatrix& m){
+            taser_event(a,"burn",0,0,m[3]);
+            if(c.particles.burn)c.particles.burn(m);};                                   // 132fx3: 00232120(10, m)
         h.flak=[this,a](std::uint64_t o){taser_event(a,"flak",o);};
         h.noise=[this,a](std::int32_t id,const RootVector& p,float radius){taser_event(a,"noise",0,static_cast<std::uint32_t>(id),p,radius);};
         const auto* torch=s.actors->torch_host(a);
@@ -899,6 +931,8 @@ struct CombatThrows::Impl final:AreaWorld {
         return h;
     }
     std::uint64_t next_taser_effect{1};
+    std::map<std::uint64_t,std::uint64_t> taser_particles;          // 132fx3: taser effect -> particle handle
+    static constexpr float air_taser_effect_scale=0.8F;             // *0048b1a0
     bool taser_fire(std::size_t a,std::uint64_t target,bool aim_view,std::int32_t subtarget){
         auto& obj=taser_object(a);
         const auto before=obj.state_8;
@@ -1035,22 +1069,22 @@ struct CombatThrows::Impl final:AreaWorld {
     // The receiver's inventory hosting for actor a.
     ActorAnimationReceiverHost receiver_host(std::size_t a){
         ActorAnimationReceiverHost h;
+        // Checkpoint 132fx3: on CombatWorld's attach table (the one +2410 table; combat_world.hpp).
         h.set_model_slot=[this,a](std::uint64_t,std::size_t slot,const std::optional<ActorModelPart>& part,const ActorAnimationReceiverState&){
             if(part)fail("a non-null attached part (record +13c) for model slot "+std::to_string(slot));
             if(slot!=0)fail("model slot "+std::to_string(slot)+" set by the release");
-            (void)set_actor_model_slot(models.at(a),hands.at(a),slot,part);     // 0038c7d0
+            s.combat->clear_attach_point(a,slot);                                // 0038c7d0(+60, 0, null)
             frame.slot_writes.push_back(a);
         };
         // The original never bounds-checks +2410 + 4 x slot; the count only
         // lets the receiver reject a mapping outside the ten points.
-        h.model_slot_count=[this,a](std::uint64_t)->std::size_t{return models.at(a).slots.size();};
+        h.model_slot_count=[](std::uint64_t)->std::size_t{return actor_model_slot_count;};
         h.model_slot_present=[this,a](std::uint64_t,std::size_t slot)->bool{
-            const auto& slots=models.at(a).slots;
-            if(slot>=slots.size())fail("model slot "+std::to_string(slot)+" outside the ten attach points");
-            return slots[slot].has_value();
+            if(slot>=actor_model_slot_count)fail("model slot "+std::to_string(slot)+" outside the ten attach points");
+            return s.combat->attach_table(a).at(slot)!=0;
         };
         h.swap_model_slots=[this,a](std::uint64_t,std::size_t first,std::size_t second,const ActorAnimationReceiverState&){
-            swap_actor_model_slots(models.at(a),hands.at(a),first,second);    // 0038c790
+            s.combat->swap_attach_points(a,first,second);                        // 0038c790
         };
         // 00142c50 (00142cb8..00142d00): the owner is inventory +88, its
         // component +58 (always present on a solo actor: AI or player), the
@@ -1121,8 +1155,7 @@ CombatThrows::CombatThrows(CombatThrowSession session,CombatThrowConfig config)
     m.effects.assign(n,ActorEffectSlotState{});               // the spawn constructor's 0 / -2 slots
     m.ignitions.assign(n,ActorIgnitionState{});
     m.glow.assign(n,std::int16_t{0});
-    m.models.assign(n,constructed_actor_model_slots());
-    m.hands.assign(n,MorphHostState{});
+
     Impl* self=impl_.get();
     ThrowWorldHost h;
     h.los=[self](const RootVector& o,const RootVector& d){return projectile_world_los(self->aw().collision(),o,d);};
@@ -1187,7 +1220,7 @@ void CombatThrows::append_actor(std::int32_t object_id,std::optional<SecondaryMo
     m.cameras.emplace_back(std::nullopt);m.stuns.emplace_back();   // +33bc = -1 (the spawn reset 001b61d8)
     m.effects.emplace_back();m.ignitions.emplace_back();             // the constructor's 0 / -2 slots
     m.glow.emplace_back(std::int16_t{0});
-    m.models.push_back(constructed_actor_model_slots());m.hands.emplace_back();
+
     m.hook(a);
 }
 void CombatThrows::reset_actor(std::size_t a,std::optional<SecondaryMotionRegistry> registry){
@@ -1198,7 +1231,7 @@ void CombatThrows::reset_actor(std::size_t a,std::optional<SecondaryMotionRegist
     m.cameras[a]=std::nullopt;m.stuns[a]={};
     m.effects[a]={};m.ignitions[a]={};
     m.glow[a]=std::int16_t{0};
-    m.models[a]=constructed_actor_model_slots();m.hands[a]={};
+
     m.hook(a);
 }
 
@@ -1323,7 +1356,7 @@ const ActorStunState& CombatThrows::stun(std::size_t actor) const{return impl_->
 const ActorEffectSlotState& CombatThrows::effect_slots(std::size_t actor) const{return impl_->effects.at(actor);}
 const ActorIgnitionState& CombatThrows::ignition(std::size_t actor) const{return impl_->ignitions.at(actor);}
 std::int16_t CombatThrows::glow_2df6(std::size_t actor) const{return impl_->glow.at(actor);}
-const ActorModelSlots& CombatThrows::model_slots(std::size_t actor) const{return impl_->models.at(actor);}
+
 const FireEffectObject* CombatThrows::fire_effect(std::uint32_t object) const{
     const auto at=impl_->effect_objects.find(object);
     return at==impl_->effect_objects.end()||!at->second.effect?nullptr:&*at->second.effect;
@@ -1334,6 +1367,24 @@ const FireZone* CombatThrows::fire_zone(std::uint32_t object) const{
 }
 const std::vector<std::uint32_t>& CombatThrows::registered_objects() const{return impl_->registration;}
 const std::map<std::uint32_t,CombatThrows::FireEmitter>& CombatThrows::emitters() const{return impl_->emitters;}
+std::vector<CombatThrows::BodyParticle> CombatThrows::body_particles() const{
+    const auto& m=*impl_;
+    std::vector<BodyParticle> out;
+    for(const auto key:m.registration){
+        const auto o=m.effect_objects.find(key);
+        if(o==m.effect_objects.end()||!o->second.effect||!o->second.active||o->second.released)continue;
+        for(const auto& st:o->second.effect->states_7c){
+            if(!st.emitter_0)continue;
+            const auto e=m.emitters.find(st.emitter_0);
+            if(e!=m.emitters.end()&&e->second.particle)out.push_back({o->second.actor,e->second.particle,st.previous_10});
+        }
+    }
+    return out;
+}
+std::uint64_t CombatThrows::taser_particle(std::uint64_t effect) const{
+    const auto at=impl_->taser_particles.find(effect);
+    return at==impl_->taser_particles.end()?0:at->second;
+}
 std::optional<AwarenessObjectView> CombatThrows::object_view(std::uint64_t object) const{
     const auto at=object<=0xffffffffU?impl_->effect_objects.find(static_cast<std::uint32_t>(object)):impl_->effect_objects.end();
     if(at==impl_->effect_objects.end())return std::nullopt;

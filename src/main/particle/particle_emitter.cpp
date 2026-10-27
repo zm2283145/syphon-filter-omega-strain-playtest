@@ -290,6 +290,8 @@ std::unique_ptr<Emitter> ParticleSystem::make_type0_emitter(Emitter* parent, Par
     return em;
 }
 
+void curve_coefficients(Emitter& e);  // 0039fc10 (below)
+
 std::unique_ptr<Emitter> ParticleSystem::make_emitter(Emitter* parent, ParticleDefinition* d, const std::uint8_t* matrix, float t) {
     std::unique_ptr<Emitter> em = make_base(parent, d, t);
     Emitter& e = *em;
@@ -322,14 +324,19 @@ std::unique_ptr<Emitter> ParticleSystem::make_emitter(Emitter* parent, ParticleD
     e.set_f32(0x170, length3(pk[0]));
     e.set_f32(0x174, length3(sub4(pk[1], pk[0])));
     e.set_f32(0x178, length3(sub4(pk[2], pk[1])));
-    // 0039fc10(em, p0..p2, em+d0): the Bezier coefficients per axis.
+    curve_coefficients(e);
+    return em;
+}
+
+// 0039fc10(em, em+110 (p0..p2), em+d0): the Bezier coefficients per axis.
+void curve_coefficients(Emitter& e) {
+    const std::array<V4, 3> pk{load4(e.bytes.data() + 0x110), load4(e.bytes.data() + 0x120), load4(e.bytes.data() + 0x130)};
     for (int k = 0; k < 3; ++k) {
         const V4 v{pk[0][k], pk[1][k], pk[2][k], 0.0f};
         V4 c = transform4(kCurveBasis, v);
         c[3] = 0.0f;
         store4(e.bytes.data() + 0xd0 + 0x10 * k, c);
     }
-    return em;
 }
 
 // 003a2930 with fp = 0: before the first emitter whose definition's sort
@@ -1344,10 +1351,113 @@ void ParticleSystem::update_body(Emitter& em, EffectInstance& inst, const std::u
     em.bytes[0x84] = 1;
 }
 
-// 003a0540 -> 003a1760, then the wind check.
+namespace {
+// 00132030 / 00132060 (and 003a06f4): vmul.xyz, the w-lane sum (vmulax.w / vmadday.w / vmaddz.w), vrsqrt Q =
+// 1 / sqrt, vmulq.xyz; w kept. A zero length gives the VU's largest Q (the zero lanes stay zero).
+V4 normalize3(V4 v) {
+    float sq[3];
+    for (int k = 0; k < 3; ++k) sq[k] = ftz(v[k] * v[k]);
+    const float s = ftz(ftz(ftz(1.0f * sq[0]) + sq[1]) + sq[2]);
+    const float q = s > 0.0f ? ftz(static_cast<float>(1.0 / std::sqrt(static_cast<double>(s)))) : FLT_MAX;
+    for (int k = 0; k < 3; ++k) v[k] = ftz(v[k] * q);
+    return v;
+}
+// 001320f0 and the inline form: vopmula.xyz ACC, a, b; vopmsub.xyz d, b, a (d = a x b); vsubw.w (w = 0).
+V4 cross3(const V4& a, const V4& b) {
+    return {ftz(ftz(a[1] * b[2]) - ftz(b[1] * a[2])), ftz(ftz(a[2] * b[0]) - ftz(b[2] * a[0])),
+            ftz(ftz(a[0] * b[1]) - ftz(b[0] * a[1])), 0.0f};
+}
+// 001320b0 (VU0_IsZero3) and the inline form: vaddx.xyz with vf0.x, MAC flags == 0xe (x, y, z zero).
+bool zero3(const V4& v) { return v[0] == 0.0f && v[1] == 0.0f && v[2] == 0.0f; }
+// 0039ff30(em, out, target, point, f12 = 0, f13 = step): out = target - point (vsub.xyzw); unless its xyz are
+// zero, the length (vsqrt, vaddq.x) and the unit vector (vdiv, vmulq.xyz); when |length - f12| > f13 the
+// unit vector * f13 (vmulx.xyzw), else the difference.
+V4 wind_spring_force(const V4& target, const V4& point, float step) {
+    const V4 d = sub4(target, point);
+    if (zero3(d)) return d;
+    const float len = length3(d);
+    const float q = div_s(1.0f, len);
+    V4 n = d;
+    for (int k = 0; k < 3; ++k) n[k] = ftz(d[k] * q);
+    if (std::fabs(sub_s(len, 0.0f)) <= step) return d;
+    return scale4(n, step);
+}
+// The rotation of segments 2 and 3 (003a0804..003a0978): the rows of 00131f00(cross(axis, z) normalized, axis
+// normalized, their cross) when cross(axis, z) is not zero (00131c70 or 00131c40 otherwise).
+std::array<V4, 3> wind_frame(const V4& axis) {
+    const V4 z{0.0f, 0.0f, 1.0f, 1.0f};  // 004bc550
+    const V4 c = cross3(axis, z);
+    if (zero3(c)) {
+        if (zero3(axis)) return {V4{1, 0, 0, 0}, V4{0, 1, 0, 0}, V4{0, 0, 1, 0}};  // 00131c40
+        // 00131c70: up = z (0x00497f30) when |axis.z| < 0.707, else x (0x00497f20).
+        const V4 up = std::fabs(axis[2]) < 0.70700002f ? V4{0, 0, 1, 0} : V4{1, 0, 0, 0};
+        const V4 f = normalize3(axis);
+        const V4 r = normalize3(cross3(axis, up));
+        return {r, f, cross3(r, f)};
+    }
+    const V4 r = normalize3(c);
+    const V4 f = normalize3(axis);
+    return {r, f, cross3(r, f)};
+}
+}  // namespace
+
+// 003a0574..003a0e6c: with a velocity (a3) and def+68 above 0.01, the spring of the three curve points em+110 /
+// 120 / 130 (velocities em+140 / 150 / 160) toward the rest shape bent by the wind, then 0039fc10.
+void wind_spring(Emitter& em, const std::uint8_t* matrix, const std::array<float, 4>& velocity) {
+    ParticleDefinition& d = *em.def;
+    std::uint8_t* b = em.bytes.data();
+    if (!matrix) unhosted(0x3a05e0, "the node matrix (node+10) of the emitter wind");
+    // f23 = (em+170 + em+174 + em+178) / 3; f22 = def+6c * f23 (the step); f21 = def+70 (the damping).
+    const float avg = div_s(add_s(em.f32(0x178), add_s(em.f32(0x170), em.f32(0x174))), 3.0f);
+    const float step = mul_s(d.f32(0x6c), avg);
+    const float damp = d.f32(0x70);
+    // The wind: the velocity through the transposed upper 3x3 (00398d90, 0013ed60), * def+68, * f23.
+    const V4 m0 = load4(matrix), m1 = load4(matrix + 0x10), m2 = load4(matrix + 0x20);
+    const V4 t0{m0[0], m1[0], m2[0], m0[3]}, t1{m0[1], m1[1], m2[1], m1[3]}, t2{m0[2], m1[2], m2[2], m2[3]};
+    const V4 wind = scale4(scale4(transform3(t0, t1, t2, velocity), d.f32(def::wind)), avg);
+    const V4 z{0.0f, 0.0f, 1.0f, 1.0f};  // 004bc550
+    const auto add_force = [&](std::size_t velocity_offset, const V4& f) {
+        store4(b + velocity_offset, add4(load4(b + velocity_offset), f));
+    };
+    // Point 0: def+a40 (through the emitter's rows +10..+30 when it has a parent +74).
+    V4 dir = load4(d.bytes.data() + 0xa40);
+    if (em.parent) dir = transform3(load4(b + 0x10), load4(b + 0x20), load4(b + 0x30), dir);
+    add_force(0x140, wind_spring_force(scale4(normalize3(add4(dir, wind)), em.f32(0x170)), load4(b + 0x110), step));
+    // Point 1: (def+a50 - def+a40) gives the frame for em+110 (or z when its cross with z is zero).
+    const V4 axis1 = sub4(load4(d.bytes.data() + 0xa50), load4(d.bytes.data() + 0xa40));
+    V4 dir1 = z;
+    if (!zero3(cross3(axis1, z))) {
+        const auto r = wind_frame(axis1);
+        dir1 = transform3(r[0], r[1], r[2], load4(b + 0x110));
+    }
+    add_force(0x150, wind_spring_force(add4(load4(b + 0x110), scale4(normalize3(add4(dir1, wind)), em.f32(0x174))),
+                                       load4(b + 0x120), step));
+    // Point 2: (def+a60 - def+a50) gives the frame for em+120 - em+110.
+    const V4 axis2 = sub4(load4(d.bytes.data() + 0xa60), load4(d.bytes.data() + 0xa50));
+    V4 dir2 = z;
+    if (!zero3(cross3(axis2, z))) {
+        const auto r = wind_frame(axis2);
+        dir2 = transform3(r[0], r[1], r[2], sub4(load4(b + 0x120), load4(b + 0x110)));
+    }
+    add_force(0x160, wind_spring_force(add4(load4(b + 0x120), scale4(normalize3(add4(dir2, wind)), em.f32(0x178))),
+                                       load4(b + 0x130), step));
+    // 003a0df0..003a0e58: each point += its velocity (vadd.xyzw), then the velocity *= f21 (vmulx.xyzw).
+    for (std::size_t k = 0; k < 3; ++k) {
+        const std::size_t p = 0x110 + 0x10 * k, v = 0x140 + 0x10 * k;
+        store4(b + p, add4(load4(b + p), load4(b + v)));
+        store4(b + v, scale4(load4(b + v), damp));
+    }
+    curve_coefficients(em);  // 003a0e68
+}
+
+// 003a0540 -> 003a1760, then the wind spring (Checkpoint 132fx3: the effect objects' FireHuman / FireHumanSmoke
+// emitters, def+68 = 2, under 00235f60's velocity).
 void ParticleSystem::update_emitter(Emitter& em, EffectInstance& inst, const std::uint8_t* matrix, std::uint32_t flag, float t) {
     update_body(em, inst, matrix, t);
-    if (flag != 0 && !(em.def->f32(def::wind) <= 0.01f)) unhosted(0x3a057c, "emitter wind");
+    if (flag != 0 && !(em.def->f32(def::wind) <= 0.01f)) {
+        if (!update_velocity_) unhosted(0x3a057c, "emitter wind without the velocity vector");
+        wind_spring(em, matrix, *update_velocity_);
+    }
 }
 
 // The emitter vtable +1c: 003a23f0 (type 1) returns 0; 00397a90 (type 0)
@@ -1436,7 +1546,16 @@ void ParticleSystem::update_type0(Emitter& em, EffectInstance& inst, const std::
         store4(em.bytes.data() + 0xd0, transform3(t0, t1, t2, V4{0.0f, 0.0f, 1.0f, 1.0f}));
         em.set_f32(0xdc, cvt_s_w(d.u8(0x64)));
     }
-    if (flag != 0 && !(d.f32(def::wind) <= 0.01f)) unhosted(0x398bfc, "type-0 emitter wind (00398d90 / 0013ed60)");
+    // 00398bf4..00398c6c: with a velocity (a3 non-null) and def+68 > 0.01, em+90 += (the velocity through the
+    // transposed upper 3x3, 00398d90 + 0013ed60 vmulax / vmadday / vmaddz .xyz, w kept) * def+68 (vmulx.xyzw,
+    // vadd.xyzw: em+9c takes the velocity's w too).
+    if (flag != 0 && !(d.f32(def::wind) <= 0.01f)) {
+        if (!update_velocity_) unhosted(0x398bfc, "type-0 emitter wind without the velocity vector");
+        const V4 m0 = load4(matrix), m1 = load4(matrix + 0x10), m2 = load4(matrix + 0x20);
+        const V4 t0{m0[0], m1[0], m2[0], m0[3]}, t1{m0[1], m1[1], m2[1], m1[3]}, t2{m0[2], m1[2], m2[2], m2[3]};
+        const V4 v = transform3(t0, t1, t2, *update_velocity_);
+        store4(em.bytes.data() + 0x90, add4(load4(em.bytes.data() + 0x90), scale4(v, d.f32(def::wind))));
+    }
     if (inst.bytes[0x6a] != 0) return;
     if (em.i32(0x124) > 0) {
         // 003a3430 of the definition's own effectName, then 003a26a0(inst, 0,
@@ -1461,7 +1580,14 @@ void ParticleSystem::update_type0(Emitter& em, EffectInstance& inst, const std::
     }
 }
 
-void ParticleSystem::update(EffectInstance& inst, const std::uint8_t* matrix, std::uint32_t flag, float dt) {
+void ParticleSystem::update(EffectInstance& inst, const std::uint8_t* matrix, std::uint32_t flag, float dt,
+                            const std::array<float, 4>* velocity) {
+    struct Restore {
+        const std::array<float, 4>*& slot;
+        const std::array<float, 4>* old;
+        ~Restore() { slot = old; }
+    } restore{update_velocity_, update_velocity_};
+    update_velocity_ = velocity;
     inst.set_f32(0x50, add_s(inst.f32(0x50), dt));
     inst.bytes[0x68] = 0;
     inst.bytes[0x69] = 0;
@@ -1753,11 +1879,31 @@ void ParticleSystem::draw_instance(EffectInstance& inst, std::uint32_t flags, st
     // The matrix push (0037c350) and the heat-haze state bit 0x2000 are GS
     // state (the 0x2000 path 0037d3d8 is the host's haze pipeline,
     // particle_renderer.hpp); the type-1 vtable +1c (003a23f0) gives no attach matrix.
+    // 003a1f80..003a2010 (Checkpoint 132fx3): an attached emitter (vtable +1c non-zero: a type-0 emitter that
+    // captured its node matrix em+e0) pops the instance matrix and pushes em+e0 in its place (0037c350); the
+    // emitters after it keep that matrix while they have a parent (+74), and one without a parent pushes the
+    // instance matrix again. The batches drawn under em+e0 carry it (ParticleBatch::attach).
+    const std::uint8_t* cur = nullptr;
     for (auto& em : inst.emitters)
         if (em->drawn() && em->i32(0x6c) != 0) {
-            // 003a1fc0: an attached emitter (vtable +1c non-zero) re-pushes the
-            // matrix as stack * em+e0 for itself and the emitters after it.
-            if (attach_matrix(*em)) unhosted(0x3a1fc0, "the attach matrix push (stack * em+e0) of the particle draw");
+            if (const std::uint8_t* m = attach_matrix(*em)) cur = m;
+            else if (cur && !em->parent) cur = nullptr;
+            const std::size_t first = out.size();
+            if (cur && ((em->u32(0x00) == kRainVtable) || (em->u32(0x00) == kShatterVtable && em->i32(0x170) >= 0)))
+                unhosted(0x3a1fc0, "an attach matrix (em+e0) over a rain or shard primitive draw");
+            struct Mark {
+                std::vector<ParticleBatch>& out;
+                std::size_t first;
+                const std::uint8_t* const& cur;
+                ~Mark() {
+                    if (!cur) return;
+                    for (std::size_t i = first; i < out.size(); ++i) {
+                        std::array<std::array<float, 4>, 4> m{};
+                        std::memcpy(m.data(), cur, 64);
+                        out[i].attach = m;
+                    }
+                }
+            } mark{out, first, cur};
             if (em->u32(0x00) == kType0EmitterVtable) {
                 draw_type0(*em, inst.time(), f20, inst.scale(), inst.alpha(), out);  // vtable 004dfa80 +0c
             } else if (em->u32(0x00) == kRainVtable) {  // vtable 004dfaf0 +0c: 00399080

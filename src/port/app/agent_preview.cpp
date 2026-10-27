@@ -88,8 +88,16 @@ void AgentPreviewRenderer::build(const AgentPacking& packing) {
         scales_ = bone_scale_matrices(decode_bone_scales(disc_.archive_member(frontend_manskm, bon)));
     const auto palette = make_skin_palette(world, inverse_, scales_);
     std::vector<std::string> own_keys, common_keys;   // 132md3: per part, its front-end key and the COMMON one
+    bool strap_found = false;
     for (const auto& part : look.parts) {
         if (part.mesh.blank) continue;
+        // Checkpoint 132id1: the agent screens' models are drawn by 003870c0 -> 00385d40, which skips the STRA_ pair
+        // (+2c0f, the first non-blank one) while the model's attach points 2 and 5 are empty
+        // (appearance_strap_drawn); these models hold no weapon (the preview draws none).
+        if (!strap_found && appearance_strap_mesh(part.mesh.members[0])) {
+            strap_found = true;
+            if (!appearance_strap_drawn(false, false)) continue;
+        }
         const SkinnedMesh* m = mesh(part.mesh.members[0]);
         if (!m) {
             skipped_.push_back(part.mesh.members[0]);

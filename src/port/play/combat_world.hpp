@@ -134,6 +134,12 @@ public:
     // Runs one event of the actor's inventory (library mode only).
     void apply_event(std::size_t actor,const WeaponInventoryEvent& event);
     const ModelAttachTable& attach_table(std::size_t actor) const;
+    // Checkpoint 132fx3: the animation receiver's item tokens on the same +60 +2410 table (001a3980's
+    // hide / restore: the holster 00142bb0 and the redraw 00142c50 swap the hand and holster points with
+    // 0038c790; the release 00141cd0 sets point 0 to the null part, 0038c7d0). The hand weights 0038c5e0
+    // refreshes are not kept with this table (as for the inventory's own move_attach events).
+    void swap_attach_points(std::size_t actor,std::size_t first,std::size_t second);
+    void clear_attach_point(std::size_t actor,std::size_t point);
     // Checkpoint 132cp10: the render object's bytes +2442 + point (actor +24a2 + point), which
     // 003855d0 reads to show the light part +412 (gun_drawn_parts). 00142e00(inventory, slot, b)
     // writes slot s's byte at point 00489d70[s] (6 -> 6, 7 -> 7) when the slot holds an item (the

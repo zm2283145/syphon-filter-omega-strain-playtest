@@ -86,7 +86,7 @@ constexpr float min_width=0.8F;          // 0048b1b8
 constexpr float shock_smoothing=0.7F;    // 0048b1c0
 constexpr float los_pull_back=2.0F;      // 0048b1c8
 constexpr float wobble_start=std::bit_cast<float>(0x4048f5c3U);   // 3.14
-constexpr float segment_width=std::bit_cast<float>(0x3f266666U);  // 0.65
+constexpr float segment_colour=std::bit_cast<float>(0x3f266666U);  // 0.65
 constexpr float lethal_damage=10000.0F;
 
 float unit(const AirTaserHost& h){                       // float(rand) / 2^31
@@ -134,7 +134,7 @@ void set_light_colour(const AirTaserHost& h,std::size_t index,float r,float g){
 AirTaserSegment segment(const RootVector& pos){
     AirTaserSegment s;
     s.pos=pos;
-    s.width_30=segment_width;s.width_34=segment_width;s.width_38=1.0F;s.width_3c=1.0F;
+    s.colour_30=segment_colour;s.colour_34=segment_colour;s.colour_38=1.0F;s.colour_3c=1.0F;
     return s;
 }
 // The frame both 00264530 / 00264720 and the fire build: 0025b38c's
@@ -395,8 +395,8 @@ void air_taser_physics(AirTaserObject& obj,bool flag,float dt){   // 00264370
         if(sign(s.vel[0])!=sign(fx))fx=mul(fx,2.0F);
         if(flag&&std::fabs(fx)<half)fx=mul(fx,small_force);
         const float w=std::min(std::max(std::fabs(mul(fx,width_factor)),min_width),1.0F);
-        s.width_34=w;
-        s.width_30=w;
+        s.colour_34=w;
+        s.colour_30=w;
         s.vel[0]=add(s.vel[0],fx);
         float fz=mul(k,-s.local[2]);
         if(sign(s.vel[2])!=sign(fz))fz=mul(fz,2.0F);

@@ -45,9 +45,11 @@ public:
     // 0053b5a0 / 5a8 / 5b0 / 5b8 after the requests (0 at boot): copy into
     // ParticleSystem::special.
     const std::array<std::int32_t, 4>& special() const { return special_; }
+    // 003a35c0: the id of a loaded definition by name (-1: none); also the runtime's lookups (00235f60's
+    // effect-object emitters, the air taser's 00265b90 / 00263890; Checkpoint 132fx3).
+    int lookup(const std::string& name) const;
 
 private:
-    int lookup(const std::string& name) const;  // 003a35c0
     void load(const std::string& file);         // 003a58e0
     Reader read_;
     std::vector<std::unique_ptr<ParticleDefinition>> defs_;

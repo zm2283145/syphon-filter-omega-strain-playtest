@@ -1,8 +1,8 @@
 #pragma once
 // The air taser object (00266630, 0xd0 bytes): the inventory +0 of roles 1
 // and 3 (weapon_inventory.hpp) and the state of the native air taser
-// (air_taser.hpp). The list it joins (004f8350, the wire draw) is not
-// modelled.
+// (air_taser.hpp). The list it joins (004f8350) is drawn by 002629c0 ->
+// 00262a20 (play_main.cpp, Checkpoint 132fx3).
 #include "animation_root.hpp"
 #include <array>
 #include <cstdint>
@@ -18,7 +18,9 @@ struct AirTaserSegment {
     RootVector pos{};                    // +0 world
     RootVector local{};                  // +10 in the controller frame
     RootVector vel{};                    // +20 (x, z used)
-    float width_30{},width_34{},width_38{},width_3c{};
+    // +30..+3c: the vertex colour (RGBA, 1.0 = 0x80) 00262a20 draws the wire point with (formerly read as widths;
+    // segment() sets (w, w, 1, 1), 00264370 rewrites r and g: a blue-white wire).
+    float colour_30{},colour_34{},colour_38{},colour_3c{};
     bool operator==(const AirTaserSegment&) const=default;
 };
 // One 0x60-byte spark node of the list at +20 (payload +10..+5f).

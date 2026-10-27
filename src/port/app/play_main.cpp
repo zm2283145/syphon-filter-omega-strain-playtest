@@ -2545,7 +2545,14 @@ struct PlayGuiOverlay{
             drawn_parts=&f.modded;
         }
         const auto& parts=*drawn_parts;
+        // Checkpoint 132id1: 003870c0 -> 00385d40 skips the STRA_ pair (+2c0f) unless the figure's attach point 2
+        // or 5 holds a gun (appearance_strap_drawn; the table's records, -1 empty).
+        std::size_t strap=parts.size();
+        if(!appearance_strap_drawn(table[2]!=-1,table[5]!=-1))
+            for(std::size_t i=0;i<f.character->parts().size();++i)
+                if(appearance_strap_mesh(f.character->parts()[i].name)){strap=i;break;}
         for(std::size_t i=0;i<parts.size();++i){
+            if(i==strap)continue;
             const auto& g=parts[i].mesh;
             GuiDrawBatch b=out.take();   // 132vf4 (port-only): a recycled batch's storage
             b.flush=flush;b.clip=clip;b.filter=0x20;
@@ -3478,7 +3485,7 @@ void print_combat_frame(const CombatPlayFrame& f,CombatPlaySession& session,Acto
                 std::cout<<" "<<e.code<<" -> "<<e.descriptor<<(e.what=="release"?" (00263080)":" (00262d90)")<<", shock "<<e.value
                     <<"s, victim "<<(e.object?actor_id(e.object):std::string("none"));
             else if(e.what=="sound"||e.what=="stop sound")
-                std::cout<<" 0x"<<std::hex<<e.descriptor<<std::dec<<(e.object?" on "+actor_id(e.object):std::string(" positional"))<<" (not played)";
+                std::cout<<" 0x"<<std::hex<<e.descriptor<<std::dec<<(e.object?" on "+actor_id(e.object):std::string(" positional"))<<" (to 004ffb50)";
             else if(e.what=="effect")std::cout<<" kind "<<e.descriptor<<(e.code?" on":" off")<<" on "<<actor_id(e.object)<<" (00185d40)";
             else if(e.what=="damage")std::cout<<" "<<e.value<<" type "<<e.descriptor<<" category "<<e.code<<" to "<<actor_id(e.object)<<" (vcall +100)";
             else if(e.what=="camera")std::cout<<" target "<<actor_id(e.object)<<" (00131540)";
@@ -7417,6 +7424,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             std::uint64_t decal_triangles=0;
             // Checkpoint 132o3: the blood decals (0027737c -> 002797c0; 002792f0 -> 003d4350 type-3 projectors).
             std::uint64_t blood_events=0,blood_records=0,blood_projectors=0,blood_projector_gated=0,blood_gob_parts=0,blood_nie_parts=0;
+            // Checkpoint 132fx3: the combat bridge's particle instances (CombatThrowConfig::particles: the effect
+            // objects' emitters of 00235f60 and the air taser's Tazer_Line_glo1) by handle, drawn as 00236380 /
+            // 00262a20 draw them (hook_effects), and the air taser's burn bursts 00232120(10).
+            std::map<std::uint64_t,std::unique_ptr<particle::EffectInstance>> body_instances;
+            std::uint64_t body_next=1,body_creates=0,body_destroys=0,body_unresolved=0,body_sprites=0,taser_burns=0,
+                taser_burns_spawned=0,taser_wire_triangles=0;
         };
         std::unique_ptr<PlayParticles> play_particles;   // --mission-scripts
         // Checkpoint 132ms4: the knife takedown's 00232180 requests (token 0x98) of the frame, spawned after it.
@@ -9264,6 +9277,37 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             return e->id;};
                         tc.directional_effect=[&takedown_effects](std::size_t a,std::int32_t id,const RootVector& point,const RootVector& direction){
                             takedown_effects.push_back({a,id,point,direction});};
+                    }
+                    // Checkpoint 132fx3 (port-only presentation bridge, combat_throw_play.hpp ParticleHost): the
+                    // effect objects' and the air taser's cParticle instances on this particle system.
+                    if(play_particles&&play_particles->system){
+                        auto* pp=play_particles.get();
+                        const auto rows=[](const FireMatrix& m){std::array<std::uint8_t,64> b{};std::memcpy(b.data(),m.data(),64);return b;};
+                        tc.particles.create=[pp,rows](std::string_view name,const FireMatrix& m,float f12)->std::uint64_t{
+                            const int id=pp->library->lookup(std::string(name));                     // 003a35c0
+                            if(id<0){++pp->body_unresolved;return 0;}
+                            auto inst=std::make_unique<particle::EffectInstance>();
+                            const auto b=rows(m);
+                            pp->system->construct(*inst,id,f12,b.data());                            // 003a2dd0
+                            const auto h=pp->body_next++;
+                            pp->body_instances.emplace(h,std::move(inst));++pp->body_creates;
+                            return h;};
+                        tc.particles.update=[pp,rows](std::uint64_t h,const FireMatrix& m,const RootVector* v,float dt){
+                            const auto b=rows(m);
+                            std::array<float,4> vel{};
+                            if(v)vel=*v;
+                            pp->system->update(*pp->body_instances.at(h),b.data(),v?1U:0U,dt,v?&vel:nullptr);};   // 003a2400
+                        tc.particles.strength=[pp](std::uint64_t h,float f12){                         // 003a2680
+                            auto& i=*pp->body_instances.at(h);i.set_f32(0x54,f12+f12*i.f32(0x58));};
+                        tc.particles.floor=[pp](std::uint64_t h,float f){pp->body_instances.at(h)->set_f32(0x5c,f);};
+                        tc.particles.fade=[pp](std::uint64_t h){pp->body_instances.at(h)->bytes[0x6a]=1;};
+                        tc.particles.destroy=[pp](std::uint64_t h){                                    // 003a2ba0 + 0036b130
+                            pp->system->destroy(*pp->body_instances.at(h));pp->body_instances.erase(h);++pp->body_destroys;};
+                        if(pp->effect_table)tc.particles.burn=[pp](const FireMatrix& m){                // 00232120(10, m)
+                            std::array<std::array<float,4>,4> mm{};
+                            for(std::size_t r=0;r<4;++r)mm[r]=m[r];
+                            ++pp->taser_burns;
+                            pp->taser_burns_spawned+=particle::spawn_table_effect(pp->effects,pp->system.get(),*pp->effect_table,10,mm);};
                     }
                     cc.throws=std::move(tc);
                 }
@@ -11425,6 +11469,24 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             character_mesh(workers,piece,drawn,textured,false,true,textures,gore,&replaced_sources);
         };
+        // Checkpoint 132id1: the part draw 00385d40 skips the actor's STRA_ pair (+2c0f) unless its attach point 2
+        // or 5 holds a model (character_appearance.hpp, appearance_strap_drawn): the part keeps its surface (the
+        // 00390570 sort and the overlay images are per part) and draws nothing. Parts are in pair order here.
+        const auto hide_strap=[&](Mesh& mesh,std::size_t actor,std::size_t s0,std::size_t n){
+            const AnimatedCharacter* c=actor==0?&character:nullptr;
+            if(!c)for(const auto& npc:npcs)if(npc.actor==actor){c=npc.character.get();break;}
+            if(!c)return;
+            const auto& parts=c->parts();
+            std::size_t strap=parts.size();
+            for(std::size_t i=0;i<parts.size();++i)if(appearance_strap_mesh(parts[i].name)){strap=i;break;}
+            if(strap>=n)return;
+            bool point_2=false,point_5=false;   // +2418 / +2424; nothing is attached without the combat session
+            if(combat_session&&actor<combat_session->actors().size()){
+                const auto& table=combat_session->combat().attach_table(actor);
+                point_2=table.at(2)!=0;point_5=table.at(5)!=0;
+            }
+            if(!appearance_strap_drawn(point_2,point_5))mesh.surfaces[s0+strap].index_count=0;
+        };
         auto build_actor_mesh=[&](Mesh& mesh){
             actor_mesh_ranges.clear();
             overlay_skins.clear();gpu_skinned=cpu_skinned=0;
@@ -11435,6 +11497,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto n=mesh.surfaces.size()-s0;
                 if(sort.positions.size()!=n)throw std::runtime_error("003870c0: actor "+std::to_string(actor)+" draws "+std::to_string(n)+" parts with "+
                                                                      std::to_string(sort.positions.size())+" sorted positions");
+                hide_strap(mesh,actor,s0,n);
                 std::vector<std::uint32_t> parts(n);
                 for(std::uint32_t j=0;j<n;++j)parts[j]=j;
                 std::stable_sort(parts.begin(),parts.end(),[&](std::uint32_t a,std::uint32_t b){return sort.positions[a]<sort.positions[b];});
@@ -15106,8 +15169,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // vt+48(dt) = 001c57a0 -> 00394590 iff +2d (zone presence) and +2c (the asset's on) and not +2e.
                         for(auto& pl:play_particles->placements){
                             if(!pl.asset.present()||!pl.asset.on())continue;
-                            if(mission_host&&!mission_host->object_enabled_2c(pl.key))
-                                throw std::runtime_error("PLR "+std::to_string(pl.key)+": +2c written by Disable (0021a940) is not hosted for a placement");
+                            // Checkpoint 132fx3: cGameGOBJ::Disable 0021a940 (decomp GameGOBJ_45.c) writes the object's
+                            // +2c = 0 (and resets its children, none for a placement); the traversal then skips its vt+48.
+                            if(mission_host&&!mission_host->object_enabled_2c(pl.key))continue;
                             std::array<std::uint8_t,64> rows{};
                             std::memcpy(rows.data(),pl.node.data(),64);
                             try{pl.asset.update(*play_particles->system,rows.data(),step_dt);}
@@ -17058,6 +17122,39 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const auto desc=game_sound->request(goggles_vision_loop_bank,goggles_vision_loop_name,0,0);
                         game_sound->post(e.kind==GogglesEvent::Kind::loop_start?game_sound->owned_play(desc,owner)
                                                                               :game_sound->owned_stop(desc,owner));
+                    }
+                    if(game_sound&&combat_frame.throws){
+                        // Checkpoint 132fx3: the stun buzz of 00184ce0 (0020f990(msg, 004f12d0 G_TASER_BUZZ, actor), +20 = 1;
+                        // its countdown's and the NPC destructor's 0020eba0), the fire loop of 00186360 / 00185d40
+                        // (001ca210(desc, 1, "G_TASER_BODY", 0, 0), 0020f990 / 0020eba0 on the actor) and the air
+                        // taser's sounds (00265b90 / 00263890 / 00263080: 004f1130 G_TASER_LAUNCH positional 0020f860,
+                        // 004f12d0 G_TASER_BUZZ, 004f1470 G_TASER_FIRE, 004f1610 V_BURN_SCREAM on an object), each to
+                        // 004ffb50 with transport 0: delivered by the next frame's pump.
+                        const auto& t=*combat_frame.throws;
+                        const auto owner_of=[&](std::size_t a){return static_cast<std::uint32_t>(combat_ids.at(a));};
+                        for(const auto& s:t.stun_sounds){
+                            const auto desc=static_sound_record(static_sound_descriptor(s.descriptor));
+                            game_sound->post(s.start?game_sound->owned_play(desc,owner_of(s.actor)):game_sound->owned_stop(desc,owner_of(s.actor)));
+                        }
+                        for(const auto& e:t.effect_calls){
+                            const bool play=e.what.rfind("fire_sound:",0)==0;
+                            const bool stop=e.what.rfind("fire_sound_stop:",0)==0||e.what.rfind("stop_sound:",0)==0;
+                            if(!play&&!stop)continue;
+                            const auto desc=game_sound->request(1,e.what.substr(e.what.find(':')+1),0,0);
+                            game_sound->post(play?game_sound->owned_play(desc,owner_of(e.actor)):game_sound->owned_stop(desc,owner_of(e.actor)));
+                        }
+                        for(const auto& e:t.taser){
+                            if(e.what!="sound"&&e.what!="stop sound")continue;
+                            const auto desc=static_sound_record(static_sound_descriptor(e.descriptor));
+                            if(!e.object){
+                                game_sound->post(game_sound->positional_play(desc,{e.position[0],e.position[1],e.position[2],e.position[3]}));
+                                continue;
+                            }
+                            std::optional<std::size_t> who;
+                            for(std::size_t k=0;k<actors.size();++k)if(actors.actor(k).handle()==e.object){who=k;break;}
+                            if(!who)throw std::runtime_error("Air taser sound on object "+std::to_string(e.object)+", which is not an actor of the world");
+                            game_sound->post(e.what=="sound"?game_sound->owned_play(desc,owner_of(*who)):game_sound->owned_stop(desc,owner_of(*who)));
+                        }
                     }
                     for(const auto& z:combat_frame.zoom_sounds)
                         std::cout<<"Zoom sound "<<(z.start?"start":"stop")<<" of "<<combat_ids.at(z.actor)<<" at frame "<<frame
@@ -19074,6 +19171,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // they and the sprite programs run on the workers, merged in batch order (draw_prepare.hpp).
             const auto draw_batches=[&](const std::string& source,std::vector<particle::ParticleBatch>& batches,const auto& world){
                 auto& p=*play_particles;
+                // Checkpoint 132fx3: batches under an attach matrix (003a1fc0) are drawn by the combat particle draw only.
+                for(const auto& b:batches)if(b.attach)throw std::runtime_error(source+": an attached emitter's matrix (003a1fc0) in this draw");
                 const auto pf=particle_draw->frame(world);
                 OMEGA_ZONE_LAPS(batch_laps);   // 132vd1: the zones
                 const auto drawn=prepare_particle_sprites(workers,batches,particle_records,pf.cull,pf.sprite,no_heat_haze);
@@ -19282,6 +19381,82 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(captures.count(frame))
                         std::cout<<"Effect draw frame "<<frame<<": "<<play_particles->effects.effects()<<" effects, "
                             <<play_particles->effects.scheduled()<<" scheduled components, "<<effect_sprites<<" sprites\n";
+                }
+                if(play_particles->system&&combat_session&&combat_session->throws()){
+                    // Checkpoint 132fx3: cHumanParticleGroup::Render 00236380 (each live record instance under the
+                    // identity with row 3 = the record position, 003a1ad0 with the actor's +38) and cAirTaser::Render
+                    // 00262a20 (from 002629c0 at 001330fc, after the bullet render 002755f0): the wire as a line strip
+                    // (draw mode 0x200, ALPHA *004bc1b0 = 0x44 / FIX 0x80, vertex colour = point +30..+3c), then each
+                    // spark at its matrix (state 2) or the dart glow +c0 at the last point (state 1).
+                    // Port-only: both draw here, after the effect draw; the actor's +38 scene code is not modelled (2,
+                    // as for the host's NIE walk); the GS line strip draws as camera-facing quads one PS2 line (1 / 448
+                    // of the view height) wide.
+                    auto& p=*play_particles;
+                    const auto* throws=combat_session->throws();
+                    std::size_t body_sprites=0,wire_triangles=0;
+                    using Rows=std::array<std::array<float,4>,4>;
+                    const auto draw_at=[&](std::uint64_t h,const Rows& m){
+                        const auto at=p.body_instances.find(h);
+                        if(!h||at==p.body_instances.end())return;
+                        std::vector<particle::ParticleBatch> batches;
+                        {const DeferredDraws deferring(*p.system,particle_records,workers);p.system->draw_instance(*at->second,2,batches);}
+                        // The runs of batches under the instance matrix or an emitter's attach matrix (003a1fc0).
+                        for(std::size_t i=0;i<batches.size();){
+                            std::size_t j=i+1;
+                            while(j<batches.size()&&batches[j].attach==batches[i].attach)++j;
+                            const Rows world=batches[i].attach?*batches[i].attach:m;
+                            std::vector<particle::ParticleBatch> run(std::make_move_iterator(batches.begin()+static_cast<std::ptrdiff_t>(i)),
+                                                                     std::make_move_iterator(batches.begin()+static_cast<std::ptrdiff_t>(j)));
+                            for(auto& b:run)b.attach.reset();
+                            body_sprites+=draw_batches("combat particles",run,world);
+                            i=j;
+                        }
+                    };
+                    for(const auto& b:throws->body_particles())
+                        draw_at(b.particle,Rows{{{1,0,0,0},{0,1,0,0},{0,0,1,0},b.position}});
+                    const Rows identity{{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}}};
+                    for(std::size_t a=0;a<actors.size();++a){
+                        const auto& inv=combat_session->combat().inventory(a);
+                        if(!inv.object_0)continue;
+                        const auto& o=*inv.object_0;
+                        if(!o.state_8||o.wire_10.size()<=1)continue;
+                        if(state.camera->view){
+                            const auto& view=*state.camera->view;
+                            const float k=std::tan(view.vertical_half_fov)/448.0F;
+                            particle::ShatterFlush f;f.texture=-1;f.alpha=(0x80ULL<<32)|0x44ULL;
+                            const auto side=[&](const RootVector& p0,const RootVector& dir){
+                                const float ex=view.eye.x-p0[0],ey=view.eye.y-p0[1],ez=view.eye.z-p0[2];
+                                float sx=dir[1]*ez-dir[2]*ey,sy=dir[2]*ex-dir[0]*ez,sz=dir[0]*ey-dir[1]*ex;
+                                const float n=std::sqrt(sx*sx+sy*sy+sz*sz);
+                                const float w=std::sqrt(ex*ex+ey*ey+ez*ez)*k;
+                                if(n>0.0F){sx*=w/n;sy*=w/n;sz*=w/n;}
+                                return std::array<float,3>{sx,sy,sz};
+                            };
+                            for(std::size_t i=0;i+1<o.wire_10.size();++i){
+                                const auto& s0=o.wire_10[i];const auto& s1=o.wire_10[i+1];
+                                const RootVector dir{s1.pos[0]-s0.pos[0],s1.pos[1]-s0.pos[1],s1.pos[2]-s0.pos[2],0};
+                                const auto a0=side(s0.pos,dir),a1=side(s1.pos,dir);
+                                const std::array<float,4> c0{s0.colour_30,s0.colour_34,s0.colour_38,s0.colour_3c};
+                                const std::array<float,4> c1{s1.colour_30,s1.colour_34,s1.colour_38,s1.colour_3c};
+                                const std::array<particle::ShatterVertex,4> q{{
+                                    {{s0.pos[0]-a0[0],s0.pos[1]-a0[1],s0.pos[2]-a0[2],1},c0,{}},{{s0.pos[0]+a0[0],s0.pos[1]+a0[1],s0.pos[2]+a0[2],1},c0,{}},
+                                    {{s1.pos[0]-a1[0],s1.pos[1]-a1[1],s1.pos[2]-a1[2],1},c1,{}},{{s1.pos[0]+a1[0],s1.pos[1]+a1[1],s1.pos[2]+a1[2],1},c1,{}}}};
+                                for(const std::size_t v:{0,1,2,1,2,3})f.vertices.push_back(q[v]);
+                            }
+                            if(!particle_draw->has_handle_texture(-1))particle_draw->set_handle_texture(-1,nullptr);   // a white texel
+                            wire_triangles+=particle_draw->draw_shatter({f},identity);
+                        }
+                        if(o.state_8==2){
+                            for(const auto& sp:o.sparks_20)draw_at(throws->taser_particle(sp.effect),Rows{sp.matrix[0],sp.matrix[1],sp.matrix[2],sp.matrix[3]});
+                        }else if(o.state_8==1){
+                            Rows m=identity;m[3]=o.wire_10.back().pos;
+                            draw_at(throws->taser_particle(o.particle_c0),m);
+                        }
+                    }
+                    p.body_sprites+=body_sprites;p.taser_wire_triangles+=wire_triangles;
+                    if(captures.count(frame)&&(body_sprites||wire_triangles))
+                        std::cout<<"Combat particle draw frame "<<frame<<": "<<p.body_instances.size()<<" instances, "<<body_sprites
+                                 <<" sprites, "<<wire_triangles<<" air taser wire triangles (00236380 / 00262a20)\n";
                 }
                 if(!play_particles->shatter_draws.empty()){
                     // Checkpoint 132g: the Shatter assets' draws of the last step: the ShatterWindow emitters' 00371200

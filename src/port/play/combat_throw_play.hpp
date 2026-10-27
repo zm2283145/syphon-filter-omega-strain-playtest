@@ -178,6 +178,21 @@ struct CombatThrowConfig {
     // Session-local identities of the projectiles and area objects (their handles and +c).
     std::uint64_t first_object{0xd0000000ULL};
     std::int32_t first_id{0x70000000};
+    // Checkpoint 132fx3 (port-only presentation bridge): the particle instances (cParticle, 0x70 bytes) of the
+    // effect objects' emitters (00235f60: "FireHuman", "FireHumanSmoke", "Tazer_Shock1") and of the air taser
+    // ("Tazer_Line_glo1": the dart glow +c0 and the wire sparks), on the host's particle system, and the air
+    // taser's burn burst. The game state never reads them back; an empty member makes that call only record.
+    struct ParticleHost {
+        // 0036b180(0, 0x70) + 003a35c0(0053b540, name) + 003a2dd0(alloc, id, &matrix, f12): a non-zero handle.
+        std::function<std::uint64_t(std::string_view name,const FireMatrix& matrix,float f12)> create;
+        // 003a2400(inst, &matrix, velocity, dt); velocity null: the original's null a2.
+        std::function<void(std::uint64_t particle,const FireMatrix& matrix,const RootVector* velocity,float dt)> update;
+        std::function<void(std::uint64_t particle,float f12)> strength;   // 003a2680: +54 = f12 + f12 * +58
+        std::function<void(std::uint64_t particle,float value)> floor;    // +5c
+        std::function<void(std::uint64_t particle)> fade;                 // +6a = 1
+        std::function<void(std::uint64_t particle)> destroy;              // 003a2ba0(inst, -1) + 0036b130
+        std::function<void(const FireMatrix& matrix)> burn;               // 00232120(10, matrix): the lethal burn burst
+    } particles;
 };
 
 // One melee request of 001960c0: 001414d0's answer and 00196480's.
@@ -376,8 +391,7 @@ public:
     // the effect objects / fire zones by key (null: not one), the world-object
     // registration (00571748) in order, and the particle emitters.
     std::int16_t glow_2df6(std::size_t actor) const;
-    // The actor's render model attach points (+60 +2410).
-    const ActorModelSlots& model_slots(std::size_t actor) const;
+
     const FireEffectObject* fire_effect(std::uint32_t object) const;
     const FireZone* fire_zone(std::uint32_t object) const;
     const std::vector<std::uint32_t>& registered_objects() const;
@@ -390,8 +404,16 @@ public:
         RootVector velocity{};
         float strength{},floor_5c{};
         bool faded{};
+        std::uint64_t particle{};               // Checkpoint 132fx3: CombatThrowConfig::particles' handle (0: none)
     };
     const std::map<std::uint32_t,FireEmitter>& emitters() const;
+    // Checkpoint 132fx3: what cHumanParticleGroup::Render 00236380 draws: every registered effect object that is
+    // present (+2d, virtual +5c / +60) and not released, in registration order, each record's live instance
+    // (+7c[i] +0) under the identity matrix with row 3 = the record position (+7c[i] +10, the last update's).
+    struct BodyParticle {std::size_t actor{};std::uint64_t particle{};RootVector position{};};
+    std::vector<BodyParticle> body_particles() const;
+    // The particle handle of an air taser effect (AirTaserObject::particle_c0, AirTaserSpark::effect); 0: none.
+    std::uint64_t taser_particle(std::uint64_t effect) const;
     // An effect object or fire zone as the perception's object view reads it
     // (nullopt: not one of them).
     std::optional<AwarenessObjectView> object_view(std::uint64_t object) const;

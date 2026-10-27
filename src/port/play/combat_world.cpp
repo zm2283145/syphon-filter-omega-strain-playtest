@@ -116,6 +116,11 @@ void CombatWorld::apply_event(std::size_t actor,const WeaponInventoryEvent& e){
 }
 
 const ModelAttachTable& CombatWorld::attach_table(std::size_t actor) const{return attach_.at(actor);}
+void CombatWorld::swap_attach_points(std::size_t actor,std::size_t first,std::size_t second){
+    auto& t=attach_.at(actor);
+    std::swap(t.at(first),t.at(second));
+}
+void CombatWorld::clear_attach_point(std::size_t actor,std::size_t point){attach_.at(actor).at(point)=0;}
 
 void CombatWorld::write_slot_render_byte(std::size_t actor,std::uint8_t slot,std::uint8_t value){
     static constexpr std::uint8_t points[]{3,4,2,5,8,9,6,7};    // 00489d70

@@ -171,4 +171,20 @@ struct ActorDrawLod {
     std::int32_t lod{};                  // s2 (= +2be8 when not forced)
 };
 ActorDrawLod actor_draw_lod(const std::array<float, 3>& view_root, float half_fov, std::int32_t gore_counter, bool forced = false);
+
+// The strap pair (Checkpoint 132id1). 0038c920 stores at +2c0f the pair 004068b0 finds for "STRA_" (0x0038cb7c..
+// 0x0038cb88: the first pair whose mesh name reads "STRA_" at bytes 1..5; -1 when none; 00392b50 starts it at -1,
+// 0x003924d4). The part draw 00385d40 skips that part (0x00385e10..0x00385e34: s = -1, then s = +2c0f when the
+// model's attach points 2 and 5 are both empty, +2418 == 0 and +2424 == 0; 0x0038603c: part s is not drawn) at
+// either LOD. Points 2 and 5 are the holster points of weapon slots 2 and 3 (00489d70 {3, 4, 2, 5, 8, 9, 6, 7}):
+// the strap (sling) shows only while a long gun is slung. Every actor draw takes this path (00392990 -> 003870c0 ->
+// 00385d40: in-level actors, the start menu's and loadout's figures, the agent screens' models).
+bool appearance_strap_mesh(std::string_view mesh_name);   // bytes 1..5 read "STRA_"
+// The drawn parts are the packing's pairs after the blank pairs are removed (00406e00 for a serial < 0,
+// 004061b0 on the agent screens),
+// so the first drawn part whose mesh reads "STRA_" is +2c0f's pair.
+// 00385d40: whether part +2c0f is drawn, from the attach points 2 (+2418) and 5 (+2424) holding a model.
+inline bool appearance_strap_drawn(bool point_2_attached, bool point_5_attached) {
+    return point_2_attached || point_5_attached;
+}
 }
