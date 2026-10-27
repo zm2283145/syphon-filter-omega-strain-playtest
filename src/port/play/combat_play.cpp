@@ -157,6 +157,15 @@ struct CombatPlaySession::Impl {
             auto& st=actors->secondary(a).states;apply_actor_secondary_mode(st.request_312,st.request_313,mode);});
         // Actions 0x40 / 0x41 (the flashbang hide) on the actor's +3314.
         world.actor(a).set_secondary_component([this,a]{return &actors->secondary(a);});
+        // Checkpoint 132fx3: 00199f30's armed test and pose type (solo_actor_simulation.hpp set_equipment_hook).
+        world.actor(a).set_equipment_hook([this,a]()->std::pair<bool,std::uint8_t>{
+            const auto& inv=inventory(a);
+            bool armed=false;
+            if(world.actor(a).player_controller()){                                   // 001434d0
+                for(const auto& slot:inv.slots)if(slot.item!=-1){armed=true;break;}
+            }else armed=inv.current_84!=weapon_no_slot;                               // InvArmed: +84 != 6
+            return {armed,item_kind(a)};                                              // 00143510
+        });
         // 001b5560 on activation: the new +3314, +3524 +a0 = 0, 001977f0(actor, 0).
         world.actor(a).set_activation_hook([this,a]{
             actors->recreate_secondary(a);
@@ -2112,6 +2121,7 @@ CombatPlaySession::~CombatPlaySession(){
         s.world.actor(a).set_secondary_update({});
         s.world.actor(a).set_death_secondary_hooks({},{});
         s.world.actor(a).set_secondary_component({});
+        s.world.actor(a).set_equipment_hook({});
     }
     s.world.actor(s.config.player).set_pad_combat_hooks({});
     if(s.config.backpack_world)s.world.actor(s.config.player).set_object_trigger_hooks({},{});

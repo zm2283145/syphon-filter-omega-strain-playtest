@@ -903,6 +903,12 @@ public:
     // reads the actor's fields (`input`; empty: that case throws), and
     // 001cb120(+3314, mode) applies the mode (`apply`; empty: recorded only).
     void set_death_secondary_hooks(std::function<SecondaryModeInput()> input,std::function<void(std::uint8_t mode)> apply);
+    // Checkpoint 132fx3: the +3524 inventory reads of the channel update 00199f30 (human.cc:9182,
+    // 0x0019a3c8..0x0019a43c): `first` the armed test (the player component, virtual +54: 001434d0 any of the
+    // eight slots holds an item; an AI component: +84 != 6) and `second` the pose type 00143510 (the held
+    // record's +48, 0 with nothing held). Channel 12 (the casual / combat stand, walk and peek sliders) goes to
+    // 1 when armed and the pose is not 6; channel 13 (sliderNonCrawl) when the pose is 6. Empty: unarmed (false, 0).
+    void set_equipment_hook(std::function<std::pair<bool,std::uint8_t>()> hook);
     // The secondary component +3314 for actor actions 0x40 / 0x41 (the
     // flashbang hide, actor_flashbang_hide.hpp; a combat host links it). A
     // null result is the original's absent component; an empty hook makes

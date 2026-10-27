@@ -10577,6 +10577,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // model's +0x2bd4 / +0x2bd8 / +0x2bec across frames (+0x2bec = 0x80 from the model init 00392380
         // at 003924c4) and the last logged gate.
         std::uint32_t man_2bd4=0;std::uint16_t man_2bd8=0,man_2bec=0x80;std::string last_man_gate;
+        std::map<std::size_t,std::uint32_t> man_draw_alpha;   // 132fx3: the draw alpha s7 003870c0 passes 00385d40 (absent: 0x80)
         bool scene_order_reported=false;
         std::string gob_glow_reported;   // Checkpoint 132cp5: the last GOB glow 0025f270 summary printed
         // Port-only (132ws): what the wide view clip filed that the 4:3 clip culls (particles, GOB / NIE receivers, glows).
@@ -11487,6 +11488,18 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             if(!appearance_strap_drawn(point_2,point_5))mesh.surfaces[s0+strap].index_count=0;
         };
+        // Checkpoint 132fx3: 00385d40 also skips the MOUT_ pair (+2c0e) when 003870c0's draw alpha is not 0x80 (the
+        // fading actor; character_appearance.hpp appearance_mouth_drawn). The alpha is this frame's gate (above the
+        // mesh build); an actor the gate did not reach draws at 0x80.
+        const auto hide_mouth=[&](Mesh& mesh,std::size_t actor,std::size_t s0,std::size_t n){
+            const auto found=man_draw_alpha.find(actor);
+            if(found==man_draw_alpha.end()||appearance_mouth_drawn(found->second))return;
+            const AnimatedCharacter* c=actor==0?&character:nullptr;
+            if(!c)for(const auto& npc:npcs)if(npc.actor==actor){c=npc.character.get();break;}
+            if(!c)return;
+            const auto& parts=c->parts();
+            for(std::size_t i=0;i<parts.size()&&i<n;++i)if(appearance_mouth_mesh(parts[i].name)){mesh.surfaces[s0+i].index_count=0;return;}
+        };
         auto build_actor_mesh=[&](Mesh& mesh){
             actor_mesh_ranges.clear();
             overlay_skins.clear();gpu_skinned=cpu_skinned=0;
@@ -11497,7 +11510,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto n=mesh.surfaces.size()-s0;
                 if(sort.positions.size()!=n)throw std::runtime_error("003870c0: actor "+std::to_string(actor)+" draws "+std::to_string(n)+" parts with "+
                                                                      std::to_string(sort.positions.size())+" sorted positions");
-                hide_strap(mesh,actor,s0,n);
+                hide_strap(mesh,actor,s0,n);hide_mouth(mesh,actor,s0,n);
                 std::vector<std::uint32_t> parts(n);
                 for(std::uint32_t j=0;j<n;++j)parts[j]=j;
                 std::stable_sort(parts.begin(),parts.end(),[&](std::uint32_t a,std::uint32_t b){return sort.positions[a]<sort.positions[b];});
@@ -18613,7 +18626,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // attachment sphere is left out as in the player's gate above. 00159020 (the dead NPC's removal)
                 // and 00144080 read it in the next game frame.
                 for(const auto& npc:npcs){
-                    if(actors.destroyed(npc.actor)){npc_scene_38.erase(npc.actor);npc_man_draw.erase(npc.actor);continue;}
+                    if(actors.destroyed(npc.actor)){npc_scene_38.erase(npc.actor);npc_man_draw.erase(npc.actor);man_draw_alpha.erase(npc.actor);continue;}
+                    man_draw_alpha.erase(npc.actor);
                     auto& a=actors.actor(npc.actor);
                     std::uint32_t code=0x80;
                     if(a.eligible()){
@@ -18634,6 +18648,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             ManDrawAlphaInput nin;nin.prev_2bd4=st.h2bd4;nin.h2bd8=st.h2bd8;nin.b2bdd=0;nin.depth=ndepth;
                             const ManDrawAlpha na=man_draw_alpha_003872d8(nin,st.h2bec);
                             st.h2bec=na.h2bec;st.h2bd8=na.h2bd8;st.h2bd4=nflags;   // 003875a0
+                            man_draw_alpha[npc.actor]=na.s7;
                             const ManDrawGs ngs=man_draw_gs_state(na);
                             ManDrawTagsInput ntin;ntin.flags_2bd4=nflags;ntin.s7=static_cast<std::int32_t>(na.s7);ntin.h2bd8=st.h2bd8;
                             const ManDrawTags ntags=man_draw_gif_tags_00386ef8(ntin);
@@ -18649,6 +18664,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 ManDrawAlphaInput alpha_in;alpha_in.prev_2bd4=man_2bd4;alpha_in.h2bd8=man_2bd8;alpha_in.b2bdd=1;alpha_in.depth=depth;
                 const ManDrawAlpha alpha=man_draw_alpha_003872d8(alpha_in,man_2bec);
                 man_2bec=alpha.h2bec;man_2bd8=alpha.h2bd8;man_2bd4=flags;   // 003875a0
+                man_draw_alpha[0]=alpha.s7;
                 const std::int8_t b2da0=static_cast<std::int8_t>(sim.aim_view_byte_2e00());
                 const std::uint8_t mode=man_draw_mode_00387650(flags,b2da0,depth);
                 state.renderer->set_overlay_main_skip(0,mode==0?player_surfaces:0);

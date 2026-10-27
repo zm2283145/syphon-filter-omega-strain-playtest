@@ -563,6 +563,7 @@ struct SoloActorSimulation::Impl {
     bool dpad_left_a5{};   // player input +a5: sp+f84 != 0, latched at the producer's end (0x0024faa8..0x0024fad4)
     std::function<void(float)> inventory_update;
     std::function<SecondaryModeInput()> death_secondary_input;
+    std::function<std::pair<bool,std::uint8_t>()> equipment_hook;   // 132fx3: 00199f30's channel 12 / 13 inputs
     std::function<void(std::uint8_t)> death_secondary_apply;
     std::function<SecondaryComponent*()> secondary_component;
     void deliver_flashbang_hide(std::int32_t action);
@@ -2294,6 +2295,9 @@ ActorAnimationSnapshot SoloActorSimulation::Impl::animation_snapshot(float dt){
     snap.component_predicate=player();
     snap.physical_flags810=frame_state.edges.slots[6].mask;     // physical +810: slot 6 mask
     snap.running_value=running_31f8;snap.approach_step=approach_step_31e0;
+    // Checkpoint 132fx3: 00199f30's +3524 reads (0x0019a3c8..: 00143510 the pose type, 001434d0 / InvArmed),
+    // from the combat host; without one the actor holds nothing (false, 0).
+    if(equipment_hook){const auto [has,pose]=equipment_hook();d.has_equipment=has;d.weapon_class=pose;}
     return snap;
 }
 
@@ -3413,6 +3417,7 @@ void SoloActorSimulation::set_pad_combat_hooks(PadCombatHooks hooks){impl_->pad_
 void SoloActorSimulation::set_choose_menu_track(std::function<void(const RootVector&)> track){impl_->choose_menu_track=std::move(track);}
 void SoloActorSimulation::set_pad_interact_prompt(PadInteractPrompt prompt){impl_->pad_interact_prompt=std::move(prompt);}
 void SoloActorSimulation::set_inventory_update(std::function<void(float)> update){impl_->inventory_update=std::move(update);}
+void SoloActorSimulation::set_equipment_hook(std::function<std::pair<bool,std::uint8_t>()> hook){impl_->equipment_hook=std::move(hook);}
 void SoloActorSimulation::set_death_secondary_hooks(std::function<SecondaryModeInput()> input,std::function<void(std::uint8_t)> apply){
     impl_->death_secondary_input=std::move(input);impl_->death_secondary_apply=std::move(apply);}
 void SoloActorSimulation::set_secondary_component(std::function<SecondaryComponent*()> component){

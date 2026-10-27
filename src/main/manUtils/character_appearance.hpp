@@ -187,4 +187,13 @@ bool appearance_strap_mesh(std::string_view mesh_name);   // bytes 1..5 read "ST
 inline bool appearance_strap_drawn(bool point_2_attached, bool point_5_attached) {
     return point_2_attached || point_5_attached;
 }
+// The mouth pair (Checkpoint 132fx3). 0038c920 stores at +2c0e the pair 004068b0 finds for "MOUT_" (0x0038cb90..
+// 0x0038cb98, string 004bc330). The part draw 00385d40 takes the draw alpha as its fifth argument t0 (003870c0's s7 at
+// 0x003881d0 / 0x003883a4 / 0x003883cc: 0x80, or the fading +2bec of 003872d8) and sets sp+500 = -1, then
+// sp+500 = +2c0e when t0 != 0x80 (0x00385e38..0x00385e58); a morph part (record byte 6 & 3 == 3, 0x00386054..
+// 0x0038616c) whose index is sp+500 is not drawn (0x00386184). So a translucent (fading) actor draws no mouth part.
+bool appearance_mouth_mesh(std::string_view mesh_name);   // bytes 1..5 read "MOUT_"
+inline bool appearance_mouth_drawn(std::uint32_t draw_alpha) {
+    return draw_alpha == 0x80;
+}
 }

@@ -405,6 +405,11 @@ std::optional<std::size_t> appearance_preregistered_texture_slot(const Appearanc
     return static_cast<std::size_t>(member_name.size() > 14 && member_name[14] == '0' ? 0 : 1);
 }
 
+bool appearance_mouth_mesh(std::string_view mesh_name) {
+    // 004068b0 compares 5 bytes from byte 1 (strncmp(name + 1, "MOUT_", 5)).
+    return mesh_name.size() >= 6 && mesh_name.substr(1, 5) == "MOUT_";
+}
+
 bool appearance_strap_mesh(std::string_view mesh_name) {
     // 004068b0 compares 5 bytes from byte 1 (strncmp(name + 1, "STRA_", 5)).
     return mesh_name.size() >= 6 && mesh_name.substr(1, 5) == "STRA_";
