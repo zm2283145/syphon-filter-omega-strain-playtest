@@ -121,6 +121,10 @@ struct GxmTimers {
     std::uint64_t census[10]{};            // step 3g: gfx_gxm.cpp census_blended
     std::uint64_t alpha_patched_reads = 0;  // step 3g: patched draws' vertex alpha ranges read (each draw)
     std::uint64_t alpha_skipped_draws = 0;  // step 3g: scene draws skipped: their alpha test discards every pixel
+    // Night-vision ghosts use the man draw's GEQUAL / RGB_ONLY pair. When the uniform ghost alpha is below AREF,
+    // every pixel fails: GXM skips the empty depth-writing pass and draws the RGB_ONLY pass with a no-discard shader
+    // that retains the GS alpha quantisation. These counters are the hardware A/B evidence.
+    std::uint64_t man_alpha_fail_skipped = 0, man_alpha_fail_draws = 0;
     std::uint64_t patches_live = 0;   // a gauge: the patches of the last buffer patched
     // 132vg2 step 3b: the updates split: the patch path (all), patches written in place, the time allocating new
     // patches and writing GPU memory, new patches that landed in CDRAM; the other buffers' fresh copies (count, bytes

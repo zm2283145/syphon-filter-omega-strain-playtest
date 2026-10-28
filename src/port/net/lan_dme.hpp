@@ -7,7 +7,8 @@
 // (the star through the hosting peer).
 //
 // Implemented so far (each one's contract is what the game reads; NET_INLEVEL.md section 3 has the evidence):
-//   002ebaf8(out, world)        the local client index (DME 002dd178: world +0x400) -> LanTransport::local_index
+//   002ebaf8(out, world)        NetGetMyClientIndex (DME 002dd178): world +0x400 (132fx5; PORT-ONLY before the
+//                               barrier creates world 0: LanTransport::local_index)
 //   002ebba0(world, out)        the session host's client index (002dd1f8) -> 0, the LanTransport host
 //   002ebc48(out)               the local millisecond clock (002ddac8 / 00306018)
 //   002ebce0(out)               the session clock (002ddb08: 0x0058806c) -> the local clock plus the JOIN_ACK
@@ -20,12 +21,14 @@
 //   002eb9a8(out, world, client) the client's 16-byte record head (002dd4e8) -> the client's name
 //   002ea0a0(kind, world, to, category, id, size, data) the game message send (gate, lock, 002de398) -> a channel
 //                               0x02 frame (send_message, below; checkpoint 132ln5f)
-// Every other DME API address throws, naming it.
+// Every other DME API address throws, naming it. Each wrapper opens with the library gate (0x11 / 0x2b), as the
+// original's 002ea508 .. 002ecf08 do (132fx5).
 //
 // The level start barrier (static decode of DME 002e15e0 / 002e8730 / 002e6f40 / 002e5d68 / 002e6c78 /
 // 002db720; the DME's own messages are replaced by LanDme control frames):
 //   - start: the caller's client record goes to state 3 and every connected peer gets START_READY (DME's
-//     internal message *0x005983e4, payload {3, client, +0x14, +0x18}); alone, the caller goes straight to 5.
+//     internal message *0x005983e4, payload the four bytes {3, client, +0x14, +0x18}: the counts' low bytes);
+//     alone, the caller goes straight to 5 and is the world's session host (002e5550: +0x404).
 //   - the host (parameters +0x1c 1 or 2), in each update: when no connected client is in state 0, 4 or 5 and the
 //     lowest client in state 3 is the host itself, it goes to 5, announces itself (CLIENT_INFO), calls the start
 //     callback with status 0 and sends START_GO to every client in state 3 (002e8c50).
@@ -59,14 +62,22 @@
 //     a new record (002db270), +6 = 002e68c0(the client's +0x14) and +0xa = 002e69b8(its +0x18) when nonzero, and
 //     START_GO {0x0058806c, +6, +0xa}.
 //   - each update writes the session clock to 0x0058806c (the original's update 002e4a30 keeps it there).
-// Not done (no network effect here, or not decoded): 002db550 (the record broadcast to the peers), 002dca70 /
-// 002e5550 (client state messages: CLIENT_INFO), 002e1470 (the socket layer 00303858), 002e8c50's second message
-// (*0x00598424) and its 002e1d50 flushes.
+//   - world +0x404, the session host (002e5550): 0x100 from the barrier's world (the world join's value), the
+//     local client at the host's start (002e8730) or the alone start (132fx5).
+//   - the joined-the-game step (002db720): the joined client's record (002db270 where there is none), +0 = the
+//     session clock word, the info's +0x29 = 1 and 002db470, before the callback (132fx5).
+// The client-record broadcast 002db550 / receive 002e6c78 and the join-order message *0x00598424 are carried as
+// control kinds 4 and 5. The latter also fills the PORT-ONLY world-member list omitted with 002e0118, so every
+// peer has the +0x24 ordering that 002dbbf8 would use. Host replacement itself remains unavailable because
+// LanTransport's star topology ends a client session when client 0 disappears. 002e1470 is the transport and
+// 002e8c50's three 002e1d50 pings are represented by LanTransport's clock synchronization.
 //
 // Control frames (DATA payloads, reliable): {0x01, kind, client, payload}; kind 1 START_READY {u16 +0x14,
-// u16 +0x18}, 2 START_GO {u32 session clock, u16 base, u16 second base}, 3 CLIENT_INFO {}. Little-endian. Byte 0
+// u16 +0x18}, 2 START_GO {u32 session clock, u16 base, u16 second base}, 3 CLIENT_INFO {}, 4 CLIENT_RECORD
+// {the exact 0x24-byte 002db550 payload}, 5 JOIN_ORDER {u16 client, u32 order}. Little-endian. Byte 0
 // is the LanDme channel: 0x01 DME control, 0x02 game messages (132ln5h3: 132ln5g's PORT-ONLY channel 0x03 is
-// retired; the locomotion travels as the original's game message, research/NET_INLEVEL.md 4.14).
+// used only for the game-side backpack bridge described below; locomotion travels as the original's game message,
+// research/NET_INLEVEL.md 4.14).
 //
 // Game messages (checkpoint 132ln5f; static decode of 002ea0a0 / 002de398 / 002e64e0 / 002def08 / 00305a48):
 //   - send_message(kind, world, to, category, id, size, data) is 002de398 (002ea0a0 after its gate; the native
@@ -84,6 +95,7 @@
 //     negative or oversized consumption) LanDme throws, naming the address.
 
 #include "level_load.hpp"
+#include "lan_dme_commit.hpp"
 #include "lan_transport.hpp"
 
 #include <array>
@@ -121,6 +133,18 @@ public:
     std::uint32_t last_refused() const { return last_refused_; }
     std::uint16_t last_refused_origin() const { return last_refused_origin_; }
 
+    // PORT-ONLY transport for cNetBackpackMsg's exact observable six-byte payload, plus the target's LAN key.
+    // The native message class is still applied by CombatPlay; this channel replaces only NetMap routing and the
+    // unported generic cNetMsg table entry.
+    struct BackpackMessage {
+        std::uint16_t origin{};
+        std::uint8_t type{}, owner{};
+        std::uint32_t backpack{}, target{};
+    };
+    void send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t backpack, std::uint32_t target,
+                       std::uint16_t recipient = kLanAll);
+    std::vector<BackpackMessage> take_backpacks();
+
     // The world's client-left callback (checkpoint 132ln5g): DME calls the world create parameters' +0x24
     // (00429920 from 0042a870 / 00429790, which LanSession replaces) with the block {0, client} when a client of the
     // world leaves; LanDme makes the call in update(), after the poll's frames, for each client the transport lost
@@ -130,12 +154,22 @@ public:
     // 002ec6a0 (left the world) / 002ec738 (disconnected it) were called (132ln5h7, 0042b1f0).
     bool left_world() const { return left_; }
     bool disconnected() const { return disconnected_; }
+    // PORT-ONLY host-migration groundwork. The live message path does not envelope events yet: the play must first
+    // provide the post-application state checkpoint described in research/LAN_PLAY.md §5.5.
+    LanDmeCommitLog& application_commits() { return application_commits_; }
+    const LanDmeCommitLog& application_commits() const { return application_commits_; }
 
 private:
     void send_control(std::uint16_t to, std::uint8_t kind, std::initializer_list<std::uint32_t> words = {});
     void start_records(LevelLoadMemory& memory, std::uint32_t params);
     void activate(LevelLoadMemory& memory, std::uint32_t base, std::uint32_t base2);
     void start_go(LevelLoadMemory& memory, std::uint16_t client);
+    void send_client_record(LevelLoadMemory& memory, std::uint16_t to);
+    void receive_client_record(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes);
+    void send_join_order(LevelLoadMemory& memory, std::uint16_t to, std::uint16_t client, std::uint32_t order);
+    void receive_join_order(LevelLoadMemory& memory, const std::vector<std::uint8_t>& bytes);
+    std::uint32_t member(LevelLoadMemory& memory, std::uint16_t client);
+    std::uint32_t next_join_order(LevelLoadMemory& memory);
     std::uint32_t update(LevelLoadMemory& memory);
     void control(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes);
     void game_message(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes);
@@ -143,12 +177,14 @@ private:
     void joined(LevelLoadMemory& memory, std::uint16_t client);
     void client_left(LevelLoadMemory& memory, std::uint16_t client);
     void newly_joined(LevelLoadMemory& memory, std::uint16_t client);
+    void set_session_host(LevelLoadMemory& memory, std::uint32_t client);
     std::vector<std::uint16_t> connected() const;  // the session's clients, the local one included
     std::uint32_t local_clock() const;
     std::uint32_t session_clock() const;
 
     LanTransport& transport_;
     LanClock clock_;
+    LanDmeCommitLog application_commits_;
     Invoke invoke_;
     Library library_;
     std::uint32_t scratch_;
@@ -172,6 +208,7 @@ private:
     std::uint32_t messages_sent_ = 0, messages_received_ = 0;
     std::uint32_t refused_ = 0, last_refused_ = 0;
     std::uint16_t last_refused_origin_ = 0;
+    std::vector<BackpackMessage> backpacks_;
 };
 
 }  // namespace omega::lan

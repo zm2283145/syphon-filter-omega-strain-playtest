@@ -104,24 +104,25 @@ VitaSDK toolchain file, then build its `omega_vita.vpk` target.
 
 ### PS5 (homebrew)
 
-Needs Linux or WSL (Ubuntu 24.04) with clang 18 / LLVM 18, CMake, Ninja, make, Python 3 and rsync, plus the PS5
-homebrew toolchain in `~/ps5`: the public [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) v0.42, the
-ps5-native-app-boilerplate (revision 4f531c4) and the ps5-opengl SDK 1.0.1 (`tools/ps5/setup_ps5_toolchain.sh`
-unpacks them; the last two are not publicly downloadable at the moment). Then, from Windows:
+Needs Linux or WSL (Ubuntu 24.04) with clang 18, lld 18, LLVM 18 and compiler-rt (`libclang-rt-18-dev`), CMake,
+Ninja, make, Python 3, git, unzip and rsync. `tools/ps5/fetch_toolchain.sh` fetches the PS5 toolchain from its public
+releases, pinned by version and sha256, into `~/ps5-app-toolchain`: the
+[ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) v0.45 and
+[cybervisi0n/ps5-app-sdk](https://github.com/cybervisi0n/ps5-app-sdk) with its OpenGL runtime (ps5-mesa,
+ps5-opengnm-psbc, ps5-gl-runtime). Then, from Windows (it runs the fetch itself):
 
 ```powershell
 .\tools\build_ps5.ps1
 ```
 
-or on Linux `cmake -S . -B local/build-ps5 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/ps5/ps5.toolchain.cmake
--DCMAKE_BUILD_TYPE=Release` and `cmake --build local/build-ps5 --target omega_ps5_package`. The folder title is
-`PPSA99720` (`local\build-ps5\PPSA99720`, or `local/build-ps5/app/dist/PPSA99720`).
+or on Linux `bash tools/ps5/fetch_toolchain.sh`, `cmake -S . -B local/build-ps5 -G Ninja
+-DCMAKE_TOOLCHAIN_FILE=cmake/ps5/ps5.toolchain.cmake -DCMAKE_BUILD_TYPE=Release` and
+`cmake --build local/build-ps5 --target omega_ps5_package`. The folder title is `local/build-ps5/PPSA99720`.
 
 ### Automatic builds
 
-Every push builds the Windows package and both Vita packages on GitHub Actions (`.github/workflows/build.yml`; the
-files are under each run's **Artifacts**). The PS5 job runs only on a self-hosted runner with the PS5 toolchain
-(the repository variable `PS5_RUNNER` names its label).
+Every push builds the Windows package, both Vita packages and the PS5 folder title (with the pinned toolchain above)
+on GitHub Actions (`.github/workflows/build.yml`; the files are under each run's **Artifacts**).
 
 ## Reporting problems
 

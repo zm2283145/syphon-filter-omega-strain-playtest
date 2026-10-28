@@ -13,9 +13,10 @@
 #include <optional>
 
 namespace omega {
-// The cNetHuman's aim fields (+1e0 and +1e4 set).
+// The cNetHuman's aim fields (+1e0 and +1e4 set); +21 is the +1e4 block's ready byte.
 struct NpcRemoteAim {
     bool aiming_20{},firing_21{};
+    bool point_valid_0{};
     std::uint32_t target_8{};
     std::int8_t subtarget_c{-1};
     RootVector point_10{};
@@ -28,6 +29,7 @@ struct NpcRemoteMotion {
 // What the remote controller reads outside the actor (PORT-ONLY: LanNetCore's NPC block answers; the play links them).
 struct NpcRemoteLink {
     std::function<std::optional<NpcRemoteAim>()> link;                  // nullopt: +1e0 or +1e4 clear
+    std::function<bool()> fire_gate;                                   // 002c4f20 on (+1e4): max/current halfwords
     std::function<std::optional<NpcRemoteMotion>()> motion;             // nullopt: +3584 clear
     std::function<void(const RootVector& position)> write_position;     // the cNetHuman's +44..+4c
     std::function<std::uint32_t()> word_150;                            // the controller's +150 (0021e548)
@@ -44,8 +46,14 @@ struct NpcRemoteState {
     std::int32_t node_210{-1};          // +210: the install's current node when it had no hold / previous one
     float speed_200{};                  // +200: the speed the locomotion reads (virtual +d8)
     float timer_204{};                  // +204: the no-contact time (002d5a40)
+    std::uint16_t burst_1ec{};          // +1ec: 002d48f0's remaining shots
     std::uint8_t mode_1ee{};            // +1ee: the ramp mode (1 up, 2 down)
     std::uint8_t flags_214{};           // +214: bit 0 follow, bit 1 15f9b0 at activation, bit 2 node teleport
+};
+struct NpcRemoteBurstStep {
+    std::uint16_t count{};
+    float pause{},cooldown{};
+    bool shoot{};
 };
 // The install's copies from an AI controller (002d6030, old +88 == 1): +141 bit 7 and +98, the node (+208 / +1e8)
 // from the old path follower's +4c, else +54, else +50 (also +210), else the actor's +3548, and +141 bit 2 =
@@ -68,4 +76,12 @@ float npc_remote_distance(const RootVector& a,const RootVector& b);
 // 002d57a8..: the far teleport's test: distance > 4.0, actor +320c != 0x10, and actor +38 == 0x80 or a present
 // physical component whose +2c8 is not below 0.5.
 bool npc_remote_far_teleport(float distance,std::uint32_t mode_320c,std::uint32_t word_38,bool physical_present,float physical_2c8);
+// 002d48f0: advance the remote controller's +1ec / +84 / +88 burst state.
+NpcRemoteBurstStep npc_remote_burst_step(std::uint16_t count,float pause,float cooldown,float fire_delay,
+    std::uint32_t actor_id,bool can_attack);
+// 002d4b30: use the network point when +0 is set, moving it by actor row 1 * 20 when it is within 3 units.
+RootVector npc_remote_no_fire_point(const NpcRemoteAim& aim,const std::array<RootVector,4>& actor_matrix,
+    const RootVector& target_eye);
+// 002c4f20: one process-wide initial reset, then increment current while it is below max.
+bool npc_remote_fire_gate(std::uint16_t maximum,std::uint16_t& current,bool& reset);
 }

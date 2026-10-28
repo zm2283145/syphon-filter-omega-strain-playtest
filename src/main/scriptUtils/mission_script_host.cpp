@@ -667,10 +667,12 @@ bool MissionScriptHost::deliver_crate_interact(Word crate, std::int32_t taken, s
 
 bool MissionScriptHost::deliver_inventory(Word backpack, std::int32_t item, std::int32_t count) {
     if (!started_) throw std::runtime_error("InventoryMsg before the mission scripts started");
-    const auto [label, receiver] = objects_.receiver(backpack);
+    const auto remote = remote_backpacks_.find(backpack);
+    const Word script_id = remote != remote_backpacks_.end() ? remote->second : backpack & 0x00ffffffU;
+    const auto [label, receiver] = objects_.receiver(script_id);
     if (label != "backpack") throw std::runtime_error("InventoryMsg to a record that is not a backpack: " + std::to_string(backpack));
     const StageScope scope(stage_, "InventoryMsg " + std::to_string(item) + " x" + std::to_string(count) + " -> " +
-                                       std::to_string(backpack) + " (" + label + ")");
+                                       std::to_string(script_id) + " (" + label + ")");
     ScriptContext::Message message{"InventoryMsg", {{"Taken", Value(Word{static_cast<Word>(item)})},
                                                     {"Count", Value(Word{static_cast<Word>(count)})},
                                                     {"Who", Value(objects_.objects.resolve(objects_.player | 0x80000000U))}}};
@@ -682,6 +684,14 @@ void MissionScriptHost::register_runtime_backpack(Word id) {
         throw std::runtime_error("A run-time backpack that is not a live world object: " + std::to_string(id));
     if (!objects_.sections.emplace(id, "backpack").second)
         throw std::runtime_error("A run-time backpack ID already in the population: " + std::to_string(id));
+}
+
+Word MissionScriptHost::register_remote_runtime_backpack(Word network_id) {
+    if (const auto found = remote_backpacks_.find(network_id); found != remote_backpacks_.end()) return found->second;
+    const Word local_id = allocate_object_id(0xf5);
+    register_runtime_backpack(local_id);
+    remote_backpacks_.emplace(network_id, local_id);
+    return local_id;
 }
 
 ItemInventory& MissionScriptHost::item_list(Word id) {
@@ -969,6 +979,19 @@ bool MissionScriptHost::deliver_spawned_npc(Word generator, std::optional<Word> 
     const StageScope scope(stage_, "SpawnedNPCMsg -> " + std::to_string(generator));
     ScriptContext::Message message{"SpawnedNPCMsg", {}};
     message.getters.emplace("GetNPC", std::move(who));
+    return context_.deliver(receiver, std::move(message));
+}
+
+bool MissionScriptHost::deliver_despawned_npc(Word generator, Word npc) {
+    if (!started_) throw std::runtime_error("DespawnedNPCMsg before the mission scripts started");
+    const auto [label, receiver] = objects_.receiver(generator);
+    if (label != "generator") throw std::runtime_error("DespawnedNPCMsg to a record that is not a generator: " + std::to_string(generator));
+    const auto section = objects_.sections.find(npc);
+    if (section == objects_.sections.end() || section->second != "npc")
+        throw std::runtime_error("DespawnedNPCMsg about a record that is not an NPC: " + std::to_string(npc));
+    const StageScope scope(stage_, "DespawnedNPCMsg -> " + std::to_string(generator));
+    ScriptContext::Message message{"DespawnedNPCMsg", {}};
+    message.getters.emplace("GetNPC", objects_.objects.resolve(npc));
     return context_.deliver(receiver, std::move(message));
 }
 
@@ -3497,10 +3520,11 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (section != objects_.sections.end() && (section->second == "fire" || section->second == "node")) return Word{0};
         // Checkpoint 132ms5: an InteractGOBJ (00216ae0 over the GOB constructor 0021add0, which calls 003cf0e0 and
         // neither writes +58) answers 0 too: BELARUS2's bridge C-4 533680 / 533679, the CreateBlast attackers of
-        // BridgeExplosion, read by OnDamageMsg word 2557.
+        // BridgeExplosion, read by OnDamageMsg word 2557. TORONTO1's no_vum blast marker 140503 is kind 1 and likewise
+        // leaves the base GOBJ's +58 null (OnDamageMsg word 4524): IsPlayer answers 0.
         if (section != objects_.sections.end() && section->second == "object") {
             const auto kind = objects_.kinds.find(handle->id);
-            if (kind != objects_.kinds.end() && kind->second == 5) return Word{0};
+            if (kind != objects_.kinds.end() && (kind->second == 1 || kind->second == 5)) return Word{0};
         }
         if (section == objects_.sections.end() || section->second != "npc")
             throw std::runtime_error("IsPlayer(GOBJ) of a GOBJ that is not an actor (+58 not hosted): " + std::to_string(handle->id));

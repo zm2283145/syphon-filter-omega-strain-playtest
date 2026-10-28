@@ -382,6 +382,18 @@ std::size_t coop_partners_setting(const PortSettings& s) {
     return count;
 }
 
+void set_coop_partners_setting(PortSettings& s, std::size_t count) {
+    if (count < 1 || count > 3) throw std::runtime_error("Port settings: coop_partners must be 1, 2 or 3");
+    const std::string value(1, static_cast<char>('0' + count));
+    bool found = false;
+    for (auto& [key, v] : s.other)
+        if (key == "coop_partners") {
+            v = value;
+            found = true;
+        }
+    if (!found) s.other.emplace_back("coop_partners", value);
+}
+
 bool window_units_pixels(const PortSettings& s) {
     bool pixels = false;
     for (const auto& [key, value] : s.other)

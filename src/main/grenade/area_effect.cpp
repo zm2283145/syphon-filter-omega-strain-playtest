@@ -42,6 +42,63 @@ std::optional<RootVector> traced(AreaWorld& world,const RootVector& start,const 
 }
 }
 
+bool area_clip_band(RootVector& a,RootVector& b,float lo,float hi){
+    const RootVector d=vsub(b,a);                                            // vsub.xyzw
+    float z=a[2];
+    if(z>hi){
+        if(b[2]>hi)return false;
+        const float t=div(sub(hi,z),d[2]);
+        a[0]=add(a[0],mul(d[0],t));a[1]=add(a[1],mul(d[1],t));a[2]=hi;
+    }else if(z<lo){
+        if(b[2]<lo)return false;
+        const float t=div(sub(lo,z),d[2]);
+        a[0]=add(a[0],mul(d[0],t));a[1]=add(a[1],mul(d[1],t));a[2]=lo;
+    }
+    z=b[2];
+    if(z>hi){
+        const float t=div(sub(hi,z),d[2]);
+        b[0]=add(b[0],mul(d[0],t));b[1]=add(b[1],mul(d[1],t));b[2]=hi;
+    }else if(z<lo){
+        const float t=div(sub(lo,z),d[2]);
+        b[0]=add(b[0],mul(d[0],t));b[1]=add(b[1],mul(d[1],t));b[2]=lo;
+    }
+    return true;
+}
+
+bool area_segment_near(const RootVector& a,const RootVector& b,const RootVector& c,float r){
+    const auto length_squared=[](const RootVector& v){return add(add(mul(v[0],v[0]),mul(v[1],v[1])),mul(v[2],v[2]));};   // ACC x, y, z
+    const RootVector ac=vsub(c,a);
+    const float r2=mul(r,r);
+    const float d2=length_squared(ac);
+    if(d2<r2||length_squared(vsub(c,b))<r2)return true;
+    const RootVector ab=vsub(b,a);
+    const float len=check(vu::sqrt(length_squared(ab)));                     // vsqrt Q
+    const RootVector dir=vscale(ab,div(1.0F,len));
+    const float t=add(add(mul(ac[0],dir[0]),mul(ac[1],dir[1])),mul(ac[2],dir[2]));
+    return t>0.0F&&t<len&&sub(d2,mul(t,t))<r2;
+}
+
+std::uint64_t area_smoke_blocker(const std::vector<AreaEffect>& areas,const std::function<const WeaponRecord&(std::int32_t)>& record,
+    const RootVector& a,const RootVector& b){
+    for(const auto& s:areas){
+        if(!s.particles_d6)continue;                                         // +d6
+        RootVector p0=a,q0=b;
+        float ratio=1.0F;
+        const auto& def=record(s.record_80);                                 // +80
+        if(!s.flag_d5&&s.age_60<growth_time&&def.byte(0xbc)!=4)ratio=div(s.age_60,growth_time);
+        const float k=mul(def.real(0xc8),ratio);
+        const float h=div(mul(band_height,add(1.0F,ratio)),2.0F);
+        bool hit=false;
+        if(area_clip_band(p0,q0,s.position_70[2],add(s.position_70[2],h))){
+            RootVector c=s.position_70;
+            c[2]=add(c[2],div(band_height,2.0F));
+            hit=area_segment_near(p0,q0,c,k);
+        }
+        if(hit)return s.object;
+    }
+    return 0;
+}
+
 AreaEffect construct_area_effect(std::uint64_t object,const ObjectWeakHandle& owner,const RootVector& position,
     const WeaponRecord& record,std::int32_t record_id,bool flag,AreaWorld& world,std::vector<AreaEvent>& out){
     AreaEffect a;

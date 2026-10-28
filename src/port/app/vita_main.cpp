@@ -17,6 +17,8 @@
 #include "draw_prepare.hpp"
 #include "particle_vu1.hpp"
 #include "skinned_mesh.hpp"
+#include "small_alloc.hpp"
+#include "particle_tail.hpp"
 #include "host_window.hpp"
 #include "launcher.hpp"
 #include "disc.hpp"
@@ -389,8 +391,8 @@ struct RenderWindow {
                 "%.1f = programs %.1f + state %.1f + textures %.1f + uniforms %.1f + draw %.1f + rest %.1f; per frame: "
                 "state calls skipped %.0f of %.0f, texture slots skipped %.0f, fragment program cache hits %.0f; "
                 "patches %.1f (%.0f KB, filled %.0f KB, live %llu), patched draws %.0f, rebased lists %.1f, widened %.2f, folds %.2f; "
-                "no-alpha-test draws %.0f, alpha test proven to pass %.0f (vertex ranges read %.1f); shadow receivers "
-                "by vertex flags %.1f",
+                "no-alpha-test draws %.0f, alpha test proven to pass %.0f (vertex ranges read %.1f); man alpha fail "
+                "skipped %.0f + RGB-only %.0f; shadow receivers by vertex flags %.1f",
                 ms(n.submit_us, t.submit_us), per(n.submits, t.submits), ms(n.begin_scene_us, t.begin_scene_us),
                 per(n.scenes, t.scenes), ms(n.end_scene_us, t.end_scene_us), ms(n.clear_us, t.clear_us),
                 per(n.clears, t.clears), ms(n.copy_us, t.copy_us), per(n.copies, t.copies), ms(n.update_us, t.update_us),
@@ -409,6 +411,8 @@ struct RenderWindow {
                 per(n.rebased_lists, t.rebased_lists), per(n.patch_widened, t.patch_widened),
                 per(n.patch_folds, t.patch_folds), per(n.no_alpha_test_draws, t.no_alpha_test_draws),
                 per(n.alpha_proven_draws, t.alpha_proven_draws), per(n.alpha_scans, t.alpha_scans),
+                per(n.man_alpha_fail_skipped, t.man_alpha_fail_skipped),
+                per(n.man_alpha_fail_draws, t.man_alpha_fail_draws),
                 per(n.shadow_flagged_draws, t.shadow_flagged_draws));
             {
                 // 132vg2 step 3f: the scene draws by kind, and the GPU probe's mode this window (gfx_gxm.hpp)
@@ -1296,6 +1300,23 @@ int App::play(DiscImage& disc, const std::string& iso) {
             double(g.buffer_reallocs - reallocs) / frames, double(g.buffer_writes - writes) / frames,
             double(g.buffer_bytes - bytes) / 1024.0 / frames, double(g_mallocs - mallocs) / frames,
             process_memory_line().c_str());
+        {   // 132vc2: the small-object allocator (small_alloc.hpp), totals since the start
+            static omega::small_alloc::Stats sa_last{};
+            const auto sa = omega::small_alloc::stats();
+            log("play small alloc (132vc2): %.0f KB of chunks held; per frame %.1f refills, %.1f flushes, %.1f refused "
+                "(over the limit: malloc)",
+                sa.chunk_bytes_held / 1024.0, double(sa.refills - sa_last.refills) / frames,
+                double(sa.flushes - sa_last.flushes) / frames, double(sa.refused - sa_last.refused) / frames);
+            sa_last = sa;
+            static omega::ParticleTailProfile pt_last{};
+            const auto pt = omega::particle_tail_profile();
+            log("play particle tail (132vc2, %s): per frame %.1f tails, %.1f batches; ms/frame: work on the pool %.2f, "
+                "the simulation thread's wait %.2f, its emit %.2f",
+                omega::g_particle_tail.load() ? "on" : "off", double(pt.tails - pt_last.tails) / frames,
+                double(pt.batches - pt_last.batches) / frames, double(pt.work_us - pt_last.work_us) / 1000.0 / frames,
+                double(pt.wait_us - pt_last.wait_us) / 1000.0 / frames, double(pt.emit_us - pt_last.emit_us) / 1000.0 / frames);
+            pt_last = pt;
+        }
         if (g.shadow_checked || g.shadow_mismatched)
             log("play shadow cache check: %llu hits equal to the buffers, %llu not (all so far)",
                 static_cast<unsigned long long>(g.shadow_checked), static_cast<unsigned long long>(g.shadow_mismatched));
@@ -2928,6 +2949,9 @@ void report(const char* when, int top = 24) {
 [[gnu::noinline]] void* operator new(std::size_t size) {
     __atomic_fetch_add(&g_mallocs, 1, __ATOMIC_RELAXED);
     ++t_mallocs;
+    // 132vc2 (port-only): blocks of up to 1 KB from the small-object allocator (small_alloc.hpp: per-thread lists, no
+    // heap lock, no profile header); the rest, and every block once its chunks reach their limit, as before.
+    if (void* small = omega::small_alloc::allocate(size)) return small;
     const auto caller = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
     void* raw = std::malloc(size + sizeof(heap_profile::Header));
     if (!raw || size >= (4u << 20)) {
@@ -2962,6 +2986,10 @@ void report(const char* when, int top = 24) {
 void* operator new[](std::size_t size) { return operator new(size); }
 void operator delete(void* p) noexcept {
     if (!p) return;
+    if (omega::small_alloc::owns(p)) {  // 132vc2
+        omega::small_alloc::release(p);
+        return;
+    }
     auto* header = static_cast<heap_profile::Header*>(p) - 1;
     heap_profile::release(header->slot, header->size);
     std::free(header);
@@ -2981,6 +3009,13 @@ int main() {
     if (vita_file_size(std::string(vita_data_root) + "/vita_test_log_lines.txt") >= 0) g_log_reopen_seconds = 0.0;
     g_log_writer.start();
     omega::zone::thread_allocations = [] { return t_mallocs; };
+    // 132vc2 (port-only, research/VITA.md "Main-thread CPU (132vc2)"): the small-object allocator, up to 12 MB of
+    // 64 KB chunks; vita_test_small_alloc_off.txt keeps every block on newlib's malloc (the A/B).
+    const bool small_alloc_on = vita_file_size(std::string(vita_data_root) + "/vita_test_small_alloc_off.txt") < 0;
+    if (small_alloc_on) omega::small_alloc::configure(std::size_t{12} << 20);
+    // 132vc2: the particle tails on the pool (particle_tail.hpp); vita_test_particle_tail_off.txt draws each object's
+    // particles in turn on this thread as before (the A/B).
+    omega::g_particle_tail = vita_file_size(std::string(vita_data_root) + "/vita_test_particle_tail_off.txt") < 0;
     omega::crash::vita_before_exit = [] { g_log_writer.stop(); };
     log("Omega Strain native port, PS Vita (checkpoint 132vt1)");
     // 132vp1: the heap profile's caller addresses are runtime ones; log_memory's runtime address against its ELF

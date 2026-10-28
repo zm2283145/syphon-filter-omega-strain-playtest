@@ -44,8 +44,14 @@ std::vector<VisionCoronaCall> vision_corona_0025f4c0(std::int32_t vision_mode, c
         if(point_194&&ref.pool==LevelLightPool::point&&ref.index==*point_194)continue;
         const LevelLight& l=lights.pool(ref.pool)[ref.index];
         const bool flashlight=l.vtable==level_light_vtable_flashlight;
+        // Checkpoint 132fx1: every light vtable of the image is covered: the five plain ones (the 004d9200 / 004d9240 rows:
+        // +20 Light_GetCoronaSize 001479b0, +24 Light_GetCoronaFlag 001479c0, +34 001479f0) and the flashlight's.
+        // The released light 004d9280 (an 8-word table: +20 / +24 / +34 read the next table 004d92a0's words, 0 and
+        // a message's functions) is undefined in the original; any other word is not a light vtable.
+        if(l.vtable==level_light_vtable_released)
+            throw std::runtime_error("0025f4c0: a corona light already released (vtable 004d9280: vcalls +20 / +24 / +34 run past its 8 words, undefined in the original)");
         if(!flashlight&&!plain_light(l.vtable))
-            throw std::runtime_error("0025f4c0: corona light with an unported vtable "+hex(l.vtable)+" (vcalls +20 / +24 / +34)");
+            throw std::runtime_error("0025f4c0: corona light with a vtable "+hex(l.vtable)+" that is not a light's (vcalls +20 / +24 / +34)");
         VisionCoronaCall c;
         c.light=ref;
         c.position={l.position[0],l.position[1],l.position[2],l.position[3]};

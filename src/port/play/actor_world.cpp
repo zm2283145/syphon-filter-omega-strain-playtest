@@ -142,6 +142,7 @@ std::unique_ptr<SoloActorSimulation> ActorWorld::make(std::size_t index,const So
 }
 std::size_t ActorWorld::add(const SoloActorConfig& config,SoloActorAnimation* animation,std::optional<ActorAnimationTuning> tuning,
     SoloActorControlFields initial,const SoloActorController& controller,bool present){
+    if(!owner_dt_)owner_dt_=config.dt;
     const auto index=actors_.size();
     if(index>=0x100000)throw std::runtime_error("Actor world: too many actors for the handle ranges");
     actors_.push_back(make(index,config,animation,std::move(tuning),initial,controller,present));
@@ -186,7 +187,16 @@ std::size_t ActorWorld::size() const{return actors_.size();}
 SoloActorSimulation& ActorWorld::actor(std::size_t index){return *actors_.at(index);}
 const SoloActorSimulation& ActorWorld::actor(std::size_t index) const{return *actors_.at(index);}
 const SoloCollisionWorld& ActorWorld::collision() const{return *world_;}
-void ActorWorld::set_collision_owner(std::uint64_t handle,const CollisionMatrix& matrix){world_->set_owner(handle,matrix);}
+void ActorWorld::set_collision_owner(std::uint64_t handle,const CollisionMatrix& matrix){
+    const auto prior=world_->owner(handle);
+    world_->set_owner(handle,matrix);
+    if(!owner_dt_||!prior){world_->set_owner_velocity(handle,std::nullopt);return;}
+    RootVector velocity{};
+    for(std::size_t i=0;i<3;++i)velocity[i]=(matrix[12+i]-(*prior)[12+i])/ *owner_dt_;
+    velocity[3]=0.0F;
+    if(velocity[0]==0.0F&&velocity[1]==0.0F&&velocity[2]==0.0F)world_->set_owner_velocity(handle,std::nullopt);
+    else world_->set_owner_velocity(handle,velocity);
+}
 std::vector<SoloActorFrame> ActorWorld::step(std::span<const SoloActorFrameInput> inputs){
     if(inputs.size()!=actors_.size())throw std::runtime_error("Actor world: one input per actor");
     stepping_=true;
@@ -222,6 +232,7 @@ std::vector<SoloActorFrame> ActorWorld::step(std::span<const SoloActorFrameInput
             return SoloActorSimulation::AppendedActor{actors_[next++].get(),&late_frames.back(),&late_input};
         };
     SoloActorSimulation::run_frame(list,live_inputs,live_frames,services,later,appended,std::span<const bool>(traverse.get(),live.size()));
+    world_->clear_owner_velocities();
     ++frame_counter_;
     std::vector<SoloActorFrame> frames(initial);
     for(std::size_t k=0;k<live.size();++k)frames[live[k]]=std::move(live_frames[k]);
@@ -254,7 +265,7 @@ bool ActorWorld::traversed(std::size_t index) const{
 }
 void ActorWorld::set_frame_services(std::function<void(std::uint32_t frame)> services){services_=std::move(services);}
 void ActorWorld::set_after_first_traversal(std::function<void(std::uint32_t frame)> entries){after_first_traversal_=std::move(entries);}
-void ActorWorld::set_step_dt(float dt){for(auto& a:actors_)a->set_step_dt(dt);step_dt_=dt;}
+void ActorWorld::set_step_dt(float dt){for(auto& a:actors_)a->set_step_dt(dt);step_dt_=dt;owner_dt_=dt;}
 void ActorWorld::set_movement_list(std::function<std::vector<std::size_t>()> list){movement_list_=std::move(list);}
 void ActorWorld::set_agent_slot(int slot,std::optional<std::size_t> actor){
     if(slot<1||slot>3)throw std::runtime_error("Actor world: agent slots are 1..3 (slot 0 is the first player)");

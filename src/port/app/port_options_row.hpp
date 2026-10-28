@@ -4,7 +4,7 @@
 // (coop_partner.hpp). The original's offline options have no such row: it is a copy of the VIBRATION
 // row (label_rumble, textbackground6, value_rumble: the same fonts, colours and decorator IE nodes)
 // placed one row step below it, the step being the file's value_rumble - value_freelooky offsets (rect y
-// and decorator translation z). The value reads MB_On / MB_Off (the VIBRATION strings); Cross toggles it
+// and decorator translation z). The value reads MB_On / MB_Off (the VIBRATION strings); Cross toggles it (132pt1: OFF / 1 / 2 / 3)
 // and writes the port settings file (port_settings.hpp) at once, outside the memory-card save. The
 // in-game options (GAMEOPT2) get no row: the partner is chosen before the level loads.
 
@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace omega {
 
@@ -53,6 +55,14 @@ inline constexpr const char* save_message = "squarebutton_message";
 // spaced at this fraction of the control page's row step (39.1 units: 28.2), so VIDEO MODE, FULLSCREEN, VSYNC and
 // "PRESS [] TO SAVE" keep one even rhythm above the footer buttons (z -200) instead of overlapping it.
 inline constexpr float video_row_step_scale = 0.72F;
+
+// Checkpoint 132pt1 (port-only, the user's request): the CPU PARTNER row cycles OFF, 1, 2, 3 (the number of CPU partners,
+// research/COOP.md "Up to 3 CPU partners"): Cross writes coop_partner=0|1 and coop_partners=1..3 (OFF keeps the count).
+// The value reads the game's MB_Off string for OFF (the VIBRATION row's) and the count's digit otherwise.
+// The next value after `count` (0: OFF).
+std::size_t cpu_partner_row_next(std::size_t count);
+// The value's text for the settings (strings: GetString 003fdb50; a missing MB_Off shows nothing, as go_refresh).
+std::string cpu_partner_row_text(const PortSettings& s, const std::function<std::optional<std::string>(const std::string&)>& strings);
 
 struct PortToggleRow {
     std::function<bool()> get;       // the state now (the window's fullscreen, the presents' vsync)

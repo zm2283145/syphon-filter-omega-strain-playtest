@@ -1,6 +1,7 @@
 #include "hud_object.hpp"
 #include "weapon_hud.hpp"
 #include "character_shadows.hpp"
+#include "game_libm.hpp"
 
 #include <bit>
 #include <cmath>
@@ -672,6 +673,61 @@ void HudObject::reticle_default() {  // 00244a10
     screen_.show_element(element_68, 1);            // 003e8de0
     screen_.evaluate_element(element_68, 0.0F);     // 003f45a0
     screen_.fade_element(element_68, 17.0F);        // 003f44e0
+}
+
+HudThrownMarker hud_thrown_marker(const std::array<std::array<float, 4>, 4>& camera_node, const std::array<float, 4>& point,
+                                  const std::array<float, 4>* direction) {  // 00244580 past its +68 test
+    const auto ftz = [](float v) { return std::fpclassify(v) == FP_SUBNORMAL ? (std::signbit(v) ? -0.0F : 0.0F) : v; };
+    const auto add = [&](float a, float b) { return ftz(a + b); };
+    const auto sub = [&](float a, float b) { return ftz(a - b); };
+    const auto mul = [&](float a, float b) { return ftz(a * b); };
+    ShadowMatrix node;
+    for (std::size_t k = 0; k < 4; ++k) node.column[k] = camera_node[k];
+    const ShadowMatrix v = shadow_rigid_inverse(node);   // 00133330, 00133190 (sp+1b0)
+    HudThrownMarker out;
+    std::array<float, 3> angle{0.0F, 0.0F, 0.0F};        // sp+1a0..+1a8
+    if (direction) {
+        const float k03 = std::bit_cast<float>(0x3e99999aU);
+        ShadowVector p{};
+        for (std::size_t i = 0; i < 4; ++i) p[i] = add(point[i], mul((*direction)[i], k03));   // vmulx, vadd
+        out.words_20 = shadow_transform(v, p);                                              // 003e8180(+68, sp+140)
+        ShadowVector d = *direction;                                                         // vmaddz.xyz: w kept
+        for (std::size_t i = 0; i < 3; ++i)
+            d[i] = add(add(mul(v.column[0][i], (*direction)[0]), mul(v.column[1][i], (*direction)[1])),
+                       mul(v.column[2][i], (*direction)[2]));
+        ShadowVector n{};
+        for (std::size_t i = 0; i < 4; ++i) n[i] = sub(0.0F, d[i]);                          // vmulax ACC 0, vmsubw
+        const float y2 = mul(n[1], n[1]), z2 = mul(n[2], n[2]);                              // sp+80.x = 0
+        const float q = std::sqrt(add(add(0.0F, y2), z2));                                   // vsqrt, vaddq.x
+        const float a = game_atan2f(-n[0], add(0.0F, q));                                    // neg.s f12
+        const float b = game_atan2f(n[2], n[1]);
+        angle = {b, 0.0F, a};
+    } else {
+        out.words_20 = shadow_transform(v, point);
+    }
+    const float cy = game_cosf(angle[1]), sy = game_sinf(angle[1]);
+    const float cz = game_cosf(angle[2]), sz = game_sinf(angle[2]);
+    const float cx = game_cosf(angle[0]), sx = game_sinf(angle[0]);
+    const float f15 = add(mul(sz, mul(cx, cy)), mul(sx, sy));
+    const float s0 = add(mul(sz, mul(sx, sy)), mul(cx, cy));    // mula.s / madd.s, the 00140e20 stack word
+    const float f2 = mul(cx, sy);
+    const float f17 = sub(mul(sz, f2), mul(sx, cy));            // mula.s / msub.s
+    const float f18 = sub(mul(cy, mul(sx, sz)), f2);
+    const float f12 = mul(cy, cz), f13 = -sz, f14 = mul(sy, cz), f16 = mul(cx, cz), f19 = mul(sx, cz);
+    const float s = std::bit_cast<float>(0x3df5c28fU);          // 0048ae50 (0.12)
+    out.matrix = {mul(f12, s), mul(f15, s), mul(f18, s), 0.0F, mul(f13, s), mul(f16, s), mul(f19, s), 0.0F,
+                  mul(f14, s), mul(f17, s), mul(s0, s),  0.0F, 0.0F,        0.0F,        0.0F,        1.0F};
+    return out;
+}
+
+void HudObject::thrown_marker(const std::array<std::array<float, 4>, 4>& camera_node, const std::array<float, 4>& point,
+                              const std::array<float, 4>* direction) {  // 00244580
+    if (element_68 < 0) return;
+    screen_.set_flag_61(require(node_58, "002445c0", "fptarget (+58)"), 1);   // 003ee830(+58, 1)
+    const auto m = hud_thrown_marker(camera_node, point, direction);
+    auto& el = screen_.element_at(element_68);
+    el.words_20 = m.words_20;   // 003e8180
+    el.matrix = m.matrix;       // 003e8040
 }
 
 void HudObject::pad_meters(const ActorHealthState& health) {  // 0024cec8..0024ceec

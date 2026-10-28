@@ -108,6 +108,47 @@ SceneRenderer::Ptr<gfx::Buffer> SceneRenderer::buffer(const void* data, std::siz
 
 namespace {
 constexpr unsigned max_viewport = 16384;  // D3D11's texture limit (a fullscreen 8K monitor fits)
+
+#if defined(OMEGA_PS5)
+}  // namespace
+}  // namespace omega
+// Port-only (132ps5d hw2): 0 turns set_overlay_textures' reuse off (gfx_gl46_ps5.cpp reads ps5_gl.txt overlay_reuse).
+extern "C" {
+int omega_ps5_overlay_reuse = 1;
+}
+namespace omega {
+namespace {
+// Port-only (132ps5d): a 64-bit digest of everything upload_texture uploads from an image (its size, the RGBA or block
+// levels of the mod replacement when there is one), for set_overlay_textures' reuse. 64-bit words, multiply-xorshift.
+std::uint64_t digest_bytes(std::uint64_t h, const std::vector<std::uint8_t>& bytes) {
+    constexpr std::uint64_t k = 0x9e3779b97f4a7c15ULL;
+    const auto mix = [&](std::uint64_t v) {
+        h ^= v + k + (h << 6) + (h >> 2);
+        h *= 0xff51afd7ed558ccdULL;
+        h ^= h >> 33;
+    };
+    mix(bytes.size());
+    std::size_t i = 0;
+    for (; i + 8 <= bytes.size(); i += 8) {
+        std::uint64_t v;
+        std::memcpy(&v, bytes.data() + i, 8);
+        mix(v);
+    }
+    std::uint64_t tail = 0;
+    if (i < bytes.size()) std::memcpy(&tail, bytes.data() + i, bytes.size() - i);
+    mix(tail);
+    return h;
+}
+std::uint64_t upload_digest(const Texture& source) {
+    const Texture& t = upload_image(source);
+    std::uint64_t h = (std::uint64_t(t.width) << 32) ^ t.height ^ (std::uint64_t(t.block_bytes) << 24) ^
+                      (std::uint64_t(t.uses_alpha) << 60);
+    h = digest_bytes(h, t.rgba);
+    for (const auto& m : t.mips) h = digest_bytes(h, m);
+    for (const auto& b : t.blocks) h = digest_bytes(h, b);
+    return h;
+}
+#endif
 }
 
 SceneRenderer::SceneRenderer(const SceneDisplay& display, const Mesh& mesh, const CollisionMesh& collision,
@@ -157,6 +198,9 @@ void SceneRenderer::release_device() {
     vertices_.reset(); indices_.reset(); collision_vertices_.reset(); collision_indices_.reset();
     skin_buffers_.clear(); skin_constants_.clear(); skin_written_.clear(); skin_current_ = nullptr; skin_ready_ = false;  // 132md8
     overlay_textures_.clear(); projector_textures_.clear(); overlay_vertices_.reset(); overlay_indices_.reset();
+#if defined(OMEGA_PS5)
+    overlay_cache_.clear();
+#endif
     solid_.reset(); wire_.reset(); depth_enabled_.reset(); depth_disabled_.reset();
     blend_.reset(); blend_add_half_.reset(); blend_subtract_half_.reset();
     blend_alpha_add_.reset(); blend_alpha_subtract_.reset(); blend_fix_over_.reset();
@@ -1054,7 +1098,46 @@ SceneRenderer::Ptr<gfx::Texture> SceneRenderer::upload_raw_alpha(const Texture& 
 void SceneRenderer::set_overlay_textures(const std::vector<Texture>& textures) try {
     overlay_source_ = &textures;
     overlay_textures_.clear();
+#if defined(OMEGA_PS5)
+    // Port-only (132ps5d, research/PS5.md "Overlay images"): the play host calls this with the whole list again at every
+    // NPC spawn, new weapon texture or vision change (the player's parts, every NPC's, the guns': about 1,100 images in
+    // TORONTO1), and uploading each again made the PS5 GL driver create and free 1,000-4,000 textures at once (132ps5c
+    // hw11: stalls of 1.5-2.5 s, then GL_OUT_OF_MEMORY at the subway and the characters drawn without their textures).
+    // An image whose uploaded bytes equal one of the previous call's keeps that GPU texture (the same upload would make
+    // the same texture); only new images are uploaded, and the ones no longer listed are released.
+    std::map<std::uint64_t, Ptr<gfx::Texture>> kept;
+    std::size_t reused = 0, uploaded = 0;
+    if (!omega_ps5_overlay_reuse) overlay_cache_.clear();
+    for (const auto& texture : textures) {
+        if (!omega_ps5_overlay_reuse) {
+            overlay_textures_.push_back(upload_texture(texture));
+            ++uploaded;
+            continue;
+        }
+        const std::uint64_t key = upload_digest(texture);
+        auto found = kept.find(key);
+        if (found == kept.end()) {
+            auto old = overlay_cache_.find(key);
+            if (old != overlay_cache_.end()) {
+                found = kept.emplace(key, std::move(old->second)).first;
+                overlay_cache_.erase(old);
+                ++reused;
+            } else {
+                found = kept.emplace(key, upload_texture(texture)).first;
+                ++uploaded;
+            }
+        } else {
+            ++reused;
+        }
+        overlay_textures_.push_back(found->second);
+    }
+    overlay_cache_ = std::move(kept);
+    if (uploaded > 8)
+        std::cout << "Overlay images (PS5): " << textures.size() << " listed, " << uploaded << " uploaded, " << reused
+                  << " reused\n";
+#else
     for (const auto& texture : textures) overlay_textures_.push_back(upload_texture(texture));
+#endif
 } catch (const DeviceLost&) {}
 void SceneRenderer::set_projector_textures(const std::vector<Texture>& textures) try {
     projector_source_ = &textures;

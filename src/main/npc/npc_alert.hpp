@@ -80,9 +80,12 @@ void npc_dispatch_awareness_event(NpcAiComponent& c,const NpcAiMessage& m,NpcAiH
 // update leaves that selection out throws.
 void npc_hearing_reaction(NpcAiComponent& c,std::uint8_t cause,std::uint64_t object,NpcAiHost& host);
 // Component +d0 = 00152fd0(c, cause, value, source): a null source does
-// nothing; cause 5 (a landed projectile) does nothing in mode 10 and throws
-// otherwise (the projectile's owner, 0025ac00 and mode 10 / action 8 are
-// N5d); other causes: 0016c9d0(perception, source, cause, value).
+// nothing; cause 5 (a landed projectile; Checkpoint 132fx1) does nothing in
+// mode 10; otherwise the projectile's present owner (not this NPC's actor)
+// is added as cause 2 (0016c9d0(perception, owner, 2, 0.0)), then a
+// flashbang (0025ac00 == 3) requests action 8 (5.0 s) and anything else
+// mode 10 at priority 50 (+f4 = the projectile's ID when accepted); other
+// causes: 0016c9d0(perception, source, cause, value).
 void npc_hear(NpcAiComponent& c,std::uint8_t cause,float value,std::uint64_t source,NpcAiHost& host,std::vector<NpcPerceptionSend>& out);
 
 // An AI sound message (key 004ee5c8, to the AI Sound System 004ee5c0):
@@ -105,6 +108,8 @@ struct NpcSoundListener {
     RootVector position{};                       // virtual +e8 row 3
     // Its component's +d0 (00152fd0) with (cause, source, value).
     std::function<void(std::uint8_t cause,std::uint64_t source,float value)> hear;
+    // Checkpoint 132fx1: its perception (+58's +1ac) has a sensed record of the object with +39 and +38 set.
+    std::function<bool(std::uint64_t object)> sees;
 };
 struct NpcSoundWorld {
     std::function<std::uint64_t(std::int32_t id)> object_by_id;       // 0040c540
@@ -115,14 +120,18 @@ struct NpcSoundWorld {
     // Kind 2: the directed target's controller (+58 / +5c) and its +d0.
     std::function<bool(std::uint64_t object)> ai_controlled;
     std::function<void(std::uint64_t object,std::uint8_t cause,std::uint64_t source,float value)> hear_directed;
+    // Checkpoint 132fx1: cause 5: the projectile's owner +124 when its +c is +128 and it is present (+2d, +2c,
+    // !+2e); 0 otherwise.
+    std::function<std::uint64_t(std::uint64_t projectile)> projectile_owner;
 };
 // 0016adb0 for a message of key 004ee5c8: nothing when the source's ID is
 // not found. Kind 2: cause 7 to a directed target with an AI controller
 // (value 0.0); other causes nothing. Kinds 0/1: every listener other than
 // the source (by ID), not dying or dead, with an AI controller, not deaf
 // (+33ac <= 0) and closer than the radius (d = |position - (source position
-// or +40)|, VU) hears (cause, source, d). Cause 5 also reaches listeners
-// that see the projectile's owner, which needs projectiles (N5d): throws.
+// or +40)|, VU) hears (cause, source, d). Cause 5 (Checkpoint 132fx1) also
+// reaches, with value 0 and deaf or not, the listeners whose perception
+// senses the projectile's present owner (+39 and +38), the owner excepted.
 void npc_ai_sound_event(const NpcSoundMessage& m,const NpcSoundWorld& w);
 
 // The perception's sends as the component sends them (transport 0): AI

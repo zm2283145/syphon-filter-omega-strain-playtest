@@ -3,11 +3,12 @@
 // for kind 2 and every death code of the jump table 0049dbe0 (0..11): the
 // motion name by code (crouch variants from +3204 and RNG draws for codes
 // 0, 1, 6 and 7), the extra action 0x1c and token 0x91 of codes 2/3, the
-// landing pose choice 0019e9a0 for codes 9/10 and the immediate dead state of
-// code 11, then the tail 001977f0(actor, 0) (with a held item through
-// choose_secondary_mode). The multiplayer branch (005721c8 set), actors
-// without the root object bytes +2d/+2c (or with +2e), +326b and codes
-// outside 0..11 are not native and throw.
+// landing pose choice 0019e9a0 for codes 9/10, the immediate dead state of
+// code 11, and the inactive-object final pose animBodyFinalPoseAfterTossed,
+// then the tail 001977f0(actor, 0) (with a held item through
+// choose_secondary_mode). The local player's +326b branch pops the current
+// world object before clearing the byte. The multiplayer branch (005721c8
+// set) and codes outside 0..11 are not native and throw.
 #include "actor_animation_receiver.hpp"
 #include "actor_motion.hpp"
 #include "animation_controller.hpp"
@@ -66,6 +67,7 @@ struct ActorDeathHost {
     std::function<std::uint32_t()> random;                      // 00127dd0
     std::function<void(std::int32_t line)> voice;               // 0018c770(actor, line): the player's voice line 8/9
     std::function<void(std::int32_t action)> self_action;       // action 0x24 kind 0, transport 1
+    std::function<void()> pop_world_object;                     // 00131240(004ffb50), player +326b
     std::function<ActorLandingPoseInput()> landing_pose_input;  // read when 0019e9a0 runs
     std::function<void(std::size_t channel,float value)> set_channel;                      // 0018d0f0
     std::function<void(const std::string& sound)> sound;                                   // 0019e9a0 sound
@@ -85,6 +87,8 @@ struct ActorDeathResult {
     bool handled{};                      // kind 2 past the early return
     bool already_dying{};                // action 0x1b or 0x1f was active: nothing done
     std::optional<std::uint8_t> physical_14;   // physical +14 = 2 (NPC or replica)
+    std::optional<std::uint8_t> physical_11;   // inactive path: physical +11 = 1
+    std::optional<std::uint8_t> byte_326b;     // player branch: actor +326b = 0 after world pop
     std::string motion;                  // the installed motion (empty: unresolved, not installed)
     std::optional<ActorLandingPose> pose;
     bool dead_state{};                   // 001a3780 called directly (code 11)

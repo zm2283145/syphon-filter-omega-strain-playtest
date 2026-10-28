@@ -950,6 +950,9 @@ public:
     // 0040c240(&id, 0xf5)): a cBackpack the scripts' Backpack type handlers
     // receive (003c8de0 selects by the receiver's type).
     void register_runtime_backpack(Word id);
+    // PORT-ONLY (132fx5): give a received network backpack a collision-free
+    // local script object while retaining its full network ID for routing.
+    Word register_remote_runtime_backpack(Word network_id);
     // A script AI notification an NPC's AI component sent its actor
     // (ActorAiNotification): AIActivatedMsg (key 004ff268; getter Who
     // (AIGOBJMsg, 0026efe0): +24, the local player's actor),
@@ -1063,6 +1066,8 @@ public:
     // native receiver 00221610 takes it with no effect). GetNPC (0021d060,
     // spawned_npc_msg.hpp) answers the AI component of `npc`, or null.
     bool deliver_spawned_npc(Word generator, std::optional<Word> npc);
+    // Checkpoint 132fx1: DespawnedNPCMsg (key 004a4a88, vtable 004db620; +24 the actor) from 00220bb0, as above.
+    bool deliver_despawned_npc(Word generator, Word npc);
     // A spawned NPC's script identity (PopulationObjects::add_spawned_npc).
     // `plus_c` is the actor's +c after 001b801c..001b8078 (the ID with its
     // high byte), the key 0021e8a4 -> 0040b790 registers it under in
@@ -1369,6 +1374,7 @@ private:
                                      const std::vector<Value>& arguments, bool& applied);
     std::map<std::string, Script> modules_;
     PopulationObjects objects_;
+    std::map<Word, Word> remote_backpacks_;   // full network ID -> local script object ID
     std::map<Word, PopulationNode> nodes_;
     std::vector<Word> node_ids_;                                                       // node list index -> ID
     std::map<Word, std::vector<std::array<std::uint32_t, 2>>> interact_references_;   // OBJ kind 5

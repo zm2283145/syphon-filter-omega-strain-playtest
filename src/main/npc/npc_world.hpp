@@ -116,6 +116,9 @@ struct NpcCombatLink {
     // Checkpoint 132uk5, mode 8 CarryBody (00153150, npc_carry_body.hpp): an
     // actor's skeleton node 14 world matrix (00133ed0(00132a30(o), *0049d024)).
     std::function<std::array<RootVector,4>(std::uint64_t object)> node_14_of;
+    // Checkpoint 132fx1: a thrown projectile's +c, root bytes, resolved owner +124, damage type and virtual +bc,
+    // for the landed-projectile hearing 00152fd0 and mode 10.
+    std::function<std::optional<NpcProjectileView>(std::uint64_t object)> projectile;
 };
 // N4a/N4b: what the perception reads from the world (npc_perception_think.hpp).
 // sense builds the observer's view for the actor (its eye, head node 14
@@ -308,6 +311,10 @@ public:
     bool generator_spawned() const{return !level_loaded_;}
     bool perception_hosted() const{return static_cast<bool>(perception_link_.sense);}
     NpcPerception& perception(){return perception_;}
+    // Checkpoint 132fx1: the AI Sound System's listener virtual +d0 (00152fd0), and its
+    // NpcPerception_SensedRecord test (+39 && +38) for a projectile owner's cause-5 delivery.
+    void hear(SoloActorSimulation& actor,std::uint8_t cause,std::uint64_t source,float value);
+    bool senses(SoloActorSimulation& actor,std::uint64_t object);
     // The AI script natives on the perception and modes (npc_alert.hpp); they
     // need the perception link. object: the target's actor handle.
     void script_add_awareness(SoloActorSimulation& actor,std::uint64_t object);

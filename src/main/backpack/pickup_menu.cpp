@@ -3,6 +3,11 @@
 #include <stdexcept>
 
 namespace omega {
+
+void PickupMenuFrameHost::goggles_ir_off() {
+    throw std::runtime_error("0025200c: the IR goggle switch 00199590(actor, 0) is not hosted");
+}
+
 namespace {
 
 float as_time(std::int32_t value) {
@@ -470,7 +475,7 @@ bool pickup_menu_confirm(PickupMenu& menu, PickupMenuFrameHost& host) {
             entry.item = static_cast<std::uint32_t>(held_item);
             put = held_item;
             if (host.record(held_item).class_30 == 6)
-                throw std::runtime_error("0025200c: the IR goggle switch 00199590 is not ported");
+                host.goggles_ir_off();   // 0025200c: 00199590(actor, 0) (Checkpoint 132fx1)
             if (swap_dual)
                 host.add_weapon(bp, held_item, put_spare, put_clip, 0);
         }
@@ -527,8 +532,10 @@ bool pickup_menu_confirm(PickupMenu& menu, PickupMenuFrameHost& host) {
     }
     host.pickup_ammunition(bp);
     host.share_dual();
-    if (host.multiplayer_5721c8() && menu.start != 0)
-        throw std::runtime_error("002524a8: the multiplayer drop message (002ebaf8 / 003c9e30) is not ported");
+    if (host.multiplayer_5721c8() && menu.start != 0) {
+        const std::uint32_t local = host.local_index_494178();  // 002524b4..002524e0 (132fx5)
+        host.network_inventory_message(menu.backpack, local);
+    }
     return result;
 }
 

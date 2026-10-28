@@ -561,6 +561,7 @@ private:
     // The vision layers (Checkpoint 132cp4): the write-mask blends, the noise frames and the blur images.
     std::map<std::uint8_t, Ptr<gfx::BlendState>> channel_restore_;
     std::map<const Texture*, Ptr<gfx::Texture>> images_;
+    std::vector<GuiHostVertex> vision_vertices_;  // retained: night vision's tiles and quads
     // 132md12: the wide backgrounds' images (kept with their source, so a pointer is never reused while cached).
     std::map<const Texture*, std::pair<std::shared_ptr<const Texture>, Ptr<gfx::Texture>>> wide_views_;
     std::uint64_t wide_background_draws_ = 0;

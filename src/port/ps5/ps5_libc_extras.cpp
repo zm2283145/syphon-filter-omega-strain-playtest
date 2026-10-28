@@ -230,3 +230,59 @@ extern "C" [[noreturn]] void __wrap___cxa_throw(void* object, std::type_info* ty
     }
     __real___cxa_throw(object, type, destroy);
 }
+
+// Port-only (132ps5d, research/PS5.md "Build"): what the OpenGL runtime of cybervisi0n/ps5-gl-runtime (Mesa, NIR,
+// the EGL layer) calls that the PS5's C library does not export to a native title (the link names them). The former
+// ps5-opengl SDK's native-app files supplied the same set; these are the title's own.
+#include <algorithm>
+#include <cstdio>
+#include <vector>
+
+// assert() of the runtime's C code (FreeBSD's __assert): logged, then abort as assert does.
+extern "C" [[noreturn]] void __assert(const char* function, const char* file, int line, const char* expression) {
+    omega::ps5::log("FATAL: assertion failed in the GL runtime: %s (%s:%d, %s)", expression ? expression : "?",
+                    file ? file : "?", line, function ? function : "?");
+    omega::ps5::log_flush();
+    std::abort();
+}
+
+// FreeBSD's qsort_r (thunk before the comparison, which takes the thunk first): Mesa's util_qsort_r calls it so
+// (nir_sort_variables_with_modes, nir_opt_vectorize). Sorted through an index (the order of equal elements is
+// unspecified, as qsort's).
+extern "C" void qsort_r(void* base, std::size_t count, std::size_t size, void* thunk,
+                        int (*compare)(void*, const void*, const void*)) {
+    if (count < 2 || size == 0) return;
+    auto* bytes = static_cast<unsigned char*>(base);
+    std::vector<std::size_t> order(count);
+    for (std::size_t i = 0; i < count; ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return compare(thunk, bytes + a * size, bytes + b * size) < 0;
+    });
+    std::vector<unsigned char> sorted(count * size);
+    for (std::size_t i = 0; i < count; ++i) std::memcpy(sorted.data() + i * size, bytes + order[i] * size, size);
+    std::memcpy(bytes, sorted.data(), sorted.size());
+}
+
+// No temporary-file-with-suffix, syslog or subprocesses on the PS5 (the runtime's optional debug paths).
+extern "C" int mkstemps(char* pattern, int suffix_length) {
+    (void)pattern;
+    (void)suffix_length;
+    errno = ENOSYS;
+    return -1;
+}
+extern "C" void openlog(const char* identity, int option, int facility) {
+    (void)identity;
+    (void)option;
+    (void)facility;
+}
+extern "C" FILE* popen(const char* command, const char* mode) {
+    (void)command;
+    (void)mode;
+    errno = ENOSYS;
+    return nullptr;
+}
+extern "C" int pclose(FILE* stream) {
+    (void)stream;
+    errno = ENOSYS;
+    return -1;
+}

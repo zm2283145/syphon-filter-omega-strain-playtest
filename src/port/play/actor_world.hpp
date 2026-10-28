@@ -175,6 +175,7 @@ private:
     // The last set_step_dt (port-only, 132vp1): an actor made after it steps with the same dt (the Vita's measured dt;
     // UKRAINE's first frame appended one with the fixed dt and the traversal's equal-dt check threw).
     std::optional<float> step_dt_;
+    std::optional<float> owner_dt_;   // current frame duration for collision-owner velocity
     std::vector<bool> removal_requested_,removed_,destroyed_;
     // The weak-owner serial of each slot (a water record's +4): rebuild_ai's new actor (001b57c0, 001b8130) no longer
     // matches the records of the one it replaced.

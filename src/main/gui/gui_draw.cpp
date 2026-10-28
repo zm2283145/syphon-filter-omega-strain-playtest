@@ -794,11 +794,24 @@ void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widge
         // round counts. 0045d7f0 / 0045d710 around the children (the panels' fade, 0x00440e74) are the
         // weapon display draw's alpha in the port (weapon_display_draw reads each panel's +54).
         if (gui.g.controller_6a8) return;
+        // Port-only (132fx1): the weapon select's batches follow the HUD weapon icon under the wide aspect.
+        const auto follow = [&](std::size_t from) {
+            if (!port_weapon_select_anchor) return;
+            for (std::size_t k = from; k < out.batches.size(); ++k)
+                if (!out.batches[k].port_anchor) out.batches[k].port_anchor = port_weapon_select_anchor;
+        };
         for (const Widget* c : w.children)
-            if (c->flags & flag_visible) draw_widget(out, gui, *c, now_ms);
+            if (c->flags & flag_visible) {
+                const std::size_t from = out.batches.size();
+                draw_widget(out, gui, *c, now_ms);
+                if (c == gui.gs.ws) follow(from);
+            }
         if ((w.flags & 0x100) && gui.canvas().focus == &w) fail(0x41e560, "focus highlight draw");
-        if (gui.gs.ws && (gui.gs.ws->flags & flag_visible) && gui.gs.d4 == 1 && gui.gs.text)
+        if (gui.gs.ws && (gui.gs.ws->flags & flag_visible) && gui.gs.d4 == 1 && gui.gs.text) {
+            const std::size_t from = out.batches.size();
             draw_game_screen_counts(out, gui, w, now_ms);
+            follow(from);
+        }
         return;
     }
     switch (w.cls) {

@@ -1823,6 +1823,9 @@ extern const std::array<std::array<std::int32_t, 3>, 15> end_award_rows;
 
 // 0048c160: the 18 level names (17 missions, then TRAINING).
 extern const std::array<const char*, 18> cc_level_names;
+// Checkpoint 132pt1: whether the original offers the level in an online (co-op) game: the command centre's levels 00297020
+// with app +30 (the online level table 004acc70; TRAINING only offline). The CPU partners join only these levels.
+bool command_centre_online_level(const std::string& level);
 
 // One translated input event (the 0x18-byte record 00415510 / 004153f0 build).
 struct PadEvent {

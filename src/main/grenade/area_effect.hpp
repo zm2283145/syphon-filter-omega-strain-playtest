@@ -13,6 +13,7 @@
 #include "weapon_database.hpp"
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -103,6 +104,18 @@ bool finish_area_effect(AreaEffect& area,std::vector<AreaEvent>& events);
 // the height of the object's node 14 from the centre and from each extent to
 // that node; any clear ray means exposed.
 bool area_gas_exposure(const AreaEffect& area,std::uint64_t object,bool not_gasable,AreaWorld& world,std::vector<AreaEvent>& events);
+
+// Checkpoint 132fx1: 002594a0 cAreaEffect::LOS_Obscured (SmokeVolumes_BlockSight, grenade.cc; matched C): the
+// first area of the list 004f8040 (in order) with +d6 set whose volume the segment a-b meets: the ratio 1, or
+// +60 / 5.0 while growing (+d5 clear, +60 < 5.0 and record +bc != 4); the radius record +c8 x ratio; the band
+// [z, z + 8.0 (1 + ratio) / 2] of +70 clips the segment (0025a880), then 0025aa20: the clipped segment within the
+// radius of (+70 with z + 4.0). Returns that area's object, 0 when none.
+std::uint64_t area_smoke_blocker(const std::vector<AreaEffect>& areas,const std::function<const WeaponRecord&(std::int32_t)>& record,
+    const RootVector& a,const RootVector& b);
+// 0025a880(a, b, lo, hi): clips the segment to lo <= z <= hi in place; false when both ends are on one side.
+bool area_clip_band(RootVector& a,RootVector& b,float lo,float hi);
+// 0025aa20(a, b, c, r): the segment a-b passes within r of c.
+bool area_segment_near(const RootVector& a,const RootVector& b,const RootVector& c,float r);
 
 // The actor fields of a flash and a blindness, and their decay.
 struct ActorSenses {

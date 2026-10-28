@@ -170,6 +170,11 @@ struct GuiDrawBatch {
     } port_edge_band;
 };
 inline constexpr std::uint32_t port_anchor_widget = 0x10000;
+// Port-only (checkpoint 132fx1): port_anchor_follow | a HUD element's tag: the batch takes that element's wide shift
+// (and does not count towards its bounds). The game screen's weapon select (GAMEGUI "weaponselect", 0045ca20) follows
+// the HUD's "weaponselectpanel" it extends from, so under the wide aspect the five panels stay beside the weapon
+// icon at the right edge instead of keeping their 4:3 place.
+inline constexpr std::uint32_t port_anchor_follow = 0x20000;
 
 struct GuiDrawList {
     std::vector<GuiDrawBatch> batches;
@@ -311,6 +316,9 @@ public:
     // The game screen (GuiGameScreen, vtable 004e1620, HUD +6a4: GAMEGUI's root as 004187c0 makes it) whose
     // +30 is 0045d8d0 instead of 0041e470. Null: no widget takes that draw.
     const gui::Widget* game_screen = nullptr;
+    // Port-only (checkpoint 132fx1, wide aspect only; 0 otherwise): the anchor tag (port_anchor_follow | the HUD
+    // "weaponselectpanel" tag) given to the weapon select's batches (its widget and 0045c0f0's round counts).
+    std::uint32_t port_weapon_select_anchor = 0;
 
 private:
     struct TextState {

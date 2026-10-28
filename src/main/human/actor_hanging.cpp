@@ -221,9 +221,12 @@ void launch_actor_jump(ActorJumpState& jump,ActorJumpPhysical& physical,const Ac
         arc=minimum(maximum(arc,bits(0x3dcccccdU)),1.0F);              // 001a2a44 / 001a2a4c
     }
     // 003a8c80 with g = 004f5438 and the minimum angle pi/4 (0x3f490fdb).
-    const auto solution=solve_projectile_trajectory(pos,target,bits(game_gravity_bits),arc,bits(0x3f490fdbU));
-    if(bit(in.flags_3248,10)&&physical.support_component_1f4)
-        throw std::runtime_error("Actor jump launch from a moving support (001a2a94) is not native");
+    auto solution=solve_projectile_trajectory(pos,target,bits(game_gravity_bits),arc,bits(0x3f490fdbU));
+    // 001a2a80..001a2ae4 (Checkpoint 132fx1): +3248 bit 10 with +3310 +1f4 and its +54: both velocities += +54 +a0.
+    if(bit(in.flags_3248,10)&&physical.support_velocity_a0){
+        solution.initial_velocity=add4(solution.initial_velocity,*physical.support_velocity_a0);
+        solution.terminal_velocity=add4(solution.terminal_velocity,*physical.support_velocity_a0);
+    }
     if(radius)physical.radius_374=*radius;
     jump.target_34c0=target;
     jump.arrival_34d0=solution.terminal_velocity;

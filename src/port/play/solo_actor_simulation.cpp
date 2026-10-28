@@ -6,6 +6,7 @@
 #include "actor_cancel_action.hpp"
 #include "actor_edge_detection.hpp"
 #include "actor_hanging.hpp"
+#include "actor_choke.hpp"
 #include "actor_body_carry.hpp"
 #include "actor_landing_effect.hpp"
 #include "actor_ledge_action.hpp"
@@ -122,7 +123,8 @@ struct SoloWaterSink final:WaterEffectSink {
 }
 
 void SoloCollisionWorld::add(std::vector<std::uint8_t> col,std::string name,std::optional<CollisionMatrix> owner_matrix){
-    cols.push_back(std::move(col));names.push_back(std::move(name));owners.push_back(owner_matrix);game_objects.push_back(0);
+    cols.push_back(std::move(col));names.push_back(std::move(name));owners.push_back(owner_matrix);
+    owner_velocities.push_back(std::nullopt);game_objects.push_back(0);
 }
 void SoloCollisionWorld::set_game_object(std::uint64_t handle,std::uint64_t object){
     geometry(handle);
@@ -142,6 +144,18 @@ void SoloCollisionWorld::set_owner(std::uint64_t handle,const CollisionMatrix& o
     geometry(handle);
     if(!owners[handle-1])throw std::runtime_error("COL geometry without a transform component cannot move");
     owners[handle-1]=owner_matrix;
+}
+void SoloCollisionWorld::set_owner_velocity(std::uint64_t handle,std::optional<RootVector> velocity){
+    geometry(handle);
+    if(!owners[handle-1])throw std::runtime_error("COL geometry without a transform component cannot have velocity");
+    owner_velocities[handle-1]=velocity;
+}
+std::optional<RootVector> SoloCollisionWorld::owner_velocity(std::uint64_t handle) const{
+    geometry(handle);
+    return handle<=owner_velocities.size()?owner_velocities[handle-1]:std::nullopt;
+}
+void SoloCollisionWorld::clear_owner_velocities(){
+    for(auto& velocity:owner_velocities)velocity.reset();
 }
 std::vector<ExpandedCollisionTriangle> SoloCollisionWorld::expand(const Bounds& bounds) const{
     ExpandScratch scratch;
@@ -240,6 +254,7 @@ struct SoloActorSimulation::Impl {
     PlayerQuickTurnState quick_turn;
     // Priority actions +3210/+3218 and mode +320c (highest action).
     ActorAnimationReceiverState actions;
+    ActorChokeState choke;
     std::array<float,4> previous_left_60{};   // input +0x60 (0x0024fa58)
     // The model's transform component (P+8 +28): the model's published
     // placement when it reports one, otherwise the floor root's animated pose
@@ -1312,6 +1327,7 @@ void SoloActorSimulation::Impl::death_action(std::int32_t code){
     a.flags_3204=actions.flags_3204;
     const auto r=handle_actor_death(actions,2,code,a,death_host());
     byte_31b2=r.byte_31b2;word_2dd0=r.word_2dd0;word_2dd4=r.word_2dd4;word_2dec=r.word_2dec;
+    if(r.byte_326b)actions.byte_326b=*r.byte_326b;
     if(r.physical_14)frame_state.response.physical.shape_14=*r.physical_14;   // 0018abd0: an NPC's physical +14 = 2
     if(current){current->death=r;if(!r.motion.empty())current->ledge_motions.push_back(r.motion);}
 }
@@ -1335,6 +1351,7 @@ ActorDeathHost SoloActorSimulation::Impl::death_host(){
         if(action!=0x24)throw std::runtime_error("Solo actor: unexpected death self action");
         if(current)current->delivered_actions.push_back(action);
         cancel_ladder();};
+    dh.pop_world_object=[this]{(void)pop_actor_world_object(world_objects,world_stack_host());};
     dh.landing_pose_input=[this]{
         ActorLandingPoseInput in;
         // +2e64: the model's node collection; nodes 0..3 of the last evaluation.
@@ -1400,8 +1417,8 @@ ActorJumpPhysical SoloActorSimulation::Impl::jump_physical() const{
     j.override_9d0=g.override_motion;j.velocity_310=g.velocity;j.force_330=g.force;j.inverse_mass_2e4=g.inverse_mass;
     j.enabled_12=p.enabled_12;j.keep_velocity_13=p.byte_13;j.unsupported_dc=p.byte_dc;j.supported_dd=p.byte_dd;
     j.floor_2c4=p.floor_2c4;
-    // +1f4: slot 1 is bound only to static COL owners, which have no +54 component.
-    j.support_component_1f4=false;
+    const auto support=frame_state.support_history.owners[0];
+    j.support_velocity_a0=support?world().owner_velocity(support):std::nullopt;
     return j;
 }
 // Only the fields these functions write.
@@ -2436,6 +2453,14 @@ void SoloActorSimulation::Impl::logic(const SoloActorFrameInput& input){
                 }
             };
             update_actor_heading(hh);
+        }
+        {
+            ActorChokeHost h;
+            h.random=[this]{return next_game_random(*rng);};
+            h.resolve=[this](std::string_view n){return model->resolve_motion(n);};
+            h.retained=[this]{return model->retained_motion();};
+            h.install=[this](const MotionRequest& r,MotionInstallMode m){model->install_motion(r,m);};
+            update_actor_choke(actions,choke,dt,h);                              // 00199980
         }
         // 0x001b1d10: 00197e00's gait (footstep hooks), then its item triggers (the combat host's, when set).
         if(footsteps.materials)footstep_gait();
@@ -3822,6 +3847,7 @@ ActorStunnedActionResult SoloActorSimulation::receive_stunned_action(std::uint32
     h.install=[this](const MotionRequest& q,MotionInstallMode m){install_motion(q,m);};  // 003ad500
     return handle_actor_stunned_action(s.actions,code_2c,h);
 }
+void SoloActorSimulation::receive_tear_gas(){impl_->choke.requested_3539=1;}
 ActorMotionRegistration SoloActorSimulation::resolve_mapped_motion(std::string_view name) const{
     const auto& m=takedown_model(impl_->model);
     return m.resolve_motion_id(m.motion_node_id(name).value_or(0U));          // 0018c5a0 -> 0018c6b0

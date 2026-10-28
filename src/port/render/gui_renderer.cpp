@@ -991,7 +991,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         OMEGA_ZONE("gr.wide");
         std::map<std::uint32_t, std::array<float, 2>> bounds;
         for (const WideRange& r : wide_ranges) {
-            if (r.anchor == 0 || r.kind != wide_frame) continue;
+            if (r.anchor == 0 || r.kind != wide_frame || (r.anchor & port_anchor_follow)) continue;
             auto [it, fresh] = bounds.try_emplace(r.anchor, std::array<float, 2>{1e30F, -1e30F});
             for (std::size_t k = r.first; k < r.end; ++k) {
                 const HostVertex& v = vertices[k];
@@ -1005,6 +1005,12 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             if (b[0] <= b[1])
                 wide_shift[tag] = frame_wide_anchor_shift(frame_wide_anchor_side(0.5F * (b[0] + b[1])), width, height,
                                                           frame_hud_margin_setting());
+        // 132fx1: a follower tag takes its leader's shift (none without the leader in this frame).
+        for (const WideRange& r : wide_ranges)
+            if (r.anchor & port_anchor_follow) {
+                const auto lead = wide_shift.find(r.anchor & ~port_anchor_follow);
+                wide_shift[r.anchor] = lead != wide_shift.end() ? lead->second : 0.0F;
+            }
         // 132ws5: the wide menu draw's header and legend spread (gui_wide_menu_shifts).
         std::map<std::uint32_t, float> menu_shift;
         if (wide_menu) {
@@ -1659,7 +1665,8 @@ std::size_t GuiRenderer::draw_vision_layers(const gfx::Texture* target, unsigned
         const HostVertex bl{x0, y1, 0, 1, c[0], c[1], c[2], c[3]}, br{x1, y1, 1, 1, c[0], c[1], c[2], c[3]};
         out.insert(out.end(), {tl, tr, bl, bl, tr, br});
     };
-    std::vector<HostVertex> v;
+    auto& v = vision_vertices_;
+    v.clear();
     // The mask restore: the channels FBMSK kept from the scene and the quad hold the clear colour (black).
     std::uint8_t masked = 0;
     if (layers.fbmsk & 0x000000ffU) masked |= gfx::mask_r;
@@ -1695,11 +1702,23 @@ std::size_t GuiRenderer::draw_vision_layers(const gfx::Texture* target, unsigned
     const gfx::TargetView none_target{};
     list_.clear();
     list_.set_targets(1, &none_target, nullptr);
-    list_.copy(blur_copy_.get(), target);
     device_->submit(list_);
     v.clear();
     quad(v, -320.0F, 224.0F, 320.0F, -224.0F, {1.0F, 1.0F, 1.0F, 1.0F});
-    draw_host_vertices(blur_small_.get(), 256, 256, v.data(), v.size(), opaque_.get(), sampler_.get(), blur_copy_.get());
+#ifdef __vita__
+    // The scaled Vita scene target is sampleable. Sampling it directly for ScreenFxBuf is identical to sampling the
+    // point-for-point UNORM copy, and removes one full-scene copy, target switch and GXM scene from every goggle frame.
+    const gfx::Texture* blur_source = (fd.bind & gfx::bind_sampled) != 0 ? target : blur_copy_.get();
+    if (blur_source == blur_copy_.get()) {
+        list_.copy(blur_copy_.get(), target);
+        device_->submit(list_);
+    }
+#else
+    list_.copy(blur_copy_.get(), target);
+    device_->submit(list_);
+    const gfx::Texture* blur_source = blur_copy_.get();
+#endif
+    draw_host_vertices(blur_small_.get(), 256, 256, v.data(), v.size(), opaque_.get(), sampler_.get(), blur_source);
     list_.set_targets(1, &none_target, nullptr);
     device_->submit(list_);
     draw_host_vertices(target, width, height, v.data(), v.size(), opaque_.get(), sampler_.get(), blur_small_.get());

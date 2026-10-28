@@ -186,6 +186,7 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
         };
         h.perception=&perception_;h.sense=&*sense_;
         h.object_by_id=perception_link_.object_by_id;
+        h.projectile=combat_.projectile;
     }
     h.system=&system_;
     // Checkpoint 132zf12: mode 9 Follow (00153870). The target's +f4 / +3584 /
@@ -801,6 +802,18 @@ void NpcAiController::perception_awareness(SoloActorSimulation& actor,std::uint6
     auto h=host(actor);std::vector<NpcPerceptionSend> out;
     npc_perception_add(perception_,*h.sense,source,cause,value,out);           // 0016c9d0
     npc_forward_perception_sends(out,h);
+}
+void NpcAiController::hear(SoloActorSimulation& actor,std::uint8_t cause,std::uint64_t source,float value){
+    need_link(perception_link_);
+    auto h=host(actor);std::vector<NpcPerceptionSend> out;
+    npc_hear(component_,cause,value,source,h,out);                              // virtual +d0 = 00152fd0
+    npc_forward_perception_sends(out,h);
+}
+bool NpcAiController::senses(SoloActorSimulation& actor,std::uint64_t object){
+    need_link(perception_link_);
+    auto h=host(actor);
+    const auto* r=npc_perception_sensed_record(perception_,*h.sense,object);    // 0016c6a0 / NpcPerception_SensedRecord
+    return r&&r->byte_39!=0&&r->byte_38!=0;
 }
 void NpcAiController::script_look_around(SoloActorSimulation& actor){
     auto h=host(actor);

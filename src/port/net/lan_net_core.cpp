@@ -216,6 +216,18 @@ std::uint32_t LanNetCore::local_player_key() const {
     return (static_cast<std::uint32_t>(transport_.local_index()) + 1) << 24 | kLocalPlayerId;
 }
 
+void LanNetCore::bind_backpack(std::uint32_t id, std::uint16_t owner, std::uint32_t address) {
+    const auto binding = std::pair{owner, address};
+    const auto [it, inserted] = backpack_bindings_.emplace(id, binding);
+    if (!inserted && it->second != binding)
+        throw std::runtime_error("LanNetCore: conflicting NetMap backpack binding 0x" + hex8(id));
+}
+
+void LanNetCore::send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
+                               std::uint16_t recipient) {
+    dme_->send_backpack(type, owner, id, target, recipient);
+}
+
 // 132ln5h11 (the header).
 void LanNetCore::register_generator(std::uint32_t id, const std::array<float, 3>& position) {
     auto& m = memory_;
@@ -559,6 +571,7 @@ std::optional<LanNetCore::NpcNetLink> LanNetCore::npc_net_link(std::uint32_t c) 
     const auto data = m.read(controller + 0x1e0);
     if (!data || !m.read(controller + 0x1e4)) return std::nullopt;
     NpcNetLink l;
+    l.point_valid_0 = m.read(data, 1) != 0;
     l.aiming_20 = m.read(data + 0x20, 1) != 0;
     l.firing_21 = m.read(data + 0x21, 1) != 0;
     l.target_8 = m.read(data + 8);
@@ -566,7 +579,17 @@ std::optional<LanNetCore::NpcNetLink> LanNetCore::npc_net_link(std::uint32_t c) 
     for (std::uint32_t k = 0; k < 3; ++k) l.point_10[k] = std::bit_cast<float>(m.read(data + 0x10 + k * 4));
     return l;
 }
-
+bool LanNetCore::npc_fire_gate_002c4f20(std::uint32_t c) {
+    auto& m=memory_;
+    const auto counter=m.read(npc_block(c)+kNpcController+0x1e4);
+    if(!counter)unhosted(0x2c4f20,"the remote NPC fire gate without +1e4");
+    std::uint16_t current=static_cast<std::uint16_t>(m.read(counter+2,2));
+    if(npc_fire_gate_reset_){current=0;npc_fire_gate_reset_=false;}
+    const auto maximum=static_cast<std::uint16_t>(m.read(counter,2));
+    if(current>=maximum)return false;
+    m.write(counter+2,2,static_cast<std::uint16_t>(current+1));
+    return true;
+}
 std::optional<LanNetCore::NpcNetMotion> LanNetCore::npc_net_motion(std::uint32_t c) const {
     const auto& m = memory_;
     const auto data = m.read(npc_block(c) + 0x3584);

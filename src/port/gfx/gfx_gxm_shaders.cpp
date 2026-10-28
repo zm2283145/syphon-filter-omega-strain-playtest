@@ -68,7 +68,13 @@ OMEGA_OUT main(float3 vNormal : TEXCOORD0, float2 vUv : TEXCOORD1, float4 vColor
         color *= texel;
     }
     bool raw = alphaTest.z > 0.5;
-#ifndef OMEGA_NO_ALPHA_TEST  // 132vg2: the GXM backend's variant for draws without an alpha test (no discard)
+#if defined(OMEGA_MAN_ALPHA_FAIL)
+    // Vita GXM: when the backend proves the man draw's scaled alpha is below AREF for every pixel, this is the
+    // RGB_ONLY pass. Keep the GS alpha quantisation exactly, but omit discard so the GPU can keep early-Z.
+    float at = ceil(color.a * 127.5 - 0.001);
+    float as = floor(at * (alphaTest.w - 1.0) / 128.0);
+    color.a = as / 128.0;
+#elif !defined(OMEGA_NO_ALPHA_TEST)  // GXM variant for draws without an alpha test (no discard)
     if (alphaTest.w > 0.5) {
         float at = ceil(color.a * 127.5 - 0.001);
         float as = floor(at * (alphaTest.w - 1.0) / 128.0);

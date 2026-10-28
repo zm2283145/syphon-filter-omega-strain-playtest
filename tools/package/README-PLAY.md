@@ -118,6 +118,7 @@ below except `window`, `iso`, `iso_verified`, `partner_friendly_fire`, `partner_
 | Key | Values (default) | Also changed by |
 |---|---|---|
 | `coop_partner` | `0` / `1` (0): the CPU co-op partner in play | Title Options > Control > **CPU PARTNER** |
+| `coop_partners` | `1` / `2` / `3` (1): how many CPU partners join when `coop_partner=1` | Title Options > Control > **CPU PARTNER** (OFF / 1 / 2 / 3), `--coop-partners N` |
 | `partner_friendly_fire` | `0` / `1` (0): your shots, melee and explosives can hurt the CPU partner (1, as between two players in the original) or not (0) | the settings file only (read at each level start) |
 | `partner_loadout` | `auto` / `copy` / `record` (auto): the CPU partner's weapons at the level start: the best primary, sidearm and melee from the weapons your agent has unlocked (auto), exactly the loadout you accepted (copy), or the partner character's own fixed kit (record) | the settings file only (read at each level start) |
 | `partner_pickups` | `0` / `1` (1): the CPU partner picks up better weapons and ammunition from weapon crates and dropped backpacks | the settings file only (read at each level start) |
@@ -132,7 +133,11 @@ below except `window`, `iso`, `iso_verified`, `partner_friendly_fire`, `partner_
 | `mouse_look` | `0` / `1` (1) | Port Settings |
 | `mouse_sensitivity` | `0.05` .. `20` (1); 24 mouse counts in one frame is a full stick deflection | Port Settings |
 | `mouse_invert_y` | `0` / `1` (0): invert the mouse's vertical look | Port Settings |
-| `aspect` | `pillarbox` / `4:3` / `stretch` (pillarbox): how the 4:3 picture fills a wider or narrower window; see below | `--aspect`, Port Settings |
+| `aspect` | `pillarbox` / `4:3` / `stretch` / `wide` (pillarbox): how the 4:3 picture fills a wider or narrower window; see below | `--aspect`, Port Settings |
+| `hud_margin` | `0`..`20` (0): under `aspect=wide`, inset edge-anchored HUD elements by this percentage of the screen width | `--hud-margin`, Port Settings |
+| `fov` | `70`..`150` (100): under `aspect=wide`, field of view as a percentage of the original view tangent; 100 keeps the original vertical FOV and extends it horizontally | `--fov`, Port Settings |
+| `movie_fill` | `bars` / `zoom` (bars): under `aspect=wide`, keep loading/briefing screens whole or zoom them to the screen width | `--movie-fill`, Port Settings (ASPECT WIDE / WIDE ZOOM) |
+| `movies` | `fill` / `bars` / `stretch` (fill): under `aspect=wide`, crop movies vertically to fill without distortion, keep 4:3 bars, or stretch | `--movies`, Port Settings |
 | `render_scale` | `0.25` .. `4` (1): the internal resolution as a multiple of the window size (below 1 is faster and softer, above 1 smoother) | `--render-scale`, Port Settings |
 | `renderer` | `d3d11` / `vulkan` (d3d11): the renderer (port-only). Direct3D 11 is the reference; Vulkan draws the same picture through a native Vulkan 1.3 renderer. Read at start; without a Vulkan 1.3 driver the game logs why and uses Direct3D 11 | `--renderer d3d11\|vulkan`, Port Settings (INPUT page, RENDERER; from the next start) |
 | `frame_overlay` | `0` / `1` (0): the frame-time overlay (menus and levels) | the overlay key, `--frame-overlay`, Port Settings |
@@ -162,8 +167,14 @@ Left removes the last one.
 By default (`aspect=pillarbox`) the game keeps its own 4:3 picture: in a wider or narrower window, and in fullscreen,
 menus, movies, loading screens and the HUD are shown at 4:3 with black bars, never stretched, while the 3D view of a
 level fills the window. `aspect=4:3` shows only the 4:3 picture everywhere (black bars in levels too, as on a 4:3
-television); `aspect=stretch` stretches the 4:3 picture over the whole window. The game's 60 Hz step is the same with
-VSYNC on or off and with any of these settings.
+television); `aspect=stretch` stretches the 4:3 picture over the whole window.
+
+`aspect=wide` is the port-only true-widescreen mode. Levels keep the original vertical FOV and show more at the sides;
+HUD elements anchor to the screen edges without stretching. Front-end menus, including the NEW AGENT / LOAD AGENT
+title screen, keep their text and widgets at their original scale while suitable backdrop bands and panel art extend
+to the screen edges. Loading/briefing screens use the same treatment. Slideshows and other screens whose photographs
+or document text cannot be mirrored cleanly retain the blurred side fill; movies follow `movies=`. `aspect=pillarbox`
+and the other modes are unaffected. The game's 60 Hz step is the same with VSYNC on or off and with any aspect.
 
 **Frame-time overlay (port-only):** F3 in the menus or a level (or `frame_overlay=1`) shows the frame time and frame rate, and the
 milliseconds spent in the game simulation (SIM), its mission scripts (SCRIPT), drawing (RENDER) and presenting
@@ -172,7 +183,7 @@ reports.
 
 ## CPU partner (port-only)
 
-Title > Options > Control > **CPU PARTNER On** adds a CPU-controlled partner agent to the levels. Off (the default)
+Title > Options > Control > **CPU PARTNER 1** (or 2, 3) adds CPU-controlled partner agents to the levels. OFF (the default)
 plays the original single-player game.
 
 The partner follows you with the game's own NPC navigation. Where you climb a wall, crawl through a pipe, take a
@@ -190,6 +201,41 @@ agent is another player; here you give the partner an order at a command point:
   the laptop room and press Triangle at the laptop.
 - The order is kept when you walk away, and is cancelled (ticker) if the water main can no longer be turned. You can
   give it again whenever the prompt shows.
+
+**Which missions.** Partners join only the missions the original game offers for online co-op: TORONTO 1-3, BELARUS 1-2,
+YEMEN 2, TOKYO, MYANMAR and UKRAINE. In TRAINING and the other single-player-only missions no partner appears, even with
+the setting on, and the D-pad Up partner menu is not available.
+
+**How many partners.** The **CPU PARTNER** row cycles **OFF**, **1**, **2**, **3** with Cross: the number of CPU partners
+(up to three, as the original's four-agent online game). It writes `coop_partner` and `coop_partners` to
+`local\port_settings.txt` at once (OFF keeps the count for the next time you turn it on). `--coop-partners N` on the
+command line overrides it for one run.
+
+**The command menu (D-pad Up).** In a level, press D-pad **Up** to open the partner menu on the quick-chat panel (the
+original's multiplayer quick chat). Each page has up to four entries, one per D-pad direction; Triangle closes the menu
+without an order. While it is open the D-pad and Triangle are the menu's.
+
+1. **Who** (two or three partners only): the partners by their codenames (Python, ...), or **All**.
+2. **Command / Fire / Tasks**.
+3. - Command: **Follow**, **Stay** (holds where it is), **Go there**, **Regroup** (walks back to you).
+   - Fire: **Weapons free**, **Hold fire**, **Attack my target** (the enemy you hold R1 on).
+   - Tasks: **Level tasks** (below), **Hold here**, **Cover me** (weapons free), **Follow me**.
+
+**Go there.** Look where the partner should go and give **Command > Go there**: it runs to the place, walking round
+obstacles, and holds there until you give **Follow** or **Regroup**. You can aim with **L1** (the aim view) while you
+open the menu: then the place is exactly where your aim meets the floor or a wall (up to about 60 m away). Without L1 it
+is the place about 30 m ahead in the camera's direction (short of the first wall). If no route leads there the ticker says
+"Partner: can't get there".
+
+**Level tasks.** **Tasks > Level tasks** lists the level's open tasks a partner can do, by the objective's own name
+(TORONTO1: the laptop, whose partner part is the water main; BELARUS2: the bridge; UKRAINE: the launch override). Up to
+four fit one page; with more, **Down** shows the next page. Pick a task with its direction, then pick the partner (by its
+codename) who does it (with one partner it goes to that partner at once). The partner goes and does that task's part by
+itself (no prompt needed) and then follows you; the ticker shows "Python: <task>". If no task is open where you are, the
+ticker says "No level tasks open". Levels without partner tasks list none.
+
+**Crawls.** When you crawl through a pipe or duct, the partners crawl after you (the original crawl, on all fours), the
+whole way between the two openings, even where you stay crouched outside the crawl zones.
 
 **Friendly fire.** By default (`partner_friendly_fire=0` in `local\port_settings.txt`) nothing you or your allies do
 hurts the partner: bullets, melee, grenades, explosions and fire you cause. Enemies still hurt it. With

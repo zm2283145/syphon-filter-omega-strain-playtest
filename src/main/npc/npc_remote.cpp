@@ -3,6 +3,7 @@
 #include "npc_world.hpp"
 #include "actor_fire.hpp"
 #include "actor_object_action.hpp"
+#include "npc_attack.hpp"
 #include "npc_death_notice.hpp"
 #include "npc_route.hpp"
 #include "vu_float.hpp"
@@ -81,6 +82,37 @@ bool npc_remote_far_teleport(float distance,std::uint32_t mode_320c,std::uint32_
     if(word_38==0x80U)return true;
     if(!physical_present)return false;                                         // actor +3310
     return !(physical_2c8<0.5F);
+}
+NpcRemoteBurstStep npc_remote_burst_step(std::uint16_t count,float pause,float cooldown,float fire_delay,
+    std::uint32_t actor_id,bool can_attack){
+    NpcRemoteBurstStep out{count,pause,cooldown,false};
+    if(count!=0){
+        if(can_attack&&cooldown<=0.0F){
+            out.count=static_cast<std::uint16_t>(count-1);
+            out.cooldown=fire_delay;
+            out.shoot=true;
+        }
+    }else if(pause<=0.0F){
+        out.count=static_cast<std::uint16_t>((actor_id&7U)+3U);
+        out.pause=4.0F*(std::bit_cast<float>(0x3e4ccccdU)
+            +std::bit_cast<float>(0x3c23d70aU)*static_cast<float>(actor_id&15U));
+    }
+    return out;
+}
+RootVector npc_remote_no_fire_point(const NpcRemoteAim& aim,const std::array<RootVector,4>& actor_matrix,
+    const RootVector& target_eye){
+    if(!aim.point_valid_0)return target_eye;
+    RootVector point=aim.point_10;
+    const float x=point[0]-actor_matrix[3][0],y=point[1]-actor_matrix[3][1],z=point[2]-actor_matrix[3][2];
+    if((x*x+y*y+z*z)<9.0F)
+        for(std::size_t k=0;k<4;++k)point[k]+=actor_matrix[1][k]*20.0F;
+    return point;
+}
+bool npc_remote_fire_gate(std::uint16_t maximum,std::uint16_t& current,bool& reset){
+    if(reset){current=0;reset=false;}
+    if(current>=maximum)return false;
+    ++current;
+    return true;
 }
 
 std::function<void()> NpcAiController::generator_release(){
@@ -275,15 +307,60 @@ void NpcAiController::remote_update(SoloActorSimulation& actor,float dt){
         tick(c.field_88);tick(c.field_84);
     }else if(!inv)throw std::runtime_error("NPC AI: the remote NPC's update 002d5160 for an actor without a combat inventory");
     // 002d4e70(s2)
-    bool fire=false;
-    if(target!=0&&link&&link->firing_21){
+    bool valid_target=false;
+    NpcSenseObject target_view{};
+    if(target!=0&&link){
         const auto v=present(target);
-        fire=(v.root[1]&&v.root[0]&&!v.root[2])||v.class_4ea770;
+        valid_target=(v.root[1]&&v.root[0]&&!v.root[2])||v.class_4ea770;
+        target_view=v;
     }
-    if(fire)throw std::runtime_error("NPC AI: the remote NPC's fire (002c4f20, then 002d48f0 / 002d4b30) is not ported");
-    for(const std::int32_t a:{0x3a,0x3f}){
-        NpcAiSend s;s.kind=NpcAiSend::Kind::action;s.transport=0;s.action=a;s.action_kind=0;   // key 0055d480, vtable 004e0840
+    auto action=[&](std::int32_t code,std::uint8_t kind,std::uint8_t transport){
+        NpcAiSend s;s.kind=NpcAiSend::Kind::action;s.transport=transport;s.action=code;s.action_kind=kind;
+        return s;
+    };
+    auto send_action=[&](const NpcAiSend& s){
         h.send(s);
+        if(s.transport==1){
+            if(!combat_.actor_action)throw std::runtime_error("NPC AI: an immediate remote combat action without NpcCombatLink::actor_action");
+            combat_.actor_action(s);
+        }
+    };
+    if(valid_target){
+        if(!combat_.eye_c0_of)
+            throw std::runtime_error("NPC AI: 002d48f0 / 002d4b30 needs the target's virtual +c0 (NpcCombatLink::eye_c0_of)");
+        const RootVector eye=combat_.eye_c0_of(target,-1);
+        if(link->firing_21){
+            if(!remote_link_.fire_gate)
+                throw std::runtime_error("NPC AI: 002c4f20 needs the cNetHuman fire-counter link");
+            if(remote_link_.fire_gate()){                                      // 002d48f0
+                auto aim=action(0x39,4,1);aim.point=eye;send_action(aim);
+                WeaponInventory* inv=combat_.inventory();
+                const auto burst=npc_remote_burst_step(remote_->burst_1ec,npc_burst_pause_84(c),npc_shot_cooldown_88(c),
+                    c.fire_delay_8c,actor_id_,weapon_can_attack(*inv,*combat_.database));
+                remote_->burst_1ec=burst.count;
+                c.field_84=static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(burst.pause));
+                c.field_88=static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(burst.cooldown));
+                if(burst.shoot){
+                    auto shot=action(0x3b,0xb,0);
+                    shot.word_30=target_view.id;shot.word_34=-1;
+                    send_action(shot);
+                    WeaponInventoryHost ih;ih.player=false;
+                    std::vector<WeaponInventoryEvent> events;
+                    WeaponInventoryOps ops(*inv,*combat_.database,ih,events);
+                    if(ops.clip(weapon_no_slot)==0)send_action(action(0x3c,0,0));
+                }
+                auto look=action(0x3e,5,1);look.word_2c=target_view.id;send_action(look);
+            }else{                                                            // 002d4b30
+                auto aim=action(0x39,4,1);
+                aim.point=npc_remote_no_fire_point(*link,h.actor.world_matrix(),eye);
+                send_action(aim);
+                send_action(action(0x3f,0,0));
+            }
+        }else{
+            for(const std::int32_t a:{0x3a,0x3f})send_action(action(a,0,0));
+        }
+    }else{
+        for(const std::int32_t a:{0x3a,0x3f})send_action(action(a,0,0));
     }
     auto& r=*remote_;
     const auto motion=remote_link_.motion();

@@ -394,6 +394,14 @@ struct NpcAttackHost;
 struct NpcFollowHost;
 struct NpcCarryHost;
 struct NpcGoToBodyHost;
+// Checkpoint 132fx1: a thrown projectile (cGrenade) as 00152fd0 (cause 5) and mode 10 001535e0 read it.
+struct NpcProjectileView {
+    std::int32_t id{};                       // +c
+    std::array<std::uint8_t,3> root{};       // +2c, +2d, +2e
+    std::uint64_t owner{};                   // +124 resolved through +128 (0: none, or its +c no longer matches)
+    std::int32_t damage_type{};              // 0025ac00 cGrenade::GetDamageType (3: flashbang)
+    RootVector point_bc{};                   // virtual +bc
+};
 struct NpcAiHost {
     NpcAiActor actor;
     const NpcNodeGraph* graph{};
@@ -438,6 +446,9 @@ struct NpcAiHost {
     std::function<std::uint32_t()> random;                    // 00127dd0 (0014d730)
     std::function<std::int32_t()> held_weapon_rating;         // 00142b50(actor +3524) (mode 1)
     std::function<std::uint64_t(std::int32_t id)> object_by_id;   // 0040c540 (the dispatcher's AI event 7)
+    // Checkpoint 132fx1: the projectile view of an object (nullopt: not a thrown projectile); the hearing of a
+    // landed projectile (00152fd0 cause 5) and mode 10 need it, and throw without it.
+    std::function<std::optional<NpcProjectileView>(std::uint64_t object)> projectile;
     // Every send in order; a component message with transport 0 is also
     // queued for the next pump by the host.
     std::function<void(const NpcAiSend&)> send;

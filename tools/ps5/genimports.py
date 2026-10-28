@@ -1,10 +1,12 @@
 import pathlib, re
-# Port-only (132ps5c): regenerates src/port/ps5/ps5_imports.cpp from local/ps5/imports.txt (tools/ps5/genimports.sh:
-# llvm-nm -u of the linked llvm-pie.elf). Run after the imports change.
+# Port-only (132ps5c, 132ps5d): regenerates src/port/ps5/ps5_imports.cpp from a list of the linked title's imports
+# (tools/ps5/genimports.sh: llvm-nm -u of llvm-pie.elf; the omega_ps5_imports target runs both). Run after the imports
+# change.  usage: genimports.py <imports.txt>
+import sys
 root = pathlib.Path(__file__).resolve().parents[2]
-names = [n.strip() for n in (root / 'local/ps5/imports.txt').read_text().split() if n.strip()]
+names = [n.strip() for n in pathlib.Path(sys.argv[1]).read_text().split() if n.strip()]
 wraps = set("chdir getcwd realpath access fchmodat fopen freopen link lstat mkdir mkstemp open openat opendir fdopendir readdir closedir pathconf "
-            "readlink remove rename stat statvfs symlink truncate unlink unlinkat utimes malloc calloc realloc free "
+            "readlink remove rename stat statvfs symlink truncate unlink unlinkat utimes malloc calloc realloc free __cxa_throw "
             "posix_memalign malloc_usable_size".split())
 skip = {'sceKernelDebugOutText', 'chdir', 'getcwd', 'realpath', 'mkstemp'}  # weak, or implemented by the title
 names = [n for n in names if n not in skip and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', n)]

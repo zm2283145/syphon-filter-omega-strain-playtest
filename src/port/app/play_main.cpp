@@ -19,6 +19,7 @@
 #include "blast_world.hpp"
 #include "actor_goggles.hpp"
 #include "combat_play.hpp"
+#include "bullet_render.hpp"
 #include "weapon_hud.hpp"
 #include "player_camera.hpp"
 #include "animation_graph_manifest.hpp"
@@ -82,6 +83,7 @@
 #include "tank.hpp"
 #include "port_cheats.hpp"
 #include "native_paths.hpp"
+#include "npc_alert.hpp"
 #include "npc_roster.hpp"
 #include "npc_world.hpp"
 #include "npc_generator.hpp"
@@ -142,6 +144,7 @@
 #include "texture_replacement.hpp"
 #include "model_overrides.hpp"
 #include "draw_prepare.hpp"
+#include "particle_tail.hpp"
 #include "frame_overlay.hpp"
 #include "pad_connection.hpp"
 #include "pad_vibration.hpp"
@@ -1880,7 +1883,10 @@ struct PlayGuiHost final:GuiStaticHost{
     bool equip_player() override{return combat!=nullptr;}
     std::int32_t equip_held() override{   // 00176110: v0 stays -1 for the holstered slot 6
         const auto& inv=combat_player(0x176110).player_inventory();
-        if(inv.current_84>=inv.slots.size())return -1;
+        // Checkpoint 132wf1: 0017613c beq +84, 6 -> -1 whatever slot 6 holds (the goggles' slot doubles as the
+        // holstered index), so the gather 0045c760 then walks from slot 0. Reading slot 6's item here gave the
+        // goggles (item 74, slot class 6) and the gather threw (the user's TRAINING crash).
+        if(inv.current_84==weapon_no_slot||inv.current_84>=inv.slots.size())return -1;
         return inv.slots[inv.current_84].item;
     }
     std::array<std::int32_t,8> equip_slots() override{
@@ -2112,6 +2118,15 @@ struct PlayGuiHost final:GuiStaticHost{
 // stays on it (the Hor+ view's vertical field of view is the 4:3 one: the same GUI scale).
 int wide_hud_role(const IeScreen& screen,std::uint32_t tag){
     if(tag==0)return 0;
+    // Port-only tags can carry renderer metadata in their upper bits. A follower still names its HUD leader;
+    // widget tags do not name an IE node at all.
+    if(tag&port_anchor_widget)return 1;
+    tag&=~port_anchor_follow;
+    if(tag==0||tag>screen.nodes().size()){
+        std::cerr<<"Play GUI (port-only, 132fx1 wide): ignoring invalid HUD anchor tag "<<tag
+                 <<" for a screen with "<<screen.nodes().size()<<" nodes\n";
+        return 0;
+    }
     std::string n=screen.node(static_cast<int>(tag-1)).name;
     for(char& c:n)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     for(const char* p:{"callout","target_lock","targetlock","fptarget","lockon"})
@@ -3136,6 +3151,14 @@ struct PlayGuiOverlay{
             while(s.node(r).children.size()==1&&s.node(r).elements.empty())r=s.node(r).children.front();
             return r;
         };
+        // Port-only (checkpoint 132fx1): under the wide aspect the game screen's weapon select follows the HUD element
+        // "weaponselectpanel" (gui_draw.hpp port_anchor_follow).
+        drawer.port_weapon_select_anchor=0;
+        if(wide_hud){
+            const auto& s=hud->screen();
+            for(const int k:s.node(hud_wide_root()).children)
+                if(s.node(k).name=="weaponselectpanel")drawer.port_weapon_select_anchor=port_anchor_follow|static_cast<std::uint32_t>(k+1);
+        }
         // The roles of the HUD batches drawn from `first` (wide_hud_role): anchored ones keep their tag, the
         // reticle's are fitted, the 3D-placed ones (callouts, lock-on) are drawn free.
         const auto hud_wide_tags=[&](std::size_t first){
@@ -3315,7 +3338,10 @@ struct PlayGuiOverlay{
             wide_fill_reported=true;
         }
         if(wide_hud)for(const auto& [tag,shift]:renderer.wide_shifts()){
-            const std::string& name=hud->screen().node(static_cast<int>(tag-1)).name;
+            if(tag&port_anchor_widget)continue;
+            const std::uint32_t hud_tag=tag&~port_anchor_follow;
+            if(hud_tag==0||hud_tag>hud->screen().nodes().size())continue;
+            const std::string& name=hud->screen().node(static_cast<int>(hud_tag-1)).name;
             if(wide_reported.insert(name).second)
                 std::cout<<"Play GUI (port-only, 132ws wide): HUD element '"<<name<<"' anchored "
                          <<(shift<0.0F?"left":shift>0.0F?"right":"centre")<<" (x shift "<<shift<<" GUI units) at frame "<<frame<<"\n";
@@ -3702,7 +3728,9 @@ void apply_placement_zone_requests(const std::vector<ZoneRequest>& zone_requests
 // The tracker's requests on the generators (00224330 / 00224180 on a GEN member); the pathed
 // objects' and hotboxes' presence is not applied here. 132ln5h11: in a network game (the generators' network_host
 // set by the network level load) their network parts (00224330's +5c 002214b0, 00224180's +60 00221460).
-void apply_generator_zone_requests(const std::vector<ZoneRequest>& zone_requests,GeneratorWorld& generators){
+// Checkpoint 132fx1: deactivate_immediate is 00220bb0's per-node part (a forced deactivation with spawned NPCs).
+void apply_generator_zone_requests(const std::vector<ZoneRequest>& zone_requests,GeneratorWorld& generators,
+    const std::function<void(GeneratorState&,const GeneratorListEntry&)>& deactivate_immediate={}){
     std::optional<GeneratorNetHost> net;
     for(const auto& r:zone_requests){
         auto* s=generators.find(r.key);
@@ -3714,6 +3742,7 @@ void apply_generator_zone_requests(const std::vector<ZoneRequest>& zone_requests
             continue;
         }
         if(r.activate)generator_zone_activate(*s);
+        else if(deactivate_immediate)generator_zone_deactivate(*s,r.forced,[&](const GeneratorListEntry& n){deactivate_immediate(*s,n);});
         else generator_zone_deactivate(*s,r.forced);
     }
 }
@@ -4138,6 +4167,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             else if(arg==L"--max-steps"){max_steps_per_loop=number<int>(value());
                 if(max_steps_per_loop<1||max_steps_per_loop>4)throw std::runtime_error("--max-steps must be 1 to 4");}
             else if(arg==L"--measured-dt")measured_dt=true;
+            else if(arg==L"--particle-tail")g_particle_tail=true;   // 132vc2 (port-only diagnostic; the Vita's default)
             // Port-only (132vt2d): the terrain light pass keeps a batch whose light list is unchanged (on by default
             // on the PS Vita, off on Windows; the pixels and traces are the same either way).
             else if(arg==L"--terrain-light-memo"){
@@ -5172,6 +5202,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 else if(on)std::cout<<"Port settings (port-only): CPU Partner on, skipped: the partner needs --mission-scripts and --navigation-tuning\n";
                 else if(level_pass>0&&from_rows)std::cout<<"Port settings (port-only): CPU Partner off ("<<where<<")\n";
             }
+        }
+        // Checkpoint 132pt1 (port-only, research/COOP.md "Missions without partners"): the CPU partners stand in for online co-op
+        // agents, so they join only the levels the original offers in an online game: the command centre's level list
+        // 00297020 with app +30 opens a level only by the online level table 004acc70, and TRAINING (slot 0x17) only offline.
+        // In any other mission (TRAINING, ITALY, KYRGSTAN, YEMEN1, MINSK, CHECHNYA, LORELEI, ZURICH, MNTNEGR1, LOADING) no
+        // partner spawns, from the setting or --coop-partner, and the command menu (which needs a partner) is not offered.
+        if(coop_forced)coop_partner=true;   // --coop-partner: again at each level (an earlier level may have had none)
+        if(coop_partner&&!omega::gui::command_centre_online_level(mission)){
+            std::cout<<"CPU partner (port-only): none in "<<mission<<": the original does not offer it for online co-op (the command centre's"
+                       " online level table 004acc70, 00297020; TRAINING only offline)\n";
+            coop_partner=false;
         }
         // Checkpoint 132pc3 (port-only): friendly fire on the CPU partner: --partner-friendly-fire, else the front end's /
         // settings file's partner_friendly_fire (default 0: the partner shield drops the player's and allies' damage).
@@ -6264,6 +6305,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(g.port_overlay.size()<coop_nod_count)g.port_overlay.resize(coop_nod_count);
             }
             return g;}();
+        // Checkpoint 132pt1 (port-only): the safety net under the online level rule: the partners move only by the level's Nav
+        // graph (the original NPC navigation), so a level whose NOD has no Nav node (npc_node_nav) gets no partner.
+        if(coop_partner&&std::none_of(npc_graph.nodes.begin(),npc_graph.nodes.begin()+static_cast<std::ptrdiff_t>(coop_nod_count),
+                                      [](const NpcNode& n){return (n.flags&npc_node_nav)!=0;})){
+            std::cout<<"CPU partner (port-only): none in "<<mission<<": the level has no Nav node to move by\n";
+            coop_partner=false;
+        }
         if(std::find(node_dump_ids.begin(),node_dump_ids.end(),0U)!=node_dump_ids.end()){   // "all" (132uk6)
             node_dump_ids.clear();for(const auto& v:npc_graph.nodes)node_dump_ids.push_back(v.id);}
         for(const auto id:node_dump_ids){   // --node-dump (diagnostic)
@@ -7104,9 +7152,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         bool coop_partner_held=false;bool coop_release_pending=false,coop_release_logged=false;constexpr float coop_hold_seconds=3600.0F;bool coop_follow_point_pending=false;
         std::int32_t coop_partner_physical_mode=-1;   // logged on change (the 001e7f40 mover skip in mode 9)
         std::int32_t coop_partner_action=-2;          // the partner's highest active action, logged on change (132ob5)
+        bool coop_partner_crouched=false;              // 132pt1: the partner's crouch bit, logged on change
         std::int32_t coop_follow_node_pending=-1;   // the follow MoveToNode whose route answer (path event 2/3) is awaited
         // Checkpoint 132pc2 (port-only, coop_breadcrumbs.hpp): the player's traversals as the partner's breadcrumbs.
-        const CoopBreadcrumbConfig coop_crumb_config;CoopBreadcrumbRecorder coop_crumb_recorder;CoopBreadcrumbQueue coop_crumbs;
+        const CoopBreadcrumbConfig coop_crumb_config;CoopBreadcrumbRecorder coop_crumb_recorder;CoopBreadcrumbQueue coop_crumbs;std::pair<bool,bool> coop_player_crouch_seen{false,false};   // 132pt1 (port-only): the crouch bit and crawl zone last logged
         std::uint32_t coop_crumb_next_id=coop_breadcrumb_first_id;std::int32_t coop_crumb_pending=-1;CoopBreadcrumbTail coop_crumb_tail;
         CoopWalkBridgeState coop_bridge;   // 132pw5fix2 (port-only): the partner's walk bridges (install_coop_walk_bridge)
         const auto coop_crumbs_clear=[&](const char* why){
@@ -7149,7 +7198,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         CoopOrderState coop_order;
         // rank: its place among the order's partners; role: a Tasks page role (132pw4); node / guard: a team task's post (132pw5:
         // go there to this Nav node index and guard it).
-        struct CoopPendingOrder{CoopOrder order{};std::uint64_t attack{};std::size_t rank{};std::optional<CoopRole> role{};std::int32_t node{-1};bool guard{};};
+        struct CoopPendingOrder{CoopOrder order{};std::uint64_t attack{};std::size_t rank{};std::optional<CoopRole> role{};std::int32_t node{-1};bool guard{};std::uint32_t task{};bool aim{};};   // task, aim (the aim view, L1, at the order): 132pt1
         std::array<std::optional<CoopPendingOrder>,3> coop_order_pending{};
         // Checkpoint 132pw5 (port-only, coop_command_menu.hpp CoopRoleSection / CoopTeamTask): the level sections and the
         // timed team task, from the display labels the level's script shows (with two or three partners only).
@@ -7169,7 +7218,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         X(coop_errand) X(coop_command_done) X(coop_command_over_at) X(coop_errand_acting) X(coop_errand_action) X(coop_errand_node_pending) \
         X(coop_errand_arrived) X(coop_errand_moved_at) X(coop_errand_deferred) X(coop_climb_link) X(coop_climb_saved_114) X(coop_climb_round) \
         X(coop_second_round_sent) X(coop_climb_box) X(coop_partner_held) X(coop_release_pending) X(coop_release_logged) \
-        X(coop_follow_point_pending) X(coop_partner_physical_mode) X(coop_partner_action) X(coop_follow_node_pending) X(coop_crumbs) \
+        X(coop_follow_point_pending) X(coop_partner_physical_mode) X(coop_partner_action) X(coop_partner_crouched) X(coop_follow_node_pending) X(coop_crumbs) \
         X(coop_crumb_pending) X(coop_crumb_tail) X(coop_catch_up) X(coop_rejoin_pending) X(coop_rejoin_waiting) X(coop_partner_rejoins) \
         X(coop_combat) X(coop_held_shots_logged) X(coop_held_streak_start) X(coop_held_streak_last) X(coop_held_streak_count) \
         X(coop_combat_mode) X(coop_hang_released) X(coop_pull_up_refused) X(coop_partner_items) X(coop_partner_respawns) X(coop_partner_down) \
@@ -7306,6 +7355,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::map<std::size_t,NpcManDrawState> npc_man_draw;std::size_t npc_faded_logged=0;
         const std::array<RootVector,4>* aim_view_camera_matrix=nullptr;   // the player camera's +50 transform (aim view)
         const std::array<RootVector,4>* aim_view_camera_da0=nullptr;      // the player camera's +da0 (aim point 00249670)
+        // Checkpoint 132wf1: the arc preview's vector 004f8000 (0025cdc0, filled by the pad block in the step) until the
+        // render frame's 0025c650 draws and clears it.
+        std::optional<ThrowArcPreview> throw_arc_draw;std::uint64_t throw_arc_draws=0,bullet_tracer_draws=0;
         const PlayerCameraState* sound_camera=nullptr;                    // the camera object 004ffc14 of gameSound's pan
         // The NPC figure of each actor (null: the player) for the combat session's team and perception lookups; a
         // generator spawn appends its actor's, and links its controller through the same perception world.
@@ -7342,6 +7394,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::function<bool()> prompt_map_toggle;std::function<void()> prompt_map_sticks;
         std::array<std::array<float,2>,2> map_sticks_raw{};
         std::optional<SimulationScriptWorld> script_world;std::optional<HudObject> hud_object;HudBlips hud_blips;std::size_t hud_objective_events=0;std::map<std::uint32_t,std::uint32_t> hud_objective_serials;std::uint32_t hud_objective_serial_next=PlayGuiHost::objective_serial_base;HudMatrix hud_marker_m{};std::function<RootVector(std::size_t)> gob_position_e4;std::function<std::optional<CombatHostObject>(std::int32_t)> host_object_by_id;bool hud_waypoint_selected=false;bool hud_map_marker_shown=false;int hud_waypoint_shown=-1;bool hud_release_noted=false;std::size_t hud_blips_logged=0;std::unique_ptr<GuiDecorAssets> gui_assets;std::optional<GameScreenInteract> game_screen_interact;unsigned hud_frame=0,headshot_popup_frame=0;std::unique_ptr<MissionScriptHost> mission_host;ScriptFrameClock script_clock;
+        // Checkpoint 132pt1 (port-only, coop_partner.hpp coop_level_tasks): an objective is open for the Level tasks list while it is
+        // not destroyed and not decided (ObjectiveStage status 0), shown on the HUD or not yet (TORONTO1's laptop, objective 3, is
+        // created at the level start and shown only once the water main, its partner task, is turned); its name is its own menu
+        // text (SetMenuString, as the
+        // objectives screen shows it, objective_overlay_state), else the port's "Objective N".
+        const auto coop_objective_open=[&](std::uint32_t id){
+            if(!mission_host)return false;
+            const auto* o=mission_host->objectives().stage().find(id);
+            return o&&!o->destroyed&&o->status==0;};
+        const auto coop_objective_text=[&](std::uint32_t id)->std::string{
+            if(mission_host){
+                const auto state=objective_overlay_state(mission_host->objectives().stage(),mission_host->objectives().objective_records());
+                for(const auto& r:state.records)if(r.id==id&&r.has_text&&!r.text.empty())return r.text;
+            }
+            return "Objective "+std::to_string(id);};
         // gameSound (checkpoint 119i): the request layer native, the 989snd / IOP below it the disc-backed host,
         // mixed headless at 48 kHz; --audio-wav writes the mix.
         std::unique_ptr<audio::Mixer> sound_mixer;std::unique_ptr<SoundIopHost> sound_host;std::unique_ptr<GameSoundManager> game_sound;
@@ -7507,6 +7574,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // copies 003c9420(msg, gen, 0) queues (003c9950 -> 003ca0e0, list 005435c0) for the next frame's pump.
         struct SpawnedNpc{std::size_t figure{};std::uint32_t generator{};std::uint32_t id{};std::uint32_t c{};bool flushed{};bool id_reused{};};
         std::map<std::uint32_t,SpawnedNpc> spawned_npcs;std::vector<std::pair<std::uint32_t,std::uint32_t>> spawned_npc_msgs;
+        // Checkpoint 132fx1: the DespawnedNPCMsgs 00220bb0 sends its generator (transport 0), delivered with the SpawnedNPCMsgs.
+        std::vector<std::pair<std::uint32_t,std::uint32_t>> despawned_npc_msgs;
         // The type-1/6/7 boxes' EnableMsg / DisableMsg (transport 0) to generators, queued (005435c0) for the next pump.
         std::vector<std::pair<std::uint32_t,bool>> generator_link_msgs;
         // Checkpoint 132vo2: the SND: sound objects (00212ee0; built with the sound manager) and the type-1/6/7
@@ -7527,7 +7596,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<std::tuple<Word,float,float,bool>> net_light_msgs;
         bool npc_figures_added=false;   // the overlay textures follow a spawn
         std::vector<std::uint32_t> pathed_order;   // their record order (00133420 visits objects in registration order)
-        std::optional<ZoneActivationMap> zone_map;std::optional<ZoneTracker> zone_tracker;   // --mission-scripts: 001c24d0 / 0013db30
+        std::optional<ZoneActivationMap> zone_map;std::optional<ZoneTracker> zone_tracker;std::vector<ZoneTracker> coop_zone_trackers;std::array<bool,3> coop_zone_own{};   // --mission-scripts: 001c24d0 / 0013db30; 132pt1: one tracker per CPU partner
         // Checkpoint 132cp9: the level lights as the load 001c4190 leaves them: the models' patch sets registered
         // in the PNT lights' slots (00377920 -> 00371c30), the PNT link pass 001c1470, the first ENV's
         // activations (001781a0). The shadow scene takes them; the level-start zone requests reach them there.
@@ -7563,6 +7632,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // with (empty: the base colours) and whether that is still current; a batch whose list is unchanged keeps
         // its colours (the pass is a function of the list and the base colours), so it is neither relit nor uploaded.
         std::vector<std::vector<TerrainPointLight>> terrain_light_memo;std::vector<std::uint8_t> terrain_light_memo_valid;
+        // 132vc2: the preceding light set and its colours (bit 1 of terrain_light_memo_valid).
+        std::vector<std::vector<TerrainPointLight>> terrain_light_memo2;
+        std::vector<std::vector<float>> terrain_light_colours2;
         // Port-only (132vs1): the pass's working lists, kept between frames so a frame's pass allocates nothing once
         // they have grown: the (batch, terrain instance) pairs with the bits of the instance's lights that reach the
         // batch, and the batches to relight.
@@ -7903,9 +7975,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         link.link=[net,c]()->std::optional<NpcRemoteAim>{
                             const auto l=net->npc_net_link(c);
                             if(!l)return std::nullopt;
-                            NpcRemoteAim a;a.aiming_20=l->aiming_20;a.firing_21=l->firing_21;a.target_8=l->target_8;
+                            NpcRemoteAim a;a.aiming_20=l->aiming_20;a.firing_21=l->firing_21;a.point_valid_0=l->point_valid_0;
+                            a.target_8=l->target_8;
                             a.subtarget_c=l->subtarget_c;a.point_10={l->point_10[0],l->point_10[1],l->point_10[2],1.F};
                             return a;};
+                        link.fire_gate=[net,c]{return net->npc_fire_gate_002c4f20(c);};
                         link.motion=[net,c]()->std::optional<NpcRemoteMotion>{
                             const auto n=net->npc_net_motion(c);
                             if(!n)return std::nullopt;
@@ -9009,6 +9083,24 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     };
                     cc.net_shot=[&]{lan_net->record_shot();};
                     cc.net_weapon=[&](std::int32_t item){lan_net->record_weapon(item);};
+                    cc.net_local_index=[&]{return static_cast<std::uint32_t>(lan_net->local_client_index());};
+                    cc.net_session_host=[&]{return static_cast<std::uint32_t>(lan_net->session_host());};
+                    cc.net_hosting=lan_net->hosting();
+                    cc.net_actor_key=[&](std::size_t a)->std::uint32_t{
+                        if(a==0)return lan_net->local_player_key();
+                        for(const auto& r:lan_remotes)if(r.key&&r.figure&&r.figure->actor==a)return r.key;
+                        return static_cast<std::uint32_t>(combat_ids.at(a));};
+                    cc.net_actor=[&](std::uint32_t key)->std::optional<std::size_t>{
+                        if(key==lan_net->local_player_key())return 0;
+                        for(const auto& r:lan_remotes)if(r.key==key&&r.figure)return r.figure->actor;
+                        for(std::size_t a=0;a<combat_ids.size();++a)
+                            if(static_cast<std::uint32_t>(combat_ids[a])==key)return a;
+                        return std::nullopt;};
+                    cc.net_backpack_bind=[&](std::uint32_t id,std::uint32_t owner,std::uint32_t address){
+                        lan_net->bind_backpack(id,static_cast<std::uint16_t>(owner),address);};
+                    cc.net_backpack_send=[&](std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
+                                             std::uint16_t recipient){
+                        lan_net->send_backpack(type,owner,id,target,recipient);};
                 }
                 const auto record_of=[&roster](std::size_t record)->const NpcRosterEntry&{
                     for(const auto& e:roster)if(e.record==record)return e;
@@ -9190,6 +9282,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // 00257640's cBackpack (0xf5) receives the scripts' Backpack type handlers (InventoryMsg).
                         if(category==0xf5)mission_host->register_runtime_backpack(id);
                         return id;};
+                    bw.register_remote_id=[&mission_host](std::uint32_t id){mission_host->register_remote_runtime_backpack(id);};
                     const auto region=[&zone_map,&zone_tracker](std::size_t i)->BackpackRegion{
                         const auto key=zone_map->zones().at(i).key;
                         return BackpackRegion{key,{1,static_cast<std::uint8_t>(zone_tracker->present(key)?1:0),0}};};
@@ -9260,6 +9353,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     tc.gravity=game_initial_gravity;
                     tc.none_word=0xffffffffU;
                     if(npc_perception)tc.stealth_44=[&stealth](std::size_t a)->std::int32_t{return stealth?stealth->value(a):0;};
+                    // Checkpoint 132fx1: +346b for the gases: the player's from SetNotGasable(GOBJ) 00185140, an NPC's from
+                    // SetNotGasable(NPC) 00148f80; other actors keep the constructor's 0.
+                    tc.not_gasable_346b=[&script_world,&npcs](std::size_t a)->bool{
+                        if(a==0)return script_world&&script_world->player_not_gasable_346b;
+                        for(const auto& n:npcs)if(n.actor==a&&n.ai)return n.ai->not_gasable_346b()!=0;
+                        return false;};
                     tc.explode=[&blast_world](const BlastRequest& r){
                         if(!blast_world)throw std::runtime_error("Combat: a thrown item exploded before the explosion world exists");
                         const auto b=blast_world->blast(r);
@@ -9345,9 +9444,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // 00249cc4) is 00242fa0(hud, &object +c, GetString 003fdb50("Headshot"), 0, 0, 0, 0.1, 1.0) on the
                 // callout list +6e8 when the callouts are hosted (--gui-overlay); its record is drawn by its
                 // tracker (003e97d0) at the object, refreshed while the reticle stays on the head and cleared by
-                // 00242330 0.1 s after. The thrown marker 00244580 is recorded, not hosted.
-                if(hud_object)cc.aim_view_hud=[&hud_object,&hud_frame,&headshot_popup_frame,&mission_host,last=std::array<std::uint8_t,4>{},
-                                               first=true,popup=true,thrown=true](const AimViewHudEvent& e)mutable{
+                // 00242330 0.1 s after. Checkpoint 132wf1: the thrown marker 00244580 (the grenade's landing reticle)
+                // places the fptarget element in perspective at the thrown point (HudObject::thrown_marker), through
+                // the camera 00159560(004ffc14)'s +50 node: the player camera's transform_50 (aim_view_camera_matrix).
+                if(hud_object)cc.aim_view_hud=[&hud_object,&hud_frame,&headshot_popup_frame,&mission_host,&aim_view_camera_matrix,
+                                               last=std::array<std::uint8_t,4>{},first=true,popup=true,thrown=true](const AimViewHudEvent& e)mutable{
                     using K=AimViewHudEvent::Kind;
                     if(e.kind==K::reticle_friend_9d0){hud_object->nofire_show();return;}
                     if(e.kind==K::reticle_clear_9a0){hud_object->nofire_hide();return;}
@@ -9370,8 +9471,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                           <<(text?std::string(*text):std::string("(null)"))<<"\", timer 0.1, colour 1.0\n";
                         popup=false;return;}
                     if(e.kind==K::thrown_580){
-                        if(thrown)std::cout<<"HUD thrown marker at frame "<<hud_frame<<" (00244580, not hosted)\n";
-                        thrown=false;return;}
+                        if(!aim_view_camera_matrix)throw std::runtime_error("00244580: the thrown marker before the player camera exists");
+                        const auto& m=*aim_view_camera_matrix;
+                        hud_object->thrown_marker({m[0],m[1],m[2],m[3]},e.point,&e.direction);
+                        if(thrown&&hud_object->element_68>=0){
+                            const auto& el=hud_object->screen().element_at(hud_object->element_68);
+                            std::cout<<"HUD thrown marker at frame "<<hud_frame<<" (00244580): point ("<<e.point[0]<<", "<<e.point[1]<<", "
+                                     <<e.point[2]<<"), direction ("<<e.direction[0]<<", "<<e.direction[1]<<", "<<e.direction[2]
+                                     <<"), view +20 ("<<el.words_20[0]<<", "<<el.words_20[1]<<", "<<el.words_20[2]<<")\n";
+                            thrown=false;
+                        }
+                        return;}
                     auto& vars=mission_host->context();
                     const HudLockAlpha alpha{std::bit_cast<float>(std::get<Word>(vars.engine_variable("game::lockAlpha"))),
                                              std::bit_cast<float>(std::get<Word>(vars.engine_variable("game::NVlockAlpha")))};
@@ -11412,8 +11522,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // (gfx::ghost_camera_matrix), per slot in the actor's surface order.
         struct GhostSkin{const omega::gfx::ReplacementModel* model{};std::vector<SkinMatrix> positions;};
         struct NightTrail{std::array<std::vector<std::array<float,3>>,skm_night_slots> slots;std::array<std::uint32_t,skm_night_slots> stamps{};
-                          std::array<std::vector<GhostSkin>,skm_night_slots> skin_slots;};
+                          std::array<std::vector<GhostSkin>,skm_night_slots> skin_slots;std::size_t head{};};
         std::map<std::size_t,NightTrail> night_trails;std::string night_logged,thermal_logged;std::uint64_t night_frames=0,night_ghosts=0;unsigned night_first=0,night_last=0;
+        std::vector<std::uint32_t> night_range_skins;   // retained while goggles are on
         // 132win10: the far-LOD skinning's reused storage, one per drawn actor (the player first) so that actors with
         // different part counts do not shrink and regrow each other's part vectors every frame.
         std::vector<std::vector<omega::AnimatedCharacterGeometry>> lod_geometry;
@@ -11783,8 +11894,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(!vision_render.night_53b350)return;
             const float t=std::tan(half_fov);
             const std::uint32_t d0=actors.frame_counter();
-            std::size_t drawn=0,skipped_stamp=0,skipped_lod=0,npc_translucent=0;std::string alphas;
-            std::vector<std::uint32_t> range_skins;   // 132md8: the range's GPU-skinned surfaces' skins, in surface order
+            std::size_t drawn=0,drawn_surfaces=0,drawn_vertices=0,drawn_indices=0;
+            std::size_t skipped_stamp=0,skipped_lod=0,npc_translucent=0;std::string alphas;
             for(const auto& r:actor_mesh_ranges){
                 const bool player=r.actor==0;
                 // Mode 0 or culled (0x80): no Skm_Draw. Checkpoint 132cp6: NPCs by their own alpha segment.
@@ -11794,21 +11905,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 auto& trail=night_trails[r.actor];
                 const std::uint32_t s7=gs.vertex_alpha;   // 003870c0 s7
                 const auto first=static_cast<std::uint32_t>(actor_mesh.surfaces.size());
-                range_skins.clear();
+                night_range_skins.clear();
                 for(std::uint32_t k=r.first_surface;k<r.first_surface+r.surface_count;++k)
-                    if(actor_mesh.surfaces[k].skin)range_skins.push_back(actor_mesh.surfaces[k].skin);
+                    if(actor_mesh.surfaces[k].skin)night_range_skins.push_back(actor_mesh.surfaces[k].skin);
                 const auto skins_match=[&](const std::vector<GhostSkin>& history){
-                    if(history.size()!=range_skins.size())return false;
+                    if(history.size()!=night_range_skins.size())return false;
                     for(std::size_t j=0;j<history.size();++j){
-                        const auto& now=overlay_skins.at(range_skins[j]-1);
+                        const auto& now=overlay_skins.at(night_range_skins[j]-1);
                         if(history[j].model!=now.model.get()||history[j].positions.size()!=now.palette.size())return false;
                     }
                     return true;
                 };
                 for(std::uint32_t s0=skm_night_slots;s0-->0;){
                     if(!skm_night_ghost_drawn(trail.stamps[s0],d0,s0)){++skipped_stamp;continue;}
-                    const auto& slot=trail.slots[s0];
-                    if(slot.size()!=r.vertex_count||!skins_match(trail.skin_slots[s0])){++skipped_lod;continue;}
+                    const std::size_t history=(trail.head+s0)%skm_night_slots;
+                    const auto& slot=trail.slots[history];
+                    if(slot.size()!=r.vertex_count||!skins_match(trail.skin_slots[history])){++skipped_lod;continue;}
                     const auto a=skm_night_ghost_alpha(s0,s7);
                     const auto base=static_cast<std::uint32_t>(actor_mesh.vertices.size());
                     const auto g0=static_cast<std::uint32_t>(actor_mesh.surfaces.size());
@@ -11826,9 +11938,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             // 132md8: the ghost of a GPU-skinned part is the part drawn by its old palette (in this
                             // frame's world), with its current normals and colour.
                             OverlaySkin ghost=overlay_skins.at(skinned.skin-1);
-                            const auto& history=trail.skin_slots[s0][ghost_skin++];
+                            const auto& old_skin=trail.skin_slots[history][ghost_skin++];
                             for(std::size_t b=0;b<ghost.palette.size();++b)
-                                ghost.palette[b].position=omega::gfx::ghost_world_matrix(history.positions[b],m,t);
+                                ghost.palette[b].position=omega::gfx::ghost_world_matrix(old_skin.positions[b],m,t);
                             overlay_skins.push_back(std::move(ghost));
                             actor_mesh.surfaces.push_back({skinned.material,skinned.first_index,skinned.index_count,
                                                            static_cast<std::uint32_t>(overlay_skins.size())});
@@ -11839,33 +11951,42 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         for(std::uint32_t i=0;i<src.index_count;++i)
                             actor_mesh.indices.push_back(actor_mesh.indices[src.first_index+i]-r.first_vertex+base);
                         actor_mesh.surfaces.push_back({src.material,i0,src.index_count});
+                        drawn_indices+=src.index_count;
                     }
+                    drawn_surfaces+=actor_mesh.surfaces.size()-g0;
+                    drawn_vertices+=r.vertex_count;
                     ghost_gs.push_back({g0,static_cast<std::uint32_t>(actor_mesh.surfaces.size())-g0,static_cast<std::uint8_t>(a&0xffU),
                                         gs.aref});
                     ++drawn;if(player)alphas+=(alphas.empty()?"":" ")+std::to_string(a);else if(s7<0x80U)++npc_translucent;
                 }
                 if(actor_mesh.surfaces.size()>first)ghost_items[r.actor]={first,static_cast<std::uint32_t>(actor_mesh.surfaces.size())-first};
-                // 00388208..00388374: the history and stamps shift; slot 0 takes this draw.
-                for(std::size_t k=skm_night_slots-1;k>0;--k)trail.slots[k]=std::move(trail.slots[k-1]);
-                for(std::size_t k=skm_night_slots-1;k>0;--k)trail.skin_slots[k]=std::move(trail.skin_slots[k-1]);
-                trail.skin_slots[0].clear();
-                for(const auto id:range_skins){
+                // 00388208..00388374: slot 0 takes this draw. A ring keeps each slot's vector capacity instead of
+                // move-shifting it away and allocating one complete actor history every night-vision frame.
+                trail.head=(trail.head+skm_night_slots-1)%skm_night_slots;
+                auto& latest_skins=trail.skin_slots[trail.head];
+                latest_skins.resize(night_range_skins.size());
+                for(std::size_t j=0;j<night_range_skins.size();++j){
+                    const auto id=night_range_skins[j];
                     const auto& s=overlay_skins.at(id-1);
-                    GhostSkin g{s.model.get(),{}};
-                    g.positions.reserve(s.palette.size());
-                    for(const auto& b:s.palette)g.positions.push_back(omega::gfx::ghost_camera_matrix(b.position,m,t));
-                    trail.skin_slots[0].push_back(std::move(g));
+                    auto& g=latest_skins[j];
+                    g.model=s.model.get();
+                    g.positions.resize(s.palette.size());
+                    for(std::size_t b=0;b<s.palette.size();++b)
+                        g.positions[b]=omega::gfx::ghost_camera_matrix(s.palette[b].position,m,t);
                 }
-                trail.slots[0].resize(r.vertex_count);
+                auto& latest=trail.slots[trail.head];
+                latest.resize(r.vertex_count);
                 for(std::uint32_t v=0;v<r.vertex_count;++v){
                     const auto& p=actor_mesh.vertices[r.first_vertex+v].position;
                     const float dx=p.x-m[3][0],dy=p.y-m[3][1],dz=p.z-m[3][2];
-                    trail.slots[0][v]={(dx*m[0][0]+dy*m[0][1]+dz*m[0][2])/t,dx*m[1][0]+dy*m[1][1]+dz*m[1][2],(dx*m[2][0]+dy*m[2][1]+dz*m[2][2])/t};
+                    latest[v]={(dx*m[0][0]+dy*m[0][1]+dz*m[0][2])/t,dx*m[1][0]+dy*m[1][1]+dz*m[1][2],(dx*m[2][0]+dy*m[2][1]+dz*m[2][2])/t};
                 }
                 skm_night_stamp_shift(trail.stamps,d0);
             }
             log<<actor_mesh_ranges.size()<<" actors, "<<drawn<<" ghosts (player RGBAQ.A "<<(alphas.empty()?"-":alphas)<<", GIF tag 0x"<<std::hex
-               <<skm_night_gif_tag(player_flags)<<std::dec<<"), "<<npc_translucent<<" translucent NPC ghosts, "<<skipped_stamp<<" slots past their stamp, "<<skipped_lod<<" LOD mismatches";
+               <<skm_night_gif_tag(player_flags)<<std::dec<<"), "<<drawn_surfaces<<" surfaces, "<<drawn_vertices<<" vertices, "
+               <<drawn_indices<<" copied indices; "<<npc_translucent<<" translucent NPC ghosts, "<<skipped_stamp
+               <<" slots past their stamp, "<<skipped_lod<<" LOD mismatches";
             if(!night_frames++)night_first=frame_no;   // checkpoint 132pc1: the night-gate frames for the exit summary
             night_last=frame_no;night_ghosts+=drawn;
             if(log.str()!=night_logged){
@@ -12218,6 +12339,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 actors.deactivate(f.actor);
                 slot->gone=true;
                 std::cout<<"; "<<f.label<<" ("<<f.actor_id<<") removed from the traversal (0040b720) and deactivated (+60)\n";
+            }
+        };
+        const auto lan_backpacks=[&](unsigned frame){
+            if(!combat_session)return;
+            for(const auto& m:lan_net->take_remote_backpacks()){
+                combat_session->receive_backpack_network(m.type,m.owner,m.backpack,m.target);
+                std::cout<<"LAN (132fx5): cNetBackpackMsg type "<<int(m.type)<<" owner "<<int(m.owner)
+                         <<" backpack 0x"<<std::hex<<m.backpack<<" target 0x"<<m.target<<std::dec
+                         <<" from client "<<m.origin<<" at frame "<<frame<<"\n";
             }
         };
         // Checkpoint 132ln5h14b (research/NET_INLEVEL.md 4.25): each traversed spawned NPC's update 001b1710 runs its
@@ -13542,6 +13672,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
+                    lan_backpacks(frame);
                     lan_npc_sections(frame);
                     lan_damages(frame);
                     // Port-only (132on2d): the online game's lobby frame (004536b0 state 10 -> 004446e0(1)); 132on2f:
@@ -14247,8 +14378,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     std::optional<CoopMenuPress> result;
                     if(!coop_menu.open){
                         // Not over the pickup menu or the lift floor chooser (0045bd00), whose D-pad entries are the game's.
-                        if(pressed[0]&&!(combat_session&&combat_session->pickup_menu())&&!(gui_overlay_draw&&gui_overlay_draw->rt.gs_choose_shown_bd00()))
-                            coop_menu_open(coop_menu,coop_partner_figures.size());
+                        if(pressed[0]&&!(combat_session&&combat_session->pickup_menu())&&!(gui_overlay_draw&&gui_overlay_draw->rt.gs_choose_shown_bd00())){
+                            // 132pt1 (port-only): the Level tasks list: the level's open objectives with partner rules, by their own
+                            // text (the SetMenuString the objectives screen shows; coop_level_tasks).
+                            std::vector<CoopTaskEntry> tasks;
+                            if(mission_host)for(const auto id:coop_level_tasks(coop_errands,sim.hotboxes(),coop_objective_open))
+                                tasks.push_back({id,coop_objective_text(id)});
+                            coop_menu_open(coop_menu,coop_partner_figures.size(),std::move(tasks));
+                        }
                     }else if(pressed[4])result=coop_menu_cancel(coop_menu);
                     else for(int d=0;d<4;++d)if(pressed[static_cast<std::size_t>(d)]){result=coop_menu_press(coop_menu,d);break;}
                     // A label's text: GetString 003fdb50 of its STRINGS.DAT key (as 002b1350's QC_MENU / QC_ITEM), else the port's.
@@ -14269,7 +14406,25 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                     if(result&&result->closed){
                         if(gui_overlay_draw)gui_overlay_draw->quickchat_show(false,{});
-                        if(result->role){
+                        if(result->no_tasks){
+                            // 132pt1 (port-only): Level tasks with no task open here (coop_level_tasks).
+                            std::cout<<"Coop command menu (port-only) at frame "<<frame<<": Level tasks: no task is open in "<<mission<<"\n";
+                            if(hud_object)hud_object->ticker_add("No level tasks open",{0.6509804F,0.7019608F,1.0F,1.0F},1,false);
+                        }else if(result->task){
+                            // 132pt1 (port-only): a level task from the list to the partner chosen by its codename: the tasks role
+                            // (seeking) limited to that objective's rules (CoopOrderState::task, coop_task_slot).
+                            const auto k=static_cast<std::size_t>(result->target);
+                            const auto task_text=coop_objective_text(*result->task);
+                            coop_order_pending.at(k)=CoopPendingOrder{CoopOrder::follow,0,0,CoopRole::tasks,-1,false,*result->task};
+                            if(coop_team_posted(k)){
+                                coop_team->released[k]=true;   // as a role: the player's task takes it off its post
+                                std::cout<<"Coop team task (port-only, 132pw5) at frame "<<frame<<": partner "<<k+1<<" leaves its post (the player's task)\n";
+                            }
+                            const std::string text=label_text(coop_partner_label(k))+": "+task_text;
+                            std::cout<<"Coop command menu (port-only) at frame "<<frame<<": level task \""<<task_text<<"\" (objective "<<*result->task<<") to "
+                                     <<coop_order_target_name(result->target)<<"; ticker \""<<text<<"\"\n";
+                            if(hud_object)hud_object->ticker_add(text,{0.6509804F,0.7019608F,1.0F,1.0F},1,false);
+                        }else if(result->role){
                             // 132pw4 (port-only): a Tasks page role, carried out by the partner's driver with its move order.
                             const auto targets=coop_order_partners(result->target,coop_partner_figures.size());
                             CoopOrderState probe;const auto role_order=coop_role_assign(probe,*result->role);
@@ -14280,7 +14435,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     std::cout<<"Coop team task (port-only, 132pw5) at frame "<<frame<<": partner "<<targets[r]+1<<" leaves its post (the player's role)\n";
                                 }
                             }
-                            const std::string text=(result->target==coop_order_all?std::string("All"):"Partner "+std::to_string(result->target+1))+": "
+                            const std::string text=(result->target==coop_order_all?std::string("All"):label_text(coop_partner_label(static_cast<std::size_t>(result->target))))+": "
                                 +label_text(coop_role_label(*result->role));
                             std::cout<<"Coop command menu (port-only) at frame "<<frame<<": role \""<<coop_role_name(*result->role)<<"\" to "
                                      <<coop_order_target_name(result->target)<<"; ticker \""<<text<<"\"\n";
@@ -14291,6 +14446,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 const auto targets=coop_order_partners(result->target,coop_partner_figures.size());
                                 for(std::size_t r=0;r<targets.size();++r){
                                     coop_order_pending.at(targets[r])=CoopPendingOrder{*result->order,pick,r};
+                                    coop_order_pending.at(targets[r])->aim=l1>0.0F;   // 132pt1: Go there aims with the aim view's line
                                     const auto o=*result->order;
                                     if(coop_team_posted(targets[r])&&(o==CoopOrder::follow||o==CoopOrder::regroup||o==CoopOrder::hold||o==CoopOrder::go_there)){
                                         coop_team->released[targets[r]]=true;   // 132pw5: the player's move order takes it off its post
@@ -14298,7 +14454,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     }
                                 }
                             }
-                            const std::string text=(result->target==coop_order_all?std::string("All"):"Partner "+std::to_string(result->target+1))+": "
+                            const std::string text=(result->target==coop_order_all?std::string("All"):label_text(coop_partner_label(static_cast<std::size_t>(result->target))))+": "
                                 +label_text(coop_order_label(*result->order));
                             std::cout<<"Coop command menu (port-only) at frame "<<frame<<": order \""<<coop_order_name(*result->order)<<"\" to "
                                      <<coop_order_target_name(result->target)<<" (R1 pick 0x"<<std::hex<<pick<<std::dec<<"); ticker \""<<text<<"\"\n";
@@ -15095,7 +15251,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const auto& b=combat_session->backpacks().at(m.backpack);
                         if(b.destroyed)
                             throw std::runtime_error("InventoryMsg: 003c8de0 to a backpack destroyed after the send (the queue keeps the raw receiver pointer)");
-                        const auto id=b.object.word(0xc)&0x00ffffffU;   // the registry key: +c without the 00393760 high byte
+                        const auto id=b.object.word(0xc);
                         const bool handled=mission_host->deliver_inventory(id,m.item,m.count);
                         if(!handled&&(b.object.word(0x20)!=0||b.object.word(0x24)!=m.address+0x24))
                             throw std::runtime_error("InventoryMsg: 003caca0 over a non-empty +20 child list is not ported");
@@ -15125,6 +15281,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const bool handled=mission_host->deliver_spawned_npc(generator,spawned.id);
                         std::cout<<"SpawnedNPCMsg -> "<<generator<<" (GetNPC: NPC 0x"<<std::hex<<spawned.id<<std::dec<<") at frame "<<frame
                             <<(handled?": script handler":": no script handler (the generator's receiver 00221610 has no effect)")<<"\n";
+                    }
+                }
+                if(mission_host&&!despawned_npc_msgs.empty()){
+                    // Checkpoint 132fx1: 00220bb0's DespawnedNPCMsgs (00221610 ignores the key 004a4a88: scripts only).
+                    const auto queued=std::move(despawned_npc_msgs);despawned_npc_msgs.clear();
+                    for(const auto& [generator,actor]:queued){
+                        const auto& spawned=spawned_npcs.at(actor);
+                        const bool handled=mission_host->deliver_despawned_npc(generator,spawned.id);
+                        std::cout<<"DespawnedNPCMsg -> "<<generator<<" (NPC 0x"<<std::hex<<spawned.id<<std::dec<<") at frame "<<frame
+                            <<(handled?": script handler":": no script handler")<<"\n";
                     }
                 }
                 if(prof)prof->add(FrameProfile::script,std::chrono::duration<double>(std::chrono::steady_clock::now()-script_messages_begin).count());
@@ -15350,6 +15516,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                     gb.hud_6aa=false;                    // +6aa: the constructor's 0 (0x002460c4); 002426e0 / 00242740 are not hosted
                     const auto gr=apply_player_pad_gates(gated,gb);
+                    if(gr.unpause_131470){
+                        // Checkpoint 132fx1: 0x0024c048: Triangle with the start menu's +6a8 set: 002261c0 (the objective
+                        // manager's +ac is never set: nothing) and 00131470(G, 0), the world pause cleared.
+                        if(!gui_overlay_draw)throw std::runtime_error("0024c068: 00131470(G, 0) with the HUD's +6a8 set but no GUI host");
+                        gui_overlay_draw->host.app_131470(0);
+                        std::cout<<"Triangle with the start menu open at frame "<<frame<<": 002261c0 (objective manager +ac clear), 00131470(G, 0)\n";
+                    }
                     const int gate_state=(gr.disabled?1:0)|(gr.hud_screen?2:0);
                     if(gate_state!=pad_gate_logged){
                         std::cout<<"Pad gates at frame "<<frame<<": "<<(gr.disabled?"disabled (0x0024be28: input +0, 004ffc29, 00241ac0 or state 0x13)":"open")
@@ -15383,6 +15556,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // 132pw4 (port-only): the partner with the level tasks role (the first): it takes the co-op boxes and the commands.
                 std::optional<std::size_t> coop_tasks_k;
                 std::vector<std::uint32_t> coop_task_slots;   // 132ms5: partner k's level tasks slot (n-th tasks partner; 0: none)
+                std::vector<std::pair<std::uint32_t,std::uint32_t>> coop_task_claims;   // 132pt1: (objective, slot) of the assigned level tasks
                 {
                     std::vector<CoopRole> roles;
                     for(std::size_t j=0;j<std::max<std::size_t>(coop_partner_figures.size(),1);++j)
@@ -15390,6 +15564,24 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     coop_tasks_k=coop_tasks_partner(roles);
                     std::uint32_t n=0;
                     for(const auto r:roles)coop_task_slots.push_back(r==CoopRole::tasks?++n:0U);
+                    // 132pt1 (port-only): a partner given a level task from the Level tasks list runs that objective's rules in the
+                    // slot coop_task_slot gives it; the other partners leave those rules to it (CoopCommandInput::claimed). A
+                    // task whose objective is decided (or gone) is over.
+                    for(std::size_t j=0;j<roles.size();++j){
+                        auto& o=j==0?coop_order:coop_extra.at(j-1).coop_order;
+                        if(!o.task)continue;
+                        if(!coop_objective_open(o.task)){
+                            std::cout<<(j==0?std::string("Coop partner (port-only)"):"Coop partner "+std::to_string(j+1)+" (port-only)")<<" level task \""
+                                     <<coop_objective_text(o.task)<<"\" (objective "<<o.task<<") over at frame "<<frame<<"\n";
+                            o.task=0;continue;
+                        }
+                        std::vector<std::uint32_t> taken;
+                        for(const auto& [ob,s]:coop_task_claims)if(ob==o.task)taken.push_back(s);
+                        const auto slot=coop_task_slot(coop_errands,o.task,taken);
+                        if(slot==0)continue;
+                        coop_task_slots.at(j)=slot;
+                        coop_task_claims.emplace_back(o.task,slot);
+                    }
                 }
                 for(std::size_t coop_partner_k=0;coop_partner_k<std::max<std::size_t>(coop_partner_figures.size(),1);++coop_partner_k){
                 std::vector<RootVector> coop_spread;
@@ -15602,12 +15794,18 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                      <<from[0]<<", "<<from[1]<<", "<<from[2]<<"), +114 "<<partner.ai->component().action_114<<"\n";
                             coop_partner_action=h;
                         }
+                        if(const bool cr=(partner_actor.actions().flags_3248&2U)!=0;cr!=coop_partner_crouched){
+                            // 132pt1 (port-only log): the partner's crouch bit (+3248 bit 1: the crawl, action 9) and its path link +114.
+                            std::cout<<"Coop partner (port-only) crouch bit "<<cr<<" at frame "<<frame<<": partner ("<<from[0]<<", "<<from[1]<<", "<<from[2]
+                                     <<"), +114 "<<partner.ai->component().action_114<<"\n";
+                            coop_partner_crouched=cr;
+                        }
                         // Checkpoint 132pw3 (port-only, coop_command_menu.hpp): this partner's command menu order, carried out
                         // with the AI's own natives: StopMovement (0014a9f0 path, the driver's hold), MoveToNode (0014a5c0),
                         // SetTarget (0014a210: the perception target at priority 100) and ResumeAITargeting (0014a1c0).
                         if(auto& pending=coop_order_pending.at(coop_partner_k)){
                             const auto order=pending->order;const auto pick=pending->attack;const auto rank=pending->rank;const auto role=pending->role;
-                            const auto post_node=pending->node;const auto guard=pending->guard;pending.reset();
+                            const auto post_node=pending->node;const auto guard=pending->guard;const auto task=pending->task;const auto aimed=pending->aim;pending.reset();
                             if(role){
                                 // 132pw4 (port-only): the role (its fire order here, its move order below).
                                 const auto was=coop_order.role;coop_role_assign(coop_order,*role);
@@ -15626,16 +15824,44 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 // nodes nearest it, 2.5 m apart (coop_partner_start_nodes, one per partner the order went to).
                                 const auto& eye_cam=(*backpack_camera)[3];
                                 float fx=to[0]-eye_cam[0],fy=to[1]-eye_cam[1];
-                                if(const float fl=std::sqrt(fx*fx+fy*fy);fl>0.01F){
-                                    fx/=fl;fy/=fl;
+                                // 132pt1 (port-only, the user's play-test 2026-10-26 "aiming and issuing Go there, the partners do not
+                                // move"): in the aim view (L1 held at the order) the camera sits at the player's shoulder, so the
+                                // camera-to-player line points sideways (a place 5.5 m beside the player in the morgue, 132pt1's
+                                // coop_go_aim). There the place is where the aim view's line (the camera's forward row +50 row 1, the
+                                // pilot's aim) first meets the level collision within aim_reach past the player, 0.5 m short of
+                                // it, on the floor below it (a trace 20 m down); with no hit the old rule along that line, level.
+                                std::optional<RootVector> aim_place;
+                                if(aimed){
+                                    const auto& cm=*backpack_camera;
+                                    float ax=cm[1][0],ay=cm[1][1],az=cm[1][2];
+                                    if(const float al=std::sqrt(ax*ax+ay*ay+az*az);al>0.01F){
+                                        ax/=al;ay/=al;az/=al;
+                                        constexpr float aim_reach=60.0F;
+                                        const float t0=std::max(0.0F,(to[0]-eye_cam[0])*ax+(to[1]-eye_cam[1])*ay+(to[2]+1.0F-eye_cam[2])*az);
+                                        const RootVector o{eye_cam[0]+ax*t0,eye_cam[1]+ay*t0,eye_cam[2]+az*t0,1.0F};
+                                        const auto& lw=actors.actor(0).world();
+                                        if(const auto hit=trace_world_los(lw,{o,RootVector{ax*aim_reach,ay*aim_reach,az*aim_reach,0.0F},0,0})){
+                                            const RootVector p{hit->point[0]-ax*0.5F,hit->point[1]-ay*0.5F,hit->point[2]-az*0.5F+0.5F,1.0F};
+                                            float pz=to[2];
+                                            if(const auto floor=trace_world_los(lw,{p,RootVector{0.0F,0.0F,-20.0F,0.0F},0,0}))pz=floor->point[2];
+                                            aim_place=RootVector{p[0],p[1],pz,1.0F};
+                                        }
+                                        if(const float hl=std::sqrt(ax*ax+ay*ay);!aim_place&&hl>0.01F){fx=ax/hl;fy=ay/hl;}
+                                    }
+                                }
+                                if(const float fl=std::sqrt(fx*fx+fy*fy);aim_place||fl>0.01F){
+                                    if(!aim_place){fx/=fl;fy/=fl;}
                                     constexpr float reach=30.0F;
                                     const RootVector eye{to[0],to[1],to[2]+1.0F,1.0F};
                                     float d=reach;
-                                    if(const auto hit=trace_world_los(actors.actor(0).world(),{eye,RootVector{fx*reach,fy*reach,0.0F,0.0F},0,0})){
+                                    if(!aim_place)if(const auto hit=trace_world_los(actors.actor(0).world(),{eye,RootVector{fx*reach,fy*reach,0.0F,0.0F},0,0})){
                                         const float hx=hit->point[0]-eye[0],hy=hit->point[1]-eye[1];
                                         d=std::max(0.0F,std::sqrt(hx*hx+hy*hy)-1.0F);
                                     }
-                                    there=RootVector{to[0]+fx*d,to[1]+fy*d,to[2],1.0F};
+                                    there=aim_place?*aim_place:RootVector{to[0]+fx*d,to[1]+fy*d,to[2],1.0F};
+                                    if(aimed)std::cout<<"Coop partner (port-only) go-there in the aim view at frame "<<frame<<": "
+                                                      <<(aim_place?"the aim line meets the level at (":"no hit on the aim line: along it, level, to (")
+                                                      <<(*there)[0]<<", "<<(*there)[1]<<", "<<(*there)[2]<<")\n";
                                     // 132pw5fix2 (port-only): among the nodes a route from the partner's start node reaches (the
                                     // nearest node anywhere could lie past a wall: play-test 2026-10-21, frame 21184, 136174 on the
                                     // street 11 m from a place in the autopsy tent, no route); the walk then goes on to the place.
@@ -15714,9 +15940,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 }
                                 // 132pw5fix2 (port-only): a Tasks page "tasks" role makes the level tasks partner seek its tasks;
                                 // any other move order or role ends the seeking (132pw5: not a team task's post order).
-                                if(role){coop_order.seek_tasks=*role==CoopRole::tasks;coop_order.idle_reported=false;}
+                                if(role){coop_order.seek_tasks=*role==CoopRole::tasks;coop_order.idle_reported=false;coop_order.task=task;}   // 132pt1: task (0: none)
                                 else if(!guard&&(order==CoopOrder::follow||order==CoopOrder::regroup||order==CoopOrder::hold||order==CoopOrder::go_there))
-                                    coop_order.seek_tasks=false;
+                                    {coop_order.seek_tasks=false;coop_order.task=0;}
                                 if(guard){
                                     // 132pw5 (port-only): it guards the post (coop_order_may_engage) with weapons free.
                                     coop_order.guard=true;coop_order.fire=CoopFireOrder::weapons_free;
@@ -15952,6 +16178,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             CoopCommandInput command_in;command_in.player=to;command_in.triangle=coop_command_triangle;
                             command_in.partner_free=!coop_boost.box&&!coop_climb_link&&!coop_errand_acting;
                             command_in.slot=coop_task_slots.at(coop_k);command_in.frame=frame;
+                            command_in.objective=coop_order.task;if(!coop_order.task)command_in.claimed=coop_task_claims;   // 132pt1
                             command_in.tasks=static_cast<std::uint32_t>(std::count_if(coop_task_slots.begin(),coop_task_slots.end(),[](std::uint32_t s){return s!=0;}));
                             {
                                 // 132ms5 (port-only): the item gates read the agents' +3528 lists (PlayerGetItemCount's), and a
@@ -16390,11 +16617,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             CoopPlayerSample ps;ps.frame=frame;ps.floor=to;ps.actions=player_actor.actions().active_actions;
                             ps.airborne=player_actor.physical().response.physical.airborne_de!=0;
                             ps.crouched=(player_actor.actions().flags_3248&2U)!=0;ps.crawl_zone=sim.button_state().zone_24!=0;
+                            if(std::pair<bool,bool>{ps.crouched,ps.crawl_zone}!=coop_player_crouch_seen){   // 132pt1 (port-only): the crawl record's inputs
+                                coop_player_crouch_seen={ps.crouched,ps.crawl_zone};
+                                std::cout<<"Coop breadcrumbs (port-only): the player's crouch bit (+3248 bit 1) "<<ps.crouched<<", crawl zone (+24) "<<ps.crawl_zone<<" at frame "<<frame
+                                         <<" ("<<to[0]<<", "<<to[1]<<", "<<to[2]<<")\n";
+                            }
                             const auto& crumb_world=actors.actor(0).world();
                             CoopBreadcrumbHost crumb_host;
                             crumb_host.clear=[&](const RootVector& a,const RootVector& b){
                                 // The level collision between the two places, 0.5 above each (0022cb10's ray answered by 0013a480).
-                                return !coop_partner_wall_hides(crumb_world,RootVector{a[0],a[1],a[2]+0.5F,1},RootVector{b[0],b[1],b[2]+0.5F,1});};
+                                return !coop_partner_wall_hides(crumb_world,RootVector{a[0],a[1],a[2]+0.5F,1},RootVector{b[0],b[1],b[2]+0.5F,1})
+                                    &&!coop_walk_crosses_crawl_zone(sim.hotboxes(),a,b);};   // 132pt1: no walking link through a crawl zone
                             crumb_host.region=[&](const RootVector& p){return npc_region_at(*npc_routes->regions,npc_graph,p,-1);};
                             for(const auto& crumb:coop_breadcrumb_record(coop_crumb_recorder,coop_crumb_config,ps)){
                                 std::cout<<"Coop breadcrumbs (port-only): the player's "<<coop_traversal_kind_name(crumb.kind)<<" frames "<<crumb.start_frame<<"-"<<crumb.end_frame
@@ -16564,7 +16797,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             const auto& bridge_world=actors.actor(0).world();
                             CoopBreadcrumbHost bridge_host;
                             bridge_host.clear=[&](const RootVector& a,const RootVector& b){
-                                return !coop_partner_wall_hides(bridge_world,RootVector{a[0],a[1],a[2]+0.5F,1},RootVector{b[0],b[1],b[2]+0.5F,1});};
+                                return !coop_partner_wall_hides(bridge_world,RootVector{a[0],a[1],a[2]+0.5F,1},RootVector{b[0],b[1],b[2]+0.5F,1})
+                                    &&!coop_walk_crosses_crawl_zone(sim.hotboxes(),a,b);};   // 132pt1: no walking link through a crawl zone
                             bridge_host.region=[&](const RootVector& p){return npc_region_at(*npc_routes->regions,npc_graph,p,-1);};
                             std::string why;
                             const auto nodes=install_coop_walk_bridge(npc_graph,coop_nod_count,coop_crumb_first,coop_crumb_recorder.trail,from,to,start,coop_crumb_config,
@@ -16639,11 +16873,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             };
                             if(go.leg==GoLeg::node){
                                 const float nd=flat(gn.position[0],gn.position[1]);
-                                if((nd<=coop_go_config.arrive&&std::fabs(from[2]-gn.position[2])<=coop_follow_config.max_dz)||(reached&&coop_follow_node_pending<0)){
+                                const float node_arrive=go.bridged?coop_go_config.point_arrive:coop_go_config.arrive;
+                                if((nd<=node_arrive&&std::fabs(from[2]-gn.position[2])<=coop_follow_config.max_dz)||(reached&&coop_follow_node_pending<0)){
                                     if(go.point&&to_place>coop_go_config.point_arrive&&!go.bridged){
                                         coop_go_leg(coop_order,GoLeg::settle,to_place,frame);
                                         std::cout<<"Coop partner (port-only) go-there: at node "<<gn.id<<" at frame "<<frame<<", "<<to_place<<" from the place: on to it\n";
-                                    }else if(go.bridged&&to_place<=coop_go_config.arrive)arrive("the place");
+                                    }else if(go.bridged&&to_place<=coop_go_config.point_arrive)arrive("the place");
                                     else arrive(("node "+std::to_string(gn.id)).c_str());
                                 }else if(coop_go_stalled(coop_order,coop_go_config,nd,frame))coop_go_hold("no progress to its node");
                             }
@@ -16677,7 +16912,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                         const auto& place_world=actors.actor(0).world();
                                         CoopBreadcrumbHost place_host;
                                         place_host.clear=[&](const RootVector& a,const RootVector& b){
-                                            return !coop_partner_wall_hides(place_world,RootVector{a[0],a[1],a[2]+0.5F,1},RootVector{b[0],b[1],b[2]+0.5F,1});};
+                                            return !coop_partner_wall_hides(place_world,RootVector{a[0],a[1],a[2]+0.5F,1},RootVector{b[0],b[1],b[2]+0.5F,1})
+                                    &&!coop_walk_crosses_crawl_zone(sim.hotboxes(),a,b);};   // 132pt1: no walking link through a crawl zone
                                         place_host.region=[&](const RootVector& p){return npc_region_at(*npc_routes->regions,npc_graph,p,-1);};
                                         const std::vector<RootVector> no_trail;
                                         place_nodes=install_coop_walk_bridge(npc_graph,coop_nod_count,coop_crumb_first,no_trail,from,*go.point,coop_route_start_node(),
@@ -16740,7 +16976,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             // Checkpoint 132ob11: not in a crawl zone either (the input's +0x24, CROUCH_ZONES_AND_RUNNING_JUMP.md): a
                             // catch-up there stood the partner up under the crawl's low ceiling, on top of the structure.
                             coop_partner_record_trail(coop_catch_up,coop_catch_up_config,to,frame,pp.mode_20==0&&pp.airborne_de==0&&!(pacts&climbing)
-                                &&!sim.button_state().zone_24);
+                                &&!sim.button_state().zone_24&&!(player_actor.actions().flags_3248&2U));   // 132pt1: nor crouched (inside a duct between its zones)
                             const bool busy=coop_boost.box||errand_busy||coop_climb_link||on_ladder||fighting||partner_actor.physical().response.physical.mode_20!=0
                                 ||(partner_actor.actions().active_actions&climbing)!=0||!coop_order_follows(coop_order);   // 132pw3: or a hold / go-there order
                             const auto cull=npc_scene_38.find(partner.actor);
@@ -17046,6 +17282,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(combat_session){
                     const auto& combat_frame=combat_session->end_frame();
                     danger_value=combat_frame.hud_meter;
+                    if(combat_frame.arc_preview){
+                        if(!throw_arc_draws)std::cout<<"Throw arc preview (0025cdc0) at frame "<<actors.frame_counter()<<": "
+                                                     <<combat_frame.arc_preview->points.size()<<" points from ("
+                                                     <<combat_frame.arc_preview->points.front()[0]<<", "<<combat_frame.arc_preview->points.front()[1]
+                                                     <<", "<<combat_frame.arc_preview->points.front()[2]<<") to ("<<combat_frame.arc_preview->points.back()[0]
+                                                     <<", "<<combat_frame.arc_preview->points.back()[1]<<", "<<combat_frame.arc_preview->points.back()[2]<<")\n";
+                        throw_arc_draw=*combat_frame.arc_preview;   // 0025cdc0 clears the vector first (001810c0 at 0025d218)
+                    }
                     for(std::size_t ck=0;ck<coop_partner_figures.size();++ck)coop_with(ck,[&]{if(coop_partner_figure&&coop_partner_started){   // 132pw3: each partner
                         // Checkpoint 132ob6 (port-only, coop_partner.hpp CoopCombatConfig): the player's combat signals.
                         const auto partner_index=coop_partner_figure->actor;
@@ -17394,6 +17638,47 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         water_updated=true;
                         if(p.decals)p.decals->service(step_dt,decal_root);   // 00279630 at 00133800, after 003ec4c0
                     }
+                    // Checkpoint 132fx1: 0016b4f0's cause-5 sound from a projectile bounce, delivered through the
+                    // AI Sound System 0016adb0 to the active think-list NPCs. Distance listeners hear it normally;
+                    // listeners that sense the present owner hear it at value 0 even while deaf.
+                    if(combat_frame.throws&&combat_session->throws())
+                        for(const auto& [object,ev]:combat_frame.throws->world.projectile_events)
+                            if(ev.kind==ThrownProjectileEvent::Kind::landed_ai_sound){
+                                const auto projectile=combat_session->throws()->projectile_view(object);
+                                if(!projectile)throw std::runtime_error("0016b4f0: a landed-projectile sound whose source no longer resolves");
+                                NpcSoundWorld sound;
+                                sound.object_by_id=[object,id=projectile->id](std::int32_t q){return q==id?object:0;};
+                                sound.position=[object,point=projectile->point_bc](std::uint64_t q){
+                                    if(q!=object)throw std::runtime_error("0016adb0: position of an object other than the projectile source");
+                                    return point;};
+                                sound.projectile_owner=[object,owner=projectile->owner](std::uint64_t q){return q==object?owner:0;};
+                                sound.ai_controlled=[](std::uint64_t){return false;};
+                                sound.hear_directed=[](std::uint64_t,std::uint8_t,std::uint64_t,float){};
+                                sound.listeners=[&]{
+                                    std::vector<std::optional<NpcSoundListener>> out;
+                                    for(auto& npc:npcs){
+                                        if(!npc.active||!npc.ai||npc.ai->is_remote()||npc.ai->port_is_remote_controlled()||!npc.ai->perception_hosted())continue;
+                                        auto& actor=actors.actor(npc.actor);
+                                        const auto m=root_placement_matrix(actor.floor_root_placement());
+                                        NpcSoundListener l;
+                                        l.actor=actor.handle();l.id=static_cast<std::int32_t>(npc.actor_id);l.life_108=actor.life_state();l.ai_58=true;
+                                        l.deafness_33ac=combat_session->throws()->senses(npc.actor).flash_33ac;
+                                        l.position={m[12],m[13],m[14],m[15]};
+                                        auto* ai=npc.ai.get();const auto a=npc.actor;
+                                        l.hear=[&actors,ai,a](std::uint8_t cause,std::uint64_t source,float value){
+                                            ai->hear(actors.actor(a),cause,source,value);};
+                                        l.sees=[&actors,ai,a](std::uint64_t seen){return ai->senses(actors.actor(a),seen);};
+                                        out.emplace_back(std::move(l));
+                                    }
+                                    return out;
+                                };
+                                NpcSoundMessage message;
+                                message.kind_24=0;message.cause_25=static_cast<std::uint8_t>(ev.value);
+                                message.radius_2c=ev.amount;message.source_id_30=projectile->id;
+                                npc_ai_sound_event(message,sound);
+                                std::cout<<"Projectile "<<object<<" landed sound at frame "<<frame<<" (0016b4f0 cause "
+                                         <<ev.value<<", radius "<<ev.amount<<") delivered by 0016adb0\n";
+                            }
                     print_combat_frame(combat_frame,*combat_session,actors,combat_ids,*weapon_db,combat_printed,frame,
                                        hud_object?&*hud_object:nullptr);
                     // 001868a8: 00260990(*004ffc30, 1, 0.0, *0048a2c8 = 0.3, amount, amount), the flash white-out.
@@ -17722,6 +18007,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     relit.assign(touched.size(),0);
                     if(terrain_light_memo_on&&terrain_light_memo.size()!=terrain.batch_spans.size()){
                         terrain_light_memo.assign(terrain.batch_spans.size(),{});terrain_light_memo_valid.assign(terrain.batch_spans.size(),0);
+                        terrain_light_memo2.assign(terrain.batch_spans.size(),{});terrain_light_colours2.assign(terrain.batch_spans.size(),{});   // 132vc2
                     }
                     // Per touched batch (132vs2: on the pool; each writes its own batch's memo, flag and vertices).
                     const auto batch_pass=[&](std::size_t j){
@@ -17735,15 +18021,36 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             // so the batch's colours are a function of the reaching lights, in list order.
                             const std::uint32_t mask=li!=not_lit?lit_masks[li]:0U;
                             auto& memo=terrain_light_memo[b];
-                            if(terrain_light_memo_valid[b]&&memo.size()==std::size_t(std::popcount(mask))){
-                                bool same=true;
-                                for(std::size_t i=0,m=0;same&&i<lights.size();++i)
-                                    if(mask>>i&1U)same=std::memcmp(&memo[m++],&lights[i],sizeof(TerrainPointLight))==0;
-                                if(same)return;
+                            const auto same_as=[&](const std::vector<TerrainPointLight>& m){
+                                if(m.size()!=std::size_t(std::popcount(mask)))return false;
+                                for(std::size_t i=0,k=0;i<lights.size();++i)
+                                    if(mask>>i&1U)if(std::memcmp(&m[k++],&lights[i],sizeof(TerrainPointLight))!=0)return false;
+                                return true;
+                            };
+                            if((terrain_light_memo_valid[b]&1U)&&same_as(memo))return;
+                            // Port-only (132vc2, research/VITA.md "Main-thread CPU (132vc2)"): the batch's colours under the
+                            // light set before this one are kept (a flickering light switches between two sets: TORONTO1's
+                            // NI light 143850 every 2 to 4 frames); back on that set they are copied back instead of
+                            // computed again. The colours are a function of the reaching lights, as the memo above assumes.
+                            auto& memo2=terrain_light_memo2[b];auto& colours2=terrain_light_colours2[b];
+                            const auto vertices=std::span(terrain.vertices).subspan(batch.first_vertex,batch.vertex_count);
+                            const bool had=(terrain_light_memo_valid[b]&1U)!=0;
+                            if((terrain_light_memo_valid[b]&2U)&&same_as(memo2)&&colours2.size()==3*vertices.size()){
+                                for(std::size_t v=0;v<vertices.size();++v)for(std::size_t i=0;i<3;++i)
+                                    std::swap(vertices[v].color[i],colours2[3*v+i]);
+                                std::swap(memo,memo2);
+                                terrain_light_memo_valid[b]=had?3U:1U;
+                                relit[j]=1;
+                                return;
+                            }
+                            if(had){   // the current set's colours become the kept ones
+                                colours2.resize(3*vertices.size());
+                                for(std::size_t v=0;v<vertices.size();++v)for(std::size_t i=0;i<3;++i)colours2[3*v+i]=vertices[v].color[i];
+                                std::swap(memo2,memo);
                             }
                             memo.clear();
                             for(std::size_t i=0;i<lights.size();++i)if(mask>>i&1U)memo.push_back(lights[i]);
-                            terrain_light_memo_valid[b]=1;
+                            terrain_light_memo_valid[b]=had?3U:1U;
                         }
                         relit[j]=1;
                         relight_terrain_batch(lights,terrain_batch_spheres[b],batch,
@@ -18097,9 +18404,61 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 // The render pass 00132e50 runs the zone tracker (0013d8a0) after the frame's update.
                 if(zone_tracker){
-                    const auto zone_requests=zone_tracker->update(actor_position_e0(sim),sim.component());
+                    auto zone_requests=zone_tracker->update(actor_position_e0(sim),sim.component());
+                    // Checkpoint 132pt1 (port-only, research/COOP.md "Partners in far zones"): the original keeps one zone tracker
+                    // per local view (00132bc0 -> 00132dd8, its owner the local player's actor), so in an online game each human
+                    // agent's console keeps that agent's zones active. Each CPU partner stands in for such an agent: it gets its
+                    // own tracker (0013ee70 / 0013db30 at its actor's +e0, 00133e00), and the members its tracker lists stay
+                    // present (+2d) beside the player's (ZoneTracker::set_held): the generators, crates, sounds, lights and the
+                    // objects' collision (001830d0) of the partner's zone run as if a co-op player stood there.
+                    if(!coop_partner_figures.empty()){
+                        while(coop_zone_trackers.size()<coop_partner_figures.size())coop_zone_trackers.emplace_back(*zone_map);
+                        std::vector<std::uint32_t> held;
+                        for(std::size_t j=0;j<coop_partner_figures.size();++j){
+                            const auto* f=coop_partner_figures[j];
+                            if(!f)continue;
+                            const auto& pa=actors.actor(f->actor);
+                            auto& pt=coop_zone_trackers[j];
+                            const auto was=pt.zone();
+                            (void)pt.update(actor_position_e0(pa),pa.component());
+                            if(pt.zone()!=was)
+                                std::cout<<"Coop partner"<<(j?" "+std::to_string(j+1):std::string())<<" (port-only) zone at frame "<<frame<<": terrain "
+                                         <<zone_map->zones().at(pt.zone()).key<<" ("<<pt.own_keys().size()<<" members kept present)\n";
+                            // A partner holds its zones while it acts on its own: a command or level task (an errand under way or
+                            // its action), an assigned task, or a move order other than follow (hold, go there). Not a team task post
+                            // (132pw5: the posts lie beside the player's own fight; holding their zones kept TORONTO1's saboteur
+                            // generators on in coop_t1_3p_end and the power supply fell, objective 5 at 22178). A
+                            // following partner keeps to the player's view (its tracker runs, nothing held): the recorded one-partner
+                            // routes stay as they were (coop_t2: a lagging follower's zones kept TORONTO2's theatre generators on and
+                            // a spawn killed the CHA officer, objective 9).
+                            const auto& po=j==0?coop_order:coop_extra.at(j-1).coop_order;
+                            const auto& pe=j==0?coop_errand:coop_extra.at(j-1).coop_errand;
+                            const bool acting=j==0?coop_errand_acting.has_value():coop_extra.at(j-1).coop_errand_acting.has_value();
+                            const bool own=(po.move!=CoopMoveOrder::follow&&!po.guard)||po.task!=0||pe.rule.has_value()||acting;
+                            if(own!=coop_zone_own.at(j)){
+                                coop_zone_own.at(j)=own;
+                                std::cout<<"Coop partner"<<(j?" "+std::to_string(j+1):std::string())<<" (port-only) zone at frame "<<frame<<": "
+                                         <<(own?"on its own: its zones are kept present":"following: the player's zones")<<"\n";
+                            }
+                            if(own)held.insert(held.end(),pt.own_keys().begin(),pt.own_keys().end());
+                        }
+                        const auto partner_requests=zone_tracker->set_held(std::move(held));
+                        if(!partner_requests.empty())
+                            print_zone_requests(partner_requests,*zone_map,*zone_tracker,population,sim,"for the CPU partners' zones at frame "+std::to_string(frame));
+                        zone_requests.insert(zone_requests.end(),partner_requests.begin(),partner_requests.end());
+                    }
                     if(!zone_requests.empty())print_zone_requests(zone_requests,*zone_map,*zone_tracker,population,sim,"at frame "+std::to_string(frame));
-                    apply_generator_zone_requests(zone_requests,*generator_world);
+                    // Checkpoint 132fx1: 00220bb0 on a forced deactivation: each spawned actor's virtual +60(1) (001b5190, as the
+                    // prelogic's +60) and a DespawnedNPCMsg to the generator; the prelogic then despawns the inactive actors.
+                    apply_generator_zone_requests(zone_requests,*generator_world,[&](GeneratorState& g,const GeneratorListEntry& n){
+                        const auto found=spawned_npcs.find(n.actor);
+                        if(found==spawned_npcs.end()||found->second.c!=n.id)
+                            throw std::runtime_error("00220c14: Generator "+std::to_string(g.id)+"'s +90 handle no longer resolves (the original calls virtual +60 through null)");
+                        actors.deactivate(n.actor);
+                        despawned_npc_msgs.emplace_back(g.id,n.actor);
+                        std::cout<<"Generator "<<g.id<<" deactivated immediately (00220bb0) at frame "<<frame<<": NPC 0x"<<std::hex<<found->second.id<<std::dec
+                                 <<" (actor "<<n.actor<<") +60(1), DespawnedNPCMsg queued\n";
+                    });
                     apply_fire_zone_requests(zone_requests,combat_session.get());
                     apply_sound_zone_requests(zone_requests,sound_world?&*sound_world:nullptr);
                     apply_crate_zone_requests(zone_requests,combat_session.get());
@@ -19181,16 +19540,43 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             struct ParticleTally{std::size_t sprites=0,assets=0,placements=0,culled=0,adc=0,haze_sprites=0,haze_adc=0,smoke_drawn=0,smoke_sprites=0;
                 std::map<std::string,std::array<std::size_t,3>> sources;};   // sources: batches, type-0 batches, heat-haze batches
             ParticleTally ptally;
+            // 132vc2 (port-only, particle_tail.hpp): the frame's particle tails on the pool, finished in order before
+            // the frame is handed to the render thread (finish_particle_tails; the hand-off callback as a backstop).
+            std::vector<std::shared_ptr<ParticleTail>> particle_tails;
+            struct ParticleTailGuard{
+                std::vector<std::shared_ptr<ParticleTail>>& tails;WorkerPool& pool;gfx::RenderThread& rt;
+                ~ParticleTailGuard(){
+                    if(!tails.empty()){   // an exception left the frame: the places are filled with nothing
+                        try{pool.wait_tasks();}catch(...){}
+                        for(auto& t:tails)try{rt.fill(t->slot,[]{});}catch(...){}
+                        tails.clear();
+                    }
+                    rt.set_before_hand_off({});
+                }
+            } particle_tail_guard{particle_tails,workers,render_thread};
             // One object's batches through the sprite programs' batch cull and per-sprite ADC (Checkpoint 122e) under
             // its world (node+10 rows).
             // Checkpoint 132mt3 (port-only): with workers, the object's draw recorded its VU1 MSCALs (DeferredDraws);
             // they and the sprite programs run on the workers, merged in batch order (draw_prepare.hpp).
-            const auto draw_batches=[&](const std::string& source,std::vector<particle::ParticleBatch>& batches,const auto& world){
+            const auto draw_batches=[&](const std::string& source,std::vector<particle::ParticleBatch>& batches,const auto& world,bool tail_ok=false){
                 auto& p=*play_particles;
                 // Checkpoint 132fx3: batches under an attach matrix (003a1fc0) are drawn by the combat particle draw only.
                 for(const auto& b:batches)if(b.attach)throw std::runtime_error(source+": an attached emitter's matrix (003a1fc0) in this draw");
                 const auto pf=particle_draw->frame(world);
                 OMEGA_ZONE_LAPS(batch_laps);   // 132vd1: the zones
+                // 132vc2 (port-only, particle_tail.hpp): the programs, sprites and vertices on the pool, drawn later at
+                // this place of the frame (RenderThread::reserve); finish_particle_tails below adds the counts.
+                if(tail_ok&&g_particle_tail.load(std::memory_order_relaxed)&&workers.workers()&&render_thread.threaded()
+                   &&!batches.empty()&&!particle_draw->lost_now()){
+                    if(const auto slot=render_thread.reserve()){
+                        particle_tails.push_back(start_particle_tail(workers,*particle_draw,std::move(batches),particle_records,pf,no_heat_haze,slot));
+                        if(captures.count(frame))particle_tails.back()->source=source;   // counted at the finish
+                        static bool tail_reported=false;
+                        if(!tail_reported){tail_reported=true;std::cout<<"Particle tails (port-only, 132vc2): the first object's programs, sprites and vertices on the pool at frame "<<frame<<"\n";}
+                        OMEGA_ZONE_LAP(batch_laps,"particle.tail_start");
+                        return std::size_t{0};
+                    }
+                }
                 const auto drawn=prepare_particle_sprites(workers,batches,particle_records,pf.cull,pf.sprite,no_heat_haze);
                 OMEGA_ZONE_LAP(batch_laps,"particle.prepare");
                 if(captures.count(frame)){
@@ -19209,6 +19595,48 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 ptally.sprites+=n;
                 return n;
             };
+            const auto finish_particle_tails=[&]{
+                if(particle_tails.empty())return;
+                OMEGA_ZONE("particle.tail_finish");
+                auto tails=std::move(particle_tails);particle_tails.clear();
+                const auto w0=std::chrono::steady_clock::now();
+                std::exception_ptr error;
+                try{workers.wait_tasks();}catch(...){error=std::current_exception();}
+                const auto w1=std::chrono::steady_clock::now();
+                auto& p=*play_particles;
+                std::size_t k=0;
+                for(;k<tails.size()&&!error;++k){
+                    auto& t=*tails[k];
+                    if(t.error){error=t.error;break;}
+                    try{
+                        if(!t.source.empty()){   // a capture frame's batches by source (the programs have set .stop)
+                            auto& n=ptally.sources[t.source];
+                            for(const auto& b:t.batches){++n[0];n[1]+=b.emitter&&b.emitter->u32(0x00)==particle::kType0EmitterVtable;n[2]+=b.stop==0x1cc8;}
+                        }
+                        for(const auto& b:t.batches)ptally.culled+=!(no_heat_haze&&b.stop==0x1cc8);
+                        ptally.culled-=t.sprites.size();
+                        for(const auto& b:t.sprites){
+                            ptally.adc+=b.adc;p.range_particles+=b.range;p.range_adc+=b.range_adc;
+                            if(b.stop==0x1cc8){ptally.haze_sprites+=b.sprites.size();ptally.haze_adc+=b.adc;}
+                        }
+                    }catch(...){error=std::current_exception();break;}   // this slot is still open
+                    std::size_t n=0;
+                    const auto unfilled_before=render_thread.unfilled();
+                    try{
+                        render_thread.fill(t.slot,[&]{n=particle_draw->emit_sprites(t.prepared);});
+                    }catch(...){
+                        error=std::current_exception();
+                        if(render_thread.unfilled()<unfilled_before)++k;   // fill consumed this slot before recording
+                        break;
+                    }
+                    ptally.sprites+=n;
+                }
+                for(;k<tails.size();++k)try{render_thread.fill(tails[k]->slot,[]{});}catch(...){}   // after a failure: nothing
+                particle_tail_count_finish(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(w1-w0).count()),
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-w1).count()));
+                if(error)std::rethrow_exception(error);
+            };
+            render_thread.set_before_hand_off(finish_particle_tails);
             // Checkpoint 132cp10: one list 5120 particle object's vt+58 with its +38 (the cull code, or 2 without bounds)
             // and 003a1ad0's distance fade for code 0x10.
             const auto draw_scene_particle=[&](std::size_t k){
@@ -19221,7 +19649,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(!pl.asset.has_bounds())return;   // 00394520: no instance, nothing drawn
                     std::vector<particle::ParticleBatch> batches;
                     {OMEGA_ZONE("particle.asset_draw");const DeferredDraws deferring(*p.system,particle_records,workers);pl.asset.draw(*p.system,o.code,batches,nullptr,o.fade);}
-                    draw_batches("PLR "+std::to_string(pl.key)+" "+pl.name,batches,pl.node);
+                    draw_batches("PLR "+std::to_string(pl.key)+" "+pl.name,batches,pl.node,true);
                     ++ptally.placements;
                 }else if(o.kind==1){
                     auto& asset=p.assets.at(o.id);
@@ -19232,7 +19660,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     {OMEGA_ZONE("particle.nie_draw");const DeferredDraws deferring(*p.system,particle_records,workers);asset.draw(*p.system,o.code,batches,nullptr,o.fade);}
                     std::string source="NIE "+std::to_string(o.id);
                     for(const auto& [eid,ename]:p.event_assets)if(eid==o.id)source+=" "+ename;
-                    draw_batches(source,batches,*world);
+                    draw_batches(source,batches,*world,true);
                     ++ptally.assets;
                 }else if(o.kind==3){
                     // Checkpoint 132ms2: the weather record's vt+58 00232e00: each visible cell's 003a1ad0(instance, +38,
@@ -19717,7 +20145,45 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // Planned particle objects the scene draw did not reach (a lost device) draw after it; those past list
             // 5120's 0x400 slots (0013e374) stay undrawn.
             if(scene_frame)for(std::size_t k=0;k<scene_particles.size();++k)if(scene_particles[k].state==1)draw_scene_particle(k);
+            if(captures.count(frame))finish_particle_tails();   // 132vc2: the counts before the capture's report
             report_particles();
+            // 002755f0 after the scene: active tracer records enter 002757a0.
+            // The retail particle resource is always -1. InitBullet stores
+            // *00236f20(0x1a) at +11c; draw the prism with that SPECFX.HOG
+            // texture, cBullet::sUvSets and render mode 5's nearest sampler.
+            if(scene_frame&&combat_session){
+                const auto meshes=bullet_tracer_meshes(combat_session->combat().bullets());
+                std::size_t triangles=0;
+                if(decal_draw&&!meshes.empty())triangles=decal_draw->draw_bullet_tracers(meshes);
+                if(!meshes.empty()&&(!bullet_tracer_draws++||captures.count(frame)))
+                    std::cout<<"Bullet draw (002755f0 / 002757a0) at frame "<<frame<<": "<<meshes.size()
+                             <<" tracer prism(s), "<<triangles<<" triangles, effect 0x1a texture "<<meshes.front().material.texture
+                             <<", cBullet::sUvSets phase "<<int(meshes.front().phase)<<", ALPHA 0x44, nearest"
+                             <<(decal_draw?"":" (not drawn without --textured)")<<"\n";
+            }
+            // Checkpoint 132wf1: the render frame 00132e50 after the scene (0013d8a0 / 0013d950, 002755f0): 0025c650 at
+            // 001330fc draws the arc preview's vector as one untextured triangle strip and clears it (001810c0).
+            if(throw_arc_draw){
+                const auto ribbon=throw_arc_ribbon(*throw_arc_draw);
+                std::size_t triangles=0;
+                if(decal_draw&&ribbon.size()>=3){
+                    particle::ShatterFlush s;s.texture=-1;s.alpha=throw_arc_alpha;
+                    // The strip's triangles (k, k + 1, k + 2). PORT-ONLY (renderer): the GS draws the untextured strip in
+                    // its vertex colour (rgb / 255; the ALPHA blend reads alpha / 128); the triangle path modulates an image,
+                    // here the white one of slot -1.
+                    const auto vertex=[](const ThrowArcVertex& v){
+                        return particle::ShatterVertex{v.position,{v.rgba[0]/255.0F,v.rgba[1]/255.0F,v.rgba[2]/255.0F,v.rgba[3]/128.0F},
+                                                       {2048.0F,2048.0F,1.0F,0.0F}};};
+                    for(std::size_t k=0;k+2<ribbon.size();++k)for(std::size_t j=0;j<3;++j)s.vertices.push_back(vertex(ribbon[k+j]));
+                    if(!decal_draw->has_handle_texture(-1))decal_draw->set_handle_texture(-1,nullptr);
+                    const DecalMatrix world{{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}}};
+                    triangles=decal_draw->draw_shatter({s},world);
+                }
+                if(!throw_arc_draws++||captures.count(frame))
+                    std::cout<<"Throw arc draw (0025c650) at frame "<<frame<<": "<<throw_arc_draw->points.size()<<" points, "
+                             <<ribbon.size()<<" strip vertices, "<<triangles<<" triangles"<<(decal_draw?"":" (not drawn without --textured)")<<"\n";
+                throw_arc_draw.reset();
+            }
             {
                 std::ostringstream s;s<<std::hex;
                 s<<"in the scene draw";for(const auto id:hooks_in_draw)s<<" "<<id;
@@ -19936,6 +20402,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
             }
             OMEGA_ZONE_LAP(render_laps,"render.fade_overlay");
+            finish_particle_tails();   // 132vc2: the particle tails into their places, before the frame leaves
+            OMEGA_ZONE_LAP(render_laps,"render.particle_tails");
             // Port-only (132win3): a D3D call of this frame's draws saw the device lost (or --test-device-lost-mid):
             // the device is re-created now and the frame is dropped (no capture, no present).
             bool frame_dropped=false;

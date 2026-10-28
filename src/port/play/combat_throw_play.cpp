@@ -361,12 +361,13 @@ struct CombatThrows::Impl final:AreaWorld {
     }
     bool valid(const ObjectWeakHandle& h) override{return resolves(h);}
     // The fields of the admitted area types (3; 2 / 8 never reach the
-    // per-type part, and 8 is refused at launch; 4, the fire patch of a
+    // per-type part; 4, the fire patch of a
     // hold-8/9 bullet, checkpoint 132uk4): +108, the controller's +54,
     // +14, the class word (actors are human), +e4, +f4 (the 'flor' placement),
     // +3470 (001b31b0, actor_goggles.hpp; 00259d54 tests == 1), +44, and the
-    // fire fields +33b8 / +33a4 / +326a (the health's). The gas fields (+33a5,
-    // +346b) are read only for the types 5..7, which are refused at launch.
+    // fire fields +33b8 / +33a4 / +326a (the health's). The gas fields: +33a5 (the
+    // health's) and +346b (SetNotGasable, CombatThrowConfig::not_gasable_346b;
+    // Checkpoint 132fx1: the lethal and knockout gases 5 / 7).
     AreaTarget target(std::uint64_t object) override{
         const auto a=index(object);
         auto& actor=aw().actor(a);
@@ -381,6 +382,8 @@ struct CombatThrows::Impl final:AreaWorld {
         t.fire_immune_33b8=actor.health().fire_immune_33b8;
         t.burning_326a=actor.health().burning_326a;
         t.night_vision_3470=actor.item_actions().vision_3470==1;   // 00259d54: == 1
+        t.killed_33a5=actor.health().killed_33a5;                    // Checkpoint 132fx1 (00259db8)
+        if(c.not_gasable_346b)t.not_gasable_346b=c.not_gasable_346b(a);   // 002596e0 (read only by the gases)
         if(!c.stealth_44)fail("the stealth +44 (00133ab0, model light gather 00373320) the flash's blindness reads is not hosted");
         t.stealth_44=c.stealth_44(a);
         return t;
@@ -389,8 +392,17 @@ struct CombatThrows::Impl final:AreaWorld {
         auto& actor=aw().actor(index(object));
         return {actor.player_controller(),actor.byte_14()!=0};
     }
-    RootVector node_position(std::uint64_t,std::int32_t) override{fail("the gas exposure (002596e0) is not hosted");}
-    std::optional<RootVector> los(const RootVector&,const RootVector&) override{fail("the gas extents' LOS (0025a2d0, mask 0x58) is not hosted");}
+    // Checkpoint 132fx1: the gases' reads. 00132910(00132a30(object), node): the skeleton node's world row 3.
+    RootVector node_position(std::uint64_t object,std::int32_t node) override{
+        if(!c.not_gasable_346b)fail("the gas exposure 002596e0 reads +346b (CombatThrowConfig::not_gasable_346b)");
+        return aw().actor(index(object)).skeleton_node_world_matrix(node)[3];
+    }
+    // 00148290 with list 0 over the static world, the excluded mask 0x58 (0025a2d0 / 002596e0): the hit point.
+    std::optional<RootVector> los(const RootVector& start,const RootVector& displacement) override{
+        const auto hit=trace_world_los(aw().collision(),WorldLosQuery{start,displacement,0,0x58});
+        if(!hit)return std::nullopt;
+        return hit->point;
+    }
     // 00259bb0 (fire): 00186360(object, 1, owner or null, 1, 0, -1.0).
     void ignite(std::uint64_t object,std::uint64_t owner) override{ignite(index(object),1,owner,1,0,-1.0F);}
     void flash(std::uint64_t object,float amount) override{apply_actor_flash(senses.at(index(object)),amount);}   // 001866e0
@@ -399,8 +411,15 @@ struct CombatThrows::Impl final:AreaWorld {
         auto& actor=aw().actor(a);
         if(apply_actor_blind(senses.at(a),amount,actor.byte_14()!=0,actor.player_controller()))frame.white_outs.push_back({a,amount});
     }
-    void damage(std::uint64_t,std::uint64_t,std::uint8_t,std::uint8_t,float) override{fail("gas damage is not hosted");}
-    void tear_gas(std::uint64_t) override{fail("the tear-gas action 6 (0055d480) is not hosted");}
+    // Checkpoint 132fx1: the gases' object +100(object, owner, category, type, null, 0, null, amount), as the fire zone's.
+    void damage(std::uint64_t object,std::uint64_t owner,std::uint8_t category,std::uint8_t type,float amount) override{
+        const auto a=index(object);
+        auto r=damage_request(owner,category,type,amount);
+        frame.fire_damage.push_back({a,r.source,r.category,r.type,r.amount});
+        s.actors->damage_request(a,r);
+    }
+    // Action 6 sets +3539; 00199980 consumes it during the target's next logic.
+    void tear_gas(std::uint64_t object) override{aw().actor(index(object)).receive_tear_gas();}
 
     // 00141e20 for actor a's held slot, reading +33cc / +33d0 from `state`
     // (the live fields or a receiver candidate) with the combat inventory
@@ -414,8 +433,11 @@ struct CombatThrows::Impl final:AreaWorld {
             fail("a launch of hold class "+std::to_string(record.hold_class_f0())+" is not hosted");
         const auto type=record.damage_type_bc();
         // Type 4 (fire) since 132ms8: its area's fire branch (00259bb0) is this host's ignite (00186360).
-        if(!(type==0||type==2||type==3||type==4||type==9||type==13))
-            fail("a thrown item of damage type "+std::to_string(type)+" (its area: gas exposure, tear gas or smoke volumes) is not hosted");
+        // Checkpoint 132fx1: the lethal (5) and knockout (7) gases (002596e0 over node_position / los, the damage
+        // virtual), tear gas (6: action 6 / 00199980), and smoke (8: its area
+        // does nothing; perception LOS reads it through 002594a0).
+        if(!(type==0||type==2||type==3||type==4||type==5||type==6||type==7||type==8||type==9||type==13))
+            fail("a thrown item of damage type "+std::to_string(type)+" is not hosted");
         ThrowLaunchActor l;
         l.hand_frame=actor.skeleton_node_world_matrix(hand_node);                         // 00132a30 / 00133ed0
         l.actor_matrix=rows_of(root_placement_matrix(actor.floor_root_placement()));       // virtual +f4
@@ -449,6 +471,22 @@ struct CombatThrows::Impl final:AreaWorld {
         frame.launches.emplace_back(a,std::move(r));
     }
 
+    // 00199590(actor, ir) (actor_goggles.hpp): the item trigger's one-shot (below) and, Checkpoint 132fx1, the pickup
+    // menu's goggles put back (0025200c, ir 0).
+    void switch_ir(std::size_t a,std::uint8_t ir){
+        auto& actor=aw().actor(a);
+        GogglesActorView v;
+        v.slot6_item=s.combat->inventory(a).slots.at(6).item;                         // 0013fb50: inventory +68
+        if(v.slot6_item!=-1)v.record_100=static_cast<std::int8_t>(s.database->record(v.slot6_item).byte(0x100));
+        v.controller_player=actor.player_controller();v.byte_14=actor.byte_14()!=0;
+        std::vector<GogglesEvent> ev;
+        switch_actor_ir(actor.item_actions(),ir,v,ev);
+        for(const auto& e:ev){
+            // 00142e00(inventory, 6, ir): the byte 003855d0 reads to draw the light part (Checkpoint 132cp10).
+            if(e.kind==GogglesEvent::Kind::render_byte)s.combat->write_slot_render_byte(a,static_cast<std::uint8_t>(e.a),static_cast<std::uint8_t>(e.b));
+            frame.goggles.emplace_back(a,e);
+        }
+    }
     // 00197e00 at 0x001b1d10 (from 00198278).
     void item_triggers(std::size_t a){
         auto& actor=aw().actor(a);
@@ -470,20 +508,7 @@ struct CombatThrows::Impl final:AreaWorld {
         h.star_sound=[this,a]{frame.star_sounds.push_back(a);};
         // 00199590(actor, +33e6) (actor_goggles.hpp). A local player with +33e7 (the toggles 00199770 / 00199860
         // write it) reaches the HUD 00244a80: the hud_ir event, applied by the host's HUD object.
-        h.switch_on_ir=[this,a](std::uint8_t ir){
-            auto& actor=aw().actor(a);
-            GogglesActorView v;
-            v.slot6_item=s.combat->inventory(a).slots.at(6).item;                         // 0013fb50: inventory +68
-            if(v.slot6_item!=-1)v.record_100=static_cast<std::int8_t>(s.database->record(v.slot6_item).byte(0x100));
-            v.controller_player=actor.player_controller();v.byte_14=actor.byte_14()!=0;
-            std::vector<GogglesEvent> ev;
-            switch_actor_ir(actor.item_actions(),ir,v,ev);
-            for(const auto& e:ev){
-                // 00142e00(inventory, 6, ir): the byte 003855d0 reads to draw the light part (Checkpoint 132cp10).
-                if(e.kind==GogglesEvent::Kind::render_byte)s.combat->write_slot_render_byte(a,static_cast<std::uint8_t>(e.a),static_cast<std::uint8_t>(e.b));
-                frame.goggles.emplace_back(a,e);
-            }
-        };
+        h.switch_on_ir=[this,a](std::uint8_t ir){switch_ir(a,ir);};
         // +3314 exists while the actor is activated (001b5560 / 001b5190).
         // The IR argument is +33e6 (00198564), written by the goggles switch 001992b0.
         const auto t=run_actor_item_triggers(actor.item_actions(),actor.eligible(),actor.item_actions().byte_33e6,h);
@@ -1137,6 +1162,7 @@ struct CombatThrows::Impl final:AreaWorld {
     }
 };
 
+const CombatThrowConfig& CombatThrows::config() const{return impl_->c;}
 CombatThrows::CombatThrows(CombatThrowSession session,CombatThrowConfig config)
     :impl_(std::make_unique<Impl>(std::move(session),std::move(config))){
     auto& m=*impl_;
@@ -1297,6 +1323,26 @@ bool CombatThrows::air_taser_fire(std::size_t actor,std::uint64_t target,bool ai
     return impl_->taser_fire(actor,target,aim_view,subtarget);
 }
 void CombatThrows::air_taser_update(std::size_t actor,float dt){impl_->taser_update(actor,dt);}
+void CombatThrows::switch_ir(std::size_t actor,std::uint8_t ir){impl_->switch_ir(actor,ir);}
+std::uint64_t CombatThrows::smoke_blocker(const RootVector& a,const RootVector& b) const{
+    if(!impl_->world)return 0;
+    const auto* db=impl_->s.database;
+    return area_smoke_blocker(impl_->world->areas(),[db](std::int32_t id)->const WeaponRecord&{return db->record(id);},a,b);
+}
+std::optional<NpcProjectileView> CombatThrows::projectile_view(std::uint64_t object) const{
+    if(!impl_->world)return std::nullopt;
+    for(const auto& item:impl_->world->projectiles()){
+        const auto& p=item.projectile;
+        if(p.object!=object)continue;
+        NpcProjectileView v;
+        v.id=p.id_c;v.root={1,1,static_cast<std::uint8_t>(p.motion.retired?1:0)};
+        v.owner=impl_->resolves(p.owner_124)?p.owner_124.object:0;
+        v.damage_type=impl_->s.database->record(p.record_120).damage_type_bc();
+        v.point_bc=p.node[3];
+        return v;
+    }
+    return std::nullopt;
+}
 void CombatThrows::air_taser_release(std::size_t actor){impl_->taser_release(actor);}
 
 bool CombatThrows::shock_to_death(std::size_t actor){

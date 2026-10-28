@@ -25,8 +25,9 @@
 // Not ported (throw naming the address): the constructor's base object
 // 003cf0e0 / id 0040c240 / vtable +90, the placement 002561d0, the box
 // bounds 00253fb0 (the gearpack model's +3e0 box computed by VU0 micro
-// code at model load, 0038d720), the multiplayer sends (005721c8), the
-// default receiver 003cea10. Checkpoint 132t: 001762c0 builds the Triangle
+// code at model load, 0038d720), the multiplayer pickup sound send in
+// 00254da0, and the default receiver 003cea10. Checkpoint 132fx5 hosts the
+// remote-owner pickup request as an event. Checkpoint 132t: 001762c0 builds the Triangle
 // confirm object 00253070 through WeaponBackpackHost::open_menu (the menu
 // is pickup_menu.hpp, hosted in play by pickup_menu_play.hpp; without the
 // host it still throws naming 00253070), and the menu's backpack callees
@@ -87,6 +88,8 @@ struct WeaponBackpackEvent {
         format,             // 00128bd0(buf, a, ...)
         hud_message,        // 00242b00(*004ffc2c, buf)
         sound,              // 0020f860(msg, descriptor a, position) and its send
+        pickup_request,     // multiplayer (132fx5): 003fb020(net id a = bp +c, InventoryMsg *005061b0 {+20 4, +24 2,
+                            // +28 bp, +2c b = the picker's +68}, -1, c = bp +308), to the backpack's owner
     } kind{};
     std::uint32_t a{},b{},c{};
     RootVector position{};

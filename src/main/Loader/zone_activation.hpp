@@ -106,7 +106,17 @@ public:
     // physical +2f0 or the model translation, plus +380), `camera` the owner
     // +50 component's translation +40 (00173980's distance origin).
     std::vector<ZoneRequest> update(const RootVector& position, const RootVector& camera);
+    // Port-only (checkpoint 132pt1, research/COOP.md "Partners in far zones"): present = this tracker's own +2d or held by
+    // another agent's tracker (set_held). The original keeps one tracker per local view (00132bc0 -> 00132dd8, owner the
+    // local player's actor), so in an online game every human agent's console keeps that agent's zones active; offline the
+    // port gives each CPU partner such a tracker and holds the union of their members here. With nothing held (solo, no
+    // partner) present() is the original's +2d exactly.
     bool present(std::uint32_t key) const;
+    bool own_present(std::uint32_t key) const;
+    const std::vector<std::uint32_t>& own_keys() const { return present_; }
+    // Replaces the held set; answers the requests that change a member's presence (a key newly held and not the tracker's
+    // own: activate; no longer held and not its own: deactivate; forced 0). update() leaves out the requests of held keys.
+    std::vector<ZoneRequest> set_held(std::vector<std::uint32_t> keys);
     // A member whose own constructor set +2d before the first update (the
     // INV: crate: 00257f30's box block calls virtual +5c 003ce980).
     void mark_present(std::uint32_t key) { set_present(key, true); }
@@ -128,6 +138,7 @@ private:
     std::size_t zone_{};
     bool forced_{true};
     std::vector<std::uint32_t> present_;   // sorted keys with +2d set
+    std::vector<std::uint32_t> held_;      // port-only (132pt1): sorted keys other agents' trackers hold present
     void set_present(std::uint32_t key, bool value);
 };
 // The +88 bounds test of 0013db30 / 00224ac0: p - min and max - p without a

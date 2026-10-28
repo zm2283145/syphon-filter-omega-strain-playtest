@@ -3172,6 +3172,13 @@ void GuiRuntime::cc_levels(Widget* w) {  // 00297020
     g.cc_want_bonus = 0;
 }
 
+bool command_centre_online_level(const std::string& level) {
+    // 00297020's online rule: with app +30 (an online game) a command-centre level is open only when the online level table
+    // 004acc70 says so; TRAINING (slot 0x17, level 17) is open only offline. Any other name is no command-centre level.
+    for (std::size_t s = 0; s < cc_level_names.size(); ++s)
+        if (level == cc_level_names[s]) return s != 17 && cc_online_levels[s] != 0;
+    return false;
+}
 void GuiRuntime::cc_bonus_flags(Widget* w) {  // 002972e0
     const std::int32_t p = host_.current_profile();
     for (int i = 0; i < 18; ++i) w->cc->bonus[i] = static_cast<std::uint8_t>(host_.level_flag(p, i + 1, -1));

@@ -53,11 +53,6 @@
 int omega_play_entry(int argc, wchar_t** argv);
 
 extern "C" {
-// The OpenGL runtime's malloc heap (native-app/app_heap.c wraps malloc / new): CPU-cached direct memory, mapped once.
-// 1 GiB, the size the Melee PS5 port runs with (the level's heap is about 0.5 GB on the PC; past it the runtime
-// allocates from the libc heap). 132ps5c hw2 asked for 2 GiB (2^31 bytes) and faulted in the first allocations.
-extern const std::size_t ps5_opengl_heap_size;
-const std::size_t ps5_opengl_heap_size = std::size_t(1024) << 20;
 int sceKernelGetModuleInfoFromAddr(const void* address, int flags, void* info);
 int sceUserServiceInitialize(void* params);
 }
@@ -447,7 +442,7 @@ int main() {
     if (data_root != "/download0") ps5::log_mirror((data_root + "/omega_ps5.log").c_str());
     if (std::freopen((data_root + "/gl-stdout.log").c_str(), "w", stdout)) std::setvbuf(stdout, nullptr, _IOLBF, 0);
     ps5::redirect_streams();
-    ps5::log("Syphon Filter: The Omega Strain, native port, PS5 (132ps5c); main_marker at %p",
+    ps5::log("Syphon Filter: The Omega Strain, native port, PS5 (132ps5d); main_marker at %p",
              reinterpret_cast<void*>(&main_marker));
     ps5::log("data folder %s (the log is also in %s)", data_root.c_str(), ps5::log_file);
     if (const unsigned missing = ps5::log_missing_imports()) {

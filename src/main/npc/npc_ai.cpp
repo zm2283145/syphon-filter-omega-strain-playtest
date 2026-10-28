@@ -3,8 +3,10 @@
 #include "game_libm.hpp"
 #include "npc_alert.hpp"
 #include "npc_attack.hpp"
+#include "npc_avoid_grenade.hpp"
 #include "npc_carry_body.hpp"
 #include "npc_cover.hpp"
+#include "npc_flee.hpp"
 #include "npc_follow.hpp"
 #include "npc_perception_think.hpp"
 #include "npc_script_control.hpp"
@@ -311,8 +313,10 @@ bool dispatch_npc_ai_mode(NpcAiComponent& c,const NpcAiMessage& m,NpcAiHost& hos
     if(c.mode_44==5)return npc_search_mode(c,m,host);                       // 00154dd0 (N5c, static)
     if(c.mode_44==9)return npc_follow_mode(c,m,host);                       // 00153870 (Checkpoint 132zf12)
     if(c.mode_44==8)return npc_carry_body_mode(c,m,host);                   // 00153150 (Checkpoint 132uk5)
+    if(c.mode_44==10)return npc_avoid_grenade_mode(c,m,host);               // 001535e0 (Checkpoint 132fx1)
+    if(c.mode_44==6)return npc_flee_mode(c,m,host);                         // 001548f0 (Checkpoint 132fx1)
     if(c.mode_44!=0){
-        // Jump table 0049b6a0: 6 = 001548f0, 10 = 001535e0 (8 = 00153150 and 9 = 00153870 are native).
+        // Jump table 0049b6a0: every mode 1..10 is native (6 = 001548f0, 10 = 001535e0: Checkpoint 132fx1).
         static constexpr const char* handlers[]{"00156f90","00156d00","001564c0","00155ba0","00155350","00154dd0",
             "001548f0","00154660","00153150","00153870","001535e0"};
         const auto mode=static_cast<std::size_t>(c.mode_44);

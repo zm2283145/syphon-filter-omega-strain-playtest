@@ -42,13 +42,14 @@
 // - The gait / footstep part of 00197e00 (00197e00..00198274) is not run; the
 //   IR switch's argument +33e6 is not modelled (only 00199590, not hosted,
 //   would read it).
-// - Admitted launches: hold class 1 with damage type 0, 2, 3, 4, 9 or 13 (the
-//   explosion through CombatThrowConfig::explode; type 4's fire area ignites
-//   through 00186360 since 132ms8); the area types 5..8 (gases, smoke: the
-//   gas exposure's node and LOS, the tear gas action, the smoke volumes of
-//   002594a0) and hold class 7 (the star
-//   message 004eeed0, its sound, the scan's +d byte) throw at the start or
-//   launch.
+// - Admitted launches: hold class 1 with damage type 0, 2..9 or 13. The
+//   explosion runs through CombatThrowConfig::explode; type 4's fire area
+//   ignites through 00186360; types 5 and 7 run lethal and knockout gas
+//   exposure; type 6 sets actor +3539 and Choke_NextFrame 00199980 alternates
+//   its tased_loop cough; type 8 supplies the smoke volumes of 002594a0.
+//   Hold class 7 (the
+//   star message 004eeed0, its sound, and the scan's +d byte) remains
+//   unsupported.
 // - 001960c0's melee branch (COMBAT.md, "Checkpoint 113 NeckSnap takedown"):
 //   the target choice 001414d0 over the registrations, then 00196480 with the
 //   secondary one-shot (001cae20) on the actor's component, the swing sound
@@ -114,17 +115,20 @@
 #include "area_effect.hpp"
 #include "combat_actor_world.hpp"
 #include "combat_world.hpp"
+#include "npc_ai.hpp"
 #include "npc_perception.hpp"
 #include "player_targeting.hpp"
 #include "secondary_playback.hpp"
 #include "takedown_camera.hpp"
 #include "throw_world.hpp"
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace omega {
@@ -165,6 +169,8 @@ struct CombatThrowConfig {
     std::optional<std::uint32_t> none_word;
     // Actor +44 (the flash's blindness reads it, 00259880); empty: reading it throws.
     std::function<std::int32_t(std::size_t actor)> stealth_44;
+    // Checkpoint 132fx1: actor +346b (SetNotGasable), read by the gas exposure 002596e0; without it a gas area throws.
+    std::function<bool(std::size_t actor)> not_gasable_346b;
     // 0021a200 for a detonation of damage type 2 / 13 (ExplosionWorld::blast); empty: throws.
     std::function<void(const BlastRequest& request)> explode;
     // The engine variable game::doKnifeDmg (*00489da0, boot value 1; scripts
@@ -355,6 +361,14 @@ public:
     bool air_taser_fire(std::size_t actor,std::uint64_t target,bool aim_view,std::int32_t subtarget);
     void air_taser_update(std::size_t actor,float dt);
     void air_taser_release(std::size_t actor);
+    // Checkpoint 132fx1: 00199590(actor, ir), the IR switch (actor_goggles.hpp switch_actor_ir), with its events in
+    // the frame's goggles list: the pickup menu's goggles put back (0025200c, ir 0).
+    void switch_ir(std::size_t actor,std::uint8_t ir);
+    // Checkpoint 132fx1: 002594a0 over the live areas (area_effect.hpp area_smoke_blocker): the area whose smoke
+    // volume blocks the segment a-b, 0 when none.
+    std::uint64_t smoke_blocker(const RootVector& a,const RootVector& b) const;
+    // Checkpoint 132fx1: the thrown-projectile view used by cause-5 NPC hearing and mode 10.
+    std::optional<NpcProjectileView> projectile_view(std::uint64_t object) const;
     // A FIR: zone of the level (make_level_fire_zone): the loader 001c0b00
     // registers each (0040c9d0) in record order at level load, before any
     // actor's effect object; its key is the record ID. The traversal updates
@@ -374,6 +388,7 @@ public:
     // record names it), still an effect object of the world.
     bool actor_fire_zone(std::uint64_t key) const;
     CombatThrowFrame take_frame();
+    const CombatThrowConfig& config() const;
     const ThrowWorld& world() const;
     // Checkpoint 132sx11: 0025a120 (game::ResetLevel), its events added to the frame.
     void finish_areas();

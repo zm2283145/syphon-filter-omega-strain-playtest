@@ -78,6 +78,18 @@ public:
     using BulkCopy = std::function<void(std::uint8_t* destination, const std::uint8_t* source, std::size_t bytes)>;
     void set_bulk_copy(BulkCopy copy);
 
+    // Port-only (132vc2, research/VITA.md "Main-thread CPU (132vc2)"): a place kept in the frame being recorded for
+    // work recorded later. reserve() marks the current position; fill(slot, record) runs `record` on the calling
+    // (simulation) thread with the wrapped devices' submits and writes going to that position instead of the end, so
+    // the render thread executes them in the order they would have had if recorded at reserve() time. Every slot must
+    // be filled before the frame is handed off or drained: set_before_hand_off's callback (the owner's) runs first in
+    // end_frame / drain while slots are unfilled, and must fill them. Only while threaded() and no device-loss
+    // injection is armed (else reserve() gives no slot: 0, and the owner records inline).
+    std::size_t reserve();
+    void fill(std::size_t slot, const std::function<void()>& record);
+    std::size_t unfilled() const;
+    void set_before_hand_off(std::function<void()> callback);
+
     // The per-frame times recorded so far (frames handed off by end_frame) and a one-line summary of them.
     std::vector<FrameTime> frame_times() const;
     std::string summary() const;

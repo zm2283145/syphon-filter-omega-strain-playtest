@@ -93,6 +93,7 @@ void ParticleRenderer::reset_device() {
     raster_.reset();
     depth_.reset();
     sampler_.reset();
+    nearest_sampler_.reset();
     textures_.clear();
     haze_vertices_.reset();
     copy_vertices_.reset();
@@ -172,6 +173,8 @@ void ParticleRenderer::create_pipeline() {
     depth_ = device.create_depth({true, false, gfx::Compare::less_equal}, "Create particle depth state");
     no_depth_ = device.create_depth({false, false, gfx::Compare::less_equal}, "Create ScreenFxBuf depth state");
     sampler_ = device.create_sampler({gfx::Filter::linear, gfx::Address::clamp, 0.0F}, "Create particle sampler");
+    nearest_sampler_ = device.create_sampler({gfx::Filter::point, gfx::Address::clamp, 0.0F},
+                                             "Create bullet tracer sampler");
 }
 
 void ParticleRenderer::set_texture(const particle::ParticleDefinition* def, const Texture& texture) {
@@ -308,27 +311,31 @@ void ParticleRenderer::copy_screen_fx() try {
     list_.clear();
 }
 
-std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBatch>& batches) try {
-    if (lost()) return 0;
-    struct Segment {
-        std::uint32_t first = 0, count = 0;
-        const gfx::Texture* view = nullptr;
-        int blend = 0;   // -1: heat haze (haze_vertices)
-    };
-    std::vector<HostVertex> vertices;
-    std::vector<HazeVertex> haze_vertices;
-    std::vector<gfx::Box> haze_boxes;  // each haze sprite's target pixels (frame_cd)
-    std::vector<Segment> segments;
-    const float w = static_cast<float>(scene_.width()), h = static_cast<float>(scene_.height());
+// 132vc2 (port-only, research/VITA.md "Main-thread CPU (132vc2)"): draw() is build_sprites (the vertices, pure: the
+// same values in the same order as before) then emit_sprites (the uploads and the command list), so that the play
+// can build on a worker and emit later into a kept place of the frame (RenderThread::reserve).
+void ParticleRenderer::build_sprites(const std::vector<particle::ParticleSpriteBatch>& batches,
+                                     const std::function<const gfx::Texture*(const particle::ParticleDefinition*)>& view,
+                                     bool screen_fx, bool frame_copy, float w, float h, PreparedSprites& out) {
+    out.vertices.clear();
+    out.haze_vertices.clear();
+    out.haze_boxes.clear();
+    out.segments.clear();
+    std::size_t plain = 0, haze = 0;
+    for (const auto& b : batches) (b.stop == 0x1cc8 ? haze : plain) += b.sprites.size();
+    out.vertices.reserve(plain * 6 * 9);
+    out.haze_vertices.reserve(haze * 6 * 11);
+    out.haze_boxes.reserve(haze);
+    out.segments.reserve(batches.size());
     const auto ndc_x = [&](std::int32_t x) { return x / kSubpixel / w * 2 - 1; };
     const auto ndc_y = [&](std::int32_t y) { return 1 - y / kSubpixel / h * 2; };
     for (const auto& b : batches) {
         if (b.stop == 0x1cc8) {
-            const auto it = textures_.find(b.def);
-            if (it == textures_.end()) throw std::runtime_error("heat-haze draw: no texture for the batch's definition");
-            if (!screen_fx_) throw std::runtime_error("heat-haze draw: ScreenFxBuf (0037bd40) was not copied");
-            if (!frame_copy_) throw std::runtime_error("heat-haze draw: no frame copy for Cd (0037bd40)");
-            const auto first = static_cast<std::uint32_t>(haze_vertices.size());
+            const gfx::Texture* texture = view(b.def);
+            if (!texture) throw std::runtime_error("heat-haze draw: no texture for the batch's definition");
+            if (!screen_fx) throw std::runtime_error("heat-haze draw: ScreenFxBuf (0037bd40) was not copied");
+            if (!frame_copy) throw std::runtime_error("heat-haze draw: no frame copy for Cd (0037bd40)");
+            const auto first = static_cast<std::uint32_t>(out.haze_vertices.size() / 11);
             for (const auto& s : b.sprites) {
                 const auto px = [&](std::int32_t v, float size) {
                     return static_cast<unsigned>(std::clamp(v / kSubpixel, 0.0F, size));
@@ -339,7 +346,7 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
                                top = px(std::min(s.xy_first[1], s.xy_second[1]), h),
                                bottom = static_cast<unsigned>(std::ceil(std::clamp(
                                    std::max(s.xy_first[1], s.xy_second[1]) / kSubpixel, 0.0F, h)));
-                haze_boxes.push_back({left, top, 0, std::max(left, right), std::max(top, bottom), 1});
+                out.haze_boxes.push_back({left, top, 0, std::max(left, right), std::max(top, bottom), 1});
                 const float r = s.rgba[0] / 128.0F, g = s.rgba[1] / 128.0F, bl = s.rgba[2] / 128.0F,
                             a = s.rgba[3] / 128.0F;
                 const float x0 = ndc_x(s.xy_first[0]), y0 = ndc_y(s.xy_first[1]);
@@ -352,10 +359,13 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
                 const HazeVertex tr{x1, y0, z, u1, v0, s1, t0, r, g, bl, a};
                 const HazeVertex bl_{x0, y1, z, u0, v1, s0, t1, r, g, bl, a};
                 const HazeVertex br{x1, y1, z, u1, v1, s1, t1, r, g, bl, a};
-                for (const HazeVertex& v : {tl, tr, bl_, bl_, tr, br}) haze_vertices.push_back(v);
+                for (const HazeVertex* v : {&tl, &tr, &bl_, &bl_, &tr, &br}) {
+                    const auto* f = reinterpret_cast<const float*>(v);
+                    out.haze_vertices.insert(out.haze_vertices.end(), f, f + 11);
+                }
             }
-            const auto count = static_cast<std::uint32_t>(haze_vertices.size()) - first;
-            if (count) segments.push_back({first, count, it->second.get(), -1});
+            const auto count = static_cast<std::uint32_t>(out.haze_vertices.size() / 11) - first;
+            if (count) out.segments.push_back({first, count, texture, -1});
             continue;
         }
         int blend = -1;
@@ -369,9 +379,9 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
                           static_cast<unsigned long long>(b.alpha));
             throw std::runtime_error(text);
         }
-        const auto it = textures_.find(b.def);
-        if (it == textures_.end()) throw std::runtime_error("particle draw: no texture for the batch's definition");
-        const auto first = static_cast<std::uint32_t>(vertices.size());
+        const gfx::Texture* texture = view(b.def);
+        if (!texture) throw std::runtime_error("particle draw: no texture for the batch's definition");
+        const auto first = static_cast<std::uint32_t>(out.vertices.size() / 9);
         for (const auto& s : b.sprites) {
             const float r = s.rgba[0] / 128.0F, g = s.rgba[1] / 128.0F, bl = s.rgba[2] / 128.0F,
                         a = s.rgba[3] / 128.0F;
@@ -385,24 +395,55 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
             const HostVertex tr{x1, y0, z, u1, v0, r, g, bl, a};
             const HostVertex bl_{x0, y1, z, u0, v1, r, g, bl, a};
             const HostVertex br{x1, y1, z, u1, v1, r, g, bl, a};
-            for (const HostVertex& v : {tl, tr, bl_, bl_, tr, br}) vertices.push_back(v);
+            for (const HostVertex* v : {&tl, &tr, &bl_, &bl_, &tr, &br}) {
+                const auto* f = reinterpret_cast<const float*>(v);
+                out.vertices.insert(out.vertices.end(), f, f + 9);
+            }
         }
-        const auto count = static_cast<std::uint32_t>(vertices.size()) - first;
-        if (count) segments.push_back({first, count, it->second.get(), blend});
+        const auto count = static_cast<std::uint32_t>(out.vertices.size() / 9) - first;
+        if (count) out.segments.push_back({first, count, texture, blend});
     }
+}
+
+const gfx::Texture* ParticleRenderer::texture_view(const particle::ParticleDefinition* def) const {
+    const auto it = textures_.find(def);
+    return it == textures_.end() ? nullptr : it->second.get();
+}
+
+std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBatch>& batches) try {
+    if (lost()) return 0;
+    PreparedSprites& p = prepared_;
+    build_sprites(batches, [this](const particle::ParticleDefinition* def) { return texture_view(def); },
+                  screen_fx_ != nullptr, frame_copy_ != nullptr, static_cast<float>(scene_.width()),
+                  static_cast<float>(scene_.height()), p);
+    return emit_sprites(p);
+} catch (const DeviceLost&) {
+    list_.clear();
+    return 0;
+} catch (...) {
+    list_.clear();
+    throw;
+}
+
+std::size_t ParticleRenderer::emit_sprites(const PreparedSprites& p) try {
+    if (lost()) return 0;
+    const SpriteTargets tg = p.targets.set ? p.targets : targets();  // 132vc2: the place's targets (scene_ by default)
+    const auto& vertices = p.vertices;
+    const auto& haze_vertices = p.haze_vertices;
+    const auto& haze_boxes = p.haze_boxes;
     if (vertices.empty() && haze_vertices.empty()) return 0;
     gfx::Device& device = *scene_.device();
     if (!vertices.empty())
-        upload(device, vertices_, vertex_capacity_, vertices.data(), vertices.size() * sizeof(HostVertex),
+        upload(device, vertices_, vertex_capacity_, vertices.data(), vertices.size() * sizeof(float),
                6 * 512 * sizeof(HostVertex), "Particle vertex buffer");
     if (!haze_vertices.empty())
-        upload(device, haze_vertices_, haze_capacity_, haze_vertices.data(), haze_vertices.size() * sizeof(HazeVertex),
+        upload(device, haze_vertices_, haze_capacity_, haze_vertices.data(), haze_vertices.size() * sizeof(float),
                6 * 64 * sizeof(HazeVertex), "Heat-haze vertex buffer");
-    const gfx::Texture* target = scene_.render_target();
+    const gfx::Texture* target = tg.target;
     auto& l = list_;
     l.clear();
-    l.set_target(target, scene_.depth_view());
-    l.set_viewport({0.0F, 0.0F, static_cast<float>(scene_.width()), static_cast<float>(scene_.height()), 0.0F, 1.0F});
+    l.set_target(target, tg.depth);
+    l.set_viewport({0.0F, 0.0F, static_cast<float>(tg.width), static_cast<float>(tg.height), 0.0F, 1.0F});
     l.set_raster(raster_.get());
     l.set_depth(depth_.get());
     l.set_sampler(0, sampler_.get());
@@ -415,7 +456,7 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
     };
     std::vector<HazeAlpha> haze_alpha;
 #endif
-    for (const Segment& s : segments) {
+    for (const SpriteSegment& s : p.segments) {
         const int kind = s.blend < 0 ? -1 : 1;
         if (kind != bound) {
             bound = kind;
@@ -424,13 +465,13 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
             l.set_program(kind > 0 ? gfx::Program::particle_sprite : gfx::Program::particle_haze);
             l.set_texture(1, kind > 0 ? nullptr : screen_fx_.get());
             l.set_blend(kind > 0 ? nullptr : haze_blend_.get());
-            if (kind < 0 && !scene_.frame_alpha_target())
+            if (kind < 0 && !tg.frame_alpha)
                 throw std::runtime_error("0037d3d8: the scene has no frame-alpha target for sprite A");
-            const gfx::TargetView targets[2]{{target, 0}, {kind > 0 ? nullptr : scene_.frame_alpha_target(), 0}};
+            const gfx::TargetView targets[2]{{target, 0}, {kind > 0 ? nullptr : tg.frame_alpha, 0}};
 #if defined(__vita__)
-            l.set_targets(1, targets, scene_.depth_view());   // 132vt3: the frame alpha after the loop
+            l.set_targets(1, targets, tg.depth);   // 132vt3: the frame alpha after the loop
 #else
-            l.set_targets(kind > 0 ? 1 : 2, targets, scene_.depth_view());
+            l.set_targets(kind > 0 ? 1 : 2, targets, tg.depth);
 #endif
         }
         if (kind > 0) l.set_blend(s.blend == 4 ? reverse_subtract_.get() : blend_[s.blend].get());
@@ -503,8 +544,8 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
         }
         bound = -1;
         l.set_blend(haze_blend_.get());
-        const gfx::TargetView targets[2]{{nullptr, 0}, {scene_.frame_alpha_target(), 0}};
-        l.set_targets(2, targets, scene_.depth_view());
+        const gfx::TargetView targets[2]{{nullptr, 0}, {tg.frame_alpha, 0}};
+        l.set_targets(2, targets, tg.depth);
         for (const HazeAlpha& h : haze_alpha) {
             l.set_texture(0, h.view);
             l.draw(h.count, h.first);
@@ -513,9 +554,9 @@ std::size_t ParticleRenderer::draw(const std::vector<particle::ParticleSpriteBat
 #endif
     const gfx::Texture* none[3]{};
     l.set_textures(0, 3, none);
-    if (bound < 0) l.set_target(target, scene_.depth_view());
+    if (bound < 0) l.set_target(target, tg.depth);
     device.submit(l);
-    return (vertices.size() + haze_vertices.size()) / 6;
+    return (vertices.size() / 9 + haze_vertices.size() / 11) / 6;
 } catch (const DeviceLost&) {
     list_.clear();
     return 0;
@@ -532,7 +573,37 @@ std::size_t ParticleRenderer::draw_shatter(const std::vector<particle::ShatterFl
         if (it == handle_textures_.end()) throw std::runtime_error("shatter draw: no texture for the em+170 slot");
         list.push_back({it->second.get(), f.alpha, &f.vertices});
     }
-    return draw_triangles(list, node, "shatter draw");
+    return draw_triangles(list, node, sampler_.get(), "shatter draw");
+}
+
+std::size_t ParticleRenderer::draw_bullet_tracers(const std::vector<BulletTracerMesh>& meshes) {
+    std::vector<particle::ShatterFlush> storage;
+    storage.reserve(meshes.size());
+    for (const auto& mesh : meshes) {
+        if (mesh.material.filter != BulletTracerFilter::nearest)
+            throw std::runtime_error("bullet tracer draw: unsupported texture filter");
+        particle::ShatterFlush flush;
+        flush.texture = mesh.material.texture;
+        flush.alpha = mesh.material.gs_alpha;
+        flush.vertices.reserve(mesh.indices.size());
+        for (const auto index : mesh.indices) {
+            if (index >= mesh.vertices.size()) throw std::runtime_error("bullet tracer draw: vertex index outside the mesh");
+            const auto& uv = mesh.uv[index];
+            flush.vertices.push_back({mesh.vertices[index], mesh.colour[index],
+                                      {uv[0] + 2048.0F, uv[1] + 2048.0F, uv[2], uv[3]}});
+        }
+        storage.push_back(std::move(flush));
+    }
+    std::vector<TriangleFlush> list;
+    list.reserve(storage.size());
+    for (const auto& flush : storage) {
+        const auto it = handle_textures_.find(flush.texture);
+        if (it == handle_textures_.end())
+            throw std::runtime_error("bullet tracer draw: effect 0x1a texture handle is not loaded");
+        list.push_back({it->second.get(), flush.alpha, &flush.vertices});
+    }
+    const std::array<std::array<float, 4>, 4> identity{{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}}};
+    return draw_triangles(list, identity, nearest_sampler_.get(), "bullet tracer draw");
 }
 
 std::size_t ParticleRenderer::draw_weather(const std::vector<particle::WeatherFlush>& flushes,
@@ -543,7 +614,7 @@ std::size_t ParticleRenderer::draw_weather(const std::vector<particle::WeatherFl
     std::vector<TriangleFlush> list;
     std::vector<particle::ParticleSpriteBatch> batches;
     const auto flush_triangles = [&] {
-        if (!list.empty()) triangles += draw_triangles(list, node, "weather draw");
+        if (!list.empty()) triangles += draw_triangles(list, node, sampler_.get(), "weather draw");
         list.clear();
     };
     const auto flush_sprites = [&] {
@@ -570,7 +641,8 @@ std::size_t ParticleRenderer::draw_weather(const std::vector<particle::WeatherFl
 }
 
 std::size_t ParticleRenderer::draw_triangles(const std::vector<TriangleFlush>& flushes,
-                                             const std::array<std::array<float, 4>, 4>& node, const char* what) try {
+                                             const std::array<std::array<float, 4>, 4>& node,
+                                             const gfx::SamplerState* sampler, const char* what) try {
     if (lost()) return 0;
     struct Segment {
         std::uint32_t first = 0, count = 0;
@@ -635,7 +707,7 @@ std::size_t ParticleRenderer::draw_triangles(const std::vector<TriangleFlush>& f
     l.set_depth(depth_.get());
     l.set_program(gfx::Program::particle_clip);
     l.set_vertex_buffer(clip_vertices_.get(), sizeof(ClipVertex));
-    l.set_sampler(0, sampler_.get());
+    l.set_sampler(0, sampler);
     for (const Segment& s : segments) {
         l.set_blend(s.blend);
         l.set_texture(0, s.view);

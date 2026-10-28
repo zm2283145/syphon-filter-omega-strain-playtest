@@ -81,7 +81,9 @@ std::vector<CoopBreadcrumb> coop_breadcrumb_record(CoopBreadcrumbRecorder& r, co
         r.last_standing.reset();
         ++r.restarts;
     }
-    const bool traversing = coop_player_traversing(s);
+    // 132pt1: a crawl goes on while the player stays crouched after its zone (TORONTO1's duct: crouched from the zone
+    // 2:8985 at frame 487 to the zone 2:9066 at 1227, out of both zones in between); it ends when the player stands.
+    const bool traversing = coop_player_traversing(s) || (r.episode && r.crawl && s.crouched);
     if (r.finishing) {
         if (traversing) {
             out.push_back(*r.finishing);
@@ -118,7 +120,7 @@ std::vector<CoopBreadcrumb> coop_breadcrumb_record(CoopBreadcrumbRecorder& r, co
     r.buddy = r.buddy || (s.actions & coop_buddy_actions) != 0;
     r.climb = r.climb || (s.actions & coop_traversal_actions & ~((1U << 16) | coop_buddy_actions)) != 0;
     r.air = r.air || s.airborne || (s.actions & coop_fall_actions) != 0;
-    if (s.crouched && s.crawl_zone) {
+    if (s.crouched && (s.crawl_zone || r.crawl)) {
         r.crawl = true;
         const auto& from = r.line.empty() ? r.start : r.line.back();
         if (full(from, s.floor) >= c.spacing) r.line.push_back(s.floor);
@@ -229,6 +231,9 @@ std::vector<std::pair<float, std::int32_t>> place_joins(const NpcNodeGraph& grap
 bool coop_breadcrumb_routed(const NpcNodeGraph& graph, const CoopBreadcrumb& crumb, const CoopBreadcrumbConfig& c,
                             const CoopBreadcrumbHost& host) {
     if (!host.clear) throw std::runtime_error("Coop breadcrumbs: the host's clear line test is not linked");
+    // 132pt1 (the user's play-test 2026-10-26: the partners walked through a pipe instead of crawling): a crawl is never left
+    // to the walking graph: only type-8 links (coop_breadcrumb_covered) make the partner crawl (action 9) through it.
+    if (crumb.kind == CoopTraversalKind::crawl) return false;
     const RootVector to = crumb.after ? *crumb.after : crumb.exit;
     const auto starts = place_joins(graph, crumb.entry, c, host);
     if (starts.empty()) return false;

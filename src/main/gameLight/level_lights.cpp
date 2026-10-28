@@ -344,7 +344,10 @@ float frame_z_near(const LevelLights& lights){
 void update_level_fog(LevelLights& lights){
     lights.z_near_158=blended_z_near(lights);
     lights.fog_180_written=true;
-    try{lights.fog_180=level_fog(lights);}catch(const std::runtime_error&){lights.fog_180.reset();}
+    // 00538370 / 00538380 are persistent renderer registers. A degenerate environment update does not make the
+    // previous frame's valid terms unreadable: keep them until a later update produces replacements. TORONTO1's
+    // subway environment 332451 reaches an equal near/far transition after its ENV hotbox switches.
+    try{lights.fog_180=level_fog(lights);}catch(const std::runtime_error&){}
 }
 std::optional<LevelFog> frame_fog(const LevelLights& lights){
     if(lights.fog_180_written)return lights.fog_180;

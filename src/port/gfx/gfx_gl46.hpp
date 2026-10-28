@@ -1,7 +1,8 @@
 #pragma once
 // Port-only (132ps5c, research/PS5.md "Renderer"): the PS5 backend of the renderer abstraction (gfx_device.hpp) on the
-// ps5-opengl SDK's OpenGL 4.6 core driver (Mesa over AGC) with an EGL window surface (1920 x 1080 by default). The
-// programs are the shared Cg sources of gfx_gxm_shaders.cpp converted to GLSL 4.60 when the device starts. The PS5
+// PS5 OpenGL core driver (Mesa over AGC; since 132ps5d cybervisi0n/ps5-gl-runtime: a 4.6 context, else 3.3) with an
+// EGL window surface (1920 x 1080 by default). The
+// programs are the shared Cg sources of gfx_gxm_shaders.cpp converted to GLSL (4.60 / 3.30) when the device starts. The PS5
 // app (src/port/ps5/ps5_main.cpp) makes the display; the play host draws into it through host_window_ps5.hpp.
 #include "gfx_device.hpp"
 

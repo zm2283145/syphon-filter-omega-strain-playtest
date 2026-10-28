@@ -194,4 +194,36 @@ struct InventoryLaunchResult {
 InventoryLaunchResult launch_inventory_projectile(WeaponInventory& inventory,const WeaponDatabase& database,
     const InventoryLaunchInput& input,float gravity_z,const ThrownProjectileTuning& tuning);
 
+// Checkpoint 132wf1: the aim view's throw arc. The pad block (0024f350..0024f388, a hold-class-1 item with Square
+// held in the aim view) calls 0025cdc0(hand, &+d0, f12 = the power +e0, f13 = cvt.s.w(record +104)) with the hand
+// the actor's skeleton node *(s8)0049d02c = 20 (00132a30, 00132910) and +d0 the thrown point 002497c0 wrote. It
+// fills the vector 004f8000 (+4 count, +8 data; 001810c0 clear, 00180bd0 push) that the render frame's 0025c650
+// (00132e50 at 001330fc: after the scene, before the taser wires 002629c0 and the HUD 00244b90) draws and clears.
+//   0025cdc0: d = target - hand, xyz normalised (vrsqrt / vmulq.xyz, w kept); side 004f8010 = d x (0, 0, 1, 1)
+//   (vopmula / vopmsub, w 0); the start = hand + side * 1.0 (0048afd8); side *= 0.6 / 3.0 (0048afa8, div.s);
+//   v = 003a8c80(start, target, 0, *004f5438, power, *004f7fe0) (solve_projectile_trajectory), clamped to the
+//   speed when |v|^2 > speed * speed (normalised xyz, then all lanes times the speed); a Verlet particle on the
+//   stack (001ec2a0(state, 1.0): mass 1, inverse mass 1) at the start with the previous position start - 0.1 v
+//   and the force 0 + gravity 004f5430 * 1; the start is pushed, then each step x' = (2 x - x_prev) +
+//   force * (1 * 0.01) (0017dc00, 00183380, 0017f670, 00134080; dt 1 / 10 from 0048af80, w = 1 by 00183000) is
+//   pushed until the step x - x_prev no longer rises (z >= 0) and x.z <= target.z (c.olt.s / c.ole.s). The
+//   velocity / acceleration the step also writes (+30 / +40) are not read.
+struct ThrowArcPreview {
+    RootVector side{};                    // 004f8010 after the 0.6 / 3 scale: the ribbon's half width
+    std::vector<RootVector> points;       // 004f8000's elements
+};
+ThrowArcPreview throw_arc_preview(const RootVector& hand,const RootVector& target,float power,float speed_104,
+    const RootVector& gravity,float gravity_z,const ThrownProjectileTuning& tuning);
+// 0025c650: per point p (count n = *004f8004), two strip vertices (0025ca40) p - side and p + side, both coloured
+// 0025c9d0 (cvt.w.s(128 c)) with c = (0.3, 0.6, 0.3, a) (0048afb0 / afb8 / afc0), a from 1.0 (0048afc8) down by
+// (1.0 - 0.1) / n (0048afd0, cvt.s.w) after each point. One 00371200 flush: a triangle strip, untextured
+// (00539228 = 0), ALPHA 004bc1b0[0] (0x8000000044), the mode 0 for the draw (005392d0 restored after); then
+// 001810c0 clears the vector.
+struct ThrowArcVertex {
+    RootVector position{};
+    std::array<std::int32_t,4> rgba{};
+};
+std::vector<ThrowArcVertex> throw_arc_ribbon(const ThrowArcPreview& arc);
+inline constexpr std::uint64_t throw_arc_alpha=0x0000008000000044ULL;   // 004bc1b0[0]
+
 }

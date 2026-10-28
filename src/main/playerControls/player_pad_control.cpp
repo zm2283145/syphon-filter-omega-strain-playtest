@@ -362,8 +362,9 @@ PlayerPadGateResult apply_player_pad_gates(PlayerPadSlots& s,const PlayerPadGate
     if(r.hud_screen){
         // 0x0024c010..0x0024c0dc.
         s.r2_fa8=0.0F;s.l2_fac=0.0F;s.r1_f90=0.0F;s.l1_f94=0.0F;s.select_f80=0.0F;s.down_f8c=0.0F;s.right_f88=0.0F;
-        if(!(s.triangle_fa4==0.0F)&&!b.triangle_latch_ad&&b.hud_6a8)
-            throw std::runtime_error("0024c050: Triangle closing the start menu from the player input (002261c0, 00131470(G, 0)) is not hosted");
+        // 0x0024c030..0x0024c06c (Checkpoint 132fx1): 002261c0 (a no-op: the objective manager's +ac is never set),
+        // then 00131470(G, 0), run by the caller.
+        if(!(s.triangle_fa4==0.0F)&&!b.triangle_latch_ad&&b.hud_6a8)r.unpause_131470=true;
         s.triangle_fa4=0.0F;s.square_f9c=0.0F;s.circle_f98=0.0F;
         // +6a9 outside selector 7 keeps the left stick's X (0x0024c0a4).
         if(b.hud_6a9&&b.selector_38!=7)s.left_f70[1]=0.0F;

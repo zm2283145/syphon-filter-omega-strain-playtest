@@ -61,7 +61,8 @@ double seconds_now() {
 
 }  // namespace
 struct Device::Impl {
-    Impl(std::size_t prime, bool mute) : ring(prime * 2, prime), muted(mute), grain(buffers * grain_frames * 2) {}
+    Impl(std::size_t prime, bool mute)
+        : ring(prime * 2, prime), muted(mute), grain(buffers * grain_frames * 2), prime_frames(prime) {}
 
     ~Impl() { close(); }
 
@@ -107,6 +108,7 @@ struct Device::Impl {
                 ring.read(out, grain_frames);
                 if (silent()) std::fill(out, out + grain_frames * 2, std::int16_t(0));
                 feed();
+                resync(seconds_now());
                 last_pull = seconds_now();
             }
             drained.notify_all();
@@ -141,13 +143,15 @@ struct Device::Impl {
                 const double span = now - window_start;
                 ps5::log("Audio out (PS5): %llu grains in %.2f s (%.1f %% of real time), output call mean %.2f ms max %.2f ms, "
                          "%llu early returns, %llu paced, longest gap %.1f ms; ring underruns %llu (+%llu), silent frames %llu, "
-                         "queued %.0f ms",
+                         "queued %.0f ms, resynced %.0f ms",
                          (unsigned long long)grains, span, 100.0 * double(grains) * grain_seconds / span,
                          1000.0 * call_sum / double(grains), 1000.0 * call_max, (unsigned long long)early,
                          (unsigned long long)paced, 1000.0 * gap_max, (unsigned long long)underruns,
                          (unsigned long long)(underruns - last_underruns), (unsigned long long)silent,
-                         1000.0 * double(queued) / double(Mixer::output_rate));
+                         1000.0 * double(queued) / double(Mixer::output_rate),
+                         1000.0 * double(resync_frames) / double(Mixer::output_rate));
                 last_underruns = underruns;
+                resync_frames = 0;
                 window_start = now;
                 grains = early = paced = 0;
                 call_sum = call_max = gap_max = 0.0;
@@ -178,7 +182,39 @@ struct Device::Impl {
     }
     std::size_t overflow_frames() const { return (overflow.size() - overflow_at) / 2; }
 
+    // 132ps5d hw2 (hw1: every sound about 1.6 s late, "queued 1607-1646 ms" in every 10 s line): the output runs at
+    // exactly real time, so audio that once got ahead (a burst from the loading screen, a movie or catch-up steps)
+    // stayed ahead for good. When more than the device's latency plus two grains has been queued for 0.25 s on end, the
+    // oldest audio beyond the latency plus one grain is dropped, so a sound plays within about the set latency of its
+    // frame. Called with mutex held, after a grain was taken.
+    void resync(double now) {
+        const std::size_t queued = ring.queued() + overflow_frames();
+        if (queued <= prime_frames + 2 * grain_frames) {
+            ahead_since = 0.0;
+            return;
+        }
+        if (ahead_since == 0.0) ahead_since = now;
+        if (now - ahead_since < 0.25) return;
+        std::size_t drop = queued - (prime_frames + grain_frames);
+        std::int16_t scratch[grain_frames * 2];
+        while (drop > 0) {
+            std::size_t chunk = std::min({drop, ring.queued(), std::size_t(grain_frames)});
+            if (chunk == 0) {
+                feed();
+                chunk = std::min({drop, ring.queued(), std::size_t(grain_frames)});
+                if (chunk == 0) break;
+            }
+            ring.read(scratch, chunk);
+            drop -= chunk;
+            resync_frames += chunk;
+        }
+        feed();
+        ahead_since = 0.0;
+    }
     static constexpr std::size_t buffers = 3;
+    std::size_t prime_frames = 0;
+    double ahead_since = 0.0;
+    std::uint64_t resync_frames = 0;
     static constexpr std::size_t overflow_cap = 2 * Mixer::output_rate;  // 2 s
     std::vector<std::int16_t> overflow;
     std::size_t overflow_at = 0;

@@ -18,8 +18,13 @@
 // Calls into other systems are events in call order. Not ported (throw naming
 // the address): the constructor without an actor
 // (00257820), a placement into a region the host cannot name
-// (002561d0 reads the null region's root bytes), 003ce980 with a +58 component, and the
-// multiplayer blocks (005721c8, including the eviction's +308 filter).
+// (002561d0 reads the null region's root bytes), 003ce980 with a +58 component.
+// Checkpoint 132fx5 (tests/backpack_network_goldens.hpp, gen_backpack_network.py):
+// the multiplayer blocks (005721c8) of the constructor (the id's top byte the
+// local client + 1, +308 the local client, +10 = +c, +14 = 0 off the session
+// host, NetMap_BindReceiver 003fb650), the eviction's +308 filter and the
+// destroy's InventoryMsg (*005061b0, type 4 / 1) are native; the network side
+// (the bind, the message's send 003c9420) is an event for the host.
 // Checkpoint 132ms5c: the drop matrix of an inactive actor (001a3448: virtual
 // +7c, the +58 controller's +5c and the +3584 block's +44..+4c) is ported.
 // Checkpoint 132el6 (tests/backpack_rider_goldens.hpp, gen_backpack_rider.py):
@@ -88,6 +93,9 @@ struct BackpackObjectEvent {
         zone_associate,     // ZoneMgr_Associate 00173d60(zone a, bp b, 1, 0)
         attach_rider,       // 002563f8..00256444: the handle (bp b, id c = its +c) to the lift a's +84
         box_bounds,         // 00171050(*004ffbd0, box a, bp, 0): box +70 = origin, +80 = displacement (001710a0)
+        net_bind,           // multiplayer: NetMap_BindReceiver 003fb650(id a, owner b, bp c) (132fx5)
+        inventory_send,     // multiplayer: Event_Send 003c9420(InventoryMsg *005061b0 {+20 4, +24 a, +28 b, +2c c},
+                            // sender d) (132fx5)
     } kind{};
     std::uint32_t a{},b{},c{},d{};
     RootVector origin{},displacement{};
@@ -112,6 +120,11 @@ struct BackpackObjectHost {
     std::function<std::array<RootVector,2>()> model_bounds;
     // 00171050's stores: box +70 / +80 = the bounds.
     std::function<void(std::uint32_t box,const RootVector& minimum,const RootVector& maximum)> set_box_bounds;
+    // Multiplayer (132fx5): the local client index *00494178 (lazily 002ebaf8(&it, *005721a8)), the session host
+    // flag *005721c0 and 002ebba0(*005721a8, &out)'s out (the session host's index).
+    std::function<std::uint32_t()> local_index;
+    bool hosting{};
+    std::function<std::uint32_t()> session_host;
 };
 
 // *004f7f30: the backpacks in order (the vector's +4 count / +8 data).
@@ -140,6 +153,10 @@ struct BackpackObjectCreate {
     std::uint32_t transform_address{};
     std::uint32_t id_40c240{};                // 0040c240(&id, 0xf5)
     std::uint32_t clock_4f7f70{};             // *004f7f70 (float bits)
+    // cNetBackpackMsg type 0 constructs a remote copy with the sender's full
+    // network ID and authority rather than allocating this console's prefix.
+    std::optional<std::uint32_t> network_id;
+    std::optional<std::uint32_t> network_owner;
 };
 
 // 00257a40: the count of list entries with +60 == 0, +30c >= 2 and no valid

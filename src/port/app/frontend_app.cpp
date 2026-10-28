@@ -1360,7 +1360,13 @@ void FrontendApp::Impl::present() {
         if (host->device_generation() != screen_generation) make_screen();
         if (session->movie_playing() && session->movie_frame() && session->movie_serial() != screen_movie_serial) {
             screen_movie_serial = session->movie_serial();
+#if defined(OMEGA_PS5)
+            // Port-only (132ps5d): each movie picture into the same texture (132ps5c hw11: a new texture per picture,
+            // about 30 a second at 8 ms each of the PS5 GL thread).
+            screen->stream_texture(movie_slot, movie_picture());
+#else
             screen->set_texture(movie_slot, movie_picture());
+#endif
         }
         host->sync_buffers();
         const float black[4] = {0, 0, 0, 1};

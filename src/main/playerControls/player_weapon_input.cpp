@@ -50,7 +50,8 @@ bool run_pad_weapon_block(PadWeaponState& s,const PadWeaponFrame& f,const PadWea
         fire=!square&&s.square_ab;
         if(square){
             s.power_e0=throw_power(s.hold_100);                             // 0025d430(+100)
-            if(aim_view)throw std::runtime_error("Pad weapon block: the aim-view arc preview (0025cdc0, hand node 0049d02c) is not native");
+            // 0024f348..0024f388: in the aim view, 0025cdc0(hand node *(s8)0049d02c, &+d0, +e0, cvt.s.w(record +104)).
+            if(aim_view)need(h.arc_preview,"0025cdc0")(s.point_d0,s.power_e0);
         }
     }
     else if(press_class||cls==11)fire=square&&!s.square_ab;                 // press edge

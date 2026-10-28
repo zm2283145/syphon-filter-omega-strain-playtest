@@ -337,6 +337,7 @@ struct BoundTexture {
     const GxmTexture* texture = nullptr;
     SamplerDesc sampler{};
 };
+enum class AlphaVariant : std::uint8_t { full, none, man_fail };
 struct Pipeline {
     unsigned vertex = 0, fragment = 0;
     const GxmAttribute* attributes = nullptr;
@@ -353,7 +354,7 @@ struct Pipeline {
     UniformBlock vertex_constants[2]{}, fragment_constants[2]{};
     float colour[4]{};
     float clear[4]{};
-    bool no_alpha_test = false;  // 132vg2: scene_ps's variant without the alpha test (no discard)
+    AlphaVariant alpha_variant = AlphaVariant::full;
     const void* stream = nullptr;
     const std::uint32_t* indices = nullptr;
     std::uint32_t count = 0;
@@ -634,8 +635,9 @@ public:
     std::uint32_t epoch() const { return epoch_; }
 
     // ---- programs ----
-    CompiledStage& stage(bool vertex, unsigned index, bool float_out, bool variant = false);
-    unsigned scene_fragment_ = ~0U;  // 132vg2: scene_ps's stage index (the alpha-test-free variant)
+    CompiledStage& stage(bool vertex, unsigned index, bool float_out,
+                         AlphaVariant variant = AlphaVariant::full);
+    unsigned scene_fragment_ = ~0U;  // scene_ps's stage index (the alpha-test-free variants)
     SceGxmVertexProgram* vertex_program(unsigned index, const GxmAttribute* attributes, unsigned count, std::uint32_t stride);
     SceGxmFragmentProgram* fragment_program(unsigned index, bool float_out, const Pipeline& p, const CompiledStage& vs);
 
@@ -709,7 +711,7 @@ private:
     // 132vg2 per-draw cuts: the stages by (vertex, float output, index) for indices below 32 (std::map nodes do not
     // move), and the last vertex / fragment program found.
     static constexpr unsigned stage_cache_size = 32;
-    CompiledStage* stage_cache_[2][2][2][stage_cache_size]{};
+    CompiledStage* stage_cache_[3][2][2][stage_cache_size]{};
     std::uint64_t last_vp_key_ = ~0ULL, last_fp_key_ = ~0ULL;
     SceGxmVertexProgram* last_vp_ = nullptr;
     SceGxmFragmentProgram* last_fp_ = nullptr;
@@ -1239,24 +1241,28 @@ std::string Impl::scene_dump() {
 }
 
 // A Cg stage's GXP: the cached file when present and valid, else compiled by SceShaccCg and cached.
-// variant (132vg2): scene_ps compiled with OMEGA_NO_ALPHA_TEST (no discard), for the draws without an alpha test.
-CompiledStage& Impl::stage(bool vertex, unsigned index, bool float_out, bool variant) {
+// The scene fragment variants omit discard either entirely, or only after retaining the man draw's alpha remap.
+CompiledStage& Impl::stage(bool vertex, unsigned index, bool float_out, AlphaVariant variant) {
+    const unsigned v = static_cast<unsigned>(variant);
     if (index < stage_cache_size)
-        if (CompiledStage* cached = stage_cache_[variant][vertex][float_out][index]) return *cached;
-    const std::uint32_t key = (vertex ? 0x10000u : 0u) | (float_out ? 0x8000u : 0u) | (variant ? 0x4000u : 0u) | index;
+        if (CompiledStage* cached = stage_cache_[v][vertex][float_out][index]) return *cached;
+    const std::uint32_t key =
+        (vertex ? 0x10000u : 0u) | (float_out ? 0x8000u : 0u) | (std::uint32_t(v) << 13) | index;
     auto found = stages_.find(key);
     if (found != stages_.end()) {
-        if (index < stage_cache_size) stage_cache_[variant][vertex][float_out][index] = &found->second;
+        if (index < stage_cache_size) stage_cache_[v][vertex][float_out][index] = &found->second;
         return found->second;
     }
     const GxmStage& s = vertex ? gxm_vertex_stage(index) : gxm_fragment_stage(index);
     std::string source = float_out ? "#define OMEGA_FLOAT_OUT\n" : "";
-    if (variant) source += "#define OMEGA_NO_ALPHA_TEST\n";
+    if (variant == AlphaVariant::none) source += "#define OMEGA_NO_ALPHA_TEST\n";
+    else if (variant == AlphaVariant::man_fail) source += "#define OMEGA_MAN_ALPHA_FAIL\n";
     source += s.source;
     char hash[24];
     std::snprintf(hash, sizeof hash, "%016llx", static_cast<unsigned long long>(fnv64(source)));
-    const std::string path = options.shader_cache + "/" + s.name + (float_out ? "_f" : "") + (variant ? "_na" : "") +
-                             "-" + hash + ".gxp";
+    const char* suffix = variant == AlphaVariant::none ? "_na" : variant == AlphaVariant::man_fail ? "_maf" : "";
+    const std::string path =
+        options.shader_cache + "/" + s.name + (float_out ? "_f" : "") + suffix + "-" + hash + ".gxp";
 
     CompiledStage c;
     if (FILE* f = std::fopen(path.c_str(), "rb")) {
@@ -1309,8 +1315,10 @@ CompiledStage& Impl::stage(bool vertex, unsigned index, bool float_out, bool var
     const SceGxmProgram* p = c.program();
     if (options.log) {
         char text[200];
+        const char* variant_name = variant == AlphaVariant::none ? " (no alpha test)"
+                                   : variant == AlphaVariant::man_fail ? " (man alpha fail)" : "";
         std::snprintf(text, sizeof text, "gxm program %s%s%s: %u bytes, default uniform buffer %u bytes, %u parameters, "
-                      "discard %s", s.name, float_out ? " (float out)" : "", variant ? " (no alpha test)" : "",
+                      "discard %s", s.name, float_out ? " (float out)" : "", variant_name,
                       sceGxmProgramGetSize(p), sceGxmProgramGetDefaultUniformBufferSize(p),
                       sceGxmProgramGetParameterCount(p), sceGxmProgramIsDiscardUsed(p) ? "yes" : "no");
         options.log(text);
@@ -1351,7 +1359,7 @@ CompiledStage& Impl::stage(bool vertex, unsigned index, bool float_out, bool var
     c.room_clear = uniform_room(c.clear);
     c.uniform_buffer = sceGxmProgramGetDefaultUniformBufferSize(p) != 0;
     CompiledStage& stored = stages_.emplace(key, std::move(c)).first->second;
-    if (index < stage_cache_size) stage_cache_[variant][vertex][float_out][index] = &stored;
+    if (index < stage_cache_size) stage_cache_[v][vertex][float_out][index] = &stored;
     return stored;
 }
 
@@ -1401,7 +1409,7 @@ SceGxmFragmentProgram* Impl::fragment_program(unsigned index, bool float_out, co
     std::memcpy(&blend_bits, &p.blend, sizeof blend_bits);
     const std::uint64_t key = std::uint64_t(blend_bits) | (std::uint64_t(index) << 32) | (std::uint64_t(p.vertex) << 40) |
                               (std::uint64_t(float_out) << 48) | (std::uint64_t(p.blend_info) << 49) |
-                              (std::uint64_t(p.no_alpha_test) << 50);
+                              (std::uint64_t(static_cast<unsigned>(p.alpha_variant)) << 50);
     if (key == last_fp_key_) {
         ++stats.gxm.program_cache_hits;
         return last_fp_;
@@ -1412,7 +1420,7 @@ SceGxmFragmentProgram* Impl::fragment_program(unsigned index, bool float_out, co
         last_fp_ = found->second;
         return found->second;
     }
-    const CompiledStage& s = stage(false, index, float_out, p.no_alpha_test);
+    const CompiledStage& s = stage(false, index, float_out, p.alpha_variant);
     SceGxmFragmentProgram* program = nullptr;
     check(sceGxmShaderPatcherCreateFragmentProgram(
               patcher_, s.id, float_out ? SCE_GXM_OUTPUT_REGISTER_FORMAT_FLOAT : SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4,
@@ -1739,7 +1747,7 @@ void Impl::execute(Pipeline& p) {
     const bool sample = sample_;
     std::uint64_t t0 = sample ? now_us() : 0, t1 = 0;
     const CompiledStage& vs = stage(true, p.vertex, false);
-    const CompiledStage& fs = stage(false, p.fragment, scene_.float_target, p.no_alpha_test);
+    const CompiledStage& fs = stage(false, p.fragment, scene_.float_target, p.alpha_variant);
     SceGxmVertexProgram* vp = vertex_program(p.vertex, p.attributes, p.attribute_count, p.stride);
     SceGxmFragmentProgram* fp = fragment_program(p.fragment, scene_.float_target, p, vs);
     // 132vg2: the context state cache (ctx_): a sceGxmSet* call whose value is already set in this scene is skipped.
@@ -2097,23 +2105,38 @@ void Impl::draw_body(bool indexed, std::uint32_t count, std::uint32_t first) {
         p.fragment = pass ? g.fragment_alt : g.fragment;
         // 132vg2: scene_ps without an alpha test this draw (Scene[7]: w <= 0.5 and x < 0, the shader's own test) uses
         // the variant compiled without it: no discard in the program, so the GPU's hidden-surface removal works.
-        p.no_alpha_test = false;
+        p.alpha_variant = AlphaVariant::full;
         proof_stream_ = patch && indexed && options.patched_proofs ? cpu_stream : nullptr;  // step 3g
         if (options.alpha_test_variant && p.fragment == scene_fragment_ && p.fragment_constants[0].data &&
             p.fragment_constants[0].bytes >= 8 * 16) {
             const float* alpha_test = static_cast<const float*>(p.fragment_constants[0].data) + 7 * 4;
-            p.no_alpha_test = !(alpha_test[3] > 0.5F) && !(alpha_test[0] >= 0.0F);
-            if (p.no_alpha_test) ++stats.gxm.no_alpha_test_draws;
+            p.alpha_variant = !(alpha_test[3] > 0.5F) && !(alpha_test[0] >= 0.0F)
+                                  ? AlphaVariant::none
+                                  : AlphaVariant::full;
+            if (p.alpha_variant == AlphaVariant::none) ++stats.gxm.no_alpha_test_draws;
+            // The man draw scales an 0..128 texel/vertex alpha by the uniform (w - 1), then compares it with AREF.
+            // If that uniform is below AREF every pixel fails. The first (depth-writing) pass is empty; the second
+            // RGB_ONLY pass keeps the exact quantised alpha in a specialized shader with no discard.
+            const bool man_always_fails =
+                alpha_test[3] > 0.5F && alpha_test[3] - 1.0F < alpha_test[0];
+            if (man_always_fails) {
+                if (!(alpha_test[1] > 0.5F)) {
+                    ++stats.gxm.man_alpha_fail_skipped;
+                    continue;
+                }
+                p.alpha_variant = AlphaVariant::man_fail;
+                ++stats.gxm.man_alpha_fail_draws;
+            }
             // 132vg2 step 3d: an alpha test that cannot fail on this draw's vertices and texture: the same variant.
-            if (!p.no_alpha_test && options.alpha_proof && (!patch || proof_stream_) &&
+            if (p.alpha_variant == AlphaVariant::full && options.alpha_proof && (!patch || proof_stream_) &&
                 alpha_passes_all(static_cast<const float*>(p.fragment_constants[0].data), layout, indexed, first,
                                  count)) {
-                p.no_alpha_test = true;
+                p.alpha_variant = AlphaVariant::none;
                 ++stats.gxm.alpha_proven_draws;
             }
             // step 3g: an alpha test that discards every pixel of the draw (the FB_ONLY pairs' second draw over a
             // texture with no alpha at or below the reference): the draw produces nothing and is skipped.
-            if (!p.no_alpha_test && options.alpha_proof && (!patch || proof_stream_) &&
+            if (p.alpha_variant == AlphaVariant::full && options.alpha_proof && (!patch || proof_stream_) &&
                 alpha_discards_all(static_cast<const float*>(p.fragment_constants[0].data), layout, indexed, first,
                                    count)) {
                 ++stats.gxm.alpha_skipped_draws;
@@ -2161,7 +2184,7 @@ void Impl::draw_body(bool indexed, std::uint32_t count, std::uint32_t first) {
                     p.blend_mul[0] = p.blend_mul[1] = p.blend_mul[2] = 1.0F;
                     p.blend_mul[3] = -1.0F;
                 }
-                if (probe == 3) p.no_alpha_test = true;
+                if (probe == 3) p.alpha_variant = AlphaVariant::none;
                 if (probe == 6) {
                     p.viewport.width = 1.0F;
                     p.viewport.height = 1.0F;
@@ -2169,7 +2192,7 @@ void Impl::draw_body(bool indexed, std::uint32_t count, std::uint32_t first) {
             }
             ++stats.gxm.scene_draws;
             if (blended) ++stats.gxm.scene_blended;
-            if (!p.no_alpha_test) ++stats.gxm.scene_discard;
+            if (p.alpha_variant == AlphaVariant::full) ++stats.gxm.scene_discard;
             if (state_.colour[pass] && state_.colour[pass]->display >= 0) ++stats.gxm.scene_display;
         }
         execute(p);
@@ -2248,7 +2271,7 @@ void Impl::census_blended(const Pipeline& p, const GxmLayout& layout, bool index
                           std::uint32_t count, bool patched) {
     auto& c = stats.gxm.census;
     const float* scene = static_cast<const float*>(p.fragment_constants[0].data);
-    if (!p.no_alpha_test) ++c[5];
+    if (p.alpha_variant == AlphaVariant::full) ++c[5];
     if (p.depth_write) ++c[6];
     if (p.textures[0].sampler.filter != Filter::point) ++c[7];
     const SceGxmBlendInfo& b = p.blend;
@@ -3158,7 +3181,8 @@ Display create_display(const Options& options) {
             if (g_impl->scene_fragment_ != ~0U)  // 132vg2: scene_ps without the alpha test
                 for (const bool float_out : {false, true}) {
                     try {
-                        g_impl->stage(false, g_impl->scene_fragment_, float_out, true);
+                        g_impl->stage(false, g_impl->scene_fragment_, float_out, AlphaVariant::none);
+                        g_impl->stage(false, g_impl->scene_fragment_, float_out, AlphaVariant::man_fail);
                     } catch (const ShaderCompilerMissing&) {
                         throw;
                     } catch (const std::exception& e) {
@@ -3234,4 +3258,3 @@ std::shared_ptr<Device> create_offscreen_device(const char*) {
 }
 
 }  // namespace omega::gfx
-

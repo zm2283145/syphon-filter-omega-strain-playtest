@@ -269,7 +269,8 @@ public:
     // Checkpoint 132sx12: SetEndState(NIEventOBJ) 00237870 -> virtual +128 = 0023b4c0, at once (no message):
     // +130 = 1, ni_end_state_tracks, then (kind != 3) the local matrix of 0023b618..0023b754 (the
     // 0023b2d0 compose: X +144, Y +164, Z +184 degrees, row 3 +e0), virtual +120, and each child's
-    // virtual +128 in +a4 order. An NIL child (00237a20) throws.
+    // virtual +128 in +a4 order. An NIL takes 00237a20 (Checkpoint 132fx1): its tracks +170 / +190 (looped -1),
+    // then 0023e5d0 (+130, the position / switch tracks while unlooped, kind != 3: local row 3 only).
     void end_state(std::uint32_t id);
     // Checkpoint 132uk3: Disable / Enable(NIEventOBJ) 002378a0 / 002378d0 (`lw a0,(a0)`, virtual +68 / +64 with
     // a1 = -1, return 0) -> 0023bdc0 / 0023be50: virtual +2c / +28 (-1) = 0023bcc0 / 0023bd40 sets +2c = 0 / 1

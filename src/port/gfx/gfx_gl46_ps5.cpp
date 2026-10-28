@@ -1,9 +1,12 @@
-// Port-only (132ps5b / 132ps5c, research/PS5.md "Renderer"): the PS5 backend of the renderer abstraction
-// (gfx_device.hpp, created through gfx_gl46.hpp) on the PS5 homebrew OpenGL 4.6 core driver (Mesa over AGC, EGL).
+// Port-only (132ps5b / 132ps5c / 132ps5d, research/PS5.md "Renderer"): the PS5 backend of the renderer abstraction
+// (gfx_device.hpp, created through gfx_gl46.hpp) on the PS5 homebrew OpenGL core driver (Mesa over AGC, EGL; since
+// 132ps5d cybervisi0n/ps5-gl-runtime, linked statically).
 //
 // Semantics follow the vitaGL backend (gfx_vitagl.cpp: the same Cg programs, constants, blend folding, CPU shadow
-// receiver filter and particle haze passes); the GL is plain desktop GL 4.6 core:
-// - The Cg sources of gfx_gxm_shaders.cpp are converted to GLSL 4.60 at run time (to_glsl below). A program that does
+// receiver filter and particle haze passes); the GL is plain desktop GL core, 4.6 where the runtime makes a 4.6
+// context, else 3.3 with each 4.x call it uses (texture storage, clear texture, copy image, texture sub-image read,
+// clip control, debug output) replaced next to it by its 3.3 equivalent (Impl::init lists which are present):
+// - The Cg sources of gfx_gxm_shaders.cpp are converted to GLSL at run time (to_glsl below). A program that does
 //   not compile or link is logged (with the GL info log and the GLSL) and its draws are skipped; nothing else stops.
 // - Every GL call runs on one thread (GlThread) that owns the EGL context: the render thread, the loader and the
 //   capture code all call the device, and an EGL context is current to one thread only.
@@ -162,7 +165,7 @@ void on_gl_thread(std::function<void()> job) {
     }
 }
 
-// ---- Cg (gfx_gxm_shaders.cpp) to GLSL 4.60 ----
+// ---- Cg (gfx_gxm_shaders.cpp) to GLSL (4.60, or 3.30 on a 3.3 context) ----
 
 bool is_word(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
 
@@ -259,8 +262,11 @@ unsigned texcoord_index(const std::string& semantic) {
     return static_cast<unsigned>(std::strtoul(semantic.c_str() + 8, nullptr, 10));  // "TEXCOORDn"
 }
 
+// The GLSL version line, chosen when the context is made (Impl::init): 4.60 on a 4.6 context, else 3.30 (the
+// programs use nothing past GLSL 3.30 core; the version only follows the context).
+std::string g_glsl_version = "#version 460 core\n";
+
 const char* const glsl_header =
-    "#version 460 core\n"
     "#define float2 vec2\n"
     "#define float3 vec3\n"
     "#define float4 vec4\n"
@@ -331,7 +337,7 @@ Converted to_glsl(const std::string& cg_in, bool vertex, bool clip_control) {
             throw std::runtime_error("unported Cg parameter: " + text);
         }
     }
-    std::string s = glsl_header;
+    std::string s = g_glsl_version + glsl_header;
     s += prefix;
     s += decl;
     if (vertex) {
@@ -408,8 +414,33 @@ struct GlProgram {
     unsigned vertex_count[2]{}, fragment_count[2]{};
     GLint tex_size = -1, layers = -1, blend_mul = -1;
     unsigned skipped = 0;
+    // 132ps5d: the values last set (vertex constants 0-1, fragment constants 0-1, tex_size, layers, blend_mul).
+    std::vector<float> last[7];
 };
 
+// 132ps5d: the GL state execute last set (Impl::cache_). valid = false: unknown, everything is set again.
+struct GlCache {
+    bool valid = false;
+    GLuint program = ~0u;
+    GLint viewport[4]{};
+    bool viewport_known = false;
+    double depth_range[2]{};
+    bool depth_range_known = false;
+    int polygon = -1, depth_test = -1, depth_mask = -1, colour_mask = -1, blend = -1;
+    GLenum depth_func = 0;
+    GLenum blend_funcs[6]{};
+    bool blend_known = false;
+    unsigned active = ~0u;
+    GLuint textures[4]{~0u, ~0u, ~0u, ~0u}, samplers[4]{~0u, ~0u, ~0u, ~0u};
+    GLuint array_buffer = ~0u, element_buffer = ~0u;
+    struct Attribute {
+        int enabled = -1;
+        GLuint buffer = ~0u;
+        GLint size = 0;
+        GLsizei stride = 0;
+        std::size_t offset = ~std::size_t(0);
+    } attributes[8];
+};
 // ---- pipeline description of one draw (gfx_vitagl.cpp's) ----
 
 struct UniformBlock {
@@ -559,7 +590,6 @@ struct State {
 
 // The program the present draws (back buffer to the window, flipped: the window is bottom-up).
 const char* const present_vertex_glsl =
-    "#version 460 core\n"
     "out vec2 uv;\n"
     "void main() {\n"
     "    vec2 p = vec2(float(gl_VertexID & 1) * 2.0, float(gl_VertexID >> 1) * 2.0);\n"
@@ -567,11 +597,18 @@ const char* const present_vertex_glsl =
     "    uv = vec2(p.x, 1.0 - p.y);\n"
     "}\n";
 const char* const present_fragment_glsl =
-    "#version 460 core\n"
     "uniform sampler2D image;\n"
     "in vec2 uv;\n"
     "layout(location = 0) out vec4 colour;\n"
     "void main() { colour = vec4(texture(image, uv).rgb, 1.0); }\n";
+
+// 132ps5d: copy_region's draw. The viewport is the destination rectangle; each fragment fetches the source texel at its
+// own position plus the source-to-destination offset (exact texels, no filtering; rows as stored on both sides).
+const char* const copy_fragment_glsl =
+    "uniform sampler2D source;\n"
+    "uniform ivec2 offset;\n"
+    "layout(location = 0) out vec4 colour;\n"
+    "void main() { colour = texelFetch(source, ivec2(gl_FragCoord.xy) + offset, 0); }\n";
 
 void GLAPIENTRY debug_message(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei, const GLchar* message,
                               const void*) {
@@ -582,8 +619,43 @@ void GLAPIENTRY debug_message(GLenum source, GLenum type, GLuint id, GLenum seve
          unsigned(severity), message, n == 200 ? " (no more debug messages are logged)" : "");
 }
 
+// 132ps5d hw2: switches for A/B tests on the console, read from ps5_gl.txt in the working folder (/data/omega_strain)
+// at start and whenever the file changes (checked every 2 s; FTP can replace it while the game runs). One "name=0/1"
+// per line: copy_draw (copy_region as a draw; 0: glCopyImageSubData), barrier (glTextureBarrier around the copy draws),
+// state_cache (execute skips unchanged state and uniforms), partial_updates (a partial "whole" buffer update writes
+// only its range), overlay_reuse (SceneRenderer keeps unchanged overlay images). All default to 1.
+std::atomic<bool> g_copy_draw{true}, g_barrier{true}, g_state_cache{true}, g_partial_updates{true};
+
+// 132ps5d hw2 (hw1: still about 520 textures made per 10 s): textures made per creation label since the last stats line.
+std::mutex g_label_mutex;
+std::map<std::string, unsigned> g_label_counts;
+void count_texture_label(const char* label) {
+    std::lock_guard lock(g_label_mutex);
+    ++g_label_counts[label ? label : "(none)"];
+}
+std::string take_texture_labels() {
+    std::map<std::string, unsigned> counts;
+    {
+        std::lock_guard lock(g_label_mutex);
+        counts.swap(g_label_counts);
+    }
+    std::vector<std::pair<unsigned, std::string>> sorted;
+    for (auto& [label, n] : counts) sorted.emplace_back(n, label);
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::string text;
+    for (std::size_t k = 0; k < sorted.size() && k < 4; ++k)
+        text += (k ? ", " : "") + std::to_string(sorted[k].first) + " \"" + sorted[k].second + "\"";
+    return text;
+}
 class Impl;
 Impl* g_impl = nullptr;
+
+}  // namespace
+}  // namespace omega::gfx::gl46
+// scene_renderer.cpp (OMEGA_PS5): whether set_overlay_textures reuses unchanged images (ps5_gl.txt overlay_reuse).
+extern "C" int omega_ps5_overlay_reuse;
+namespace omega::gfx::gl46 {
+namespace {
 
 // Everything below runs on the GL thread (the API objects at the end post their calls there).
 class Impl {
@@ -597,6 +669,13 @@ public:
     EGLContext context = EGL_NO_CONTEXT;
     int width = 0, height = 0;
     bool clip_control = false, s3tc = false;
+    // 132ps5d: the context's version (major * 10 + minor) and the 4.x features the backend uses, each from the core
+    // version or its extension; without one, the 3.3 path next to its use runs (cybervisi0n/ps5-gl-runtime is named
+    // "core33" and may give a 3.3 context).
+    int gl_version = 0;
+    bool has_storage = false, has_clear_texture = false, has_copy_image = false, has_get_sub_image = false;
+    bool has_debug = false;
+    GLuint copy_fbo_[2]{};
     std::string renderer, version;
     std::shared_ptr<GlTexture> back;
     std::uint64_t draws_total = 0, presents = 0, skipped_draws = 0;
@@ -605,6 +684,8 @@ public:
     std::atomic<std::uint64_t> submit_ns{0}, swap_ns{0}, upload_ns{0}, upload_bytes{0}, timed_presents{0};
     // 132ps5c hw11 (stalls of about 2 s under load in hw10): texture creation, texture updates and read-backs.
     std::atomic<std::uint64_t> texture_create_ns{0}, texture_creates{0}, texture_update_ns{0}, read_ns{0}, reads{0};
+    // 132ps5d: copy_region draws (since the last stats line) and out-of-memory retries (in all).
+    std::atomic<std::uint64_t> gpu_copies_{0}, oom_retries_{0};
 
     std::shared_ptr<GlBuffer> make_buffer(const BufferDesc& desc, const void* initial);
     std::shared_ptr<GlTexture> make_texture(const TextureDesc& desc, const Level* levels);
@@ -615,6 +696,9 @@ public:
     void read(const GlTexture& t, unsigned sub, std::vector<std::uint8_t>& out, unsigned& pitch);
     void present(unsigned sync_interval);
     void finish() { glFinish(); }
+    // 132ps5d: GL state was set outside execute, or an object was deleted (its name may come back): cache_ is unknown.
+    void invalidate_state() { cache_.valid = false; }
+    GlCache cache_;
 
 private:
     const CompiledShader& shader(bool vertex, unsigned index);
@@ -629,6 +713,10 @@ private:
                      unsigned src_sub, const Box* box);
     void update_texture(GlTexture& t, const Box& box, const std::uint8_t* data, unsigned pitch);
     void check_errors(const char* where);
+    bool out_of_memory(const char* where);
+    void poll_options();
+    double options_checked_ = -10.0;
+    long long options_mtime_ = -1;
 
     std::map<std::uint32_t, CompiledShader> shaders_;
     std::map<std::tuple<unsigned, unsigned, const GxmAttribute*>, GlProgram> programs_;
@@ -639,6 +727,11 @@ private:
     GLuint samplers_[3][2]{};
     GLuint present_program_ = 0;
     GLint present_image_ = -1;
+    // 132ps5d: copy_region as a draw (texelFetch of the source), see copy_region.
+    GLuint copy_program_ = 0;
+    GLint copy_source_ = -1, copy_offset_ = -1;
+    // 132ps5d (hw11 stalls): commands slower than 50 ms are logged with what they did.
+    unsigned slow_logged_ = 0;
     int swap_interval_ = -1;
     std::shared_ptr<GlTexture> dummy_;
     std::vector<std::uint32_t> kept_;
@@ -650,7 +743,10 @@ GlBuffer::~GlBuffer() {
     g_buffer_bytes -= cpu.size();
     if (!gl) return;
     const GLuint name = gl;
-    on_gl_thread([name] { glDeleteBuffers(1, &name); });
+    on_gl_thread([name] {
+        if (g_impl) g_impl->invalidate_state();  // 132ps5d: the name may come back for another buffer
+        glDeleteBuffers(1, &name);
+    });
 }
 
 GlTexture::~GlTexture() {
@@ -659,6 +755,7 @@ GlTexture::~GlTexture() {
     const GLuint name = gl;
     const GlTexture* self = this;
     on_gl_thread([name, self] {
+        if (g_impl) g_impl->invalidate_state();  // 132ps5d: the name may come back for another texture
         if (g_impl) g_impl->forget(self);
         if (name) glDeleteTextures(1, &name);
     });
@@ -711,13 +808,21 @@ void Impl::init() {
     EGLint configs = 0;
     if (!eglChooseConfig(display, config_attributes, &config, 1, &configs) || configs != 1)
         throw std::runtime_error("gfx gl46: eglChooseConfig found no RGBA8 window config");
-    static const EGLint context_attributes[]{EGL_CONTEXT_MAJOR_VERSION_KHR, 4, EGL_CONTEXT_MINOR_VERSION_KHR, 6,
-                                             EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
-                                             EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR, EGL_NONE};
     surface = eglCreateWindowSurface(display, config, (EGLNativeWindowType)0, nullptr);
     if (surface == EGL_NO_SURFACE) throw std::runtime_error("gfx gl46: eglCreateWindowSurface failed");
-    context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attributes);
-    if (context == EGL_NO_CONTEXT) throw std::runtime_error("gfx gl46: eglCreateContext (4.6 core) failed");
+    // The newest core context the runtime makes: 4.6 (the former ps5-opengl SDK), else 4.5 / 4.3, else 3.3 (the core
+    // profile ps5-app-sdk's sample asks for).
+    static const EGLint versions[][2]{{4, 6}, {4, 5}, {4, 3}, {3, 3}};
+    for (const auto& v : versions) {
+        const EGLint context_attributes[]{EGL_CONTEXT_MAJOR_VERSION_KHR, v[0], EGL_CONTEXT_MINOR_VERSION_KHR, v[1],
+                                          EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
+                                          EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR, EGL_NONE};
+        context = eglCreateContext(display, config, EGL_NO_CONTEXT, context_attributes);
+        logf("eglCreateContext %d.%d core: %s", int(v[0]), int(v[1]),
+             context == EGL_NO_CONTEXT ? ("failed (0x" + std::to_string(eglGetError()) + ")").c_str() : "made");
+        if (context != EGL_NO_CONTEXT) break;
+    }
+    if (context == EGL_NO_CONTEXT) throw std::runtime_error("gfx gl46: eglCreateContext (core 4.6 to 3.3) failed");
     if (!eglMakeCurrent(display, surface, surface, context)) throw std::runtime_error("gfx gl46: eglMakeCurrent failed");
     eglQuerySurface(display, surface, EGL_WIDTH, &width);
     eglQuerySurface(display, surface, EGL_HEIGHT, &height);
@@ -731,17 +836,43 @@ void Impl::init() {
 
     while (glGetError() != GL_NO_ERROR) {
     }
-    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
-    clip_control = glGetError() == GL_NO_ERROR;
-    logf("glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE): %s", clip_control ? "on" : "FAILED (z remapped in the vertex programs)");
+    GLint gl_major = 0, gl_minor = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &gl_major);
+    glGetIntegerv(GL_MINOR_VERSION, &gl_minor);
+    gl_version = int(gl_major) * 10 + int(gl_minor);
     GLint extensions = 0;
     glGetIntegerv(GL_NUM_EXTENSIONS, &extensions);
+    bool clip_control_ext = false;
     for (GLint k = 0; k < extensions; ++k) {
         const char* e = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, GLuint(k)));
-        if (e && std::strcmp(e, "GL_EXT_texture_compression_s3tc") == 0) s3tc = true;
+        if (!e) continue;
+        const std::string name = e;
+        if (name == "GL_EXT_texture_compression_s3tc") s3tc = true;
+        else if (name == "GL_ARB_texture_storage") has_storage = true;
+        else if (name == "GL_ARB_clear_texture") has_clear_texture = true;
+        else if (name == "GL_ARB_copy_image") has_copy_image = true;
+        else if (name == "GL_ARB_get_texture_sub_image") has_get_sub_image = true;
+        else if (name == "GL_KHR_debug") has_debug = true;
+        else if (name == "GL_ARB_clip_control") clip_control_ext = true;
     }
-    logf("%d extensions; S3TC %s", int(extensions), s3tc ? "present (block textures on)" : "absent (block textures decoded)");
-    if (options.debug_output) {
+    has_storage = has_storage || gl_version >= 42;
+    has_clear_texture = has_clear_texture || gl_version >= 44;
+    has_copy_image = has_copy_image || gl_version >= 43;
+    has_get_sub_image = has_get_sub_image || gl_version >= 45;
+    has_debug = has_debug || gl_version >= 43;
+    g_glsl_version = gl_version >= 46 ? "#version 460 core\n" : "#version 330 core\n";
+    if (gl_version >= 45 || clip_control_ext) {
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        clip_control = glGetError() == GL_NO_ERROR;
+    }
+    logf("GL %d.%d core, GLSL %s; glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE): %s", int(gl_major), int(gl_minor),
+         gl_version >= 46 ? "4.60" : "3.30", clip_control ? "on" : "absent or FAILED (z remapped in the vertex programs)");
+    logf("%d extensions; S3TC %s; texture storage %d, clear texture %d, copy image %d, texture sub-image read %d, "
+         "debug output %d (0: the GL 3.3 path)", int(extensions),
+         s3tc ? "present (block textures on)" : "absent (block textures decoded)", int(has_storage),
+         int(has_clear_texture), int(has_copy_image), int(has_get_sub_image), int(has_debug));
+    glGenFramebuffers(2, copy_fbo_);
+    if (options.debug_output && has_debug) {
         glEnable(GL_DEBUG_OUTPUT);
         glDebugMessageCallback(debug_message, nullptr);
         logf("GL debug output on (the first 200 messages are logged)");
@@ -772,10 +903,10 @@ void Impl::init() {
         // 132ps5c hw4 diagnostic: the smallest program the driver can compile and link, before any of ours.
         bool a = false, b = false;
         const GLuint tv = compile_glsl(GL_VERTEX_SHADER,
-                                       "#version 460 core\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n",
+                                       g_glsl_version + "void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n",
                                        "trivial_vs", a);
         const GLuint tf = compile_glsl(GL_FRAGMENT_SHADER,
-                                       "#version 460 core\nlayout(location = 0) out vec4 c;\nvoid main() { c = vec4(1.0); }\n",
+                                       g_glsl_version + "layout(location = 0) out vec4 c;\nvoid main() { c = vec4(1.0); }\n",
                                        "trivial_fs", b);
         const GLuint tp = glCreateProgram();
         glAttachShader(tp, tv);
@@ -788,8 +919,8 @@ void Impl::init() {
         logf("trivial program: compiled %d/%d, linked %d", int(a), int(b), int(linked));
     }
     bool vs_ok = false, fs_ok = false;
-    const GLuint vs = compile_glsl(GL_VERTEX_SHADER, present_vertex_glsl, "present_vs", vs_ok);
-    const GLuint fs = compile_glsl(GL_FRAGMENT_SHADER, present_fragment_glsl, "present_fs", fs_ok);
+    const GLuint vs = compile_glsl(GL_VERTEX_SHADER, g_glsl_version + present_vertex_glsl, "present_vs", vs_ok);
+    const GLuint fs = compile_glsl(GL_FRAGMENT_SHADER, g_glsl_version + present_fragment_glsl, "present_fs", fs_ok);
     present_program_ = glCreateProgram();
     glAttachShader(present_program_, vs);
     glAttachShader(present_program_, fs);
@@ -800,7 +931,23 @@ void Impl::init() {
     present_image_ = glGetUniformLocation(present_program_, "image");
     glUseProgram(present_program_);
     if (present_image_ >= 0) glUniform1i(present_image_, 0);
-
+    {
+        bool cv = false, cf = false;
+        const GLuint v = compile_glsl(GL_VERTEX_SHADER, g_glsl_version + present_vertex_glsl, "copy_vs", cv);
+        const GLuint fr = compile_glsl(GL_FRAGMENT_SHADER, g_glsl_version + copy_fragment_glsl, "copy_fs", cf);
+        copy_program_ = glCreateProgram();
+        glAttachShader(copy_program_, v);
+        glAttachShader(copy_program_, fr);
+        glLinkProgram(copy_program_);
+        GLint copy_linked = 0;
+        glGetProgramiv(copy_program_, GL_LINK_STATUS, &copy_linked);
+        if (!cv || !cf || !copy_linked) throw std::runtime_error("gfx gl46: the copy program did not build");
+        copy_source_ = glGetUniformLocation(copy_program_, "source");
+        copy_offset_ = glGetUniformLocation(copy_program_, "offset");
+        glUseProgram(copy_program_);
+        if (copy_source_ >= 0) glUniform1i(copy_source_, 0);
+        glUseProgram(present_program_);
+    }
     TextureDesc dummy;
     dummy.width = dummy.height = 1;
     dummy.bind = bind_sampled;
@@ -879,6 +1026,7 @@ GlProgram& Impl::program(unsigned vertex, unsigned fragment, const GxmAttribute*
         }
     }
     if (g.ok) {
+        invalidate_state();  // 132ps5d: the program is made current here
         glUseProgram(g.gl);
         const GxmProgram* owner = nullptr;
         for (std::size_t p = 0; p < gxm::gxm_program_count && !owner; ++p) {
@@ -920,6 +1068,7 @@ void Impl::prepare(Program p) {
 // ---- resources ----
 
 std::shared_ptr<GlBuffer> Impl::make_buffer(const BufferDesc& desc, const void* initial) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     auto b = std::make_shared<GlBuffer>(desc);
     b->cpu.assign(align_up(std::max<std::size_t>(desc.bytes, 16), 16), 0);
     if (initial) std::memcpy(b->cpu.data(), initial, desc.bytes);
@@ -928,8 +1077,17 @@ std::shared_ptr<GlBuffer> Impl::make_buffer(const BufferDesc& desc, const void* 
     if (!(desc.bind & bind_constants)) {
         glGenBuffers(1, &b->gl);
         glBindBuffer(GL_ARRAY_BUFFER, b->gl);
-        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(b->cpu.size()), b->cpu.data(),
-                     desc.usage == Usage::immutable ? GL_STATIC_DRAW : GL_DYNAMIC_DRAW);
+        check_errors("the commands before a buffer creation");
+        const GLenum usage = desc.usage == Usage::immutable ? GL_STATIC_DRAW : GL_DYNAMIC_DRAW;
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(b->cpu.size()), b->cpu.data(), usage);
+        if (out_of_memory("a buffer creation")) {
+            glFinish();
+            ++oom_retries_;
+            glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(b->cpu.size()), b->cpu.data(), usage);
+            const bool failed = out_of_memory("a buffer creation, retried after glFinish");
+            logf("out of memory making a %zu KB buffer: %s", b->cpu.size() >> 10,
+                 failed ? "FAILED again, the buffer is undefined" : "made after glFinish");
+        }
     }
     return b;
 }
@@ -944,6 +1102,7 @@ struct NsTimer {
 };
 
 std::shared_ptr<GlTexture> Impl::make_texture(const TextureDesc& desc, const Level* levels) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     NsTimer timer{texture_create_ns};
     ++texture_creates;
     if (desc.samples > 1) throw std::runtime_error("gfx gl46: multisampled textures are unported");
@@ -988,25 +1147,100 @@ std::shared_ptr<GlTexture> Impl::make_texture(const TextureDesc& desc, const Lev
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &limit);
     if (int(w) > limit || int(t->rows()) > limit)
         throw std::runtime_error("gfx gl46: a texture (with its stacked layers) above GL_MAX_TEXTURE_SIZE is unported");
-    glGenTextures(1, &t->gl);
-    glBindTexture(GL_TEXTURE_2D, t->gl);
-    glTexStorage2D(GL_TEXTURE_2D, 1, t->internal, GLsizei(w), GLsizei(t->rows()));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
     t->bytes = std::size_t(w) * t->rows() * t->bytes_per_texel;
+    // Zeroed, as a new D3D texture: glClearTexImage (4.4), else the storage is made from zero bytes (GL 3.3 path).
+    const bool zero_upload = !t->depth && !has_clear_texture;
+    std::vector<std::uint8_t> zeros(zero_upload ? t->bytes : 0);
+    const auto fill = [&] {
+        glGenTextures(1, &t->gl);
+        glBindTexture(GL_TEXTURE_2D, t->gl);
+        if (has_storage && !zero_upload) {
+            glTexStorage2D(GL_TEXTURE_2D, 1, t->internal, GLsizei(w), GLsizei(t->rows()));
+        } else {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GLint(t->internal), GLsizei(w), GLsizei(t->rows()), 0, t->format, t->type,
+                         zero_upload ? zeros.data() : nullptr);
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        if (t->depth) return;
+        if (!zero_upload) glClearTexImage(t->gl, 0, t->format, t->type, nullptr);
+        if (levels)
+            for (unsigned l = 0; l < layers; ++l) {
+                const Level& level = levels[l * mips];
+                if (!level.data) continue;
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, GLint(level.row_pitch / t->bytes_per_texel));
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, GLint(l * t->layer_rows), GLsizei(w), GLsizei(t->layer_rows),
+                                t->format, t->type, level.data);
+            }
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    };
+    check_errors("the commands before a texture creation");
+    fill();
+    if (out_of_memory("a texture creation")) {
+        // 132ps5d (hw11: GL_OUT_OF_MEMORY, then characters without textures): let the GPU retire what it still holds
+        // (the driver frees deleted objects after their last use), then make the texture again, once.
+        glDeleteTextures(1, &t->gl);
+        glFinish();
+        ++oom_retries_;
+        fill();
+        const bool failed = out_of_memory("a texture creation, retried after glFinish");
+        logf("out of memory making a %ux%u texture (format %u, %zu KB; %llu textures, %llu KB live): %s", w, t->rows(),
+             unsigned(desc.format), t->bytes >> 10, static_cast<unsigned long long>(g_textures.load()),
+             static_cast<unsigned long long>(g_texture_bytes.load() >> 10),
+             failed ? "FAILED again, the texture is undefined" : "made after glFinish");
+    }
     ++g_textures;
     g_texture_bytes += t->bytes;
-    if (t->depth) return t;
-    glClearTexImage(t->gl, 0, t->format, t->type, nullptr);  // zeroed, as a new D3D texture
-    if (levels)
-        for (unsigned l = 0; l < layers; ++l) {
-            const Level& level = levels[l * mips];
-            if (!level.data) continue;
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, GLint(level.row_pitch / t->bytes_per_texel));
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, GLint(l * t->layer_rows), GLsizei(w), GLsizei(t->layer_rows), t->format,
-                            t->type, level.data);
-        }
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     return t;
+}
+
+// 132ps5d hw2: re-reads ps5_gl.txt (the A/B switches above) when its modification time changes, every 2 s at most.
+void Impl::poll_options() {
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - options_checked_ < 2.0) return;
+    options_checked_ = now;
+    struct stat st{};
+    const long long mtime = stat("ps5_gl.txt", &st) == 0 ? (long long)st.st_mtime : -2;
+    if (mtime == options_mtime_) return;
+    options_mtime_ = mtime;
+    bool copy_draw = true, barrier = true, state_cache = true, partial = true, reuse = true;
+    if (FILE* f = std::fopen("ps5_gl.txt", "r")) {
+        char line[128];
+        while (std::fgets(line, sizeof line, f)) {
+            char name[64]{};
+            int value = 1;
+            if (std::sscanf(line, " %63[a-z_] = %d", name, &value) != 2) continue;
+            const std::string n = name;
+            if (n == "copy_draw") copy_draw = value != 0;
+            else if (n == "barrier") barrier = value != 0;
+            else if (n == "state_cache") state_cache = value != 0;
+            else if (n == "partial_updates") partial = value != 0;
+            else if (n == "overlay_reuse") reuse = value != 0;
+        }
+        std::fclose(f);
+    }
+    g_copy_draw = copy_draw;
+    g_barrier = barrier;
+    g_state_cache = state_cache;
+    g_partial_updates = partial;
+    omega_ps5_overlay_reuse = reuse ? 1 : 0;
+    invalidate_state();
+    logf("ps5_gl.txt %s: copy_draw %d, barrier %d, state_cache %d, partial_updates %d, overlay_reuse %d",
+         mtime >= 0 ? "read" : "absent (defaults)", int(copy_draw), int(barrier), int(state_cache), int(partial),
+         int(reuse));
+}
+
+// 132ps5d: true when the GL calls since the last check ran out of memory (other errors are logged as check_errors does).
+bool Impl::out_of_memory(const char* where) {
+    bool oom = false;
+    for (GLenum e = glGetError(); e != GL_NO_ERROR; e = glGetError()) {
+        if (e == GL_OUT_OF_MEMORY) oom = true;
+        else if (errors_logged_ < 64) {
+            ++errors_logged_;
+            logf("glGetError 0x%04x after %s", unsigned(e), where);
+        }
+    }
+    return oom;
 }
 
 void Impl::forget(const GlTexture* t) {
@@ -1171,37 +1405,89 @@ void Impl::execute(Pipeline& p) {
         if (g.skipped++ < 3) logf("draw skipped: program %u/%u did not build", p.vertex, p.fragment);
         return;
     }
-    glUseProgram(g.gl);
-    const Viewport& v = p.viewport;
-    glViewport(GLint(std::lround(v.x)), GLint(std::lround(v.y)), GLsizei(std::lround(v.width)), GLsizei(std::lround(v.height)));
-    glDepthRangef(v.min_depth, v.max_depth);
-    glPolygonMode(GL_FRONT_AND_BACK, p.wireframe ? GL_LINE : GL_FILL);
-    if (p.depth_test || p.depth_write) {
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(p.depth_test ? p.depth_func : GL_ALWAYS);
-        glDepthMask(p.depth_write ? GL_TRUE : GL_FALSE);
-    } else {
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
+    // 132ps5d (hw11: 700-1000 draws at 90-130 ms of GL calls a frame): the GL state of the previous draw is kept in
+    // cache_ and a draw makes only the calls whose state differs (the PS5 driver revalidates and flushes what a call
+    // marks dirty). Code that sets GL state outside execute clears cache_ (invalidate_state).
+    GlCache& s = cache_;
+    const bool caching = g_state_cache.load(std::memory_order_relaxed);
+    if (!s.valid || !caching) s = GlCache{.valid = true};
+    if (s.program != g.gl) {
+        glUseProgram(g.gl);
+        s.program = g.gl;
     }
-    glColorMask((p.mask & mask_r) ? GL_TRUE : GL_FALSE, (p.mask & mask_g) ? GL_TRUE : GL_FALSE,
-                (p.mask & mask_b) ? GL_TRUE : GL_FALSE, (p.mask & mask_a) ? GL_TRUE : GL_FALSE);
+    const Viewport& v = p.viewport;
+    const GLint vp[4]{GLint(std::lround(v.x)), GLint(std::lround(v.y)), GLint(std::lround(v.width)), GLint(std::lround(v.height))};
+    if (!s.viewport_known || std::memcmp(vp, s.viewport, sizeof vp) != 0) {
+        glViewport(vp[0], vp[1], vp[2], vp[3]);
+        std::memcpy(s.viewport, vp, sizeof vp);
+        s.viewport_known = true;
+    }
+    if (!s.depth_range_known || s.depth_range[0] != v.min_depth || s.depth_range[1] != v.max_depth) {
+        glDepthRange(v.min_depth, v.max_depth);  // GL 1.0 (glDepthRangef is 4.1)
+        s.depth_range[0] = v.min_depth;
+        s.depth_range[1] = v.max_depth;
+        s.depth_range_known = true;
+    }
+    if (s.polygon != int(p.wireframe)) {
+        glPolygonMode(GL_FRONT_AND_BACK, p.wireframe ? GL_LINE : GL_FILL);
+        s.polygon = int(p.wireframe);
+    }
+    const bool depth_on = p.depth_test || p.depth_write;
+    if (s.depth_test != int(depth_on)) {
+        if (depth_on) glEnable(GL_DEPTH_TEST);
+        else glDisable(GL_DEPTH_TEST);
+        s.depth_test = int(depth_on);
+    }
+    if (depth_on) {
+        const GLenum func = p.depth_test ? p.depth_func : GL_ALWAYS;
+        if (s.depth_func != func) {
+            glDepthFunc(func);
+            s.depth_func = func;
+        }
+    }
+    const int depth_mask = depth_on && p.depth_write ? 1 : 0;
+    if (s.depth_mask != depth_mask) {
+        glDepthMask(depth_mask ? GL_TRUE : GL_FALSE);
+        s.depth_mask = depth_mask;
+    }
+    if (s.colour_mask != int(p.mask)) {
+        glColorMask((p.mask & mask_r) ? GL_TRUE : GL_FALSE, (p.mask & mask_g) ? GL_TRUE : GL_FALSE,
+                    (p.mask & mask_b) ? GL_TRUE : GL_FALSE, (p.mask & mask_a) ? GL_TRUE : GL_FALSE);
+        s.colour_mask = int(p.mask);
+    }
+    if (s.blend != int(p.blend)) {
+        if (p.blend) glEnable(GL_BLEND);
+        else glDisable(GL_BLEND);
+        s.blend = int(p.blend);
+    }
     if (p.blend) {
-        glEnable(GL_BLEND);
-        glBlendFuncSeparate(p.colour_src, p.colour_dst, p.alpha_src, p.alpha_dst);
-        glBlendEquationSeparate(p.colour_op, p.alpha_op);
-    } else {
-        glDisable(GL_BLEND);
+        const GLenum funcs[6]{p.colour_src, p.colour_dst, p.alpha_src, p.alpha_dst, p.colour_op, p.alpha_op};
+        if (!s.blend_known || std::memcmp(funcs, s.blend_funcs, sizeof funcs) != 0) {
+            glBlendFuncSeparate(p.colour_src, p.colour_dst, p.alpha_src, p.alpha_dst);
+            glBlendEquationSeparate(p.colour_op, p.alpha_op);
+            std::memcpy(s.blend_funcs, funcs, sizeof funcs);
+            s.blend_known = true;
+        }
     }
     float tex_size[16];
     float layers[4];
     for (unsigned k = 0; k < 4; ++k) {
         const GlTexture* t = p.textures[k].texture ? p.textures[k].texture : dummy_.get();
         if (t->depth) throw std::runtime_error("gfx gl46: sampling a depth texture is unported");
-        const SamplerDesc& s = p.textures[k].sampler;
-        glActiveTexture(GL_TEXTURE0 + k);
-        glBindTexture(GL_TEXTURE_2D, t->gl);
-        glBindSampler(k, samplers_[std::min(unsigned(s.filter), 2u)][s.address == Address::wrap ? 1 : 0]);
+        const SamplerDesc& sd = p.textures[k].sampler;
+        const GLuint sampler = samplers_[std::min(unsigned(sd.filter), 2u)][sd.address == Address::wrap ? 1 : 0];
+        if (s.textures[k] != t->gl) {
+            if (s.active != k) {
+                glActiveTexture(GL_TEXTURE0 + k);
+                s.active = k;
+            }
+            glBindTexture(GL_TEXTURE_2D, t->gl);
+            s.textures[k] = t->gl;
+        }
+        if (s.samplers[k] != sampler) {
+            glBindSampler(k, sampler);
+            s.samplers[k] = sampler;
+        }
         const float w = static_cast<float>(std::max(t->desc().width, 1u)), h = static_cast<float>(t->layer_rows);
         tex_size[4 * k] = w;
         tex_size[4 * k + 1] = h;
@@ -1209,36 +1495,60 @@ void Impl::execute(Pipeline& p) {
         tex_size[4 * k + 3] = 1.0F / h;
         layers[k] = static_cast<float>(std::max(t->desc().layers, 1u));
     }
-    glActiveTexture(GL_TEXTURE0);
-    auto set = [](GLint location, const void* data, std::size_t bytes, unsigned declared) {
+    // Uniform values stay in the program object: a value equal to the program's last one is not set again.
+    auto set = [&g, caching](unsigned slot, GLint location, const void* data, std::size_t bytes, unsigned declared) {
         if (location < 0 || !data) return;
         const unsigned n = static_cast<unsigned>(std::min<std::size_t>(bytes / 16, declared));
-        if (n) glUniform4fv(location, GLsizei(n), static_cast<const GLfloat*>(data));
+        if (!n) return;
+        std::vector<float>& last = g.last[slot];
+        const std::size_t floats = std::size_t(n) * 4;
+        if (caching && last.size() == floats && std::memcmp(last.data(), data, floats * sizeof(float)) == 0) return;
+        last.assign(static_cast<const float*>(data), static_cast<const float*>(data) + floats);
+        glUniform4fv(location, GLsizei(n), static_cast<const GLfloat*>(data));
     };
     for (unsigned k = 0; k < 2; ++k) {
-        set(g.vertex_constants[k], p.vertex_constants[k].data, p.vertex_constants[k].bytes, g.vertex_count[k]);
-        set(g.fragment_constants[k], p.fragment_constants[k].data, p.fragment_constants[k].bytes, g.fragment_count[k]);
+        set(k, g.vertex_constants[k], p.vertex_constants[k].data, p.vertex_constants[k].bytes, g.vertex_count[k]);
+        set(2 + k, g.fragment_constants[k], p.fragment_constants[k].data, p.fragment_constants[k].bytes, g.fragment_count[k]);
     }
-    if (g.tex_size >= 0) glUniform4fv(g.tex_size, 4, tex_size);
-    if (g.layers >= 0) glUniform4fv(g.layers, 1, layers);
-    if (g.blend_mul >= 0) glUniform4fv(g.blend_mul, 1, p.blend_mul);
+    set(4, g.tex_size, tex_size, sizeof tex_size, 4);
+    set(5, g.layers, layers, sizeof layers, 1);
+    set(6, g.blend_mul, p.blend_mul, sizeof p.blend_mul, 1);
 
-    glBindBuffer(GL_ARRAY_BUFFER, p.vertex_buffer);
     for (unsigned k = 0; k < 8; ++k) {
+        GlCache::Attribute& a = s.attributes[k];
         if (k < p.attribute_count) {
-            glEnableVertexAttribArray(k);
-            glVertexAttribPointer(k, p.attributes[k].components, GL_FLOAT, GL_FALSE, GLsizei(p.stride),
-                                  reinterpret_cast<const void*>(p.vertex_offset + p.attributes[k].offset));
-        } else {
+            const GLint size = GLint(p.attributes[k].components);
+            const std::size_t offset = p.vertex_offset + p.attributes[k].offset;
+            if (a.enabled != 1) {
+                glEnableVertexAttribArray(k);
+                a.enabled = 1;
+            }
+            if (a.buffer != p.vertex_buffer || a.size != size || a.stride != GLsizei(p.stride) || a.offset != offset) {
+                if (s.array_buffer != p.vertex_buffer) {
+                    glBindBuffer(GL_ARRAY_BUFFER, p.vertex_buffer);
+                    s.array_buffer = p.vertex_buffer;
+                }
+                glVertexAttribPointer(k, size, GL_FLOAT, GL_FALSE, GLsizei(p.stride), reinterpret_cast<const void*>(offset));
+                a.buffer = p.vertex_buffer;
+                a.size = size;
+                a.stride = GLsizei(p.stride);
+                a.offset = offset;
+            }
+        } else if (a.enabled != 0) {
             glDisableVertexAttribArray(k);
+            a.enabled = 0;
         }
     }
     if (p.indexed) {
         if (p.index_buffer) {
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.index_buffer);
+            if (s.element_buffer != p.index_buffer) {
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.index_buffer);
+                s.element_buffer = p.index_buffer;
+            }
             glDrawElements(GL_TRIANGLES, GLsizei(p.count), GL_UNSIGNED_INT, reinterpret_cast<const void*>(std::size_t(p.first) * 4));
         } else {
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, stream_indices_);
+            s.element_buffer = stream_indices_;
             glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(std::size_t(p.count) * 4), p.client_indices, GL_STREAM_DRAW);
             glDrawElements(GL_TRIANGLES, GLsizei(p.count), GL_UNSIGNED_INT, nullptr);
         }
@@ -1259,6 +1569,7 @@ void Impl::execute(Pipeline& p) {
 
 // A colour clear (D3D ClearRenderTargetView / ClearView): glClear inside a scissor of the layer's rows.
 void Impl::clear_colour(const GlTexture* target, unsigned layer, const float rgba[4], const Rect* rects, unsigned count) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     if (!target) return;
     bind_target(target, nullptr);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1281,12 +1592,13 @@ void Impl::clear_colour(const GlTexture* target, unsigned layer, const float rgb
 }
 
 void Impl::clear_depth(const GlTexture* depth, std::uint8_t flags, float value, std::uint8_t stencil) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     if (!depth) return;
     bind_target(nullptr, depth);
     GLbitfield bits = 0;
     if (flags & CommandList::clear_depth_bit) {
         glDepthMask(GL_TRUE);
-        glClearDepthf(value);
+        glClearDepth(value);
         bits |= GL_DEPTH_BUFFER_BIT;
     }
     if (flags & CommandList::clear_stencil_bit) {
@@ -1300,6 +1612,7 @@ void Impl::clear_depth(const GlTexture* depth, std::uint8_t flags, float value, 
 // CopyResource / CopySubresourceRegion: glCopyImageSubData between the stacked layers' rows.
 void Impl::copy_region(const GlTexture* dst, unsigned dst_sub, unsigned x, unsigned y, const GlTexture* src,
                        unsigned src_sub, const Box* box) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     if (!dst || !src) return;
     if (dst->depth || src->depth) throw std::runtime_error("gfx gl46: depth copies are unported");
     const unsigned dm = std::max(dst->desc().mips, 1u), sm = std::max(src->desc().mips, 1u);
@@ -1311,24 +1624,74 @@ void Impl::copy_region(const GlTexture* dst, unsigned dst_sub, unsigned x, unsig
     const unsigned w = std::min(right - b.left, dst->desc().width - std::min(x, dst->desc().width));
     const unsigned h = std::min(bottom - b.top, dst->layer_rows - std::min(y, dst->layer_rows));
     if (!w || !h) return;
-    glCopyImageSubData(src->gl, GL_TEXTURE_2D, 0, GLint(b.left), GLint(sl * src->layer_rows + b.top), 0, dst->gl,
-                       GL_TEXTURE_2D, 0, GLint(x), GLint(dl * dst->layer_rows + y), 0, GLsizei(w), GLsizei(h), 1);
+    const GLint sx = GLint(b.left), sy = GLint(sl * src->layer_rows + b.top);
+    const GLint dx = GLint(x), dy = GLint(dl * dst->layer_rows + y);
+    if (src->compressed || dst->compressed || (!g_copy_draw.load(std::memory_order_relaxed) && has_copy_image)) {
+        if (!has_copy_image) throw std::runtime_error("gfx gl46: block-texture copies need GL_ARB_copy_image");
+        glCopyImageSubData(src->gl, GL_TEXTURE_2D, 0, sx, sy, 0, dst->gl, GL_TEXTURE_2D, 0, dx, dy, 0, GLsizei(w),
+                           GLsizei(h), 1);
+        return;
+    }
+    // 132ps5d: a draw into the destination that fetches the source's texels, on the GPU. The PS5 driver runs
+    // glCopyImageSubData through CPU maps of both whole textures (132ps5c hw11 gl-stdout.log: the read maps of
+    // ps5_screen.c 7059 and the write flushes of 7217, 3.7-10.5 MB each, 5 a present) and waits for the GPU each time;
+    // the particle haze copies a box of the scene for every haze sprite. The source is not bound as a target here.
+    ++gpu_copies_;
+    // 132ps5d hw2 (the sky showed old frames, the pause screen's among them): the source was just rendered and the
+    // destination is sampled next; the driver must not serve either from stale GPU caches.
+    const bool barrier = g_barrier.load(std::memory_order_relaxed) && gl_version >= 45;
+    if (barrier) glTextureBarrier();
+    if (src == dst) throw std::runtime_error("gfx gl46: a copy within one texture is unported");
+    bind_target(dst, nullptr);
+    glViewport(dx, dy, GLsizei(w), GLsizei(h));
+    glDepthRange(0.0, 1.0);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glUseProgram(copy_program_);
+    if (copy_offset_ >= 0) glUniform2i(copy_offset_, sx - dx, sy - dy);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src->gl);
+    glBindSampler(0, samplers_[unsigned(Filter::point)][0]);
+    for (unsigned k = 0; k < 8; ++k) glDisableVertexAttribArray(k);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (barrier) glTextureBarrier();
 }
 
 void Impl::update_buffer(GlBuffer& b, const void* data, std::size_t bytes, std::size_t offset, bool whole) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     const std::size_t size = b.desc().bytes;
     if (offset > size || bytes > size - offset) throw std::runtime_error("gfx gl46: a buffer update past its end");
     if (bytes) std::memcpy(b.cpu.data() + offset, data, bytes);
     if (!b.gl || !bytes) return;
+    // 132ps5d: a "whole" update of part of the buffer (SceneRenderer::refresh_vertices' ranges of the 34.5 MB level
+    // mesh) writes only that part; new storage (orphaning) is for an update of all of it.
+    if (whole && (offset != 0 || bytes < size) && g_partial_updates.load(std::memory_order_relaxed)) whole = false;
     upload_bytes += whole ? b.cpu.size() : bytes;
     const auto upload_start = std::chrono::steady_clock::now();
     glBindBuffer(GL_ARRAY_BUFFER, b.gl);
-    if (whole) glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(b.cpu.size()), b.cpu.data(), GL_DYNAMIC_DRAW);  // new storage
-    else glBufferSubData(GL_ARRAY_BUFFER, GLintptr(offset), GLsizeiptr(bytes), b.cpu.data() + offset);
+    if (whole) {
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(b.cpu.size()), b.cpu.data(), GL_DYNAMIC_DRAW);  // new storage
+        if (out_of_memory("a buffer's new storage")) {
+            glFinish();
+            ++oom_retries_;
+            glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(b.cpu.size()), b.cpu.data(), GL_DYNAMIC_DRAW);
+            const bool failed = out_of_memory("a buffer's new storage, retried after glFinish");
+            logf("out of memory renewing a %zu KB buffer: %s", b.cpu.size() >> 10,
+                 failed ? "FAILED again, the buffer is undefined" : "made after glFinish");
+        }
+    } else {
+        glBufferSubData(GL_ARRAY_BUFFER, GLintptr(offset), GLsizeiptr(bytes), b.cpu.data() + offset);
+    }
     upload_ns += std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - upload_start).count());
 }
 
 void Impl::update_texture(GlTexture& t, const Box& box, const std::uint8_t* data, unsigned pitch) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     NsTimer timer{texture_update_ns};
     if (t.depth || t.compressed) throw std::runtime_error("gfx gl46: depth / block texture updates are unported");
     const unsigned right = std::min(box.right, t.desc().width), bottom = std::min(box.bottom, t.layer_rows);
@@ -1341,6 +1704,7 @@ void Impl::update_texture(GlTexture& t, const Box& box, const std::uint8_t* data
 }
 
 void Impl::read(const GlTexture& t, unsigned sub, std::vector<std::uint8_t>& out, unsigned& pitch) {
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     NsTimer timer{read_ns};
     ++reads;
     if (t.depth || t.compressed) throw std::runtime_error("gfx gl46: depth / block read-back is unported");
@@ -1349,15 +1713,29 @@ void Impl::read(const GlTexture& t, unsigned sub, std::vector<std::uint8_t>& out
     const unsigned w = std::max(t.desc().width, 1u);
     pitch = w * t.bytes_per_texel;
     out.resize(std::size_t(pitch) * t.layer_rows);
-    glGetTextureSubImage(t.gl, 0, 0, GLint((sub / mips) * t.layer_rows), 0, GLsizei(w), GLsizei(t.layer_rows), 1, t.format,
-                         t.type, GLsizei(out.size()), out.data());
+    if (has_get_sub_image) {
+        glGetTextureSubImage(t.gl, 0, 0, GLint((sub / mips) * t.layer_rows), 0, GLsizei(w), GLsizei(t.layer_rows), 1,
+                             t.format, t.type, GLsizei(out.size()), out.data());
+        return;
+    }
+    // GL 3.3 path: the layer's rows read through an attachment-only framebuffer.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, copy_fbo_[0]);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.gl, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadPixels(0, GLint((sub / mips) * t.layer_rows), GLsizei(w), GLsizei(t.layer_rows), t.format, t.type, out.data());
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    bound_fbo_ = ~0u;
 }
 
 // ---- command lists ----
 
 void Impl::submit(CommandList& list) {
     const auto submit_start = std::chrono::steady_clock::now();
+    std::size_t command_index = 0;
     for (const Command& c : list.commands()) {
+        const auto command_start = std::chrono::steady_clock::now();
+        const unsigned draws_before = draws_frame;
         switch (c.op) {
         case Command::Op::set_targets:
             for (unsigned k = 0; k < 2; ++k) {
@@ -1437,6 +1815,21 @@ void Impl::submit(CommandList& list) {
         case Command::Op::flush: glFlush(); break;
         case Command::Op::reset_state: state_ = State{}; break;
         }
+        // 132ps5d (hw11: stalls of 1.5-2.5 s): a command slower than 50 ms is logged with what it did (the first 200).
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - command_start).count();
+        if (ms > 50.0 && slow_logged_ < 200) {
+            ++slow_logged_;
+            const GlTexture* t0 = (c.op == Command::Op::copy || c.op == Command::Op::copy_region ||
+                                   c.op == Command::Op::update_texture || c.op == Command::Op::clear_target)
+                                      ? texture_of(c.objects[0]) : nullptr;
+            const GlBuffer* b0 = c.op == Command::Op::update_buffer ? buffer_of(c.objects[0]) : nullptr;
+            logf("slow command: op %u (#%zu of %zu in the list) %.1f ms; draws %u, a %u b %u c %u flags %u; texture %ux%u, "
+                 "buffer %zu bytes; program %u (slow log %u of 200)",
+                 unsigned(c.op), command_index, list.commands().size(), ms, draws_frame - draws_before, unsigned(c.a),
+                 unsigned(c.b), unsigned(c.c), unsigned(c.flags), t0 ? t0->desc().width : 0u, t0 ? t0->rows() : 0u,
+                 b0 ? b0->cpu.size() : std::size_t(0), unsigned(state_.program), slow_logged_);
+        }
+        ++command_index;
     }
     check_errors("a submitted list");
     list.clear();
@@ -1446,6 +1839,8 @@ void Impl::submit(CommandList& list) {
 // The back buffer drawn into the window (flipped: the window is bottom-up, the back buffer's row 0 is the D3D top),
 // then the swap. Every 600th present logs four back-buffer pixels and the frame's draws (bring-up evidence).
 void Impl::present(unsigned sync_interval) {
+    poll_options();
+    invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     if (presents % 600 == 0 && presents < 1200) {  // two samples only: a read-back stalls the pipeline
         bind_target(back.get(), nullptr);
         std::uint8_t px[4][4]{};
@@ -1460,7 +1855,7 @@ void Impl::present(unsigned sync_interval) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     bound_fbo_ = 0;
     glViewport(0, 0, width, height);
-    glDepthRangef(0.0F, 1.0F);
+    glDepthRange(0.0, 1.0);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
@@ -1479,7 +1874,14 @@ void Impl::present(unsigned sync_interval) {
     }
     const auto swap_start = std::chrono::steady_clock::now();
     const bool swapped = eglSwapBuffers(display, surface);
-    swap_ns += std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - swap_start).count());
+    const auto swap_time = std::chrono::steady_clock::now() - swap_start;
+    swap_ns += std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(swap_time).count());
+    if (swap_time > std::chrono::milliseconds(50) && slow_logged_ < 200) {
+        ++slow_logged_;
+        logf("slow present: eglSwapBuffers %.1f ms (present %llu, %u draws) (slow log %u of 200)",
+             std::chrono::duration<double, std::milli>(swap_time).count(), static_cast<unsigned long long>(presents),
+             draws_frame, slow_logged_);
+    }
     ++timed_presents;
     if (!swapped && errors_logged_ < 64) {
         ++errors_logged_;
@@ -1500,7 +1902,8 @@ public:
     std::shared_ptr<Buffer> create_buffer(const BufferDesc& desc, const void* initial, const char*) override {
         return g_thread.call([&] { return std::shared_ptr<Buffer>(g_impl->make_buffer(desc, initial)); });
     }
-    std::shared_ptr<Texture> create_texture(const TextureDesc& desc, const Level* levels, const TextureLabels&) override {
+    std::shared_ptr<Texture> create_texture(const TextureDesc& desc, const Level* levels, const TextureLabels& labels) override {
+        count_texture_label(labels.texture);
         return g_thread.call([&] { return std::shared_ptr<Texture>(g_impl->make_texture(desc, levels)); });
     }
     std::shared_ptr<BlendState> create_blend(const BlendDesc& desc, const char*) override {
@@ -1592,7 +1995,7 @@ Display create_display(const Options& options) {
 
 }  // namespace omega::gfx::gl46
 
-extern "C" std::size_t ps5_opengl_heap_live_bytes(void);  // native-app/app_heap.c: the runtime heap's live bytes
+extern "C" std::size_t omega_ps5_heap_live_bytes();  // src/port/ps5/ps5_heap.cpp: the title heap's live bytes
 extern "C" int sceKernelAvailableFlexibleMemorySize(std::size_t* size);
 
 namespace omega::gfx::gl46 {
@@ -1604,17 +2007,18 @@ std::string stats_line() {
     const double per = n ? 1e-6 / double(n) : 0.0;
     std::size_t flexible = 0;
     sceKernelAvailableFlexibleMemorySize(&flexible);
-    char timing[400];
+    char timing[600];
     std::snprintf(timing, sizeof timing,
                   "; per present: lists %.2f ms (uploads %.2f ms, %.0f KB), swap %.2f ms; in 10 s: %llu textures made "
                   "(%.0f ms), texture updates %.0f ms, %llu read-backs (%.0f ms); runtime heap %.0f MB live, flexible "
-                  "memory %.0f MB free",
+                  "memory %.0f MB free; %llu copies drawn, %llu out-of-memory retries",
                   double(g_impl->submit_ns.exchange(0)) * per, double(g_impl->upload_ns.exchange(0)) * per,
                   n ? double(g_impl->upload_bytes.exchange(0)) / 1024.0 / double(n) : 0.0,
                   double(g_impl->swap_ns.exchange(0)) * per, (unsigned long long)g_impl->texture_creates.exchange(0),
                   double(g_impl->texture_create_ns.exchange(0)) * 1e-6, double(g_impl->texture_update_ns.exchange(0)) * 1e-6,
                   (unsigned long long)g_impl->reads.exchange(0), double(g_impl->read_ns.exchange(0)) * 1e-6,
-                  double(ps5_opengl_heap_live_bytes()) / 1048576.0, double(flexible) / 1048576.0);
+                  double(omega_ps5_heap_live_bytes()) / 1048576.0, double(flexible) / 1048576.0,
+                  (unsigned long long)g_impl->gpu_copies_.exchange(0), (unsigned long long)g_impl->oom_retries_.load());
     char text[320];
     std::snprintf(text, sizeof text,
                   "GL 4.6: %llu buffers (%llu KB), %llu textures (%llu KB), %llu presents, %u draws last frame, %llu draws, "
@@ -1624,7 +2028,8 @@ std::string stats_line() {
                   static_cast<unsigned long long>(g_impl->presents), g_impl->draws_last_frame,
                   static_cast<unsigned long long>(g_impl->draws_total), g_impl->program_failures,
                   static_cast<unsigned long long>(g_impl->skipped_draws));
-    return std::string(text) + timing;
+    const std::string labels = take_texture_labels();
+    return std::string(text) + timing + (labels.empty() ? std::string() : "; textures made by label: " + labels);
 }
 
 }  // namespace omega::gfx::gl46

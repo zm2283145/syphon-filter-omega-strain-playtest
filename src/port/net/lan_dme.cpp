@@ -7,8 +7,8 @@
 
 namespace omega::lan {
 namespace {
-constexpr std::uint8_t kChannelControl = 0x01, kChannelGame = 0x02;
-constexpr std::uint8_t kStartReady = 1, kStartGo = 2, kClientInfo = 3;
+constexpr std::uint8_t kChannelControl = 0x01, kChannelGame = 0x02, kChannelBackpack = 0x03;
+constexpr std::uint8_t kStartReady = 1, kStartGo = 2, kClientInfo = 3, kClientRecord = 4, kJoinOrder = 5;
 // The DME message registry (003057f8 / 00305998, src/main/DME/dme_library.cpp).
 constexpr std::uint32_t kRegistryUp = 0x4912e8, kRegCallbacks = 0x4912f0, kRegCounts = 0x4912f4, kRegBuffer = 0x4912ec;
 constexpr std::uint32_t kRegSpare = 0x4912f8;
@@ -22,8 +22,9 @@ constexpr std::uint32_t kRegMax = 0x529808, kRegCategories = 0x52980c, kRegBuffe
 }  // namespace
 
 LanDme::LanDme(LanTransport& transport, LanClock clock, Invoke invoke, Library library, std::uint32_t scratch)
-    : transport_(transport), clock_(std::move(clock)), invoke_(std::move(invoke)), library_(std::move(library)),
-      scratch_(scratch) {}
+    : transport_(transport), clock_(clock),
+      application_commits_(transport.session_id(), transport.local_index(), 1, 0, std::move(clock)),
+      invoke_(std::move(invoke)), library_(std::move(library)), scratch_(scratch) {}
 
 std::uint32_t LanDme::local_clock() const { return static_cast<std::uint32_t>(clock_()); }
 
@@ -60,6 +61,21 @@ void LanDme::send_control(std::uint16_t to, std::uint8_t kind, std::initializer_
         throw std::runtime_error("LanDme: a control frame could not be sent to client " + std::to_string(to));
 }
 
+void LanDme::send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t backpack, std::uint32_t target,
+                           std::uint16_t recipient) {
+    std::vector<std::uint8_t> frame{kChannelBackpack, static_cast<std::uint8_t>(transport_.local_index()), type, owner};
+    for (const auto word : {backpack, target})
+        for (int b = 0; b < 4; ++b) frame.push_back(static_cast<std::uint8_t>(word >> (8 * b)));
+    if (transport_.send(recipient, frame, kLanReliableOrdered) != LanSendResult::Sent)
+        throw std::runtime_error("LanDme: a backpack frame could not be sent");
+}
+
+std::vector<LanDme::BackpackMessage> LanDme::take_backpacks() {
+    std::vector<BackpackMessage> out;
+    out.swap(backpacks_);
+    return out;
+}
+
 std::uint32_t LanDme::record(LevelLoadMemory& m, std::uint16_t client) {
     const auto out = scratch_ + 0x44;
     if (library_(m, 0x2db188, {out, 0, client})) unhosted(0x2db188, "the client record table is missing");
@@ -73,6 +89,10 @@ void LanDme::start_records(LevelLoadMemory& m, std::uint32_t p) {
     if (library_(m, 0x2e51f0, {0, out}) || !m.read(out)) unhosted(0x2e51f0, "world 0 could not be created");
     const auto w = m.read(out);
     m.write(w + 0x400, 4, me);
+    // 132fx5: +0x404 is the world's session host (002e5550; 002ddb30 reads it, 002e8c50 compares it with +0x400).
+    // The world join sets it to 0x100 (002e0210 / 002e0760: 002e5550(world, 0x100)); the host's start sets it to
+    // itself (002e8730, or 002e15e0 alone; set_session_host below); a joiner keeps 0x100.
+    m.write(w + 0x404, 4, 0x100);
     m.write(w + 0x438, 4, 1);
     m.write(w + 0x444, 4, kLanMaxClients);
     m.write(0x58df88, 4, m.read(p + 0x20));
@@ -95,12 +115,31 @@ void LanDme::start_records(LevelLoadMemory& m, std::uint32_t p) {
     m.write(rec + 0x19, 1, 0);
 }
 
-// 002db720's info step: the client's info (002e5360) +0x29 = 1, newly joined (002e4550 announces the local
-// client's objects to it, then clears the mark).
+// 002db720's steps before the callback (132fx5: the record steps added): the joined client's record (002db188;
+// 002db270 where there is none, such as the host's on a joiner), its +0 = the session clock word 0x0058806c, the
+// client's info +0x29 = 1, newly joined (002e4550 announces the local client's objects to it, then clears the
+// mark), and 002db470(record). PORT-ONLY: 002e5360 makes the info where 002db720's 002e52d8 finds the world join's
+// member (002e0118's member list, not ported). Not done: 002db550 after the callback (the local record to the
+// joined client, message *0x00598410, received by 002e6c30 -> 002db8e8).
 void LanDme::newly_joined(LevelLoadMemory& m, std::uint16_t client) {
+    const auto world = m.read(0x48c450);
+    if (world >= 4) return;
+    auto rec = record(m, client);
+    if (!rec) rec = library_(m, 0x2db270, {world, client});
+    if (!rec) unhosted(0x2db720, "the joined client's record could not be created");
     const auto out = scratch_ + 0x4c;
-    if (m.read(0x48c450) >= 4 || library_(m, 0x2e5360, {m.read(0x48c450), client, out}) || !m.read(out)) return;
+    if (library_(m, 0x2e5360, {world, client, out}) || !m.read(out)) return;
+    m.write(rec, 4, m.read(0x58806c));
     m.write(m.read(out) + 0x29, 1, 1);
+    library_(m, 0x2db470, {rec});
+}
+
+// 002e5550(world, client): world +0x404, the session host (002e8730 and 002e15e0 alone: the local client).
+void LanDme::set_session_host(LevelLoadMemory& m, std::uint32_t client) {
+    const auto out = scratch_ + 0x58;
+    const auto world = m.read(0x48c450);
+    if (world >= 4 || library_(m, 0x2e51b8, {world, out})) return;
+    if (const auto w = m.read(out)) m.write(w + 0x404, 4, client);
 }
 
 // The local client's start (002e1918 alone, 002e8730 the host, 002e6f40 a client): its handle bases, 0x0048c454,
@@ -122,7 +161,75 @@ void LanDme::start_go(LevelLoadMemory& m, std::uint16_t client) {
     if (!rec) return;
     if (counts_[client]) m.write(rec + 6, 2, library_(m, 0x2e68c0, {counts_[client]}) & 0xffff);
     if (counts2_[client]) m.write(rec + 0xa, 2, library_(m, 0x2e69b8, {counts2_[client]}) & 0xffff);
+    const auto order = next_join_order(m);
+    if (const auto p = member(m, client)) m.write(p + 0x24, 4, order);
     send_control(client, kStartGo, {m.read(0x58806c), m.read(rec + 6, 2), m.read(rec + 0xa, 2)});
+    for (std::uint16_t c = 0; c < kLanMaxClients; ++c)
+        if (const auto p = member(m, c); p && m.read(p + 0x24)) send_join_order(m, client, c, m.read(p + 0x24));
+    send_join_order(m, kLanAll, client, order);
+}
+
+std::uint32_t LanDme::member(LevelLoadMemory& m, std::uint16_t client) {
+    const auto out = scratch_ + 0x5c;
+    if (library_(m, 0x2e5360, {m.read(0x48c450), client, out})) return 0;
+    return m.read(out);
+}
+
+std::uint32_t LanDme::next_join_order(LevelLoadMemory& m) {
+    std::uint32_t order = 0;
+    for (std::uint16_t c = 0; c < 0x100; ++c)
+        if (const auto p = member(m, c)) order = std::max(order, m.read(p + 0x24));
+    ++order;
+    if (!order || order == 0x0fffffffU) order = 1;
+    return order;
+}
+
+void LanDme::send_join_order(LevelLoadMemory&, std::uint16_t to, std::uint16_t client, std::uint32_t order) {
+    std::vector<std::uint8_t> frame{kChannelControl, kJoinOrder, static_cast<std::uint8_t>(transport_.local_index()),
+                                    static_cast<std::uint8_t>(client), static_cast<std::uint8_t>(client >> 8)};
+    for (int b = 0; b < 4; ++b) frame.push_back(static_cast<std::uint8_t>(order >> (8 * b)));
+    if (transport_.send(to, frame, kLanReliableOrdered) != LanSendResult::Sent)
+        throw std::runtime_error("LanDme: a join-order frame could not be sent");
+}
+
+void LanDme::receive_join_order(LevelLoadMemory& m, const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 9) throw std::runtime_error("LanDme: a malformed join-order frame");
+    const auto client = static_cast<std::uint16_t>(bytes[3] | bytes[4] << 8);
+    const auto order = static_cast<std::uint32_t>(bytes[5] | bytes[6] << 8 | bytes[7] << 16 | bytes[8] << 24);
+    if (client >= 0x100 || !order) throw std::runtime_error("LanDme: an invalid join-order frame");
+    if (const auto p = member(m, client)) m.write(p + 0x24, 4, order);
+}
+
+void LanDme::send_client_record(LevelLoadMemory& m, std::uint16_t to) {
+    const auto me = transport_.local_index();
+    const auto rec = record(m, me);
+    if (!rec) return;
+    std::vector<std::uint8_t> frame(3 + 0x24);
+    frame[0] = kChannelControl;
+    frame[1] = kClientRecord;
+    frame[2] = static_cast<std::uint8_t>(me);
+    frame[3] = static_cast<std::uint8_t>(me);
+    for (std::uint32_t k = 0; k < 5; ++k) {
+        const auto v = m.read(rec + 4 + k * 2, 2);
+        frame[3 + 8 + k * 2] = static_cast<std::uint8_t>(v);
+        frame[3 + 9 + k * 2] = static_cast<std::uint8_t>(v >> 8);
+    }
+    // 002db550 sends 0x24 bytes although the stack declaration's trailing name array is larger; only these
+    // fourteen bytes are on the wire (the source record name was strncpy-capped to eleven).
+    for (std::uint32_t k = 0; k < 0x0e; ++k) frame[3 + 0x16 + k] = static_cast<std::uint8_t>(m.read(rec + 0xe + k, 1));
+    if (transport_.send(to, frame, kLanReliableOrdered) != LanSendResult::Sent)
+        throw std::runtime_error("LanDme: a client-record frame could not be sent");
+}
+
+void LanDme::receive_client_record(LevelLoadMemory& m, std::uint16_t origin, const std::vector<std::uint8_t>& bytes) {
+    if (bytes.size() != 3 + 0x24 || bytes[3] != origin)
+        throw std::runtime_error("LanDme: a malformed client-record frame from client " + std::to_string(origin));
+    auto rec = record(m, origin);
+    if (!rec) rec = library_(m, 0x2db270, {m.read(0x48c450), origin});
+    if (!rec) unhosted(0x2e6c78, "the client record could not be created");
+    for (std::uint32_t k = 0; k < 5; ++k)
+        m.write(rec + 4 + k * 2, 2, static_cast<std::uint32_t>(bytes[3 + 8 + k * 2] | bytes[3 + 9 + k * 2] << 8));
+    for (std::uint32_t k = 0; k < 0x0e; ++k) m.write(rec + 0xe + k, 1, bytes[3 + 0x16 + k]);
 }
 
 void LanDme::sync_callback(LevelLoadMemory& memory, std::uint32_t status) {
@@ -133,6 +240,9 @@ void LanDme::sync_callback(LevelLoadMemory& memory, std::uint32_t status) {
     sync_cb_ = 0;  // DME clears the pointer after the call (0x0058df88 = 0)
     sync_user_ = 0;
     invoke_(memory, function, scratch_);
+    // 132fx5: and its words (002e5d68 / 002e8730: D_0058DF88 = 0, D_0048C478 = 0 after the call).
+    memory.write(0x58df88, 4, 0);
+    memory.write(0x48c478, 4, 0);
 }
 
 void LanDme::joined(LevelLoadMemory& memory, std::uint16_t client) {
@@ -140,12 +250,14 @@ void LanDme::joined(LevelLoadMemory& memory, std::uint16_t client) {
     joined_[client] = true;
     ++joined_calls_;
     newly_joined(memory, client);  // 002db720's info step (132ln5h)
-    if (!joined_cb_) return;
-    memory.write(scratch_ + 0x10, 4, 0);
-    memory.write(scratch_ + 0x14, 4, 0);  // the world
-    memory.write(scratch_ + 0x18, 4, client);
-    memory.write(scratch_ + 0x1c, 4, joined_user_);
-    invoke_(memory, joined_cb_, scratch_ + 0x10);
+    if (joined_cb_) {
+        memory.write(scratch_ + 0x10, 4, 0);
+        memory.write(scratch_ + 0x14, 4, 0);  // the world
+        memory.write(scratch_ + 0x18, 4, client);
+        memory.write(scratch_ + 0x1c, 4, joined_user_);
+        invoke_(memory, joined_cb_, scratch_ + 0x10);
+    }
+    send_client_record(memory, client);  // 002db550 follows the callback in 002db720
 }
 
 void LanDme::client_left(LevelLoadMemory& memory, std::uint16_t client) {
@@ -159,14 +271,14 @@ void LanDme::client_left(LevelLoadMemory& memory, std::uint16_t client) {
 }
 
 void LanDme::control(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes) {
-    const std::size_t sizes[] = {0, 7, 11, 3};
+    const std::size_t sizes[] = {0, 7, 11, 3, 3 + 0x24, 9};
     if (bytes.size() < 3 || bytes[0] != kChannelControl || bytes[2] != origin || origin >= kLanMaxClients ||
-        bytes[1] == 0 || bytes[1] > kClientInfo || bytes.size() != sizes[bytes[1]])
+        bytes[1] == 0 || bytes[1] > kJoinOrder || bytes.size() != sizes[bytes[1]])
         throw std::runtime_error("LanDme: a malformed DME control frame from client " + std::to_string(origin));
     const auto u16 = [&](std::size_t at) { return static_cast<std::uint32_t>(bytes[at] | bytes[at + 1] << 8); };
     switch (bytes[1]) {
     case kStartReady:
-        if (state_[origin] == 0) state_[origin] = 3;
+        state_[origin] = 3;  // 002e8228: the member's +0x14 = the message's byte 0 (3), whatever it was (132fx5)
         counts_[origin] = static_cast<std::uint16_t>(u16(3));
         counts2_[origin] = static_cast<std::uint16_t>(u16(5));
         // 002e8228 / 002e8338 (the start message's receive): a started host (local record state 5) answers a client
@@ -205,6 +317,12 @@ void LanDme::control(LevelLoadMemory& memory, std::uint16_t origin, const std::v
     case kClientInfo:
         if (state_[origin] < 4) state_[origin] = 4;
         info_pending_[origin] = true;
+        break;
+    case kClientRecord:
+        receive_client_record(memory, origin, bytes);
+        break;
+    case kJoinOrder:
+        receive_join_order(memory, bytes);
         break;
     default:
         throw std::runtime_error("LanDme: unknown control kind " + std::to_string(bytes[1]));
@@ -292,7 +410,7 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
     std::vector<std::uint16_t> left;
     const bool hosting = transport_.state() == LanTransportState::Hosting;  // the transport resets once the host is lost
     handlers.on_recv = [&](std::uint16_t origin, std::span<const std::uint8_t> bytes) {
-        if (bytes.empty() || (bytes[0] != kChannelControl && bytes[0] != kChannelGame))
+        if (bytes.empty() || (bytes[0] != kChannelControl && bytes[0] != kChannelGame && bytes[0] != kChannelBackpack))
             throw std::runtime_error("LanDme: a frame on an unknown channel from client " + std::to_string(origin));
         frames.emplace_back(origin, std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
     };
@@ -310,7 +428,15 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
     transport_.poll(handlers);
     for (const auto& [origin, bytes] : frames) {  // in their arrival order
         if (bytes[0] == kChannelGame) game_message(memory, origin, bytes);
-        else control(memory, origin, bytes);
+        else if (bytes[0] == kChannelControl) control(memory, origin, bytes);
+        else {
+            if (bytes.size() != 12 || bytes[1] != origin)
+                throw std::runtime_error("LanDme: a malformed backpack frame from client " + std::to_string(origin));
+            const auto word = [&](std::size_t at) {
+                return static_cast<std::uint32_t>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24);
+            };
+            backpacks_.push_back({origin, bytes[2], bytes[3], word(4), word(8)});
+        }
     }
     for (const auto client : left) client_left(memory, client);
     // The object replication (132ln5h): in a started session (the world +0x438 1, its local client < +0x444,
@@ -338,6 +464,8 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
         if (!blocked && first_ready == me) {
             state_[me] = 5;
             started_ = true;
+            set_session_host(memory, me);  // 002e5550(world, host) (132fx5)
+            if (const auto p = member(memory, me)) memory.write(p + 0x24, 4, 1);  // 002e8730
             send_control(kLanAll, kClientInfo);
             activate(memory, 0, 0);
             sync_callback(memory, 0);
@@ -351,6 +479,7 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
         const bool ready = std::none_of(clients.begin(), clients.end(), [&](std::uint16_t c) { return state_[c] == 0; });
         if (ready) {
             all_ready_ = true;
+            memory.write(0x48c440, 1, 1);  // 002e5d68 (NetCompleteJoin): D_0048C440 = 1 before the callback (132fx5)
             sync_callback(memory, 0);
             called = true;
         }
@@ -374,14 +503,34 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
 std::uint32_t LanDme::call(LevelLoadMemory& m, std::uint32_t address, std::initializer_list<std::uint32_t> list) {
     const std::vector<std::uint32_t> a(list);
     const auto arg = [&](std::size_t i) { return i < a.size() ? a[i] : 0U; };
+    // 132fx5: every API wrapper opens with the gate and the lock (002ea508 .. 002ecf08 in the decomp's
+    // src/lib/medius/medius_2EA508.c): 0x11 before the library init, 0x2b while it is not running.
     switch (address) {
-    case 0x2ebaf8:  // the local client index
+    case 0x2ebaf8: case 0x2ebba0: case 0x2ebc48: case 0x2ebce0: case 0x2eabf0: case 0x2eac88: case 0x2ec4f8:
+    case 0x2ec580: case 0x2eb9a8:
+        if (const auto gate = library_gate(m)) return gate;
+        break;
+    default:
+        break;
+    }
+    switch (address) {
+    case 0x2ebaf8: {  // NetGetMyClientIndex: the gate, then 002dd178(out, world) (132fx5: as the decomp's C)
         if (!arg(0)) return 0x17;
         m.write(arg(0), 4, 0x100);
-        if (arg(1) != 0) return 0x17;  // LAN has one world, index 0
-        if (disconnected_) return 0;   // 002dd178: the reset world record's +0x400 (0x100)
-        m.write(arg(0), 4, transport_.local_index());
+        if (!m.read(0x48c458)) return 0x11;  // 002df290 has not run
+        if (arg(1) >= 4) return 0x17;
+        const auto out = scratch_ + 0x54;
+        if (const auto r = library_(m, 0x2e51b8, {arg(1), out})) return r;
+        if (const auto w = m.read(out)) {
+            m.write(arg(0), 4, m.read(w + 0x400));  // 0x100 once 002ec738 reset the world
+            return 0;
+        }
+        // No world record: 002dd178 returns 0 with 0x100. PORT-ONLY: world 0 before the barrier made it (the
+        // original's exists from the world join 002e0118, not ported) gives the transport's index, which the
+        // barrier then stores at +0x400.
+        if (arg(1) == 0 && !disconnected_) m.write(arg(0), 4, transport_.local_index());
         return 0;
+    }
     case 0x2ec6a0: {  // leave the world (132ln5h7): the gate, the lock 00302260 / 003023d8, then 002e1a20
         if (const auto gate = library_gate(m)) return gate;
         if (arg(0) >= 4) return 0x17;
@@ -466,10 +615,13 @@ std::uint32_t LanDme::call(LevelLoadMemory& m, std::uint32_t address, std::initi
             start_records(m, p);
             state_[me] = 3;
             const auto peers = transport_.clients();
-            for (const auto c : peers) send_control(c, kStartReady, {m.read(p + 0x14), m.read(p + 0x18)});
+            // 132fx5: 002e15e0's start message is four bytes {3, client, +0x14, +0x18}: the counts travel as their
+            // low bytes (the game's 500 arrives as 0xf4), and the host's 002e8c50 reserves that many handles.
+            for (const auto c : peers) send_control(c, kStartReady, {m.read(p + 0x14) & 0xff, m.read(p + 0x18) & 0xff});
             if (peers.empty()) {  // alone (002e1918): started at once; the callback comes with the next update
                 state_[me] = 5;
                 started_ = true;
+                set_session_host(m, me);  // 002e5550(world, local) (132fx5)
                 activate(m, 0, 0);
             }
         }

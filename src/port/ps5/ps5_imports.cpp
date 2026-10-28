@@ -39,6 +39,7 @@ extern char atan2;
 extern char atan2f;
 extern char atanf;
 extern char atexit;
+extern char atof;
 extern char atoi;
 extern char bind;
 extern char bsearch;
@@ -313,6 +314,7 @@ extern char strxfrm;
 extern char swprintf;
 extern char sysconf;
 extern char sysctl;
+extern char sysctlbyname;
 extern char syslog;
 extern char system;
 extern char tan;
@@ -392,6 +394,7 @@ unsigned log_missing_imports() {
         {"atan2f", &::atan2f},
         {"atanf", &::atanf},
         {"atexit", &::atexit},
+        {"atof", &::atof},
         {"atoi", &::atoi},
         {"bind", &::bind},
         {"bsearch", &::bsearch},
@@ -666,6 +669,7 @@ unsigned log_missing_imports() {
         {"swprintf", &::swprintf},
         {"sysconf", &::sysconf},
         {"sysctl", &::sysctl},
+        {"sysctlbyname", &::sysctlbyname},
         {"syslog", &::syslog},
         {"system", &::system},
         {"tan", &::tan},

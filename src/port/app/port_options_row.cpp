@@ -47,6 +47,19 @@ void shift_down(GuiNode& n, std::pair<float, float> dy) {
 }
 }
 
+std::size_t cpu_partner_row_next(std::size_t count) {
+    if (count > 3) throw std::runtime_error("CPU Partner row (port-only): more than 3 partners");
+    return (count + 1) % 4;
+}
+
+std::string cpu_partner_row_text(const PortSettings& s, const std::function<std::optional<std::string>(const std::string&)>& strings) {
+    if (!s.coop_partner) {
+        const auto off = strings ? strings("MB_Off") : std::nullopt;
+        return off ? *off : std::string();
+    }
+    return std::to_string(coop_partners_setting(s));
+}
+
 void inject_cpu_partner_row(GuiNode& root) {
     GuiNode* grp = find_node(root, "control_grp");
     if (!grp) throw std::runtime_error("CPU Partner row (port-only): GAMEOPT has no control_grp");
@@ -133,15 +146,19 @@ std::function<PortSettings()> bind_port_settings_rows(FrontendServices& services
         const auto s = strings ? strings(on ? "MB_On" : "MB_Off") : std::nullopt;
         rt.set_text(value, s ? *s : std::string(), false);  // as go_refresh: a missing string shows nothing
     };
+    // 132pt1: the CPU PARTNER row's value: the game's OFF string, else the partner count.
+    const auto show_partners = [strings](gui::GuiRuntime& rt, gui::Widget* value, const PortSettings& s) {
+        rt.set_text(value, cpu_partner_row_text(s, strings), false);
+    };
     const auto vsync_now = [read, vsync] { return vsync.get ? vsync.get() : read().vsync; };
-    services.port_rows.wake = [read, show, fullscreen, vsync_now](gui::GuiRuntime& rt, gui::Widget* screen) {
-        if (gui::Widget* v = rt.find(screen, cpu_partner_button)) show(rt, v, read().coop_partner);
+    services.port_rows.wake = [read, show, show_partners, fullscreen, vsync_now](gui::GuiRuntime& rt, gui::Widget* screen) {
+        if (gui::Widget* v = rt.find(screen, cpu_partner_button)) show_partners(rt, v, read());
         if (gui::Widget* v = rt.find(screen, port_settings_button)) rt.set_text(v, port_settings_open_text, false);
         if (fullscreen.get)
             if (gui::Widget* v = rt.find(screen, fullscreen_button)) show(rt, v, fullscreen.get());
         if (gui::Widget* v = rt.find(screen, vsync_button)) show(rt, v, vsync_now());
     };
-    services.port_rows.pressed = [read, write, where, show, fullscreen, vsync, vsync_now](
+    services.port_rows.pressed = [read, write, where, show, show_partners, fullscreen, vsync, vsync_now](
                                      gui::GuiRuntime& rt, gui::Widget* screen, gui::Widget* sender) {
         if (!sender) return false;
         if (sender->name == port_settings_button) {  // 132win11: the Port Settings page
@@ -170,12 +187,16 @@ std::function<PortSettings()> bind_port_settings_rows(FrontendServices& services
             return true;
         }
         if (sender->name != cpu_partner_button) return false;
+        // 132pt1: the row cycles OFF, 1, 2, 3 (coop_partner and coop_partners; OFF keeps the count for the next ON).
         PortSettings s = read();
-        s.coop_partner = !s.coop_partner;
+        const auto next = cpu_partner_row_next(s.coop_partner ? coop_partners_setting(s) : 0);
+        s.coop_partner = next != 0;
+        if (next != 0) set_coop_partners_setting(s, next);
         write(s);
-        show(rt, sender, s.coop_partner);
-        std::cout << "Port settings (port-only): CPU Partner " << (s.coop_partner ? "on" : "off") << " written to " << where
-                  << "\n";
+        show_partners(rt, sender, s);
+        std::cout << "Port settings (port-only): CPU Partner " << (s.coop_partner ? "on" : "off") << " written to " << where;
+        if (s.coop_partner) std::cout << " (" << next << (next == 1 ? " partner)" : " partners)");
+        std::cout << "\n";
         return true;
     };
     return read;

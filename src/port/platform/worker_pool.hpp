@@ -40,6 +40,15 @@ public:
     // exception of an index is rethrown before one of first().
     void for_each_beside(std::size_t count, const std::function<void(std::size_t)>& fn, const std::function<void()>& first);
 
+    // Port-only (132vc2, research/VITA.md "Main-thread CPU (132vc2)"): a task run later by a worker (between the
+    // for_each jobs, which go first) under the submitter's floating-point mode, while the submitter goes on. Tasks
+    // must touch only their own data. With no workers the task runs at once on the caller. A task's exception is kept
+    // (the first one) and rethrown by wait_tasks. wait_tasks runs the still-queued tasks on the caller and returns when
+    // every task submitted so far has finished.
+    void submit(std::function<void()> task);
+    void wait_tasks();
+    bool tasks_pending() const { return tasks_pending_.load(std::memory_order_acquire) != 0; }
+
     // The worker count `--worker-threads -1` / the setting's "auto" picks: one less than the hardware threads (the
     // caller works too), at most 7, 0 on a single core. PS Vita: the 3 user cores (hardware_concurrency is not
     // reliable there), so 2 workers.
@@ -102,6 +111,18 @@ private:
     std::atomic<std::uint64_t> published_{0};  // 132vc1: generation_, for the spins (written under mutex_)
     std::atomic<unsigned> active_now_{0};      // 132vc1: active_, for the caller's spin (written under mutex_)
     static inline std::atomic<bool> spin_{true};
+    // 132vc2: the queued tasks (under mutex_), their float modes, and the tasks queued or running.
+    struct Task {
+        std::function<void()> fn;
+        std::uint64_t float_controls = 0;
+    };
+    std::vector<Task> tasks_;  // a FIFO: taken from tasks_head_
+    std::size_t tasks_head_ = 0;
+    std::atomic<unsigned> tasks_pending_{0};
+    std::condition_variable tasks_done_;
+    std::exception_ptr task_error_;
+    void run_task(Task& task);
+    bool take_task(Task& out);  // under mutex_
     bool quit_ = false;
     std::uint64_t batches_ = 0, items_ = 0;
 };

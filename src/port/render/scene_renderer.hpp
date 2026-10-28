@@ -365,6 +365,11 @@ private:
     // The CPU-side sources reset_device re-uploads (shared-display renderers).
     const std::vector<Texture>* textures_source_{};
     const std::vector<Texture>* overlay_source_{};
+#if defined(OMEGA_PS5)
+    // Port-only (132ps5d, research/PS5.md "Overlay images"): the GPU textures of the last set_overlay_textures, by a
+    // digest of the uploaded image, reused by the next call for an equal image.
+    std::map<std::uint64_t, Ptr<gfx::Texture>> overlay_cache_;
+#endif
     const std::vector<Texture>* projector_source_{};
     std::vector<MeshVertex> collision_points_;
     std::vector<std::uint32_t> collision_index_data_;

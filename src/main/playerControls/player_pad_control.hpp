@@ -229,10 +229,15 @@ struct PlayerPadGateBytes {
 struct PlayerPadGateResult {
     bool disabled{};       // 0x0024be28..0x0024be58: input +0, 004ffc29, 00241ac0 or state 0x13
     bool hud_screen{};     // 0x0024bff0..0x0024c008: HUD +6a9, +6a8 or +6aa
+    // Checkpoint 132fx1: 0x0024c030..0x0024c06c: Triangle (sp+fa4 != 0) with input +ad clear and the HUD's +6a8 set
+    // calls 002261c0(ObjMan_GetService()) and then 00131470(G, 0). 002261c0 closes the pause menu only with the
+    // objective manager's +ac set, which nothing in the image stores (objectives_overlay.hpp), so only the
+    // 00131470(G, 0) remains: the caller runs it (the world pause cleared).
+    bool unpause_131470{};
 };
 // Applies both gates to the slots. Throws (naming the address) where the
 // original leaves the input update: the time limit G+48 (0x0024bf50, 00369f90
-// and 0012fa60 kind 2; LEVEL_END.md) and Triangle closing the start menu from
-// the input update (0x0024c048: 002261c0, 00131470(G, 0)).
+// and 0012fa60 kind 2; LEVEL_END.md). Triangle with the start menu open
+// (0x0024c048) sets PlayerPadGateResult::unpause_131470.
 PlayerPadGateResult apply_player_pad_gates(PlayerPadSlots& slots,const PlayerPadGateBytes& bytes);
 }

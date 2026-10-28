@@ -264,6 +264,17 @@ public:
     static constexpr std::uint32_t kLocalPlayer = 0x1d40000, kLocalPlayerId = 1;
     std::uint32_t local_player_key() const;
 
+    // 132fx5: cNetBackpackMsg's observable payload and NetMap binding. LanDme replaces only the generic message
+    // table/routing layer; CombatPlay still produces and applies the native message types.
+    using RemoteBackpack = LanDme::BackpackMessage;
+    void bind_backpack(std::uint32_t id, std::uint16_t owner, std::uint32_t address);
+    void send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
+                       std::uint16_t recipient = kLanAll);
+    std::vector<RemoteBackpack> take_remote_backpacks() { return dme_->take_backpacks(); }
+    std::uint16_t local_client_index() const { return transport_.local_index(); }
+    bool hosting() const { return transport_.is_host(); }
+    std::uint16_t session_host() const { return 0; }
+
     // 132ln5h11 (research/NET_INLEVEL.md 4.21): the level's generators (cGenerator 004db680) in the network game.
     // register_generator gives a generator (its population id: the block's +0xc and +0x10, the key everywhere) a
     // PORT-ONLY block in this memory (vtable: +0x28 the remote enable 00220e60, +0x2c the remote disable 00220d00,
@@ -360,10 +371,12 @@ public:
     void npc_speed_0014c6e0(std::uint32_t c, float speed);
     void npc_heading_001a99a4(std::uint32_t c, float yaw);
     // 132ln5h13: what the remote NPC controller 002d6030 (+1e0 / +1e4, linked from +0x3584) and 002d5160 read on
-    // the NPC's block. link: +1e0 and +1e4 set (the cNetHuman's +0x20 aiming, +0x21 firing, +8 the target key, +c the
-    // subtarget, +10..+18 the aim point); motion: +0x3584 set (+3c speed, +40 heading, +44..+4c position).
+    // the NPC's block. link: +1e0 and +1e4 set (the cNetHuman's +0x20 aiming, +0x21 fire-ready, +8 the target key,
+    // +c the subtarget, +10..+18 the aim point, +1c/+1e the 002c4f20 max/current counter); motion: +0x3584 set
+    // (+3c speed, +40 heading, +44..+4c position).
     struct NpcNetLink {
         bool aiming_20 = false, firing_21 = false;
+        bool point_valid_0 = false;
         std::uint32_t target_8 = 0;
         std::int8_t subtarget_c = -1;
         std::array<float, 3> point_10{};
@@ -373,6 +386,7 @@ public:
         std::array<float, 3> position_44{};
     };
     std::optional<NpcNetLink> npc_net_link(std::uint32_t c) const;
+    bool npc_fire_gate_002c4f20(std::uint32_t c);
     std::optional<NpcNetMotion> npc_net_motion(std::uint32_t c) const;
     // 002d5160's write of the cNetHuman's +44..+4c (the node teleport of +214 bit 2).
     void npc_net_write_position(std::uint32_t c, const std::array<float, 3>& position);
@@ -526,6 +540,7 @@ private:
     std::unique_ptr<DmeThreadBody> thread_;
     bool sleeping_ = false;
     bool running_ = false;
+    bool npc_fire_gate_reset_ = true;
     std::uint32_t thread_runs_ = 0;
     std::uint32_t main_priority_ = 0, dme_priority_ = 0;
     std::uint32_t sp_ = kStack;
@@ -574,6 +589,7 @@ private:
     std::uint16_t remote_client_ = 0;   // the client of the 002c6b70 running
     std::uint32_t remote_created_ = 0;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> remote_keys_;  // key -> human (0040b6d0)
+    std::map<std::uint32_t, std::pair<std::uint16_t, std::uint32_t>> backpack_bindings_;
     std::vector<RemoteHuman> remote_events_;
     // kPlayerBlocks is the block 001314f0's stand-in returns (001b2e90 clears its +0xb70).
     static constexpr std::uint32_t kPlayerBlocks = kFakes + 0x600;

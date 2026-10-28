@@ -276,6 +276,21 @@ void hud_map_callout_tracker_draw(HudLockTracker& tracker, const HudLockOps& ops
 // unconditionally) before the object base 003cef20.
 void hud_lock_tracker_delete(HudLockTracker& tracker, const HudLockOps& ops);
 
+// Checkpoint 132wf1: what 00244580 writes into the fptarget element. V = 00133190 of the camera node (the rigid
+// inverse 00133200 of its +10 rows, as 003e9a60). With a direction d: +20 = V (point + 0.3 d) (vmulx.xyzw by
+// 0x3e99999a, vadd.xyzw, then vmulax / vmadday / vmaddaz / vmaddw); n = 0 - (V0 d.x + V1 d.y + V2 d.z) on x, y, z
+// (vmulax / vmadday / vmaddz.xyz, then vmulax ACC 0 / vmsubw: +0 for zero lanes) with w the direction's; with
+// n.x replaced by 0, q = VSQRT((0 + n.y^2) + n.z^2); the angles (x, y, z) = (atan2f(n.z, n.y), 0, atan2f(-n.x, q))
+// (00121ab8, neg.s). Without a direction +20 = V point and the angles are 0. The matrix is 00140e20 of
+// cy = cos y, sy = sin y, cz, sz, cx, sx (00140e80 / 00140e70, the game's cosf / sinf) with the FPU's mula /
+// madd / msub chains (0024486c..002448a4), rows 0..2 (x, y, z) times 0.12 (0048ae50), row 3 (0, 0, 0, 1).
+struct HudThrownMarker {
+    std::array<float, 4> words_20{};
+    std::array<float, 16> matrix{};
+};
+HudThrownMarker hud_thrown_marker(const std::array<std::array<float, 4>, 4>& camera_node, const std::array<float, 4>& point,
+                                  const std::array<float, 4>* direction);
+
 class HudObject {
 public:
     // The lock colour natives on the HUD object's copy of the globals.
@@ -450,6 +465,12 @@ public:
     // 00244a10: 00244280; with the fptarget node +58: 003ee830(+58, 0), +68 =
     // 003ef010(+58), 003e8de0(+68, 1), 003f45a0(+68, 0.0), 003f44e0(+68, 17.0).
     void reticle_default();
+    // Checkpoint 132wf1: 00244580(hud, point, &direction), the aim view's thrown marker (the grenade's landing
+    // reticle, from the thrown point 002497c0). With the fptarget element +68 set: 003ee830(+58, 1) (the node then
+    // draws in perspective at its view-space position, ie_draw's +61 path) and hud_thrown_marker's +20 (003e8180)
+    // and matrix +30 (003e8040) into +68. camera_node is the camera 00159560(004ffc14)'s +50 node (+10 rows).
+    void thrown_marker(const std::array<std::array<float, 4>, 4>& camera_node, const std::array<float, 4>& point,
+                       const std::array<float, 4>* direction);
     // The pad producer's meters 0024cec8..0024ceec (every frame with an
     // actor): 002441e0(hud, trunc(+40), +3398) (health, element +6c) and
     // 00244180(hud, +33a0, +339c) (armor, +70); each does nothing without

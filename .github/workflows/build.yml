@@ -1,10 +1,10 @@
 # Play-test repository CI (copied to .github/workflows/build.yml by the development repository's
 # tools/publish/publish_playtest.ps1; edit it there). Builds the PC release package, the PS Vita .vpk files (vitaGL and
-# GXM renderers) and, on a runner with the PS5 toolchain, the PS5 folder title. No tests (this repository has none)
+# GXM renderers) and the PS5 folder title. No tests (this repository has none)
 # and no game data: the games read the player's own disc image at run time.
 # Runners: GitHub-hosted by default; the repository variables WINDOWS_RUNNER / LINUX_RUNNER name a self-hosted runner
-# label instead. The PS5 job runs only when the variable PS5_RUNNER names a runner with the PS5 toolchain installed
-# (its OpenGL SDK and app template are not publicly downloadable).
+# label instead. The PS5 job runs on GitHub's ubuntu-24.04 with the toolchain fetched from its pinned public releases
+# (tools/ps5/fetch_toolchain.sh).
 name: Build
 on:
   push:
@@ -92,31 +92,29 @@ jobs:
 
   ps5:
     name: PS5 (folder title PPSA99720)
-    # Only on a runner with the toolchain (tools/ps5/setup_ps5_toolchain.sh: ps5-payload-sdk v0.42, the native-app
-    # boilerplate 4f531c4, the ps5-opengl SDK 1.0.1, clang 18 / LLVM 18 tools, ninja, cmake, python3, make, rsync).
-    if: ${{ vars.PS5_RUNNER != '' }}
-    runs-on: ${{ vars.PS5_RUNNER }}
-    timeout-minutes: 150
-    env:
-      # Optional overrides of the toolchain locations (default ~/ps5/bp, ~/ps5/ps5-opengl-sdk-1.0.1/sdk,
-      # ~/ps5/gl/ps5-opengl: cmake/ps5/ps5.toolchain.cmake).
-      PS5_NATIVE_APP_TEMPLATE: ${{ vars.PS5_NATIVE_APP_TEMPLATE }}
-      PS5_OPENGL_PREFIX: ${{ vars.PS5_OPENGL_PREFIX }}
-      PS5_OPENGL_SRC: ${{ vars.PS5_OPENGL_SRC }}
+    # GitHub-hosted: the toolchain is public and pinned (tools/ps5/fetch_toolchain.sh, research/CI.md "PS5").
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
+      - name: Install clang 18 and the build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 libclang-rt-18-dev ninja-build unzip
+      - uses: actions/cache@v4
+        with:
+          path: ~/ps5-app-toolchain
+          key: ps5-toolchain-${{ runner.os }}-${{ hashFiles('tools/ps5/fetch_toolchain.sh') }}
+      - name: Fetch the PS5 toolchain (pinned versions and sha256)
+        run: bash tools/ps5/fetch_toolchain.sh "$HOME/ps5-app-toolchain"
       - name: Configure and build
         run: |
-          chmod +x tools/ps5/*.sh
-          set -- -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/ps5/ps5.toolchain.cmake" -DCMAKE_BUILD_TYPE=Release
-          if [ -n "$PS5_NATIVE_APP_TEMPLATE" ]; then set -- "$@" -DPS5_NATIVE_APP_TEMPLATE="$PS5_NATIVE_APP_TEMPLATE"; fi
-          if [ -n "$PS5_OPENGL_PREFIX" ]; then set -- "$@" -DPS5_OPENGL_PREFIX="$PS5_OPENGL_PREFIX"; fi
-          if [ -n "$PS5_OPENGL_SRC" ]; then set -- "$@" -DPS5_OPENGL_SRC="$PS5_OPENGL_SRC"; fi
-          cmake -S . -B local/build-ps5 -G Ninja "$@"
+          cmake -S . -B local/build-ps5 -G Ninja -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/ps5/ps5.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release -DPS5_TOOLCHAIN="$HOME/ps5-app-toolchain"
           cmake --build local/build-ps5 --parallel "$(nproc)" --target omega_ps5_package
-          ls -l local/build-ps5/app/dist/PPSA99720/eboot.bin
+          ls -l local/build-ps5/PPSA99720/eboot.bin local/build-ps5/PPSA99720/sce_module/libc.prx
       - uses: actions/upload-artifact@v4
         with:
           name: omega_ps5-PPSA99720-${{ github.sha }}
-          path: local/build-ps5/app/dist/PPSA99720/
+          path: local/build-ps5/PPSA99720/
           retention-days: 30

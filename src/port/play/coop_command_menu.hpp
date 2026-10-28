@@ -14,11 +14,15 @@
 // original's strings where they say the same thing (QC_MENU_4 "Command", QC_ITEM_17 "Follow",
 // QC_ITEM_18 "Stay") and the port's English text for the rest.
 //
-//   menu 0 (who):       Up Partner 1, Down Partner 2, Left Partner 3, Right All   (skipped with one partner)
+//   menu 0 (who):       Up partner 1, Down partner 2, Left partner 3 (by codename), Right All   (skipped with one partner)
 //   menu 1 (kind):      Up Command (QC_MENU_4), Down Fire, Left Tasks (132pw4)
 //   menu 2 (movement):  Up Follow (QC_ITEM_17), Down Stay (QC_ITEM_18: hold), Left Go there, Right Regroup
 //   menu 3 (fire):      Up Weapons free, Down Hold fire, Left Attack my target
 //   menu 4 (tasks):     Up Level tasks, Down Hold here, Left Cover me, Right Follow me   (roles, 132pw4)
+//   menu 5 (132pt1):    the Level tasks list (Up on menu 4): the level's open tasks by their objectives' own text, up to
+//                       four on the four entries, else three a page (Up, Left, Right) and Down the next page
+//   menu 6 (132pt1):    the partner the chosen task goes to: Up, Down, Left the partners by codename (skipped with one)
+// 132pt1: the partners are named by their codenames, the agent slot's GetString("PlayerName<slot>") (Python, ...).
 //
 // The menu is a pure state machine; the play host opens it, feeds it D-pad presses and carries out the order.
 #include <array>
@@ -60,11 +64,27 @@ struct CoopMenuLabel {
     bool operator==(const CoopMenuLabel&) const = default;
 };
 
+// Checkpoint 132pt1 (port-only, the user's play-test 2026-10-26): a level task the Level tasks list offers: an objective of
+// the level that has partner rules (CoopCommandRule::objective) and is open now, named by the objective's own text (its
+// SetMenuString, the text the objectives screen shows).
+struct CoopTaskEntry {
+    std::uint32_t objective{};
+    std::string text;
+    bool operator==(const CoopTaskEntry&) const = default;
+};
+// Menus 5 and 6 (132pt1): the Level tasks list and the partner a chosen task goes to.
+inline constexpr int coop_menu_task_list = 5;
+inline constexpr int coop_menu_task_partner = 6;
+
 struct CoopCommandMenu {
     bool open{};
     int menu{};                 // the current menu (+48)
     int target{coop_order_all}; // the partner chosen on menu 0
     std::size_t partners{1};    // CPU partners present (1..3)
+    // 132pt1: the level's open tasks when the menu opened (coop_menu_open), the list's page and the task chosen on it.
+    std::vector<CoopTaskEntry> tasks;
+    std::size_t page{};
+    std::size_t chosen{};
 };
 
 struct CoopMenuPress {
@@ -73,10 +93,20 @@ struct CoopMenuPress {
     std::optional<CoopOrder> order;
     std::optional<CoopRole> role;   // a Tasks page entry (132pw4): the role, carried out with coop_role_assign's order
     int target{-1};    // 0..2, or coop_order_all
+    // 132pt1: a level task (the objective) given to partner `target`; no_tasks: Level tasks was chosen with no task open
+    // (the menu closes, nothing is given).
+    std::optional<std::uint32_t> task;
+    bool no_tasks{};
 };
 
 // Opens the menu: menu 0 with two or three partners, else menu 1 for partner 1. Throws for 0 or more than 3.
-void coop_menu_open(CoopCommandMenu& menu, std::size_t partners);
+// tasks (132pt1): the level's open tasks for the Level tasks list.
+void coop_menu_open(CoopCommandMenu& menu, std::size_t partners, std::vector<CoopTaskEntry> tasks = {});
+// 132pt1: the Level tasks list's paging: up to 4 tasks take the four entries; more go 3 to a page on Up, Left and Right,
+// and Down turns the page (the last page wraps to the first).
+std::size_t coop_menu_task_pages(const CoopCommandMenu& menu);
+// The task an entry of the current page names (an index into menu.tasks), if any.
+std::optional<std::size_t> coop_menu_task_at(const CoopCommandMenu& menu, int direction);
 // A D-pad press (0 Up, 1 Down, 2 Left, 3 Right) while open: a submenu entry moves on, an order closes the menu,
 // an empty entry or a missing partner is ignored (consumed). Closed: not consumed.
 CoopMenuPress coop_menu_press(CoopCommandMenu& menu, int direction);
@@ -87,6 +117,9 @@ CoopMenuPress coop_menu_cancel(CoopCommandMenu& menu);
 std::array<CoopMenuLabel, 4> coop_menu_labels(const CoopCommandMenu& menu);
 CoopMenuLabel coop_order_label(CoopOrder order);
 CoopMenuLabel coop_role_label(CoopRole role);
+// 132pt1: partner k's (0-based) label: its agent slot's codename key "PlayerName<k + 1>" ("Python", ...), the port's
+// "Partner <k + 1>" only if the string is missing. Throws for k > 2.
+CoopMenuLabel coop_partner_label(std::size_t k);
 // The partners (0-based) an order's target names.
 std::vector<std::size_t> coop_order_partners(int target, std::size_t partners);
 std::string coop_order_target_name(int target);
@@ -116,6 +149,9 @@ struct CoopOrderState {
     // (coop_command_rules) itself; `idle_reported` once "nothing to do here" is on the ticker. A move order ends it.
     bool seek_tasks{};
     bool idle_reported{};
+    // 132pt1: the level task (an objective, CoopCommandRule::objective) the player gave this partner from the Level tasks
+    // list: it seeks that objective's rules only, ahead of the role's slot. 0: none. A move order or another role ends it.
+    std::uint32_t task{};
     // 132pw5: a team task's post (CoopTeamTask): with a hold or go-there order the partner still joins the player's
     // fight (coop_order_may_engage) and goes back to its post after it; the host keeps a go-there guard engaged for the
     // whole task, so it also fights enemies that ignore the player (TORONTO1's saboteurs). Every move order clears it.
@@ -174,7 +210,7 @@ CoopRegroupVerdict coop_regroup_walk_step(CoopOrderState& state, const CoopRegro
 // goal has not dropped by `progress` in `patience` frames.
 struct CoopGoConfig {
     float arrive{1.5F};
-    float point_arrive{1.0F};
+    float point_arrive{2.0F};
     float progress{0.5F};
     std::uint32_t patience{600};   // 20 s at 30 fps
     std::uint32_t settle{60};

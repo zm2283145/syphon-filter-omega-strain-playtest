@@ -1,6 +1,6 @@
 // Port-only (132ps5c, research/PS5.md "Interfaces"): frame_pacer.hpp's platform functions on the PS5 (the portable
 // FrameClock / LoopPacing are frame_pacer.cpp's, shared with Windows and the Vita). The EGL window surface refreshes at
-// 60 Hz (the ps5-opengl default display mode; param.json is written for 60 fps by mkapp.sh); the pacer sleeps with
+// 60 Hz (the GL runtime's default display mode; cmake/ps5/param.json); the pacer sleeps with
 // nanosleep, and the process CPU time is getrusage's.
 
 #include "frame_pacer.hpp"

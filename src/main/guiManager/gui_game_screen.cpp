@@ -280,8 +280,10 @@ void GuiRuntime::gs_gather_c760() {  // 0045c760
     gs.list.clear();
     gs.sel_90 = -1;
     const std::uint32_t s3 = held != -1 ? static_cast<std::uint32_t>(host_.weapon_class(held)) & 0xff : 0;
-    // A held item whose class is 6 or more never meets s3 again (s2 wraps 5 -> 0): the original loops forever.
-    if (s3 >= 6) unhosted(0x45c7dc, "the weapon select's gather from slot " + std::to_string(s3));
+    // A held item whose slot class is 6 or more never meets s3 again (s2 wraps 5 -> 0): the original loops forever.
+    // Checkpoint 132wf1: +84 == 6 (holstered, the goggles' slot) reads -1 (0045c79c), so only +84 == 7 with a
+    // slot-7 item (the flashlight) could get here, which no equip path sets (0045c480 refuses classes >= 6).
+    if (s3 >= 6) unhosted(0x45c7dc, "the weapon select's gather from slot " + std::to_string(s3) + " (the original never ends)");
     const auto slots = host_.equip_slots();
     std::uint32_t s2 = s3;
     std::int32_t s1 = 0;

@@ -41,8 +41,9 @@
 // (00252364: 004706c0 / 00470870 / 00470270, the "%s %s" HUD message and
 // the InventoryMsg 004f7ee0 to the backpack). Not ported (throw naming the
 // address): the kind-1 / >= 6 lines of the update (stale text buffers), the
-// multiplayer drop message (byte 005721c8 at 002524a8), the IR goggle switch
-// 00199590 and the kind-3 / kind-4 owner messages (0025220c / 002522c4).
+// IR goggle switch 00199590 and the kind-3 / kind-4 owner messages
+// (0025220c / 002522c4). Checkpoint 132fx5 hosts the multiplayer drop message
+// (byte 005721c8 at 002524a8) through network_inventory_message.
 #include "animation_root.hpp"
 
 #include <array>
@@ -216,6 +217,9 @@ public:
     virtual void equip(std::int32_t slot) = 0;                                                 // 00142c50
     virtual void hud_message(std::string_view text) = 0;                                       // 00242b00(*004ffc2c, text)
     virtual void mark_30c(std::uint32_t backpack) = 0;                                         // 00255a40
+    // Checkpoint 132fx1: 0025200c: 00199590(actor, 0) (cHuman::EquipGoggles off, actor_goggles.hpp switch_actor_ir)
+    // when the item put back is the goggles (record +30 == 6). The default throws naming the address.
+    virtual void goggles_ir_off();
     virtual void add_weapon(std::uint32_t backpack, std::int32_t item, std::int32_t spare, std::int32_t clip,
                             std::int32_t flag) = 0;                                            // 00255af0
     virtual std::pair<std::int32_t, std::int32_t> take_armor(std::uint32_t backpack) = 0;      // 00255860 (armor, max)
@@ -242,6 +246,17 @@ public:
     // actor; Event_Send 003c9420(msg, backpack, 0), vtable 004dcf10 and
     // cMessage_dtor 003c9d60.
     virtual void inventory_message(std::uint32_t backpack, std::int32_t item, std::int32_t count) = 0;
+    // Checkpoint 132fx5: the multiplayer drop message at the end of 00251920 (002524a8..0025254c, when byte
+    // 005721c8 and the menu's +98 are set): the local client index *00494178 (002ebaf8 fills it when -1), then the
+    // InventoryMsg Event_Construct 003c9e30(msg, 005061b0), vtable 004dcef0, +20 byte 4, +24 byte 0, +28 the menu's
+    // backpack (+0), +2c the local index; Event_Send 003c9420(msg, actor, 0), vtable 004dcf10 and cMessage_dtor
+    // 003c9d60. Unhosted (the single-player hosts): throw naming 002524a8.
+    virtual std::uint32_t local_index_494178() {
+        throw std::runtime_error("002524a8: the local client index (*00494178 / 002ebaf8) is not hosted");
+    }
+    virtual void network_inventory_message(std::uint32_t /*backpack*/, std::uint32_t /*local*/) {
+        throw std::runtime_error("002524a8: the multiplayer drop message (InventoryMsg 005061b0) is not hosted");
+    }
     // Checkpoint 132zf8: the kind-3 line (a body's backpack, 0025220c): the
     // actor message Event_Construct 003c9e30(msg, 0055d480), vtable 004e01a0,
     // +24 action 0x2b, byte +28 = 5, +2c the owner's (bp +300) +c, byte +20 =

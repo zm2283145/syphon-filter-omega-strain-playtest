@@ -238,8 +238,21 @@ void npc_hearing_reaction(NpcAiComponent& c,std::uint8_t cause,std::uint64_t obj
 void npc_hear(NpcAiComponent& c,std::uint8_t cause,float value,std::uint64_t source,NpcAiHost& host,std::vector<NpcPerceptionSend>& out){
     if(source==0)return;
     if(cause==5){
+        // Checkpoint 132fx1: 00152fd0 cNPC::Sound (npc.cc:3612, matched C).
         if(c.mode_44==10)return;
-        throw std::runtime_error("NPC AI: hearing a landed projectile (00152fd0 cause 5: its owner, 0025ac00, mode 10 or action 8) is not native (N5d)");
+        if(!host.projectile)throw std::runtime_error("NPC AI: hearing a landed projectile (00152fd0 cause 5) needs the projectile view (NpcAiHost::projectile)");
+        const auto p=host.projectile(source);
+        if(!p)throw std::runtime_error("NPC AI: 00152fd0 cause 5 from an object that is not a thrown projectile");
+        // The owner +124 (valid while its +c is +128), present (+2d, +2c, !+2e), and not this NPC's actor (+30):
+        // 0016c9d0(perception, owner, 2, 0.0).
+        if(p->owner!=0){
+            const auto& h=sense(host);
+            const auto o=view(h,p->owner);
+            if(npc_sense_present(o)&&p->owner!=h.self)npc_perception_add(perception(host),h,p->owner,2,0.0F,out);
+        }
+        if(p->damage_type==3){npc_request_action(c,8,0,5.0F,host);return;}   // 0025ac00 == 3: the flash reaction
+        if(request_npc_ai_mode(c,10,50))c.object_f4=p->id;                    // 0016e170(+44, 10, 50): +f4 = the source's +c
+        return;
     }
     npc_perception_add(perception(host),sense(host),source,cause,value,out);  // 0016c9d0
 }
@@ -256,17 +269,27 @@ void npc_ai_sound_event(const NpcSoundMessage& m,const NpcSoundWorld& w){
         if(w.ai_controlled(target))w.hear_directed(target,7,source,0.0F);
         return;
     }
-    if(m.cause_25==5)throw std::runtime_error("NPC AI sound: a landed projectile (cause 5, its owner +124) is not native (N5d)");
     if(!w.listeners||!w.position)throw std::runtime_error("NPC AI sound: the think list is not hosted");
-    const RootVector from=m.kind_24==0?w.position(source):m.point_40;
+    // Checkpoint 132fx1 (asm 0016b0f0..0016b244): cause 5 also reaches, with value 0, every listener whose
+    // perception has a sensed record +39 and +38 of the projectile's present owner (+124 by +128; not itself).
+    std::uint64_t owner=0;
+    if(m.cause_25==5){
+        if(!w.projectile_owner)throw std::runtime_error("NPC AI sound: a landed projectile (cause 5) needs its owner +124 (NpcSoundWorld::projectile_owner)");
+        owner=w.projectile_owner(source);
+    }
     for(const auto& l:w.listeners()){
         if(!l||l->id==m.source_id_30||l->life_108==2||l->life_108==3||!l->ai_58)continue;
-        if(!(l->deafness_33ac<=0.0F))continue;
-        const float x=l->position[0]-from[0],y=l->position[1]-from[1],z=l->position[2]-from[2];
-        const float d=vu::sqrt((x*x+y*y)+z*z);
-        if(!(d<m.radius_2c))continue;
         if(!l->hear)throw std::runtime_error("NPC AI sound: a listener without its +d0");
-        l->hear(m.cause_25,source,d);
+        if(l->deafness_33ac<=0.0F){                                           // 0016aff0
+            const RootVector from=m.kind_24==0?w.position(source):m.point_40;  // 0016b024..0016b088
+            const float x=l->position[0]-from[0],y=l->position[1]-from[1],z=l->position[2]-from[2];
+            const float d=vu::sqrt((x*x+y*y)+z*z);
+            if(d<m.radius_2c)l->hear(m.cause_25,source,d);
+        }
+        if(owner!=0&&owner!=l->actor){                                       // 0016b0f8..0016b1f8
+            if(!l->sees)throw std::runtime_error("NPC AI sound: cause 5 needs the listener's sensed record (NpcSoundListener::sees)");
+            if(l->sees(owner))l->hear(5,source,0.0F);                          // 0016b200 NpcPerception_SensedRecord: +39 && +38
+        }
     }
 }
 

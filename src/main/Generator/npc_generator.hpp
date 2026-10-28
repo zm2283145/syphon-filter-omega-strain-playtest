@@ -320,10 +320,16 @@ void generator_zone_activate(GeneratorState& s);
 // -> 003ce980: +2d = 1 (+58 null). The constructor's call for a generator
 // whose region names no object (002222b0 / 0022225c): present for good.
 void generator_activate_5c(GeneratorState& s);
-// 00224180 on a generator: when forced, 00220bb0 (a DespawnedNPCMsg and
-// +60(1) for each +90 actor: throws when +90 is not empty, then 003ce790:
-// +2d = 0); virtual +60(0) = 00221460 -> 003ce790: +2d = 0; +2d = 0.
-void generator_zone_deactivate(GeneratorState& s, bool forced);
+// 00224180 on a generator: when forced, 00220bb0 cGenerator::DeactivateImmediate
+// (Generator.cc:1128, matched C; Checkpoint 132fx1): for each +90 node in
+// order, its actor (the handle resolved: an actor whose +c differs is null,
+// and the original calls through it) gets virtual +60(1) (Deactivate) and the
+// generator a DespawnedNPCMsg (key 004a4a88, vtable 004db620, +24 the actor,
+// +20 = 2, transport 0), both by `deactivate_immediate` (without it a forced
+// deactivation with spawned NPCs throws); then 003ce790: +2d = 0. Unforced:
+// virtual +60(0) = 00221460 -> 003ce790: +2d = 0.
+void generator_zone_deactivate(GeneratorState& s, bool forced,
+                               const std::function<void(const GeneratorListEntry&)>& deactivate_immediate = {});
 
 // ---- Multiplayer (005721c8 set). Goldens: tests/generator_network_goldens.hpp.
 

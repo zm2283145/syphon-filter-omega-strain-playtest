@@ -402,7 +402,13 @@ bool WeaponBackpackOps::receive(bool pickup_message,WeaponBackpackPicker& picker
     if(!picker.present||!picker.predicate_54||picker.byte_14==0)return true;
     if(bp_.byte(0x2f3)!=0||bp_.value(0x308)==picker.index_68){
         if(std::bit_cast<float>(bp_.word(0x314))<0.0F)picker_update(picker,actor);
-    }else if(host_.multiplayer)fail("002546d0: the multiplayer pickup request (005721c8) is not ported");
+    }else if(host_.multiplayer){
+        // 002546d0..00254740 (132fx5; the decomp's matched cBackpack_v01): another client's backpack: the request
+        // InventoryMsg {+20 4, +24 2, +28 bp, +2c picker} to its owner (cNetObj::SendMessage 003fb020).
+        WeaponBackpackEvent e;e.kind=WeaponBackpackEvent::Kind::pickup_request;
+        e.a=bp_.word(0xc);e.b=static_cast<std::uint32_t>(picker.index_68);e.c=bp_.word(0x308);
+        events_.push_back(e);
+    }
     return true;
 }
 

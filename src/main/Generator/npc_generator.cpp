@@ -316,9 +316,14 @@ void generator_activate_5c(GeneratorState& s) {
     s.present_2d = 1;                                                // 003ce98c
 }
 
-void generator_zone_deactivate(GeneratorState& s, bool forced) {
-    if (forced && !s.spawned_90.empty())                             // 00220bb0
-        throw std::runtime_error("Generator " + std::to_string(s.id) + ": a forced deactivation with spawned NPCs (00220bb0's DespawnedNPCMsg / +60(1)) is not hosted");
+void generator_zone_deactivate(GeneratorState& s, bool forced,
+                               const std::function<void(const GeneratorListEntry&)>& deactivate_immediate) {
+    if (forced && !s.spawned_90.empty()) {                           // 00220bb0
+        if (!deactivate_immediate)
+            throw std::runtime_error("Generator " + std::to_string(s.id) + ": a forced deactivation with spawned NPCs (00220bb0's DespawnedNPCMsg / +60(1)) is not hosted");
+        const auto nodes = s.spawned_90;                             // 00220bf4..00220cd8: +90 in order
+        for (const auto& n : nodes) deactivate_immediate(n);
+    }
     s.present_2d = 0;                                                // 003ce790 (00220bb0, +60(0) = 00221460), then 00224180's end
 }
 

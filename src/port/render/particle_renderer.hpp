@@ -53,12 +53,15 @@
 //   and draw() from the scene-draw hooks 0x37bd40 and 0x2b1cb0.
 // Checkpoint 132mt1: every GPU call goes through the gfx layer (gfx_device.hpp; the D3D11 backend gfx_d3d11.cpp).
 #include "gfx_device.hpp"
+#include "bullet_render.hpp"
 #include "particle_asset.hpp"
 #include "scene_renderer.hpp"
 #include "texture.hpp"
 
 #include <array>
+#include <functional>
 #include <map>
+#include <vector>
 
 namespace omega {
 
@@ -84,6 +87,45 @@ public:
     // Draws over the scene's last draw() (its camera, target and depth).
     // Returns the number of sprites drawn.
     std::size_t draw(const std::vector<particle::ParticleSpriteBatch>& batches);
+    // Port-only (132vc2, research/VITA.md "Main-thread CPU (132vc2)"): draw() = build_sprites, then emit_sprites.
+    // build_sprites is pure (any thread): the batches' host vertices (9 floats a sprite vertex, 11 for heat haze),
+    // each haze sprite's target box and the draw segments, with `view` giving a definition's texture (null: none,
+    // which throws as draw() does), the ScreenFxBuf / frame copy presence and the target size. emit_sprites uploads
+    // them and records the draws (the scene's device; the simulation thread).
+    struct SpriteSegment {
+        std::uint32_t first = 0, count = 0;
+        const gfx::Texture* view = nullptr;
+        int blend = 0;  // -1: heat haze
+    };
+    // The scene targets the sprites draw into (the scaled scene's while it is open: render_target() and width()
+    // change at end_scene), taken when the sprites' place in the frame is (132vc2).
+    struct SpriteTargets {
+        bool set = false;
+        const gfx::Texture* target = nullptr;
+        const gfx::Texture* depth = nullptr;
+        const gfx::Texture* frame_alpha = nullptr;
+        unsigned width = 0, height = 0;
+    };
+    SpriteTargets targets() const {
+        return {true, scene_.render_target(), scene_.depth_view(), scene_.frame_alpha_target(), scene_.width(),
+                scene_.height()};
+    }
+    struct PreparedSprites {
+        SpriteTargets targets;  // unset: the scene's at emit_sprites
+        std::vector<float> vertices, haze_vertices;
+        std::vector<gfx::Box> haze_boxes;
+        std::vector<SpriteSegment> segments;
+    };
+    static void build_sprites(const std::vector<particle::ParticleSpriteBatch>& batches,
+                              const std::function<const gfx::Texture*(const particle::ParticleDefinition*)>& view,
+                              bool screen_fx, bool frame_copy, float width, float height, PreparedSprites& out);
+    std::size_t emit_sprites(const PreparedSprites& prepared);
+    const gfx::Texture* texture_view(const particle::ParticleDefinition* def) const;
+    bool screen_fx_ready() const { return screen_fx_ != nullptr; }
+    bool frame_copy_ready() const { return frame_copy_ != nullptr; }
+    bool lost_now() const { return lost(); }
+    unsigned target_width() const { return scene_.width(); }
+    unsigned target_height() const { return scene_.height(); }
     // 0037bd40: the scene target's current image to ScreenFxBuf (heat haze).
     void copy_screen_fx();
     // Checkpoint 132g: the image for an em+170 texture slot (null: white).
@@ -93,6 +135,9 @@ public:
     // returns the number of triangles drawn.
     std::size_t draw_shatter(const std::vector<particle::ShatterFlush>& flushes,
                              const std::array<std::array<float, 4>, 4>& node);
+    // 002755f0 / 002757a0: effect-table texture 0x1a, cBullet::sUvSets,
+    // render mode 5 (nearest filtering) and ALPHA_1 0x44.
+    std::size_t draw_bullet_tracers(const std::vector<BulletTracerMesh>& meshes);
     // Checkpoint 132ms2: the rain emitter's triangle flushes (00399080 ->
     // 00371200, the same primitive path as the shards) with the def+74
     // texture (003820e0). Checkpoint 132ms5b: its sprite flushes (00371170,
@@ -109,7 +154,8 @@ private:
         const std::vector<particle::ShatterVertex>* vertices = nullptr;
     };
     std::size_t draw_triangles(const std::vector<TriangleFlush>& flushes,
-                               const std::array<std::array<float, 4>, 4>& node, const char* what);
+                               const std::array<std::array<float, 4>, 4>& node, const gfx::SamplerState* sampler,
+                               const char* what);
     template <class T> using Ptr = std::shared_ptr<T>;
     SceneRenderer& scene_;
     gfx::CommandList list_;
@@ -118,7 +164,7 @@ private:
     Ptr<gfx::BlendState> blend_[4];  // by def+38
     Ptr<gfx::RasterState> raster_;
     Ptr<gfx::DepthState> depth_;
-    Ptr<gfx::SamplerState> sampler_;
+    Ptr<gfx::SamplerState> sampler_, nearest_sampler_;
     std::map<const particle::ParticleDefinition*, Ptr<gfx::Texture>> textures_;
     std::map<const particle::ParticleDefinition*, std::uint32_t> texture_alpha_;  // the largest GS texel alpha
     Ptr<gfx::Buffer> haze_vertices_, copy_vertices_;
@@ -133,6 +179,7 @@ private:
     Ptr<gfx::Texture> make_view(const Texture& texture);
     std::map<const particle::ParticleDefinition*, Texture> texture_images_;  // for reset_device
     std::map<std::int32_t, const Texture*> handle_images_;
+    PreparedSprites prepared_;  // 132vc2: draw()'s, kept for its capacity
     void create_pipeline();
     static Texture white_texel();
     bool lost() const;  // the scene's device was removed (draws are skipped until reset_device)

@@ -6,8 +6,9 @@
 // choices (root weights, model anchor, shape, radius, start) are explicit
 // configuration, not recovered actor data. One simulation is a single-actor
 // view of the world frame of actor_world.hpp (pump, logic traversal, model and
-// physical traversal, frame-update event); there is no moving support object
-// and no actor-versus-actor collision. The pad helper's Cross/Triangle senders, the edge
+// physical traversal, frame-update event). A shared ActorWorld supplies live
+// collision-owner translation velocity to support-assisted jumps; a standalone
+// simulation has no moving owner. The pad helper's Cross/Triangle senders, the edge
 // slots (001dfb80 with its detection body and 001e1600) and the actor's
 // ledge action (0x2a, 001930a0) are hosted, with the jump to grab, the ledge
 // catch, the hang and the pull-up (HANGING.md); see the Native wiring
@@ -67,6 +68,9 @@ struct SoloCollisionWorld {
     std::vector<std::vector<std::uint8_t>> cols;
     std::vector<std::string> names;
     std::vector<std::optional<CollisionMatrix>> owners;
+    // Port host input for physical +54/+a0: translational velocity of an
+    // owner component in the current world frame.
+    std::vector<std::optional<RootVector>> owner_velocities;
     // The game object whose virtual +b8 returns resource i (0: terrain or an
     // object the port does not name). 003c4f00 skips the direct geometry of a
     // query's excluded objects (provider +18 / +1c, 00183070).
@@ -86,6 +90,9 @@ struct SoloCollisionWorld {
     std::uint64_t game_object(std::uint64_t handle) const;
     // Replaces an owner matrix (the entry must have one: static terrain has no transform component).
     void set_owner(std::uint64_t handle,const CollisionMatrix& owner);
+    void set_owner_velocity(std::uint64_t handle,std::optional<RootVector> velocity);
+    std::optional<RootVector> owner_velocity(std::uint64_t handle) const;
+    void clear_owner_velocities();
     std::span<const std::uint8_t> geometry(std::uint64_t handle) const;
     std::optional<CollisionMatrix> owner(std::uint64_t handle) const;
     std::vector<ExpandedCollisionTriangle> expand(const Bounds& bounds) const;
@@ -1346,6 +1353,9 @@ void fire_ignite();
     // actor's priority set and model (0018c5a0 / +326c / 003ad500 as the
     // takedown calls above). Throws without a model.
     ActorStunnedActionResult receive_stunned_action(std::uint32_t code_2c);
+    // Tear-gas action 6 writes actor +3539. Choke_NextFrame consumes it in
+    // the actor logic after heading and before gait/item triggers.
+    void receive_tear_gas();
     // Actor +3088 heading history and the +3030 heading curve.
     const ActorHeadingState& heading_state() const;
     std::uint8_t life_state() const;

@@ -521,7 +521,37 @@ void NiEventWorld::reset(std::uint32_t id){queue_shuttle(need(id,"00237900"),2,f
 void NiEventWorld::end_state(std::uint32_t id){end_state_node(need(id,"SetEndState 00237870"));}
 void NiEventWorld::end_state_node(int n){
     auto& o=nodes_[static_cast<std::size_t>(n)];
-    if(o.light)fail("00237a20: the NIEventLight end state (virtual +128 of 004dbed0) is not ported");
+    if(o.light){
+        // Checkpoint 132fx1: 00237a20 cNIEventLight::SetEndState (NIEvent.cc:2034, matched C): +18c = 1 and, with the
+        // loop +184 == -1, 00239a90(+170) by keys[+178 - 1].t - +188; the same for +1ac / +1a4 / +190 / +198 / +1a8;
+        // then 0023e5d0 cNIEventBase::SetEndState (matched C): +130 = 1, vt+12c (0023d290) by keys[+b0 - 1].t - +c0
+        // while +bc == -1, vt+130 (0023d6d0) by keys[+c8 - 1].t - +d8 while +d4 == -1, with +60 != 3 the local
+        // matrix +f0 = (an uninitialised stack matrix, row 3 +e0), vt+120 and each child's vt+128.
+        for(std::size_t k=0;k<2;++k){
+            auto& r=o.rotation[k];
+            r.active=true;
+            if(r.loop!=-1)continue;
+            if(r.keys.empty())fail("00237a20 reads rotation key -1 of NIEventLight "+hex(o.id));
+            ni_rotation_track_step(r,sub(r.keys.back().t,r.time));
+        }
+        o.playing_130=true;
+        if(o.position.loop==-1){
+            if(o.position.keys.empty())fail("0023e5d0 reads position key -1 of NIEventLight "+hex(o.id));
+            ni_position_track_step(o.position,sub(o.position.keys.back().t,o.position.time));
+        }
+        if(o.sw.loop==-1){
+            if(o.sw.keys.empty())fail("0023e5d0 reads switch key -1 of NIEventLight "+hex(o.id));
+            ni_switch_track_step(o.sw,sub(o.sw.keys.back().t,o.sw.time));
+        }
+        if(o.kind!=3){
+            o.local_rows={false,false,false,true};
+            o.local[3]=o.position.out;
+        }
+        node_update(n);
+        const auto light_children=nodes_[static_cast<std::size_t>(n)].children;
+        for(const int c:light_children)end_state_node(c);
+        return;
+    }
     o.playing_130=true;                                                  // 0023b4e4
     ni_end_state_tracks(o.position,o.sw,o.rotation);
     if(o.kind!=3){                                                       // 0023b608..0023b754

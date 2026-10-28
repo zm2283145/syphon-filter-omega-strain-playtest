@@ -248,7 +248,22 @@ ZoneTracker::ZoneTracker(const ZoneActivationMap& map) : map_(&map) {
     if (map.zones().empty()) throw std::runtime_error("Zone tracker without terrain (00224d80 returns null)");
 }
 
-bool ZoneTracker::present(std::uint32_t key) const { return std::binary_search(present_.begin(), present_.end(), key); }
+bool ZoneTracker::own_present(std::uint32_t key) const { return std::binary_search(present_.begin(), present_.end(), key); }
+bool ZoneTracker::present(std::uint32_t key) const {
+    return own_present(key) || std::binary_search(held_.begin(), held_.end(), key);
+}
+
+std::vector<ZoneRequest> ZoneTracker::set_held(std::vector<std::uint32_t> keys) {
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    std::vector<ZoneRequest> requests;
+    for (const auto key : held_)
+        if (key && !std::binary_search(keys.begin(), keys.end(), key) && !own_present(key)) requests.push_back({key, false, false});
+    for (const auto key : keys)
+        if (key && !std::binary_search(held_.begin(), held_.end(), key) && !own_present(key)) requests.push_back({key, true, false});
+    held_ = std::move(keys);
+    return requests;
+}
 void ZoneTracker::set_present(std::uint32_t key, bool value) {
     const auto at = std::lower_bound(present_.begin(), present_.end(), key);
     const bool has = at != present_.end() && *at == key;
@@ -351,14 +366,15 @@ std::vector<ZoneRequest> ZoneTracker::update(const RootVector& position, const R
     const auto sorted = sorted_members(zone_, camera);
     for (const auto key : old) {
         if (!forced_ && listed(sorted, key)) continue;
-        if (!key || !present(key)) continue;
-        requests.push_back({key, false, forced_});
+        if (!key || !own_present(key)) continue;
+        // Port-only (132pt1): a member another agent's tracker holds stays present (no request).
+        if (!std::binary_search(held_.begin(), held_.end(), key)) requests.push_back({key, false, forced_});
         set_present(key, false);
     }
     for (const auto key : sorted) {
         if (!forced_ && listed(old, key)) continue;
-        if (!key || present(key)) continue;
-        requests.push_back({key, true, forced_});
+        if (!key || own_present(key)) continue;
+        if (!std::binary_search(held_.begin(), held_.end(), key)) requests.push_back({key, true, forced_});
         set_present(key, true);
     }
     forced_ = false;

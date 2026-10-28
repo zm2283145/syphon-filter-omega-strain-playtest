@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -26,7 +27,7 @@ float ms_since(Clock::time_point t) { return std::chrono::duration<float, std::m
 
 // One queued context operation.
 struct Op {
-    enum class Kind : std::uint8_t { list, write, present };
+    enum class Kind : std::uint8_t { list, write, present, slot };  // slot: 132vc2 (RenderThread::reserve)
     Kind kind = Kind::list;
     Device* device = nullptr;     // list / write: the backend device
     SwapChain* swap = nullptr;    // present
@@ -35,6 +36,8 @@ struct Op {
     std::vector<std::uint8_t> bytes;  // write
     const char* label = nullptr;
     unsigned interval = 0;        // present
+    std::vector<Op> sub;          // slot: the operations recorded by fill()
+    bool filled = false;          // slot
 };
 
 // A run of operations handed to the thread: a frame's snapshot (frame_end), or the part recorded before a drain.
@@ -75,6 +78,23 @@ struct RenderThread::Core {
     std::shared_ptr<HostThread::Completion> worker;  // 132mt3: run() on the session's render host thread
 
     std::vector<Op> open;                // the batch being recorded (simulation thread only)
+    std::vector<Op>* target = nullptr;   // 132vc2: fill()'s slot while it records (simulation thread only)
+    std::size_t unfilled = 0;            // 132vc2: reserved slots not filled yet
+    std::function<void()> before_hand_off;
+    bool handing_off = false;
+    std::vector<Op>& sink() { return target ? *target : open; }
+    // 132vc2: the owner fills the open slots before the batch leaves (end_frame, drain).
+    void fill_open_slots() {
+        if (!unfilled || handing_off) return;
+        if (!before_hand_off) throw std::logic_error("RenderThread: a reserved slot was not filled before the hand-off");
+        handing_off = true;
+        struct Done {
+            bool& flag;
+            ~Done() { flag = false; }
+        } done{handing_off};
+        before_hand_off();
+        if (unfilled) throw std::logic_error("RenderThread: the hand-off callback left a reserved slot unfilled");
+    }
     std::vector<std::pair<std::uint64_t, float>> waits;  // end_frame waits (simulation thread only)
 
     // Operations run inline: no thread, or a device-loss test injection is armed (so it hits the same call as in a
@@ -102,9 +122,13 @@ struct RenderThread::Core {
             float present_ms = 0;
             bool was_occluded = false;
             std::exception_ptr raised;
-            for (Op& op : b.ops) {
+            const auto execute = [&](auto&& self, Op& op) -> void {
+                if (op.kind == Op::Kind::slot) {  // 132vc2: the slot's operations in their order
+                    for (Op& s : op.sub) self(self, s);
+                    return;
+                }
                 ThreadBusyScope busy_time;  // Vita: the render core's busy-time report (empty elsewhere)
-                if (failed || raised || device_lost_pending()) continue;  // the owner recovers the device
+                if (failed || raised || device_lost_pending()) return;  // the owner recovers the device
                 try {
                     switch (op.kind) {
                     case Op::Kind::list: op.device->submit(op.list); break;
@@ -115,13 +139,15 @@ struct RenderThread::Core {
                         present_ms += ms_since(t);
                         break;
                     }
+                    case Op::Kind::slot: break;
                     }
                 } catch (const DeviceLost&) {
                     // marked by the backend; the rest of the queued work is skipped while the mark is pending
                 } catch (...) {
                     raised = std::current_exception();
                 }
-            }
+            };
+            for (Op& op : b.ops) execute(execute, op);
             const float total_ms = ms_since(begin);
             current.execute_ms += total_ms - present_ms;
             current.present_ms += present_ms;
@@ -132,7 +158,11 @@ struct RenderThread::Core {
             {
                 std::lock_guard lock(m);
                 if (raised && !error) error = raised;
-                for (Op& op : b.ops) {
+                const auto recycle = [&](auto&& self, Op& op) -> void {
+                    if (op.kind == Op::Kind::slot) {
+                        for (Op& sub : op.sub) self(self, sub);
+                        return;
+                    }
                     if (op.kind == Op::Kind::list && pool.size() < max_pooled_lists) {
                         op.list.clear();
                         pool.push_back(std::move(op.list));
@@ -149,7 +179,8 @@ struct RenderThread::Core {
                             byte_pool.push_back(std::move(op.bytes));
                         }
                     }
-                }
+                };
+                for (Op& op : b.ops) recycle(recycle, op);
                 auto keep = graveyard.begin();
                 for (auto& entry : graveyard) {
                     if (entry.first <= b.seq) freed.push_back(std::move(entry.second));
@@ -175,6 +206,7 @@ struct RenderThread::Core {
 
     // Simulation thread: the open batch to the queue.
     void push(bool frame_end, std::uint64_t frame) {
+        fill_open_slots();  // 132vc2
         {
             std::lock_guard lock(m);
             Batch b;
@@ -301,7 +333,7 @@ public:
         op.kind = Op::Kind::list;
         op.device = inner_.get();
         core_->take_list(list, op);
-        core_->open.push_back(std::move(op));
+        core_->sink().push_back(std::move(op));
     }
     void write(const Buffer& buffer, const void* data, std::size_t bytes, const char* label) override {
         if (core_->inline_now()) {
@@ -322,7 +354,7 @@ public:
             op.bytes.assign(p, p + bytes);
         }
         op.label = label;
-        core_->open.push_back(std::move(op));
+        core_->sink().push_back(std::move(op));
     }
     void read(const Texture& staging, unsigned subresource, const std::function<void(const std::uint8_t*, unsigned)>& reader,
               const char* label) override {
@@ -407,6 +439,39 @@ void RenderThread::drain() { core_->drain(); }
 bool RenderThread::threaded() const { return core_->threaded; }
 
 void RenderThread::set_bulk_copy(BulkCopy copy) { core_->bulk_copy = std::move(copy); }
+
+std::size_t RenderThread::reserve() {
+    if (core_->inline_now() || core_->target) return 0;
+    Op op;
+    op.kind = Op::Kind::slot;
+    core_->open.push_back(std::move(op));
+    ++core_->unfilled;
+    return core_->open.size();  // 1 + its index in the open batch
+}
+
+void RenderThread::fill(std::size_t slot, const std::function<void()>& record) {
+    if (slot == 0 || slot > core_->open.size() || core_->open[slot - 1].kind != Op::Kind::slot || core_->open[slot - 1].filled)
+        throw std::logic_error("RenderThread: fill of a slot that is not open");
+    Op& op = core_->open[slot - 1];
+    op.filled = true;
+    --core_->unfilled;
+    if (core_->inline_now()) {  // a device-loss injection armed since: inline, as every call now
+        record();
+        return;
+    }
+    std::vector<Op> sub;
+    core_->target = &sub;
+    struct Restore {
+        Core& core;
+        ~Restore() { core.target = nullptr; }
+    } restore{*core_};
+    record();
+    core_->open[slot - 1].sub = std::move(sub);  // (open does not grow while target is set)
+}
+
+std::size_t RenderThread::unfilled() const { return core_->unfilled; }
+
+void RenderThread::set_before_hand_off(std::function<void()> callback) { core_->before_hand_off = std::move(callback); }
 
 void RenderThread::stop() {
     if (!core_->threaded) return;

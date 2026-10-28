@@ -1235,10 +1235,15 @@ struct Lib {
         return 0;
     }
 
-    // 002e4228: the local client's second-space objects (handles rec +0xa .. + rec +0xc, 002dd9f8) streamed: those
-    // in state 2 send their queued data (002f5818, the rate test, 002e3f20 / 002de880 message *0x0059840c, 002f53b8 /
-    // 002f56f8) or finish (002dd328 / 002f5348 / 002e4078). The streaming is not ported: such an object throws by
-    // name. Frame 0x70 below `stack`.
+    // 002e4228 (SendClientDataStreams): the local client's second-space objects (DME data streams, handles rec +0xa
+    // .. + rec +0xc, 002dd9f8 NetGetStreamChannel) streamed: those in state 2 send their queued data
+    // (rt_circ_buf_get_used 002f5818, the rate test, NetGetDataStreamPacket 002e3f20 / NetSendDmeMessage 002de880
+    // message *0x0059840c, rt_circ_buf_free 002f53b8 / rt_circ_buf_normalize 002f56f8) or finish (DmeFree 002dd328 /
+    // rt_circ_buf_destroy 002f5348 / SendCloseDataStream 002e4078). Not ported, and unreachable in this game
+    // (132fx5): a stream reaches state 2 only through NetIOpenDataStream 002e2878, whose one caller is the API
+    // wrapper NetOpenDataStream 002eb150, and nothing in the ELF calls or points at 002eb150 (nor at
+    // NetRegisterDataStream 002ea380, NetAddToDataStream 002eb260, NetEndDataStream 002eb318); voice chat uses
+    // NetStreamMedia instead. Such an object throws by name. Frame 0x70 below `stack`.
     void second_space_002e4228(u32 stack) {
         const auto sp = stack - 0x70;
         w32(m, sp + 8, 0x100);
@@ -1256,7 +1261,7 @@ struct Lib {
             if (slot_002dd9f8(k + r16(m, r32(m, sp + 4) + 0xa), sp + 0xc, sp)) continue;
             const auto obj = r32(m, sp + 0xc);
             if (!obj || r8(m, obj) != 2) continue;
-            throw std::runtime_error("002e4228: a second-space object's stream (state 2: 002f5818 / 002e3f20 / 002de880) is not ported");
+            throw std::runtime_error("002e4228: a DME data stream in state 2 (002f5818 / 002e3f20 / 002de880; unreachable: no caller opens one) is not ported");
         }
     }
 

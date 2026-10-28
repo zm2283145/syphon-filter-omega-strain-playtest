@@ -31,6 +31,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace omega {
@@ -514,6 +515,10 @@ struct CoopCommandRule {
     bool direct{};                            // no MoveToNode first: the route points from where it stands (132uk6c)
     bool retry_stalled{};                     // a stalled route is asked again (coop_command_stall_frames; 132uk6c)
     std::uint32_t min_tasks{};                // 0, or ordered only with at least this many level tasks partners (132uk6e)
+    // 132pt1: the objective (ObjectiveStage id) this rule does a part of: the command menu's Level tasks list offers the
+    // objective (by its own text) while it is open and one of its rules has an open target, and gives its rules to the
+    // partner the player picks (coop_level_tasks, coop_task_slot). 0: not offered.
+    std::uint32_t objective{};
 };
 // The command points of a mission (none for most).
 const std::vector<CoopCommandRule>& coop_command_rules(const std::string& mission);
@@ -557,6 +562,11 @@ struct CoopCommandInput {
     // Checkpoint 132pw5fix2: the level tasks role given from the command menu's Tasks page: with no order, the first
     // rule with an open target is ordered at once, wherever the player is and without the Triangle.
     bool seek{};
+    // Checkpoint 132pt1: a level task the player gave this partner from the Level tasks list: only that objective's rules
+    // (with slot the one coop_task_slot gave it). 0: none; then the rules other partners were given (claimed, pairs of
+    // objective and partner_slot) are left to them.
+    std::uint32_t objective{};
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> claimed;
 };
 struct CoopCommandStep {
     CoopBoostStep route;                   // the partner's navigation and its Triangle (route.trigger_box)
@@ -572,8 +582,22 @@ struct CoopCommandStep {
 };
 // 132pw5fix2: after its Triangle in a target box a seeking partner orders nothing for this many steps (frames).
 inline constexpr std::uint32_t coop_command_seek_wait = 90;
-// Whether a rule applies to this partner now: its slot and its item gates (132ms5).
+// Whether a rule applies to this partner now: its slot and its item gates (132ms5); 132pt1: an assigned task's objective,
+// or no rule another partner was given.
 bool coop_command_rule_gates(const CoopCommandRule& rule, const CoopCommandInput& input);
+// Checkpoint 132pt1 (port-only, the user's play-test 2026-10-26: the partners walked through a pipe): whether the walk from a
+// to b (0.5 above both, sampled every 0.25) passes through a crawl zone (a type-9 hotbox: the input's +0x24, the crouch
+// toggle's zone) that holds neither end: a walking link there (a walk bridge, a crumb's join) would take a standing
+// partner through the pipe. Crawls are crossed on type-8 links only.
+bool coop_walk_crosses_crawl_zone(const HotboxWorld& world, const RootVector& a, const RootVector& b);
+// Checkpoint 132pt1 (port-only): the level's tasks the command menu's Level tasks list offers: each objective (in rule
+// order) that some rule names, that is open (open_objective: not destroyed, not decided) and that has a rule
+// with an open target box (coop_command_open_target).
+std::vector<std::uint32_t> coop_level_tasks(const std::vector<CoopCommandRule>& rules, const HotboxWorld& world,
+                                            const std::function<bool(std::uint32_t)>& open_objective);
+// The partner_slot whose rules an assigned partner runs for objective: the lowest of the objective's rules' slots that
+// no other partner given the same objective holds (	aken), else the lowest. 0: the objective has no rule.
+std::uint32_t coop_task_slot(const std::vector<CoopCommandRule>& rules, std::uint32_t objective, const std::vector<std::uint32_t>& taken);
 // Whether rule r may be ordered given the partner's history (132uk6c): once, after_rule and after_objective.
 bool coop_command_rule_sequence(const CoopCommandState& state, const std::vector<CoopCommandRule>& rules, std::size_t r);
 // Whether the partner in rule r's box (target index `box`) may press now (132uk6c): a climb rule waits for a kneeling

@@ -85,7 +85,10 @@ std::uint64_t BulletPool::request(const ShotRequest& r,const WeaponDatabase& db,
     for(std::size_t i=0;i<capacity;++i){
         auto& b=records_[i];
         if(b.active_115)continue;
-        if(rec.tracer_resource_134()>=0)throw std::runtime_error("Bullet request: tracer objects (record +134, 003a2dd0) are not hosted");
+        // Checkpoint 132fx1: record +134 is -1 for good: the load 00147400, the copy 00147630 and the unload 00145200
+        // are its only writers (no store of another value in the image), so the tracer particle 003a2dd0 of
+        // Bullet_InitFromRequest is never made. A record that says otherwise is not the game's.
+        if(rec.tracer_resource_134()>=0)throw std::runtime_error("Bullet request: record +134 >= 0 (the tracer particle 003a2dd0), which no writer in the image sets");
         b=BulletRecord{};
         b.frame_20=r.frame;b.speed_4=r.power_40;
         b.target_60=r.designated_48;b.target_id_64=r.designated_48?need(host.object_id,"Bullet request: no object ids")(r.designated_48):-1;
@@ -98,6 +101,9 @@ std::uint64_t BulletPool::request(const ShotRequest& r,const WeaponDatabase& db,
             b.static_hit=hit;b.end_point_100=hit->point;
         }
         b.tracer_117=r.tracer_d6;b.item_148=r.record_dc;b.remaining_8=remaining;b.travelled_0=0.0F;
+        b.tracer_texture_11c=need(host.effect_id,"Bullet request: no tracer texture lookup (*00236f20(0x1a))")(0x1a);
+        b.tracer_phase_140=next_tracer_phase_;
+        next_tracer_phase_=static_cast<std::uint8_t>((next_tracer_phase_+4U)&12U);  // 00504038, 00277dd4..00277e04
         b.penetration_10=rec.penetration_f8();b.statistics_119=true;
         events.push_back({BulletEvent::Kind::created,i,0,remaining,-1,r.record_dc,r.power_40,{},{}});
         return i+1;

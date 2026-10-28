@@ -93,18 +93,50 @@ CoopMenuLabel coop_order_label(CoopOrder order) {
     throw std::runtime_error("Coop command menu: unknown order");
 }
 
+CoopMenuLabel coop_partner_label(std::size_t k) {
+    switch (k) {
+    case 0: return {"PlayerName1", "Partner 1"};
+    case 1: return {"PlayerName2", "Partner 2"};
+    case 2: return {"PlayerName3", "Partner 3"};
+    }
+    throw std::runtime_error("Coop command menu: no partner " + std::to_string(k + 1));
+}
+
 std::string coop_order_target_name(int target) {
     if (target == coop_order_all) return "all partners";
     if (target < 0 || target > 2) throw std::runtime_error("Coop command menu: target out of range");
     return "partner " + std::to_string(target + 1);
 }
 
-void coop_menu_open(CoopCommandMenu& menu, std::size_t partners) {
+void coop_menu_open(CoopCommandMenu& menu, std::size_t partners, std::vector<CoopTaskEntry> tasks) {
     if (partners < 1 || partners > 3) throw std::runtime_error("Coop command menu: 1 to 3 partners");
     menu.open = true;
     menu.partners = partners;
     menu.menu = partners > 1 ? 0 : 1;
     menu.target = partners > 1 ? coop_order_all : 0;
+    menu.tasks = std::move(tasks);
+    menu.page = 0;
+    menu.chosen = 0;
+}
+
+std::size_t coop_menu_task_pages(const CoopCommandMenu& menu) {
+    if (menu.tasks.size() <= 4) return 1;
+    return (menu.tasks.size() + 2) / 3;
+}
+
+std::optional<std::size_t> coop_menu_task_at(const CoopCommandMenu& menu, int direction) {
+    if (direction < 0 || direction > 3) throw std::runtime_error("Coop command menu: D-pad direction out of range");
+    std::size_t index = 0;
+    if (menu.tasks.size() <= 4) {
+        index = static_cast<std::size_t>(direction);
+    } else {
+        // Up, Left, Right hold the page's three tasks; Down turns the page.
+        static constexpr std::array<int, 4> slot{0, -1, 1, 2};
+        if (slot[static_cast<std::size_t>(direction)] < 0) return std::nullopt;
+        index = menu.page * 3 + static_cast<std::size_t>(slot[static_cast<std::size_t>(direction)]);
+    }
+    if (index >= menu.tasks.size()) return std::nullopt;
+    return index;
 }
 
 CoopMenuPress coop_menu_cancel(CoopCommandMenu& menu) {
@@ -119,8 +151,45 @@ CoopMenuPress coop_menu_press(CoopCommandMenu& menu, int direction) {
     CoopMenuPress r;
     if (!menu.open) return r;
     if (direction < 0 || direction > 3) throw std::runtime_error("Coop command menu: D-pad direction out of range");
-    if (menu.menu < 0 || static_cast<std::size_t>(menu.menu) >= menus.size()) throw std::runtime_error("Coop command menu: bad menu");
     r.consumed = true;
+    // 132pt1 (port-only): Level tasks opens the list of the level's open tasks; a task chosen there goes to the partner
+    // chosen next (with one partner, to partner 1 at once).
+    const auto give = [&](int partner) {
+        menu.open = false;
+        r.closed = true;
+        r.task = menu.tasks.at(menu.chosen).objective;
+        r.target = partner;
+        return r;
+    };
+    if (menu.menu == 4 && direction == 0) {
+        if (menu.tasks.empty()) {
+            menu.open = false;
+            r.closed = true;
+            r.no_tasks = true;
+            r.target = menu.target;
+            return r;
+        }
+        menu.menu = coop_menu_task_list;
+        menu.page = 0;
+        return r;
+    }
+    if (menu.menu == coop_menu_task_list) {
+        if (menu.tasks.size() > 4 && direction == 1) {
+            menu.page = (menu.page + 1) % coop_menu_task_pages(menu);
+            return r;
+        }
+        const auto task = coop_menu_task_at(menu, direction);
+        if (!task) return r;
+        menu.chosen = *task;
+        if (menu.partners == 1) return give(0);
+        menu.menu = coop_menu_task_partner;
+        return r;
+    }
+    if (menu.menu == coop_menu_task_partner) {
+        if (direction == 3 || static_cast<std::size_t>(direction) >= menu.partners) return r;
+        return give(direction);
+    }
+    if (menu.menu < 0 || static_cast<std::size_t>(menu.menu) >= menus.size()) throw std::runtime_error("Coop command menu: bad menu");
     const auto& row = menus[static_cast<std::size_t>(menu.menu)];
     const int id = row.ids[static_cast<std::size_t>(direction)];
     if (id == 0) return r;
@@ -144,10 +213,19 @@ std::array<CoopMenuLabel, 4> coop_menu_labels(const CoopCommandMenu& menu) {
     std::array<CoopMenuLabel, 4> out{};
     switch (menu.menu) {
     case 0:
-        out[0] = {nullptr, "Partner 1"};
-        if (menu.partners > 1) out[1] = {nullptr, "Partner 2"};
-        if (menu.partners > 2) out[2] = {nullptr, "Partner 3"};
+        // 132pt1: the partners by their codenames (the agent slot's name, GetString("PlayerName<slot>"), as the co-op HUD's
+        // callouts show them); the port's text only if the string is missing.
+        for (std::size_t k = 0; k < menu.partners; ++k) out[k] = coop_partner_label(k);
         out[3] = {nullptr, "All"};
+        return out;
+    case coop_menu_task_list: {
+        if (menu.tasks.size() > 4) out[1] = {nullptr, "Next page"};
+        for (int d = 0; d < 4; ++d)
+            if (const auto t = coop_menu_task_at(menu, d)) out[static_cast<std::size_t>(d)] = {nullptr, menu.tasks[*t].text.c_str()};
+        return out;
+    }
+    case coop_menu_task_partner:
+        for (std::size_t k = 0; k < menu.partners; ++k) out[k] = coop_partner_label(k);
         return out;
     case 1:
         out[0] = {"QC_MENU_4", "Command"};

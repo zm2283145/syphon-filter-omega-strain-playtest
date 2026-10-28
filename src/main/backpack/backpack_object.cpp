@@ -44,6 +44,11 @@ WeaponBackpack& object_at(const BackpackObjectHost& host,std::uint32_t address){
     if(!host.object)fail("the list's objects are not hosted");
     return host.object(address);
 }
+// Multiplayer (132fx5): *00494178, made by 002ebaf8 on first use.
+std::uint32_t local_index(const BackpackObjectHost& host){
+    if(!host.local_index)fail("the local client index (*00494178 / 002ebaf8) is not hosted");
+    return host.local_index();
+}
 }
 
 std::uint32_t BackpackTransform::word(std::size_t offset) const{
@@ -71,10 +76,12 @@ void backpack_object_cap_check(const BackpackObjectList& list,const BackpackObje
         if(!owner||no_pickup_items(*owner))++count;
     }
     if(static_cast<std::int32_t>(backpack_object_cap)>=count)return;
-    // 00257b7c: retire one unattached backpack that is not already fading.
-    if(host.multiplayer)fail("the multiplayer filter of the eviction 00257b7c (005721c8, +308 against *00494178) is not ported");
+    // 00257b7c: retire one unattached backpack that is not already fading. In a network game (132fx5) only the
+    // local client's own (+308 = *00494178, read once here).
+    const std::uint32_t me=host.multiplayer?local_index(host):0;
     // Unlike the count, both loops skip the +60 test.
     auto eligible=[&](const WeaponBackpack& e){
+        if(host.multiplayer&&e.word(0x308)!=me)return false;
         const auto owner=valid_owner(e,host);
         return (!owner||no_pickup_items(*owner))&&e.byte(0x2f2)==0&&finite(bits_float(e.word(0x314)))<0.0F;
     };
@@ -238,12 +245,12 @@ std::uint32_t backpack_object_construct(const BackpackObjectCreate& create,const
     BackpackObjectList& list,const BackpackObjectHost& host,std::vector<BackpackObjectEvent>& events,
     const WeaponDatabase& database){
     if(!create.object||!create.transform)fail("00257640 without its allocations");
-    if(host.multiplayer)fail("the multiplayer blocks of 00257640 (005721c8) are not ported");
     backpack_object_cap_check(list,host,events);
     event(events,BackpackObjectEvent::Kind::alloc_object,create.address);
     auto& bp=*create.object;
-    // 0040c240(&id, 0xf5), then id |= (0 + 1) << 24 in single player.
-    const std::uint32_t id=create.id_40c240|0x01000000U;
+    // 0040c240(&id, 0xf5), then id |= (local + 1) << 24: the local client in a network game (132fx5), else 0.
+    const std::uint32_t id=create.network_id.value_or(
+        create.id_40c240|((host.multiplayer?local_index(host):0U)+1U)<<24);
     // 003cb090(bp, &id).
     bp.set_word(0x0,0x004dfde0);bp.set_word(0x4,0xbebaafde);bp.set_word(0x8,0x00543650);bp.set_word(0xc,id);
     bp.set_word(0x10,0xffffffffU);bp.set_byte(0x14,1);bp.set_word(0x18,0);bp.set_word(0x0,0x004dfda0);
@@ -276,6 +283,22 @@ std::uint32_t backpack_object_construct(const BackpackObjectCreate& create,const
     const auto m=backpack_drop_matrix(actor);
     backpack_object_place(bp,create.address,t,m,host,events);
     backpack_object_set_owner(bp,create.address,actor.address,actor.view,host,events);
+    if(host.multiplayer){
+        // 00257878..002579ac (132fx5): +308 = the local client, +10 = +c, +14 = 0 unless this console is the
+        // session host (*005721c0), then NetMap_BindReceiver(+10, the owner: the local client on the session
+        // host, else 002ebba0's session host, bp).
+        bp.set_word(0x308,create.network_owner.value_or(local_index(host)));
+        bp.set_word(0x10,bp.word(0xc));
+        if(!host.hosting)bp.set_byte(0x14,0);
+        std::uint32_t owner=0;
+        if(create.network_owner)owner=*create.network_owner;
+        else if(host.hosting)owner=local_index(host);
+        else{
+            if(!host.session_host)fail("002ebba0 (the session host's index) is not hosted");
+            owner=host.session_host();
+        }
+        event(events,BackpackObjectEvent::Kind::net_bind,bp.word(0x10),owner,create.address);
+    }
     return create.address;
 }
 
@@ -410,7 +433,12 @@ void backpack_object_destroy(std::uint32_t bp_address,BackpackObjectList& list,c
     std::vector<BackpackObjectEvent>& events){
     auto& bp=object_at(host,bp_address);
     if(valid_owner(bp,host))event(events,BackpackObjectEvent::Kind::clear_owner_3464,bp.word(0x300));
-    if(bp.byte(0x2f3)==0&&host.multiplayer)fail("the multiplayer block of 00254770 (005721c8) is not ported");
+    if(bp.byte(0x2f3)==0&&host.multiplayer&&bp.word(0x308)==local_index(host)){
+        // 002547d4..00254834 (132fx5): the local client's own drop sends InventoryMsg {+20 4, +24 1, +28 bp,
+        // +2c -1} (Event_Send(msg, bp, 0)).
+        BackpackObjectEvent e;e.kind=BackpackObjectEvent::Kind::inventory_send;
+        e.a=1;e.b=bp_address;e.c=0xffffffffU;e.d=bp_address;events.push_back(e);
+    }
     if(bp.word(0x2fc)!=0){
         const std::uint32_t box=bp.word(0x2fc);
         event(events,BackpackObjectEvent::Kind::remove_box,box);

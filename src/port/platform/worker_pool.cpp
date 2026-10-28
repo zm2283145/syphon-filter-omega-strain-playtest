@@ -60,6 +60,10 @@ WorkerPool::WorkerPool(unsigned workers) {
 }
 
 WorkerPool::~WorkerPool() {
+    try {
+        wait_tasks();  // 132vc2: no task outlives the pool
+    } catch (...) {
+    }
     {
         std::lock_guard lock(mutex_);
         quit_ = true;
@@ -99,19 +103,30 @@ void WorkerPool::loop() {
 #if defined(__vita__)
         if (spin()) {  // 132vc1: the next call is often a few hundred microseconds away (the particle hooks)
             const std::uint64_t until = sceKernelGetProcessTimeWide() + 300;
-            for (unsigned k = 0; published_.load(std::memory_order_acquire) == seen; ++k)
+            for (unsigned k = 0; published_.load(std::memory_order_acquire) == seen && !tasks_pending(); ++k)
                 if ((k & 63u) == 63u && sceKernelGetProcessTimeWide() >= until) break;
         }
 #endif
+        Task task;
+        bool have_task = false;
         {
             std::unique_lock lock(mutex_);
-            wake_.wait(lock, [&] { return quit_ || generation_ != seen; });
+            wake_.wait(lock, [&] { return quit_ || generation_ != seen || tasks_head_ < tasks_.size(); });
             if (quit_) return;
-            seen = generation_;
-            job = job_;
-            if (!job) continue;
-            ++active_;
-            active_now_.fetch_add(1, std::memory_order_relaxed);
+            if (generation_ != seen) {
+                seen = generation_;
+                job = job_;
+            }
+            if (job) {
+                ++active_;
+                active_now_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                have_task = take_task(task);  // 132vc2: no job to join: a queued task
+            }
+        }
+        if (!job) {
+            if (have_task) run_task(task);
+            continue;
         }
         {
             ThreadBusyScope busy_time;
@@ -133,6 +148,72 @@ void WorkerPool::loop() {
             active_now_.fetch_sub(1, std::memory_order_release);
         }
         finished_.notify_all();
+    }
+}
+
+bool WorkerPool::take_task(Task& out) {
+    if (tasks_head_ >= tasks_.size()) return false;
+    out = std::move(tasks_[tasks_head_++]);
+    if (tasks_head_ == tasks_.size()) {
+        tasks_.clear();
+        tasks_head_ = 0;
+    }
+    return true;
+}
+
+void WorkerPool::run_task(Task& task) {
+    {
+        ThreadBusyScope busy_time;
+        const FloatControlsScope caller_mode(task.float_controls);
+        try {
+            task.fn();
+        } catch (...) {
+            std::lock_guard lock(mutex_);
+            if (!task_error_) task_error_ = std::current_exception();
+        }
+        task.fn = nullptr;
+    }
+    {
+        std::lock_guard lock(mutex_);
+        tasks_pending_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    tasks_done_.notify_all();
+}
+
+void WorkerPool::submit(std::function<void()> task) {
+    if (threads_.empty()) {
+        try {
+            task();
+        } catch (...) {
+            std::lock_guard lock(mutex_);
+            if (!task_error_) task_error_ = std::current_exception();
+        }
+        return;
+    }
+    {
+        std::lock_guard lock(mutex_);
+        tasks_.push_back({std::move(task), float_controls()});
+        tasks_pending_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    wake_.notify_one();
+}
+
+void WorkerPool::wait_tasks() {
+    for (;;) {
+        Task task;
+        {
+            std::unique_lock lock(mutex_);
+            if (!take_task(task)) {
+                tasks_done_.wait(lock, [&] { return tasks_pending_.load(std::memory_order_acquire) == 0; });
+                if (task_error_) {
+                    auto e = task_error_;
+                    task_error_ = nullptr;
+                    std::rethrow_exception(e);
+                }
+                return;
+            }
+        }
+        run_task(task);
     }
 }
 

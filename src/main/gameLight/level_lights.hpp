@@ -204,7 +204,8 @@ LevelFog renderer_fog(float near_distance,float far_distance,float near_density,
 // 00133444, which skips this setup, is not modelled.)
 LevelFog level_fog(const LevelLights& lights);
 // Checkpoint 132fx4: the world update head's XLib_UpdateFogParms (cGameSystem_NextFrame, after cEnvMan_NextFrame):
-// level_fog into fog_180 (nullopt when it throws). Run once per world update after update_environment_blend.
+// level_fog into fog_180. If the new terms are degenerate, the persistent renderer registers keep their last valid
+// values (nullopt only when no valid update has occurred yet). Run once per world update after update_environment_blend.
 void update_level_fog(LevelLights& lights);
 // The frame's fog terms the renderer reads (00538370 / 00538380): fog_180 once update_level_fog has run (an
 // environment switched later in the frame takes effect at the next update), else level_fog now (nullopt when it

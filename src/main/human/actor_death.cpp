@@ -158,8 +158,11 @@ ActorDeathResult handle_actor_death(ActorAnimationReceiverState& actions,std::in
     h.self_action(0x24);                                                 // 0018aa68 (transport 1)
     if(kind!=2)return result;                                            // 0018aa90
     result.handled=true;
-    if(actor.controller_is_player&&actor.byte_14&&actor.byte_326b)
-        throw std::runtime_error("Actor death: 00131240 for +326b (0018ab68) is not native");
+    if(actor.controller_is_player&&actor.byte_14&&actor.byte_326b){
+        if(!h.pop_world_object)throw std::runtime_error("Actor death: world-pop host required for player +326b");
+        h.pop_world_object();                                           // 0018ab68: 00131240(004ffb50)
+        result.byte_326b=std::uint8_t{0};                               // 0018ab70
+    }
     if(actor.physical_present&&!(actor.controller_is_player&&actor.byte_14))result.physical_14=std::uint8_t{2};   // 0018abd0
     std::string name;
     float blend=bits(0x3f000000U);                                       // 0049d038 (0.5) at sp+89c
@@ -216,8 +219,21 @@ ActorDeathResult handle_actor_death(ActorAnimationReceiverState& actions,std::in
         if(!h.node_id)throw std::runtime_error("Actor death: node-name map host required");
         id=static_cast<std::int32_t>(h.node_id(name).value_or(0U));
     }
-    if(!(actor.object_2d&&actor.object_2c&&!actor.object_2e))
-        throw std::runtime_error("Actor death: final-pose path for inactive objects (0018bc80) is not native");
+    if(!(actor.object_2d&&actor.object_2c&&!actor.object_2e)){            // 0018bc80
+        if(!h.resolve_name||!h.install||!h.dead_state)
+            throw std::runtime_error("Actor death: inactive final-pose hosts (0018bc80) required");
+        constexpr std::string_view final_pose="animBodyFinalPoseAfterTossed";
+        const auto reg=h.resolve_name(final_pose);
+        if(reg.node){
+            MotionRequest q;q.node=*reg.node;q.selector=reg.selector;
+            q.limit=-1.0F;q.initial_phase=0.0F;q.notifications_active=true;
+            q.notifications[4]={token_4,actor.receiver};
+            h.install(q,MotionInstallMode::reset);                       // 003ad500 (a2 = 3)
+            result.motion=final_pose;
+        }
+        if(actor.physical_present)result.physical_11=std::uint8_t{1};    // physical +11
+        h.dead_state();result.dead_state=true;                           // 001a3780
+    }else{
     if(!h.resolve_id||!h.install)throw std::runtime_error("Actor death: motion install host required");
     const auto reg=h.resolve_id(static_cast<std::uint32_t>(id));         // 0018c6b0
     if(reg.node){
@@ -233,6 +249,7 @@ ActorDeathResult handle_actor_death(ActorAnimationReceiverState& actions,std::in
     if(immediate_dead){                                                  // 0018c064
         if(!h.dead_state)throw std::runtime_error("Actor death: dead state host (001a3780) required");
         h.dead_state();result.dead_state=true;
+    }
     }
     // 0018c504: 001977f0(actor, 0). Nothing held (+3524 +84 == 6): 00143510
     // gives item kind 0 and 001437a0 11, so the flag +31b2 is 0 and the mode

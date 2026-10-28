@@ -651,11 +651,17 @@ const std::vector<CoopCommandRule>& coop_command_rules(const std::string& missio
     // TORONTO1 (STREETS handlers 838 / 839): in front of the bank's entrance, outside fire zone 144361, the player
     // sends the partner to the water main (box 139949), then runs into the laptop box 139948 once the sprinklers
     // are on (LaptopCheck's 9.0 s). The point is measured in research/TORONTO1_COOP_AUDIT.md "Checkpoint 132pc1".
-    static const std::vector<CoopCommandRule> toronto1{
-        {RootVector{45.0F, 36.75F, 3.2F, 1.0F}, 3.0F, 2.0F, {139949U}, 1U,
-         "Press TRIANGLE: send partner to the water main", "Partner: on the way to the water main",
-         "Partner: the water main is turned", "Partner: the water main order is cancelled",
-         "the water main (TURN_WATERMAIN) for the laptop"}};
+    // 132pt1: the water main is a part of objective 3 (Obj_laptop, "Laptop retrieved (Team)"; created at the level start,
+    // shown once the water main is turned).
+    static const std::vector<CoopCommandRule> toronto1 = [] {
+        std::vector<CoopCommandRule> rules{
+            {RootVector{45.0F, 36.75F, 3.2F, 1.0F}, 3.0F, 2.0F, {139949U}, 1U,
+             "Press TRIANGLE: send partner to the water main", "Partner: on the way to the water main",
+             "Partner: the water main is turned", "Partner: the water main order is cancelled",
+             "the water main (TURN_WATERMAIN) for the laptop"}};
+        for (auto& r : rules) r.objective = 3U;
+        return rules;
+    }();
     static const std::vector<CoopCommandRule> none;
     // BELARUS2 (132ms5, research/COOP.md "BELARUS2 bridge"): the second agent's half of Obj_Bridge. The C-4 cache
     // (box 533164, handler OnGOBJTriggerEventMsg word 6027: PlayerAddItem(Who, 'C-4', 1), one charge per carrier)
@@ -663,15 +669,20 @@ const std::vector<CoopCommandRule>& coop_command_rules(const std::string& missio
     // planted -> BlowBridgeStart). Partner slot 1 takes 533187 first, slot 2 533185 first; with one partner the
     // player plants the other. The plant waits until every C-4 carrier is in a plant box (together). The route
     // points lie 1 m inside the boxes (at the 0.3 default a partner stopped 0.1 m short of the cache's side).
-    static const std::vector<CoopCommandRule> belarus2{
-        {RootVector{-650.6F, -601.3F, 0.0F, 1.0F}, 30.0F, 8.0F, {533164U}, 1U, nullptr, "Partner: taking C-4",
-         "Partner: C-4 taken", nullptr, "the C-4 cache (02_C4Taken)", true, nullptr, "C-4", false, 1.0F, {533187U, 533185U}},
-        {RootVector{-650.6F, -601.3F, 0.0F, 1.0F}, 30.0F, 8.0F, {533164U}, 2U, nullptr, "Partner 2: taking C-4",
-         "Partner 2: C-4 taken", nullptr, "the C-4 cache (02_C4Taken)", true, nullptr, "C-4", false, 1.0F, {533187U, 533185U}},
-        {RootVector{0.7F, 23.8F, 3.0F, 1.0F}, 60.0F, 12.0F, {533187U, 533185U}, 1U, nullptr, "Partner: to the bridge charge",
-         "Partner: C-4 planted", nullptr, "a bridge plant spot (02_C4Plant)", true, "C-4", nullptr, true, 1.0F},
-        {RootVector{0.7F, 23.8F, 3.0F, 1.0F}, 60.0F, 12.0F, {533185U, 533187U}, 2U, nullptr, "Partner 2: to the bridge charge",
-         "Partner 2: C-4 planted", nullptr, "a bridge plant spot (02_C4Plant)", true, "C-4", nullptr, true, 1.0F}};
+    // 132pt1: all four are parts of Obj_Bridge (objective 11, "Bridge destroyed").
+    static const std::vector<CoopCommandRule> belarus2 = [] {
+        std::vector<CoopCommandRule> rules{
+            {RootVector{-650.6F, -601.3F, 0.0F, 1.0F}, 30.0F, 8.0F, {533164U}, 1U, nullptr, "Partner: taking C-4",
+             "Partner: C-4 taken", nullptr, "the C-4 cache (02_C4Taken)", true, nullptr, "C-4", false, 1.0F, {533187U, 533185U}},
+            {RootVector{-650.6F, -601.3F, 0.0F, 1.0F}, 30.0F, 8.0F, {533164U}, 2U, nullptr, "Partner 2: taking C-4",
+             "Partner 2: C-4 taken", nullptr, "the C-4 cache (02_C4Taken)", true, nullptr, "C-4", false, 1.0F, {533187U, 533185U}},
+            {RootVector{0.7F, 23.8F, 3.0F, 1.0F}, 60.0F, 12.0F, {533187U, 533185U}, 1U, nullptr, "Partner: to the bridge charge",
+             "Partner: C-4 planted", nullptr, "a bridge plant spot (02_C4Plant)", true, "C-4", nullptr, true, 1.0F},
+            {RootVector{0.7F, 23.8F, 3.0F, 1.0F}, 60.0F, 12.0F, {533185U, 533187U}, 2U, nullptr, "Partner 2: to the bridge charge",
+             "Partner 2: C-4 planted", nullptr, "a bridge plant spot (02_C4Plant)", true, "C-4", nullptr, true, 1.0F}};
+        for (auto& r : rules) r.objective = 11U;
+        return rules;
+    }();
     if (mission == "BELARUS2") return belarus2;
     // UKRAINE (132uk6c, research/UKRAINE_COOP.md "Checkpoint 132uk6c"): BASE's launch override. The two switch boxes
     // (type 8: A 1123035 -> 1123562, B 1123036 -> 1123563; OnGOBJTriggerEventMsg: both on within MissleOverrideTimer's
@@ -698,6 +709,7 @@ const std::vector<CoopCommandRule>& coop_command_rules(const std::string& missio
             r.once = true;
             r.retry_stalled = true;
             r.min_tasks = 3U;
+            r.objective = 1U;   // 132pt1: Obj_DestroyMissile ("Missile launch stopped (Team)")
             return r;
         };
         std::vector<CoopCommandRule> rules;
@@ -767,10 +779,60 @@ std::optional<std::size_t> coop_command_open_box(const std::vector<std::uint32_t
 
 bool coop_command_rule_gates(const CoopCommandRule& rule, const CoopCommandInput& input) {
     if (rule.partner_slot != input.slot) return false;
+    // 132pt1: an assigned task runs only its objective's rules; the rules given to other partners are theirs.
+    if (input.objective != 0 && rule.objective != input.objective) return false;
+    if (input.objective == 0 && rule.objective != 0 &&
+        std::find(input.claimed.begin(), input.claimed.end(), std::make_pair(rule.objective, rule.partner_slot)) != input.claimed.end())
+        return false;
     if (rule.min_tasks != 0 && input.tasks < rule.min_tasks) return false;
     if (rule.requires_item && (!input.held || input.held(rule.requires_item) <= 0)) return false;
     if (rule.unless_item && input.held && input.held(rule.unless_item) > 0) return false;
     return true;
+}
+
+bool coop_walk_crosses_crawl_zone(const HotboxWorld& world, const RootVector& a, const RootVector& b) {
+    const RootVector p{a[0], a[1], a[2] + 0.5F, 1.0F}, q{b[0], b[1], b[2] + 0.5F, 1.0F};
+    const float dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+    const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const int steps = std::max(1, static_cast<int>(std::ceil(length / 0.25F)));
+    for (const auto& box : world.boxes) {
+        if (box.record.type != 9) continue;
+        if (hotbox_contains(box, p) || hotbox_contains(box, q)) continue;
+        // A link that only clips the corner of a crawl zone (a doorway beside a duct mouth) is still a walk; a link
+        // that runs a metre or more inside one goes down the duct.
+        int run = 0;
+        for (int k = 1; k < steps; ++k) {
+            const float t = static_cast<float>(k) / static_cast<float>(steps);
+            run = hotbox_contains(box, RootVector{p[0] + dx * t, p[1] + dy * t, p[2] + dz * t, 1.0F}) ? run + 1 : 0;
+            if (static_cast<float>(run) * length / static_cast<float>(steps) >= 1.0F) return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::uint32_t> coop_level_tasks(const std::vector<CoopCommandRule>& rules, const HotboxWorld& world,
+                                            const std::function<bool(std::uint32_t)>& open_objective) {
+    std::vector<std::uint32_t> out;
+    for (const auto& rule : rules) {
+        if (rule.objective == 0 || std::find(out.begin(), out.end(), rule.objective) != out.end()) continue;
+        if (!open_objective || !open_objective(rule.objective)) continue;
+        const bool open = std::any_of(rules.begin(), rules.end(), [&](const CoopCommandRule& r) {
+            return r.objective == rule.objective && coop_command_open_target(r, world).has_value();
+        });
+        if (open) out.push_back(rule.objective);
+    }
+    return out;
+}
+
+std::uint32_t coop_task_slot(const std::vector<CoopCommandRule>& rules, std::uint32_t objective, const std::vector<std::uint32_t>& taken) {
+    std::vector<std::uint32_t> slots;
+    for (const auto& rule : rules)
+        if (rule.objective == objective && objective != 0) slots.push_back(rule.partner_slot);
+    if (slots.empty()) return 0;
+    std::sort(slots.begin(), slots.end());
+    for (const auto s : slots)
+        if (std::find(taken.begin(), taken.end(), s) == taken.end()) return s;
+    return slots.front();
 }
 
 bool coop_command_rule_sequence(const CoopCommandState& state, const std::vector<CoopCommandRule>& rules, std::size_t r) {

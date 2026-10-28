@@ -11,8 +11,9 @@
 // +e0 while Square is held, the request on release with the lock target's +e4
 // or the actor-local point (0, 0025d470(+100), 0, 0)) outside the aim view
 // (c6b/gen_pad_throw.py); in the aim view the release clears the lock
-// (0024fc90(+c0, 0)) and keeps +d0, while the arc preview 0025cdc0 (Square
-// held in the aim view) throws. Hold class 7 (Checkpoint 110): in the aim
+// (0024fc90(+c0, 0)) and keeps +d0, while Square held in the aim view runs
+// the arc preview 0025cdc0 (Checkpoint 132wf1: PadWeaponHost::arc_preview,
+// thrown_projectile.hpp throw_arc_preview). Hold class 7 (Checkpoint 110): in the aim
 // view the lock is cleared and +d0 = 0024fc60(controller +64 frame (aim 1),
 // (0, inventory +f4, 0, 1)); outside it +d0 = 0024fc60(actor +f4 matrix,
 // (0, 200, 4, 1)) unless the lock target is valid (gen_aim_view.py).
@@ -59,6 +60,9 @@ struct PadWeaponHost {
     std::function<bool(std::uint64_t object,std::int32_t id)> lock_valid;   // 00150c60 / 0014d350: object +c == +c4
     std::function<RootVector(std::uint64_t object)> position_e4;             // hold class 1: the lock target's virtual +e4
     std::function<void(const ActorFireRequest&)> send;           // action 0x3b kind 0xb, transport 0
+    // Checkpoint 132wf1: 0025cdc0(hand, &+d0, f12 = +e0, f13 = cvt.s.w(held record +104)) with the hand the
+    // actor's skeleton node *(s8)0049d02c (00132a30, 00132910): the host reads the hand and the record.
+    std::function<void(const RootVector& target,float power)> arc_preview;
     // 00249530(input, actor): input +13c caches actor +3584 + 0x1c (when +3584
     // is set; written by 001b2d60 from 003fbb10's player record) and its
     // halfword is incremented. Called before every send of a class other

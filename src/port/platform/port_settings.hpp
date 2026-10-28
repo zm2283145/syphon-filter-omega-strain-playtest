@@ -85,6 +85,8 @@ bool partner_pickups_setting(const PortSettings& s);
 // Checkpoint 132pw3 (port-only, research/COOP.md "Up to 3 CPU partners"): coop_partners=1|2|3 (kept in `other`; default
 // 1): how many CPU partners join an offline level when the CPU partner is on. Throws on another value.
 std::size_t coop_partners_setting(const PortSettings& s);
+// Checkpoint 132pt1 (port-only): writes coop_partners=count (1..3; throws otherwise), the front end's CPU PARTNER row's count.
+void set_coop_partners_setting(PortSettings& s, std::size_t count);
 // Checkpoint 132win14 (port-only HiDPI): window_units=pixels (kept in `other`): the window= rectangle is in physical
 // pixels (a per-monitor DPI aware build wrote it). Absent: it was written by an earlier, DPI-unaware build (96-DPI
 // coordinates; host_window.hpp saved_window_pixels migrates it). Throws on another value.

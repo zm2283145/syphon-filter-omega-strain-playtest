@@ -80,6 +80,7 @@
 #include "play_loadout.hpp"
 #include "skeleton.hpp"
 #include "target_visibility.hpp"
+#include "thrown_projectile.hpp"
 #include "team_relations.hpp"
 #include "weapon_aim.hpp"
 #include "weapon_backpack.hpp"
@@ -130,6 +131,9 @@ struct CombatTerrainObject {
 // (00253fb0, gun_model_load.hpp) the hotbox 00170e20 bounds read.
 struct CombatBackpackWorld {
     std::function<std::uint32_t(std::uint32_t category)> allocate_id;
+    // PORT-ONLY (132fx5): register a received backpack's full network ID in
+    // the mission-script object's local namespace.
+    std::function<void(std::uint32_t network_id)> register_remote_id;
     std::function<std::optional<BackpackRegion>(const RootVector& p)> containing_region;
     std::function<std::optional<BackpackRegion>(const RootVector& p)> nearest_region;
     std::function<std::optional<BackpackLosHit>(const RootVector& origin,const RootVector& displacement)> line_of_sight;
@@ -284,6 +288,15 @@ struct CombatPlayConfig {
     std::function<void(const TargetingRecord&)> net_record;
     std::function<void()> net_shot;
     std::function<void(std::int32_t item)> net_weapon;
+    // Checkpoint 132fx5: cNetBackpackMsg / NetMap bridge supplied by LanNetCore.
+    std::function<std::uint32_t()> net_local_index;
+    std::function<std::uint32_t()> net_session_host;
+    std::function<std::uint32_t(std::size_t actor)> net_actor_key;
+    std::function<std::optional<std::size_t>(std::uint32_t key)> net_actor;
+    bool net_hosting{};
+    std::function<void(std::uint32_t id,std::uint32_t owner,std::uint32_t address)> net_backpack_bind;
+    std::function<void(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
+                       std::uint16_t recipient)> net_backpack_send;
     // 003fdb50 (common pool, then the mission pool) for the reload's
     // TransferAmmo notice (0013fdb8); nullptr: a notice throws.
     const Localization* localization{};
@@ -448,6 +461,9 @@ struct CombatPlayFrame {
     std::vector<HudSpriteEvent> hud_sprites_update;              // the marker sprite calls of 00273b40 (end_frame)
     std::optional<CombatThrowFrame> throws;                      // with CombatPlayConfig::throws
     std::vector<AimViewHudEvent> aim_view_hud;                   // the aim view's HUD calls (00249b10 / 002497c0), in order
+    // Checkpoint 132wf1: the arc preview 0025cdc0 the player's pad block ran this frame (Square held with a
+    // hold-class-1 item in the aim view): the vector 004f8000 and the side 004f8010 that 0025c650 draws.
+    std::optional<ThrowArcPreview> arc_preview;
     std::vector<BulletEvent> aim_view_scan;                      // the lock probe's 0022ba30 candidates
     std::vector<std::pair<std::size_t,TorchFlickerCall>> torch;  // the torch flicker objects' presentation calls
     std::vector<std::pair<std::size_t,GogglesEvent>> goggles;    // 001b31b0's vision loop sound (actor_goggles.hpp)
@@ -681,6 +697,8 @@ public:
     // vector matrix[12..15]; s3 = 1 the 004d9360 message to 00254600 ->
     // 003cea10 mode 3 with the message matrix (transport 1, at once).
     void carry_backpack(std::uint32_t address,bool message,const std::array<float,16>& matrix);
+    // Applies one received cNetBackpackMsg after LanNetCore's network frame.
+    void receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target);
     // Checkpoint 132bp: the population's INV: crates at load (001c2a10 ->
     // 00257480: cBackpack_ctor 00257f30, then the list append 00257620),
     // with CombatPlayConfig::backpack_world; `find_collision` answers

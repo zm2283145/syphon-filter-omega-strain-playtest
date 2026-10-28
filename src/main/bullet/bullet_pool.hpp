@@ -10,14 +10,16 @@
 // or at the static hit point, reports the static impact, the AI impact noise
 // and the damage call to the static object. Presentation (tracers 003a2400,
 // impact sounds and decals 00189560 / 00279ca0 / 00232460, the blood decal
-// 002797c0) is recorded as events, not run. Checkpoint 132uk4: hold classes 8
+// 002797c0) is recorded as events; retail tracer geometry and the texture
+// handle stored by 00277cf8 are rendered by bullet_render.hpp at the scene's
+// 002755f0 stage. Checkpoint 132uk4: hold classes 8
 // and 9 at the end of travel (002774f8..00277928: the agent statistic 10, the
 // area object 0025a2d0 and the blast 0021a200 through the host, the hold-9
 // sound G_GRENEXP_INCIN as an event) run. Checkpoint 132uk6: explosive
 // weapons (record +c4 > 0: 00277388..002774dc, the effect 00232460, the blast
 // 0021a200 at 002774a4 and the scorch decal 002797c0) and the hold block's
-// effect 00232460 (record +d8 != -1) run; tracer resources (record +134 >= 0)
-// throw.
+// effect 00232460 (record +d8 != -1) run. A nonnegative tracer-particle
+// resource still throws because no retail image writer produces one.
 #include "bullet_hit.hpp"
 #include "bullet_impact.hpp"
 #include "explosion.hpp"
@@ -164,6 +166,8 @@ struct BulletRecord {
     std::optional<BulletStaticHit> static_hit;   // +90..+100
     RootVector end_point_100{};
     bool rolled_114{},tracer_117{},aim_view_118{},statistics_119{};
+    std::int32_t tracer_texture_11c{-1};         // *00236f20(0x1a), stored by 00277cf8..00277d2c
+    std::uint8_t tracer_phase_140{};             // cBullet::sUvSets qword: 0,4,8,12
     std::int32_t item_148{};
 };
 
@@ -181,6 +185,7 @@ public:
 private:
     void update_one(std::size_t index,float dt,const WeaponDatabase& database,const BulletPoolHost& host,std::vector<BulletEvent>& events);
     std::array<BulletRecord,capacity> records_{};
+    std::uint8_t next_tracer_phase_{};
 };
 
 // 0022ba30 for one bullet update: candidates ahead of the frame within

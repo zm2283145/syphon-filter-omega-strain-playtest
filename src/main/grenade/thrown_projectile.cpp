@@ -121,6 +121,55 @@ void launch_thrown_projectile(ThrownProjectile& p,const WeaponRecord& record,con
     p.motion.launch=prepare_projectile_launch(p.motion.position,target,arc,record.hold_class_f0(),record.power_104(),t);
 }
 
+ThrowArcPreview throw_arc_preview(const RootVector& hand,const RootVector& target,float power,float speed_104,
+    const RootVector& gravity,float gravity_z,const ThrownProjectileTuning& tuning){   // 0025cdc0
+    ThrowArcPreview r;
+    const auto d=normalize3(vsub(target,hand));                                          // 0025ced0..0025cf24
+    const auto side=cross(d,RootVector{0.0F,0.0F,1.0F,1.0F});                            // 004f8010
+    const auto start=vadd(hand,vscale(side,std::bit_cast<float>(0x3f800000U)));          // 0048afd8
+    r.side=vscale(side,div(std::bit_cast<float>(0x3f19999aU),3.0F));                     // 0048afa8 / 3.0
+    auto v=solve_projectile_trajectory(start,target,gravity_z,power,tuning.hold1_minimum_angle).initial_velocity;   // 003a8c80
+    if(!(dot3(v)<=mul(speed_104,speed_104)))v=vscale(normalize3(v),speed_104);         // 0025d0ac..0025d134
+    const float dt=div(1.0F,std::bit_cast<float>(0x41200000U));                          // 0048af80
+    const float inverse_dt=div(1.0F,dt);
+    (void)inverse_dt;                                                                    // the unread +30 / +40
+    const float dt_squared=mul(dt,dt);
+    constexpr float inverse_mass=1.0F;                                                   // 001ec2a0(sp+290, 1.0)
+    RootVector position=start;                                                           // sp+2a0
+    RootVector previous=vsub(start,vscale(v,dt));                                        // sp+2b0
+    const auto force=vadd(RootVector{0.0F,0.0F,0.0F,0.0F},vscale(gravity,1.0F));         // sp+2e0 += 004f5430 * +0
+    const float target_z=target[2];
+    r.points.push_back(position);
+    bool rising=true;
+    do{
+        const auto drift=vsub(vscale(position,2.0F),previous);                           // 0017dc00, 00183380
+        const auto next=vadd(drift,vscale(force,mul(inverse_mass,dt_squared)));          // 0017f670, 00134080
+        previous=position;
+        position=next;position[3]=1.0F;                                                  // 001325e0, 00183000
+        rising=!(sub(position[2],previous[2])<0.0F);                                     // sp+1b8 c.olt.s
+        r.points.push_back(position);                                                    // 00180bd0
+        // PORT-ONLY guard: the original steps until the arc falls below the target (gravity is negative).
+        if(r.points.size()>100000)throw std::runtime_error("Throw arc preview (0025cdc0): no end after 100000 steps");
+    }while(rising||!(position[2]<=target_z));
+    return r;
+}
+
+std::vector<ThrowArcVertex> throw_arc_ribbon(const ThrowArcPreview& arc){   // 0025c650
+    std::vector<ThrowArcVertex> out;
+    if(arc.points.empty())return out;
+    const float step=div(sub(1.0F,std::bit_cast<float>(0x3dcccccdU)),static_cast<float>(arc.points.size()));
+    const auto byte=[](float c){return static_cast<std::int32_t>(mul(128.0F,c));};      // 0025c9d0: cvt.w.s truncates
+    float alpha=std::bit_cast<float>(0x3f800000U);                                       // 0048afc8
+    for(const auto& p:arc.points){
+        const std::array<std::int32_t,4> rgba{byte(std::bit_cast<float>(0x3e99999aU)),byte(std::bit_cast<float>(0x3f19999aU)),
+                                              byte(std::bit_cast<float>(0x3e99999aU)),byte(alpha)};
+        out.push_back({vsub(p,arc.side),rgba});
+        out.push_back({vadd(p,arc.side),rgba});
+        alpha=sub(alpha,step);
+    }
+    return out;
+}
+
 std::array<RootVector,4> projectile_scan_frame(const RootVector& d,const RootVector& origin){
     std::array<RootVector,4> f{};
     const auto side=cross(d,RootVector{0.0F,0.0F,1.0F,1.0F});            // 0025b38c: 001320f0(D, up)

@@ -46,9 +46,10 @@ struct ActorJumpPhysical {
     float inverse_mass_2e4{};
     std::uint8_t enabled_12{},keep_velocity_13{},unsupported_dc{},supported_dd{};
     float floor_2c4{};                 // +2c4: height above the floor
-    // +1f4: moving-support slot 1 object has a +54 component (001a2a94 adds
-    // its +a0 velocity); not hosted, such a launch throws.
-    bool support_component_1f4{};
+    // +1f4: the moving-support slot 1 object; with a +54 component, 001a2a94
+    // (Checkpoint 132fx1) adds that component's +a0 velocity (xyzw) to the
+    // launch velocity and to +34d0. nullopt: no slot-1 object or no +54.
+    std::optional<RootVector> support_velocity_a0;
 };
 // Motion installs through the actor's controller (0018c5a0 name lookup and
 // 003ad500 on +2ef4; the retained motion +326c through 001ae270/001ae260).
