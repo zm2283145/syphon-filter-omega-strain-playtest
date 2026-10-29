@@ -92,13 +92,14 @@ inline bool& frame_movie_zoom_setting() {
     return zoom;
 }
 // Port-only (132vt2a2, port settings movies=, play's --movies): how the movies (GuiDrawBatch::port_movie) meet a wide
-// target. bars (the default): the native 4:3 picture with side bars; fill: the 4:3 picture scaled to the target's
-// width keeping its aspect, the top and bottom cut equally (the disc's movies mostly carry letterbox bars of their own);
+// target. fill (the default): the 4:3 picture scaled to the target's width keeping its PS2 display aspect, including
+// the 448-to-480-line pixel-aspect correction, with the top and bottom cut equally (the disc's movies mostly carry
+// letterbox bars of their own); bars: the native 4:3 picture with side bars;
 // stretch: the 4:3 picture stretched over the whole target (anamorphic). Only under wide (frame_wide): the other
 // aspects draw the movies as they draw the frame. The loading screen keeps movie_fill.
 enum class MovieFit : unsigned { fill, bars, stretch };
 inline MovieFit& frame_movie_fit_setting() {
-    static MovieFit fit = MovieFit::bars;
+    static MovieFit fit = MovieFit::fill;
     return fit;
 }
 inline const char* frame_movie_fit_name(MovieFit f) {

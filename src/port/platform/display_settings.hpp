@@ -10,9 +10,9 @@
 //                                  (frame_fit.hpp frame_fov_scale; default 100, the original; draw only)
 //   movie_fill=bars|zoom           132ws: under wide, the loading screen 4:3 with bars (default) or zoomed to fill the
 //                                  window's width (the movies: movies=)
-//   movies=fill|bars|stretch       132vt2a2: under wide, the movies shown at their native 4:3 with bars (the default),
-//                                  scaled to the window's width with the top and bottom cut (fill), or stretched over
-//                                  the window (frame_fit.hpp MovieFit)
+//   movies=fill|bars|stretch       132vt2a2: under wide, the movies scaled to the window's width preserving the PS2
+//                                  display aspect (fill, the default), shown at native 4:3 with bars, or stretched
+//                                  over the window (frame_fit.hpp MovieFit)
 //   render_scale=<0.25..4>         the internal render scale: the swap chain's buffers are the window's client size
 //                                  times it (DXGI scales them to the window); default 1 (native). Below 1 renders
 //                                  fewer pixels (faster, softer), above 1 supersamples.
@@ -43,9 +43,9 @@ namespace omega {
 
 struct PortSettings;
 
-// Port-only (132ps5c hw7): the PS5 (a 16:9 television, like the Vita's 16:9 screen) defaults to wide. Movies and
-// loading / briefing screens keep their native 4:3 picture whole; the port settings file's aspect= / movies= /
-// movie_fill= still selects the other presentations. Other targets: unchanged.
+// Port-only (132ps5c hw7): the PS5 (a 16:9 television, like the Vita's 16:9 screen) defaults to wide. Movies use the
+// widescreen zoom while loading / briefing screens keep their native 4:3 picture whole; the port settings file's
+// aspect= / movies= / movie_fill= still selects the other presentations. Other targets: unchanged.
 #if defined(OMEGA_PS5)
 inline constexpr FrameAspect display_default_aspect = FrameAspect::wide;
 inline constexpr bool display_default_movie_zoom = false;
@@ -61,7 +61,7 @@ struct DisplaySettings {
     unsigned hud_margin = 0;  // 132ws: percent
     unsigned fov = frame_fov_original;  // 132ws3: percent
     bool movie_zoom = display_default_movie_zoom;  // 132ws: movie_fill=zoom
-    MovieFit movie_fit = MovieFit::bars;  // 132vt2a2: movies=
+    MovieFit movie_fit = MovieFit::fill;  // 132vt2a2: movies=
     float render_scale = 1.0F;
     bool frame_overlay = false;
     std::optional<std::uint8_t> frame_overlay_key = std::uint8_t{0x72};  // VK_F3; nullopt: no key
