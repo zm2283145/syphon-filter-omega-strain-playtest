@@ -41,6 +41,8 @@ constexpr const char* music_names[3] = {"THEME_MAIN", "THEME_AGENCY", "THEME_ZEU
 // handler is not modelled, so 00533870 stays 0 and the 64-bit tick counter
 // 00533878 holds the wrapped part in 10 us units (count / 5.76).
 constexpr std::uint64_t t1_per_frame = 9600;
+constexpr std::int32_t loading_timeout_ms = 8000;
+constexpr std::int64_t splash_minimum_frames = 60;
 
 // The GUI's sound descriptors (static init 004d8180: 001ca210(table, 3, name,
 // 0, 0), the names at 004c2a18 + 0x10 * k; k 12..14 from 004d8458..004d8508),
@@ -116,6 +118,12 @@ FrontendSession::FrontendSession(FrontendServices services)
     g_.movies_61 = 1;
     g_.level_140 = rt_.g.level_name;
     gui_.names_39 = {std::string()};
+
+    // StringPool_Load creates the canvas and presents ROOT before the state-9
+    // INTRO transition. The original splash thread updates it independently;
+    // the port advances it from frame() until anim_root reaches onWake's end.
+    fn_2cb8c0(0);
+    loading_show("ROOT");
 }
 
 FrontendSession::~FrontendSession() = default;
@@ -200,12 +208,17 @@ void FrontendSession::frame(std::uint16_t held) {
     ++frames_;
     ms_ = static_cast<std::int32_t>(frames_ * 1000 / 60);   // 003698b0
     drawn_ = false;
+    if (loading_widget_ && g_.state_50 == 9) {
+        loading_update();
+        if (!loading_ready()) return;
+    }
     {
         OMEGA_ZONE("fs.prologue");
         prologue();
     }
     OMEGA_ZONE("fs.game_flow");
     run_game_flow_frame(g_, gui_, app_, *this, held);
+    if (loading_hide_frame_ >= 0 && frames_ >= loading_hide_frame_) loading_hide(false);
     // 00168bcc: the lobby state 5 runs later in the same frame. Only the state-3 multiplayer path with app +32 set
     // and +33 clear reaches it (00168008), and no retail code stores a nonzero +32 (132ln4: the one store 002a544c
     // is in the unreferenced 002a5440), so neither the LAN host nor the LAN joiner gets here.
@@ -267,6 +280,74 @@ void FrontendSession::fn_37e780(const VideoModeRequest& m) {
 void FrontendSession::fn_2c7c40(std::string_view name, std::uint32_t) {
     unreachable(0x2c7c40, "the splash '" + std::string(name) + "' (G+62 is set)");
 }
+
+void FrontendSession::loading_show(const std::string& name) {
+    if (loading_widget_ || app_37_) return;
+    gui::Widget* screen = rt_.factory("GuiWidget", name);
+    if (!screen) return;
+    rt_.push(screen, 1000);
+    loading_widget_ = screen;
+    loading_anim_ = rt_.find(screen, "anim_root");
+    loading_name_ = name;
+    loading_started_ms_ = ms_;
+    loading_target_ = 0;
+    loading_hide_frame_ = -1;
+    loading_51ee90_ = 1;
+    if (loading_anim_ && loading_anim_->deco) {
+        for (const GuiEvent& event : loading_anim_->deco->events) {
+            if (event.name == "onWake") {
+                loading_target_ = event.b;
+                break;
+            }
+        }
+    }
+    record("002c7d90 loading screen 1 " + name + " layer 1000");
+}
+
+void FrontendSession::loading_hide(bool defer) {
+    if (!loading_widget_) return;
+    if (defer) {
+        loading_hide_frame_ = std::max(loading_hide_frame_, frames_ + splash_minimum_frames);
+        return;
+    }
+    rt_.release(loading_widget_);
+    rt_.flush();
+    loading_widget_ = nullptr;
+    loading_anim_ = nullptr;
+    loading_name_.clear();
+    loading_target_ = 0;
+    loading_hide_frame_ = -1;
+    loading_51ee90_ = 0;
+    record("002c7d90 loading screen 0");
+}
+
+bool FrontendSession::loading_ready() {
+    if (!loading_widget_) return true;
+    if (ms_ - loading_started_ms_ >= loading_timeout_ms) return true;
+    if (!loading_anim_ || loading_target_ == 0) return false;
+    if (IeAnim* anim = decor_.anim(*loading_anim_))
+        return static_cast<std::int32_t>(anim->t) >= loading_target_;
+    return false;
+}
+
+void FrontendSession::loading_update() {
+    std::int32_t now = ms_;
+    if (now - last_update_ms_ > 100) last_update_ms_ = now - 100;
+    const float dt = static_cast<float>(now - last_update_ms_) / 1000.0F;
+    rt_.flush();
+    decor_.bridge_begin_update(rt_);
+    rt_.update(dt);
+    decor_.bridge_step(rt_, dt);
+    last_update_ms_ = now;
+    drawn_ = true;
+}
+
+void FrontendSession::fn_2c7d90(std::uint32_t show) {
+    if (show) loading_show("SPLASH");
+    else loading_hide(false);
+}
+
+bool FrontendSession::fn_2c7cb0() { return loading_ready(); }
 
 void FrontendSession::fn_136710() {
     // 00136710: once (byte 004e9ff0): 00147400, 0040e4c0, the AWARDS script
@@ -402,6 +483,7 @@ void FrontendSession::gui_start() {   // 002cb3d0(app, 0)
         if (!screen) throw std::runtime_error("Front end 002cb3d0: the first screen did not load");
         record("002c9ee0 / 00145160 / 002c7d90(0, 0, 0)");
         rt_.push(screen, 0);
+        loading_hide(true);
         record("003d1730 USB keyboard 0055a700 (app +278 = 0)");
     });
     app_28_ = 1;

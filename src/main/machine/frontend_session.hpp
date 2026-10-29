@@ -287,6 +287,7 @@ public:
     bool gui_active() const { return app_28_ != 0; }
     // 002cbad0 ran this frame (state 2 draws the canvas).
     bool gui_drawn() const { return drawn_; }
+    const std::string& loading_screen() const { return loading_name_; }
     // The movie playing (G+b0) and its last decoded picture.
     bool movie_playing() const { return g_.player_b0 != nullptr; }
     const std::string& movie_name() const { return movie_name_; }
@@ -580,7 +581,7 @@ public:
     void fn_37e780(const VideoModeRequest& mode) override;
     void fn_165950() override { record("00165950"); }
     void fn_2cb8c0(std::uint32_t a1) override;
-    void fn_2c7d90(std::uint32_t show) override { record("002c7d90 loading screen " + std::to_string(show)); }
+    void fn_2c7d90(std::uint32_t show) override;
     void fn_2c7c40(std::string_view, std::uint32_t) override;
     void fn_136710() override;
     void fn_2cc3e0() override;
@@ -594,7 +595,7 @@ public:
     void fn_2ca580() override { record("002ca580"); }
     void fn_2c9420() override { record("002c9420"); }
     void fn_2c9860(std::uint32_t a1) override;
-    bool fn_2c7cb0() override { return true; }
+    bool fn_2c7cb0() override;
     void fn_36a240() override { record("0036a240 pad reset"); }
     float fn_133340() override { return 1.0F / 60.0F; }
     std::int32_t fn_3f8220(MoviePlayer& player, float dt) override;
@@ -621,6 +622,10 @@ private:
     void to_runtime();
     void from_runtime();
     void gui_start();     // 002cb3d0(app, 0)
+    void loading_show(const std::string& name);
+    void loading_hide(bool defer);
+    void loading_update();
+    bool loading_ready();
     void options_load();  // 0045a150(*004ffd2c)
     // 002c9510; nested: called from inside the GUI runtime (a GuiGameOptions event), so no state is copied.
     void gui_resume(bool nested = false);
@@ -658,6 +663,12 @@ private:
     std::int32_t last_update_ms_ = 0;   // 002cbb30's clock
     std::int32_t clock_ms_ = -1;        // 0048a018 (00167c40)
     std::uint8_t loading_51ee90_ = 0;   // byte 0051ee90 (the loading screen's thread runs)
+    gui::Widget* loading_widget_ = nullptr;
+    gui::Widget* loading_anim_ = nullptr;
+    std::string loading_name_;
+    std::int32_t loading_started_ms_ = 0;
+    std::int32_t loading_target_ = 0;
+    std::int64_t loading_hide_frame_ = -1;
     ScriptScheduler events_;            // 0055a2e0 (003ea1d0)
     bool drawn_ = false;
     bool constructed_ = false;          // 00136710 ran

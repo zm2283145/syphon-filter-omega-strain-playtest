@@ -493,12 +493,14 @@ std::vector<std::vector<std::uint8_t>> title_screen_guis(const std::filesystem::
 
 // --gui-capture: a front-end screen under the native GUI runtime (its root
 // class on layer 0, no pad; TITLESCR by default, or a hosted screen loaded as
-// the script runs load a root: AGENTOPN / ONOFFSEL / CMDCENTR), `frames`
+// the script runs load a root: ROOT / SPLASH / AGENTOPN / ONOFFSEL / CMDCENTR), `frames`
 // updates at 1/60 s, then the canvas draw (gui_draw) through the host 2D
 // backend into a 640 x 448 BMP.
 int gui_capture(const std::filesystem::path& iso, const std::filesystem::path& out, int frames,
                 const std::string& screen) {
     const std::pair<const char*, gui::WidgetClass> classes[] = {{"TITLESCR", gui::WidgetClass::title},
+                                                                {"ROOT", gui::WidgetClass::widget},
+                                                                {"SPLASH", gui::WidgetClass::widget},
                                                                 {"AGENTOPN", gui::WidgetClass::agentload},
                                                                 {"ONOFFSEL", gui::WidgetClass::onoffsel},
                                                                 {"CMDCENTR", gui::WidgetClass::cmdcentr}};
