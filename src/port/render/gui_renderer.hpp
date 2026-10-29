@@ -538,6 +538,7 @@ private:
     Ptr<gfx::SamplerState> point_;
     Ptr<gfx::SamplerState> wrap_;  // the 003836b0 gun preview batches
     Ptr<gfx::Texture> white_view_;
+    Ptr<gfx::Texture> gs_untextured_view_;
     Ptr<gfx::Buffer> vertices_;
     std::size_t vertex_capacity_ = 0;
     // Port-only (checkpoint 132md7, research/MODDING.md "Speed"): the host vertices of the shared 003836b0 batches

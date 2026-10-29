@@ -442,6 +442,7 @@ void GuiRenderer::reset_device(std::shared_ptr<gfx::Device> device) {
     point_.reset();
     wrap_.reset();
     white_view_.reset();
+    gs_untextured_view_.reset();
     vertices_.reset();
     vertex_capacity_ = 0;
     retained_.clear();
@@ -533,7 +534,7 @@ void GuiRenderer::init_pipeline() {
         f.op = gfx::BlendOp::add;
         brighten_ = device_->create_blend(fade, "Create GUI brightness blend state");
     }
-    // Untextured IE nodes (mode without 1): the vertex colour alone.
+    // Host-generated quads use normalized colours and therefore sample true white.
     const std::uint32_t white = 0xffffffffU;
     gfx::TextureDesc description;
     description.width = description.height = 1;
@@ -545,6 +546,13 @@ void GuiRenderer::init_pipeline() {
     labels.texture = "Create GUI white texture";
     labels.sampled = "Create GUI white view";
     white_view_ = device_->create_texture(description, &level, labels);
+    // GS untextured primitives keep the textured path's /128 vertex representation, but native RGB is /255.
+    // Multiplying by an 0x80 texel produces byte-for-byte RGB while its 0xff alpha preserves GS alpha /128.
+    const std::uint32_t gs_neutral = 0xff808080U;
+    const gfx::Level neutral_level{&gs_neutral, 4};
+    labels.texture = "Create GUI GS untextured texture";
+    labels.sampled = "Create GUI GS untextured view";
+    gs_untextured_view_ = device_->create_texture(description, &neutral_level, labels);
 }
 
 void GuiRenderer::set_texture(std::uint32_t slot, const Texture& texture) try {
@@ -811,7 +819,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 for (const GuiTriangleVertex& t : triangle_scratch)
                     vertices.push_back({t.pos[0], t.pos[1], t.uv[0], t.uv[1], t.colour[0], t.colour[1], t.colour[2],
                                         t.colour[3], t.depth[0], t.depth[1]});
-                add(textured ? view_of(g.slot) : white_view_.get(), false, !textured || (g.filter & 0x20) != 0, at);
+                add(textured ? view_of(g.slot) : gs_untextured_view_.get(), false, !textured || (g.filter & 0x20) != 0, at);
             }
             depth_run = false;
             clear_next = false;
@@ -847,7 +855,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 const GuiDrawBatch& g = batches[index];
                 if (g.perspective) throw std::runtime_error("003836b0 batch under a perspective camera record");
                 const bool textured = (g.render_mode & 1) != 0;
-                const gfx::Texture* tv = textured ? view_of(g.slot) : white_view_.get();
+                const gfx::Texture* tv = textured ? view_of(g.slot) : gs_untextured_view_.get();
                 wide_anchor = g.port_anchor;
                 const bool linear = !textured || (g.filter & 0x20) != 0;
                 if (g.shared_vertices) {
@@ -898,7 +906,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                         t.v[c] = {h.pos[0], h.pos[1], h.uv[0], h.uv[1], h.colour[0], h.colour[1], h.colour[2], h.colour[3],
                                   h.depth[0], h.depth[1]};
                     }
-                    t.view = textured ? view_of(g.slot) : white_view_.get();
+                    t.view = textured ? view_of(g.slot) : gs_untextured_view_.get();
                     t.linear = !textured || (g.filter & 0x20) != 0;
                     run.push_back(t);
                 }
@@ -926,7 +934,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                                      {c.pos[0], c.pos[1], 0, 0, cc[0], cc[1], cc[2], cc[3]},
                                      {c.pos[0] + 1.0F, c.pos[1], 0, 0, cc[0], cc[1], cc[2], cc[3]}};
             for (const int k : {0, 1, 2, 2, 1, 3}) vertices.push_back(v[k]);
-            add(white_view_.get(), false, true, first);
+            add(gs_untextured_view_.get(), false, true, first);
             continue;
         }
         if (is_ie_batch(b)) {
@@ -957,12 +965,12 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                     backdrop_rows += std::min(y1, 224.0F) - std::max(y0, -224.0F);
             }
             if (!full_run && !cover_run) menu_trim(b, first);
-            add(textured ? view_of(b.slot) : white_view_.get(), (b.render_mode & 0x200) != 0,
+            add(textured ? view_of(b.slot) : gs_untextured_view_.get(), (b.render_mode & 0x200) != 0,
                 !textured || (b.filter & 0x20) != 0, first);
             const bool covered = full_run || cover_run;
             full_run = cover_run = false;
             if (!covered)
-                edge_extend(b, first, textured ? view_of(b.slot) : white_view_.get(), (b.render_mode & 0x200) != 0,
+                edge_extend(b, first, textured ? view_of(b.slot) : gs_untextured_view_.get(), (b.render_mode & 0x200) != 0,
                             !textured || (b.filter & 0x20) != 0);
             continue;
         }
