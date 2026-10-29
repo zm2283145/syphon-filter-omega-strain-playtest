@@ -50,10 +50,8 @@ void set_unlock_bit(std::span<std::uint8_t, agent_record_size> agent, std::int32
 }  // namespace
 
 void port_unlock_all_weapons(const ProfileAwards& awards, std::span<std::uint8_t, agent_record_size> agent,
-    AgentLoadState& state) {
-    auto c = context_of(awards, agent, state);
-    for (const auto& row : awards.registries.unlocks)
-        if (const auto name = pool_name(awards.pool, row.key)) call(c, "UnlockWeapon", Value{*name});
+    AgentLoadState&) {
+    for (const auto& row : awards.registries.unlocks) set_unlock_bit(agent, row.bit);
 }
 
 void port_unlock_all(const ProfileAwards& awards, std::span<std::uint8_t, agent_record_size> agent,
@@ -221,7 +219,6 @@ std::optional<std::string> port_cheat_string(const std::string& key) {
 std::size_t port_unlock_all_weapons(std::span<std::uint8_t, agent_record_size> agent, const AwardTables& tables) {
     std::size_t set = 0;
     for (const auto& row : tables.unlocks) {
-        if (std::find(tables.unpooled.begin(), tables.unpooled.end(), row.name) != tables.unpooled.end()) continue;
         // 003352c0's bound: the unlock words end at +b4f (the rank pointer +b50).
         const auto u = static_cast<std::uint32_t>(row.bit);
         if (row.bit < 0 || u >= (0xb50 - 0xb08) * 8)

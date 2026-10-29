@@ -9,8 +9,8 @@
 // field they touch is one the original's own progression writes:
 //
 //   UnlockLevel 003330c0     each level registry row (00532af0): its bit of +b08..
-//   UnlockWeapon 00333050    each named unlock row (00532b10, the WEAPONS.WDB records): its bit of +b08..
-//                            Rows registered with key -1 are unreachable by the native and remain hidden.
+//   weapon rows              every registered WEAPONS.WDB unlock bit at +b08.., including key -1 rows,
+//                            matching the native Unlock All Weapons PNACH's direct bitfield write
 //   UnlockSpecial            the special bonuses 0..5 (perks: NeckSnap .. IncreasedAmmo): bits 0..5 of +b08
 //   UnlockPart 00332610      each PARTS.PRN row (00532b30): the owned-parts vector (+b58, count +b5c),
 //                            which the appearance screens' locked-part list 00332500 reads
@@ -20,10 +20,9 @@
 //   004ffbb5 = 0             the level restriction, as --unlock-all-levels (0013d270)
 //
 // The loadout screen's lists (002bf090) offer the weapons 00332ac0 returns:
-// the unlock rows whose +b08 bit is set. port_unlock_all_weapons calls the
-// native unlock for every named row, so every player-addressable weapon
-// becomes selectable; internal unpooled records remain hidden. Nothing is
-// added to the inventory.
+// every unlock row whose +b08 bit is set. port_unlock_all_weapons sets all
+// registered rows, so official, mission, hidden and beta weapons become
+// selectable. Nothing is added to the inventory.
 //
 // Not touched: UnlockZeus (the ZEUS files take script-chosen triples; their
 // panel 00296314 is not ported), award flags and ranks (they are earned
@@ -82,16 +81,15 @@ namespace omega {
 
 struct ProfileAwards;
 
-// The front end's unlocks (132cc4c; the AWARDS natives, ProfileAwards) next to the pause menu's
-// direct-bit versions below (132f5, AwardTables). Every unlock above on the agent; `level_restrict`
-// is the byte 004ffbb5.
+// The front end's unlocks (132cc4c; ProfileAwards) next to the pause menu's direct-bit versions
+// below (132f5, AwardTables). Every unlock above on the agent; `level_restrict` is the byte 004ffbb5.
 void port_unlock_all(const ProfileAwards& awards, std::span<std::uint8_t, agent_record_size> agent,
     AgentLoadState& state, std::uint8_t& level_restrict);
 
-// UnlockWeapon for every named unlock row: each player-addressable weapon
-// becomes selectable in the loadout (00332ac0 / 002bf090). Internal rows
-// without a native string-pool key remain hidden. Nothing is added to the
-// inventory.
+// Sets every registered weapon unlock bit, including rows without a native
+// string-pool key. This matches the native Unlock All Weapons PNACH's direct
+// +b08 bitfield write, exposing the hidden/beta rows in 00332ac0 / 002bf090.
+// Nothing is added to the inventory.
 void port_unlock_all_weapons(const ProfileAwards& awards, std::span<std::uint8_t, agent_record_size> agent,
     AgentLoadState& state);
 
@@ -140,7 +138,7 @@ enum class PortCheat : std::uint8_t {
     end_level,         // the level ends completed (objectives set, 0012fa60(G, 0))
     super_agent,       // the player's hits on other actors kill at once
     npcs_ignore_you,   // the NPC perception ignores the player
-    unlock_all,        // every native-addressable weapon and outfit unlocked in the agent record
+    unlock_all,        // every registered weapon and outfit unlocked in the agent record
 };
 inline constexpr std::size_t port_cheat_count = 7;
 // The screen's row label keys ("PortCheat%d"), in PortCheat order.

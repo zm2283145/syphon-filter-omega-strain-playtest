@@ -203,8 +203,12 @@ WeaponModelLibrary* FrontendDisc::weapons() {
     archive.read = [this, wpnhog, names = archive.names](std::size_t i) {
         return disc_.archive_member(wpnhog, names.at(i));
     };
-    weapon_library_ = std::make_unique<WeaponModelLibrary>(*weapon_db_, std::move(archive),
+    weapon_library_ = std::make_unique<WeaponModelLibrary>(*weapon_db_, archive,
                                                            disc_.read(disc_.file({"GAMEDATA", "COMMON", "ERROR.TDX"})));
+    // 00145160 opens COMMON\WPNHOG.HOG and 00146040 loads every member, cloning
+    // both primary +13c and secondary +11c models into matching records. The
+    // latter is the native GuiWeaponDisplay preview for hold-class-7 weapons.
+    weapon_library_->load_mission_archive_146040(archive);
     return weapon_library_.get();
 }
 
