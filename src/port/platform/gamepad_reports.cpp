@@ -169,7 +169,7 @@ std::vector<std::uint8_t> sony_vibration_report(SonyPad kind,bool bluetooth,std:
         if(length<48)return r;
         r.assign(length,0);r[0]=0x02;r[1]=0x03;r[3]=weak;r[4]=large;           // 0x03: compatible vibration
     }else if(kind==SonyPad::dualsense){
-        r.assign(78,0);r[0]=0x31;r[1]=0x02;r[2]=0x03;r[4]=weak;r[5]=large;
+        r.assign(78,0);r[0]=0x31;r[2]=0x10;r[3]=0x03;r[5]=weak;r[6]=large;     // tag 0x10, then the USB payload
     }else if(kind==SonyPad::dualshock3){
         // 0x01: [2]/[4] the right/left motor durations (0xff: until changed), [3] the right motor on, [5] the left
         // motor's force, [10] the LED bitmap (LED 1, 0x02) and [11..30] the four LED timings. The report also sets

@@ -126,10 +126,15 @@ XInputGamepad xinput_from_ds2(const Ds2Pad& p) {
 std::optional<std::pair<bool, std::uint8_t>> motors_from_sony_output(SonyPad kind, bool bluetooth,
                                                                      const std::vector<std::uint8_t>& r) {
     std::size_t weak = 0, strong = 0;
-    if (kind == SonyPad::dualshock4 && !bluetooth && r.size() >= 6 && r[0] == 0x05) weak = 4, strong = 5;
-    else if (kind == SonyPad::dualshock4 && bluetooth && r.size() >= 8 && r[0] == 0x11) weak = 6, strong = 7;
-    else if (kind == SonyPad::dualsense && !bluetooth && r.size() >= 5 && r[0] == 0x02) weak = 3, strong = 4;
-    else if (kind == SonyPad::dualsense && bluetooth && r.size() >= 6 && r[0] == 0x31) weak = 4, strong = 5;
+    if (kind == SonyPad::dualshock4 && !bluetooth && r.size() >= 6 && r[0] == 0x05 && (r[1] & 0x01))
+        weak = 4, strong = 5;
+    else if (kind == SonyPad::dualshock4 && bluetooth && r.size() >= 8 && r[0] == 0x11 && (r[1] & 0xc0) == 0xc0 &&
+             (r[3] & 0x01))
+        weak = 6, strong = 7;
+    else if (kind == SonyPad::dualsense && !bluetooth && r.size() >= 5 && r[0] == 0x02 && (r[1] & 0x03))
+        weak = 3, strong = 4;
+    else if (kind == SonyPad::dualsense && bluetooth && r.size() >= 7 && r[0] == 0x31 && r[2] == 0x10 && (r[3] & 0x03))
+        weak = 5, strong = 6;
     else if (kind == SonyPad::dualshock3 && r.size() >= 6 && r[0] == 0x01) weak = 3, strong = 5;
     else return std::nullopt;
     return std::pair{r[weak] != 0, r[strong]};
