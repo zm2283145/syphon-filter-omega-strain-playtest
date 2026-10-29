@@ -314,9 +314,12 @@ void LoadingScreenHost::run() {
                 // Port-only (132win3): a device lost in any D3D call drops the frame; present re-creates it.
                 // 132win5: the renderer is made again inside the catch, whenever the device's generation moved.
                 try {
+                    phase_ = "make or refresh the window renderer";
                     if (!renderer || window->device_generation() != generation) make_renderer();
+                    phase_ = "synchronize the window buffers";
                     window->sync_buffers();
                     const float black[4] = {0, 0, 0, 1};
+                    phase_ = "clear the window back buffer";
                     gfx::clear_target(*window->gfx(), window->back_buffer(), black);
                     // Port-only (132ws8, research/FRONTEND.md "Checkpoint 132ws8"): under the wide aspect the loading
                     // screen (the level's briefing) is drawn as the front end's wide menus (132ws5): its art extended
@@ -326,17 +329,22 @@ void LoadingScreenHost::run() {
                     const bool wide_menu = frame_wide(window->width(), window->height()) && !frame_movie_zoom_setting();
                     if (!wide_menu)
                         for (GuiDrawBatch& b : list.batches) b.port_picture = true;
+                    phase_ = "draw the loading background";
                     const bool wide_background =
                         wide_menu && renderer->draw_wide_background("loading." + level_, window->back_buffer(),
                                                                     window->width(), window->height());
                     renderer->set_wide_edge_extend(wide_menu && !wide_background);
                     renderer->set_wide_menu(wide_menu);
+                    phase_ = "draw the loading GUI";
                     renderer->draw(list, window->back_buffer(), window->width(), window->height());
                     renderer->set_wide_menu(false);
                     renderer->set_wide_edge_extend(false);
-                    if (wide_menu && !wide_background && !list.batches.empty() && renderer->wide_edge_images() == 0)
+                    if (wide_menu && !wide_background && !list.batches.empty() && renderer->wide_edge_images() == 0) {
+                        phase_ = "draw the loading side fill";
                         renderer->draw_wide_fill(window->back_buffer(), window->width(), window->height());
+                    }
                     if (frames_ == options_.capture_frame && !options_.capture_dir.empty()) {
+                        phase_ = "capture the loading frame";
                         std::filesystem::create_directories(options_.capture_dir);
                         if (window->capture(capture_path())) std::cout << "Loading screen capture (port-only) at loading frame " << frames_ << "\n";
                     }
@@ -408,6 +416,10 @@ void LoadingScreenHost::run() {
         // The play owns the device context next: the renderer's objects go and the back buffer view with them.
         renderer.reset();
         if (window) window->drop_target();
+    } catch (const std::exception& e) {
+        failure_ = std::make_exception_ptr(std::runtime_error("Loading screen " + level_ + " failed at frame " +
+                                                               std::to_string(frames_.load()) + " while " +
+                                                               std::string(phase_.load()) + ": " + e.what()));
     } catch (...) {
         failure_ = std::current_exception();
     }

@@ -88,6 +88,10 @@ void gui_sound_send(GameSoundManager& sound, std::int32_t kind, std::int32_t typ
     sound.deliver(m);
 }
 
+bool frontend_command_center_hosted(std::uint8_t online, std::uint8_t online_hosted, std::uint8_t lan_mode) {
+    return !online || online_hosted || lan_mode;
+}
+
 FrontendSession::FrontendSession(FrontendServices services)
     : services_(std::move(services)),
       rt_(*this),
@@ -390,7 +394,8 @@ void FrontendSession::gui_start() {   // 002cb3d0(app, 0)
         if (rt_.g.app_35) {
             rt_.g.app_35 = 0;
             screen = rt_.factory("GuiCommandCenter", "CMDCENTR");
-            if (rt_.g.app_30 && !rt_.g.app_32) unreachable(0x2ca6f0, "the online command centre");
+            if (!frontend_command_center_hosted(rt_.g.app_30, rt_.g.app_32, rt_.g.lan_mode))
+                unreachable(0x2ca6f0, "the online command centre");
         } else {
             screen = rt_.factory("GuiTitleScreen", "TITLESCR");
         }

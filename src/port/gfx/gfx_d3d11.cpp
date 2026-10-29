@@ -102,13 +102,17 @@ public:
 
 class D3D11Texture final : public Texture {
 public:
-    explicit D3D11Texture(const TextureDesc& desc) { desc_ = desc; }
+    explicit D3D11Texture(const TextureDesc& desc, std::string label) : label_(std::move(label)) { desc_ = desc; }
     Ptr<ID3D11Texture2D> texture_;
     Ptr<ID3D11ShaderResourceView> sampled_;
     std::vector<Ptr<ID3D11RenderTargetView>> targets_;  // one per layer (layer 0 only for a plain texture)
     Ptr<ID3D11DepthStencilView> depth_;
+    std::string label_;
     ID3D11RenderTargetView* target(unsigned layer) const {
-        if (layer >= targets_.size() || !targets_[layer]) throw std::runtime_error("gfx d3d11: a texture without that render target");
+        if (layer >= targets_.size() || !targets_[layer])
+            throw std::runtime_error("gfx d3d11: texture \"" + label_ + "\" has no render target layer " +
+                                     std::to_string(layer) + " (" + std::to_string(desc_.width) + "x" +
+                                     std::to_string(desc_.height) + ", bind " + std::to_string(desc_.bind) + ")");
         return targets_[layer].Get();
     }
 };
@@ -194,7 +198,7 @@ public:
         std::vector<D3D11_SUBRESOURCE_DATA> content;
         if (levels)
             for (unsigned k = 0; k < desc.mips; ++k) content.push_back({levels[k].data, levels[k].row_pitch, 0});
-        auto out = std::make_shared<D3D11Texture>(desc);
+        auto out = std::make_shared<D3D11Texture>(desc, labels.texture ? labels.texture : "unnamed texture");
         check(device_->CreateTexture2D(&d, levels ? content.data() : nullptr, out->texture_.GetAddressOf()), labels.texture);
         if (desc.bind & bind_target) {
             if (desc.layers == 1) {
@@ -537,7 +541,7 @@ public:
     std::shared_ptr<Texture> buffer(bool with_target, const char* label, const char* target_label) override {
         Ptr<ID3D11Texture2D> back;
         check(swap_->GetBuffer(0, IID_PPV_ARGS(back.GetAddressOf())), label);
-        auto out = std::make_shared<D3D11Texture>(texture_desc(back.Get()));
+        auto out = std::make_shared<D3D11Texture>(texture_desc(back.Get()), label ? label : "swap-chain buffer");
         out->texture_ = back;
         if (with_target) {
             auto& d = static_cast<D3D11Device&>(*device_);
@@ -592,7 +596,7 @@ std::shared_ptr<Texture> wrap_target(const std::shared_ptr<Device>&, ID3D11Rende
     view->GetResource(resource.GetAddressOf());
     Ptr<ID3D11Texture2D> texture;
     check(resource.As(&texture), "The window target is not a 2D texture");
-    auto out = std::make_shared<D3D11Texture>(texture_desc(texture.Get()));
+    auto out = std::make_shared<D3D11Texture>(texture_desc(texture.Get()), "window back buffer");
     out->texture_ = texture;
     out->targets_.emplace_back(view);
     return out;

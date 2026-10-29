@@ -69,6 +69,9 @@ void gui_sound_deliver(GameSoundManager& sound, const char* name, bool stop);
 // wrapped by 0020ecb0 (kind 0, STOP), 0020faa0 (1, PLAY) or 0020f2a0 (2, QUIP) and delivered (003c9420
 // transport 1) with +20 = 1.
 void gui_sound_send(GameSoundManager& sound, std::int32_t kind, std::int32_t type, const std::string& name);
+// 002cb3d0's command-centre precondition. The native online path needs its hosted-session byte; the port's LAN
+// command centre is hosted by LanNetCore instead and deliberately keeps that online byte clear.
+bool frontend_command_center_hosted(std::uint8_t online, std::uint8_t online_hosted, std::uint8_t lan_mode);
 
 // PORT-ONLY (checkpoint 132on2, research/ONLINE.md §9): the online lobby behind the GuiHost DME-session calls
 // (net_session / net_start and the lobby_* calls GuiOnlineConnect makes; see gui_runtime.hpp). The port's
