@@ -39,9 +39,7 @@ std::optional<std::string> pool_name(const StringPool& pool, std::int32_t id) {
 }
 
 // The store 00333050 / 003330c0 make for a found row (the word
-// +b08 + 4 (bit >> 5), bit & 31). Used for rows whose key no name can reach:
-// WEAPONS.WDB records whose name is not in the common pool register with key
-// -1 (00330110), and UnlockWeapon's lookup only ever finds the first of them.
+// +b08 + 4 (bit >> 5), bit & 31).
 void set_unlock_bit(std::span<std::uint8_t, agent_record_size> agent, std::int32_t bit) {
     const auto u = static_cast<std::uint32_t>(bit);
     if (u >= (0xb50 - 0xb08) * 8) throw std::runtime_error("port cheat: an unlock bit past +b4f");
@@ -54,10 +52,8 @@ void set_unlock_bit(std::span<std::uint8_t, agent_record_size> agent, std::int32
 void port_unlock_all_weapons(const ProfileAwards& awards, std::span<std::uint8_t, agent_record_size> agent,
     AgentLoadState& state) {
     auto c = context_of(awards, agent, state);
-    for (const auto& row : awards.registries.unlocks) {
+    for (const auto& row : awards.registries.unlocks)
         if (const auto name = pool_name(awards.pool, row.key)) call(c, "UnlockWeapon", Value{*name});
-        else set_unlock_bit(agent, row.bit);
-    }
 }
 
 void port_unlock_all(const ProfileAwards& awards, std::span<std::uint8_t, agent_record_size> agent,
@@ -225,6 +221,7 @@ std::optional<std::string> port_cheat_string(const std::string& key) {
 std::size_t port_unlock_all_weapons(std::span<std::uint8_t, agent_record_size> agent, const AwardTables& tables) {
     std::size_t set = 0;
     for (const auto& row : tables.unlocks) {
+        if (std::find(tables.unpooled.begin(), tables.unpooled.end(), row.name) != tables.unpooled.end()) continue;
         // 003352c0's bound: the unlock words end at +b4f (the rank pointer +b50).
         const auto u = static_cast<std::uint32_t>(row.bit);
         if (row.bit < 0 || u >= (0xb50 - 0xb08) * 8)
