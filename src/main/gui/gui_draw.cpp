@@ -800,12 +800,20 @@ void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widge
             for (std::size_t k = from; k < out.batches.size(); ++k)
                 if (!out.batches[k].port_anchor) out.batches[k].port_anchor = port_weapon_select_anchor;
         };
-        for (const Widget* c : w.children)
+        for (std::size_t child = 0; child < w.children.size(); ++child) {
+            const Widget* c = w.children[child];
             if (c->flags & flag_visible) {
                 const std::size_t from = out.batches.size();
                 draw_widget(out, gui, *c, now_ms);
-                if (c == gui.gs.ws) follow(from);
+                if (c == gui.gs.ws) {
+                    follow(from);
+                } else {
+                    const auto anchor = port_anchor_widget | static_cast<std::uint32_t>(child + 1);
+                    for (std::size_t k = from; k < out.batches.size(); ++k)
+                        if (!out.batches[k].port_anchor) out.batches[k].port_anchor = anchor;
+                }
             }
+        }
         if ((w.flags & 0x100) && gui.canvas().focus == &w) fail(0x41e560, "focus highlight draw");
         if (gui.gs.ws && (gui.gs.ws->flags & flag_visible) && gui.gs.d4 == 1 && gui.gs.text) {
             const std::size_t from = out.batches.size();
