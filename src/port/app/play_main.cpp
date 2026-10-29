@@ -10733,7 +10733,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             PlayerCameraTarget t;
             const auto& frame=sim.physical();
             const auto& p=frame.response.physical;
+            const auto& actions=sim.actions();
             t.floor_root=sim.floor_root_placement();
+            t.mode_320c=actions.highest_action;
+            t.flags_3248=actions.flags_3248;
+            if(t.mode_320c==1||t.mode_320c==7||t.mode_320c==8||t.mode_320c==16||t.mode_320c==20)
+                t.edge_root=sim.edge_root_placement();
+            if(t.mode_320c==16) {
+                t.ladder_root=sim.ladder_root_placement();
+                t.edge_weight=sim.edge_root_weight();
+                t.ladder_weight=sim.ladder_root_weight();
+            }
             t.physical=true;
             t.offset_394=p.height_394;
             t.unsupported_dc=p.byte_dc!=0;

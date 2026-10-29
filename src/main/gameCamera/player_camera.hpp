@@ -27,6 +27,11 @@ struct PlayerCameraTarget {
     // 001b0f30 default branch: world placement of root +3290 (`flor`) through
     // 00132400; its quaternion is 4D-normalised before use.
     RootParentTransform floor_root;
+    // Modes 1/7/8/20 use +3294 (`edge`). Mode 16 blends `edge` and +3298
+    // (`ladd`) by their +d0 weights and reports frame kind 2.
+    RootParentTransform edge_root;
+    RootParentTransform ladder_root;
+    float edge_weight{},ladder_weight{};
     // Actor +3310 (physical component). Without one the corresponding reads
     // below are skipped exactly as the original does.
     bool physical{};
@@ -37,8 +42,8 @@ struct PlayerCameraTarget {
     RootVector plane_f0{};       // +f0
     // Actor vtable +f0 (001b0f20 -> 00133e00): body centre, stored at +3e0.
     RootVector look_target{};
-    std::uint32_t mode_320c{};   // must be 0
-    std::uint32_t flags_3248{};  // must be 0
+    std::int32_t mode_320c{};
+    std::uint32_t flags_3248{};
     // 001b13ec (001b0f30 with a3 = 1, the aim view): world position of the
     // skeleton node signed byte *0049d024 = 14 (00132a30 then 00132910); its
     // X/Y replace the frame position's (s2 set). With s2 clear (bit 3) the

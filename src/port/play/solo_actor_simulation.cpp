@@ -3400,6 +3400,9 @@ const PlayerButtonState& SoloActorSimulation::button_state() const{return impl_-
 std::uint32_t SoloActorSimulation::found_ledge() const{return impl_->found_ledge_130;}
 std::uint32_t SoloActorSimulation::physical_flags810() const{return impl_->frame_state.edges.slots[6].mask;}
 RootParentTransform SoloActorSimulation::edge_root_placement(){return impl_->roots.world_placement(impl_->edge_root);}
+RootParentTransform SoloActorSimulation::ladder_root_placement(){return impl_->roots.world_placement(impl_->ladd_root);}
+float SoloActorSimulation::edge_root_weight() const{return impl_->root_weight(ActorRoot::edge);}
+float SoloActorSimulation::ladder_root_weight() const{return impl_->root_weight(ActorRoot::ladder);}
 std::optional<float> SoloActorAnimation::anchor_weight(const RootAnchorKey&) const{return std::nullopt;}
 bool SoloActorAnimation::has_anchor(const RootAnchorKey&) const{return false;}
 std::optional<RootParentTransform> SoloActorAnimation::published_placement() const{return std::nullopt;}

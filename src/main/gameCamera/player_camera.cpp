@@ -457,7 +457,6 @@ void update_player_camera(PlayerCameraState& s,const PlayerCameraInput& in,
     if(!(elapsed>0)) throw std::runtime_error("Player camera elapsed time must be positive");
     if(!target) throw std::runtime_error("Player camera requires a followed actor");
     const auto& t=*target;
-    if(t.mode_320c!=0||t.flags_3248!=0) throw std::runtime_error("Player camera supports only the ordinary actor mode");
     check(t.floor_root.orientation);check(t.floor_root.position);check(t.look_target);
     check(in.look_offset_d30);check(in.rates_d60);
     auto n=s;
@@ -514,9 +513,43 @@ void update_player_camera(PlayerCameraState& s,const PlayerCameraInput& in,
     const float old_height=n.height_d88;
     n.frame_kind_d84=0;
     n.height_d88=s2 ? 5.0F : 0.0F;           // 0027d750
-    // 001b0f30 default branch (a3 = s2).
-    RootVector position=t.floor_root.position;
-    if(t.physical) position[2]=sub(position[2],t.offset_394);
+    // 001b0f30: select the animation root which owns camera tracking for the
+    // active action. Ladder mode blends edge/ladd exactly by their root weights.
+    RootParentTransform tracking=t.floor_root;
+    switch(t.mode_320c) {
+    case 1:case 7:case 8:case 20:
+        check(t.edge_root.orientation);check(t.edge_root.position);
+        tracking=t.edge_root;
+        n.frame_kind_d84=1;
+        break;
+    case 16: {
+        const float total=add(t.edge_weight,t.ladder_weight);
+        if(total!=0.0F) {
+            check(t.edge_root.orientation);check(t.edge_root.position);
+            check(t.ladder_root.orientation);check(t.ladder_root.position);
+            const float reciprocal=divide(1.0F,total);
+            const auto blend=[&](const RootVector& edge,const RootVector& ladder) {
+                RootVector out{};
+                for(std::size_t i=0;i<4;++i)
+                    out[i]=mul(add(mul(ladder[i],t.ladder_weight),mul(edge[i],t.edge_weight)),reciprocal);
+                return out;
+            };
+            tracking.orientation=blend(t.edge_root.orientation,t.ladder_root.orientation);
+            tracking.position=blend(t.edge_root.position,t.ladder_root.position);
+            n.frame_kind_d84=2;
+        }
+        break;
+    }
+    default:break;
+    }
+    // Buddy-climb token 0x33 sets mode 1 / +3248 bit 6. Native turns the edge
+    // frame by pi before exposing it to the camera.
+    if(t.mode_320c==1&&((t.flags_3248>>6)&1U)!=0)
+        tracking.orientation=camera_quaternion_multiply(
+            tracking.orientation,camera_axis_quaternion({0,0,1,0},pi));
+
+    RootVector position=tracking.position;
+    if(n.frame_kind_d84==0&&t.physical) position[2]=sub(position[2],t.offset_394);
     position[3]=1.0F;
     if(s2) {
         // 001b13ec: X/Y of skeleton node *0049d024 = 14.
@@ -525,7 +558,7 @@ void update_player_camera(PlayerCameraState& s,const PlayerCameraInput& in,
         position[0]=(*t.aim_node_14)[0];
         position[1]=(*t.aim_node_14)[1];
     }
-    const auto rows=camera_quaternion_rows(normalize4(t.floor_root.orientation));
+    const auto rows=camera_quaternion_rows(normalize4(tracking.orientation));
     RootVector q=camera_vu_matrix_to_quaternion(rows);
     float time_210=-1,time_2e0=-1,time_780=-1,time_910=-1;
     // 00280470 writes +100/+110 (not used by the transform).
@@ -536,7 +569,20 @@ void update_player_camera(PlayerCameraState& s,const PlayerCameraInput& in,
         if(!t.aim_node_14_matrix) throw std::runtime_error("Player camera aim bit 3 requires skeleton node 14's world matrix (00133ed0 at 0027dadc)");
         position=camera_aim_node_point(*t.aim_node_14_matrix);
     } else {
-        // 00280390 leaves +d88 for frame kind 0; then 2.25 or +d18 is added.
+        // 00280390: action-root frames lower the camera pivot relative to the
+        // edge/ladder anchor before the ordinary stance height is added.
+        if(n.frame_kind_d84==1) {
+            if(t.mode_320c==16)
+                n.height_d88=((t.flags_3248>>29)&1U)!=0 ? -3.0F : -6.3F;
+            else if(((n.flags_cf4>>5)&1U)!=0)
+                n.height_d88=-0.5F;
+            else if(t.mode_320c==1)
+                n.height_d88=-3.0F;
+            else if(t.mode_320c==7||t.mode_320c==8)
+                n.height_d88=-7.0F;
+        } else if(n.frame_kind_d84==2) {
+            n.height_d88=-6.3F;
+        }
         n.height_d88=player_camera_frame_height(n.flags_cf4,n.height_d88,in.height_d18);
     }
     position[2]=add(position[2],n.height_d88);   // 0027dbd8
@@ -552,7 +598,7 @@ void update_player_camera(PlayerCameraState& s,const PlayerCameraInput& in,
     // bits 0xa/0xb, bit 1.
     {
         const auto r=player_camera_frame_retimes(n.flags_cf0,n.flags_cf4,old_kind,old_height,n.frame_kind_d84,n.height_d88,
-            static_cast<std::int32_t>(t.mode_320c),t.flags_3248,{time_210,time_2e0,time_910});
+            t.mode_320c,t.flags_3248,{time_210,time_2e0,time_910});
         time_210=r.orientation_210;time_2e0=r.pivot_2e0;time_910=r.boom_910;
     }
     const bool pick=((n.flags_cf4>>1)&1U)!=0;

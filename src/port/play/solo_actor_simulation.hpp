@@ -972,6 +972,9 @@ public:
     // Physical +810: the edge slot 6 mask (read by 001977f0 in mode 8 and the hang channels).
     std::uint32_t physical_flags810() const;
     RootParentTransform edge_root_placement();
+    RootParentTransform ladder_root_placement();
+    float edge_root_weight() const;
+    float ladder_root_weight() const;
     // Actor jump fields (+3490, +34a0..+34d0, +30a0/+30a4).
     const ActorJumpState& jump_state() const;
     // Input selector +0x38 and pending priority set +0x40/+0x44.
