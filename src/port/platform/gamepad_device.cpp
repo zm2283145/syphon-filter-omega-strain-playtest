@@ -214,7 +214,8 @@ struct GamepadDevice::Impl {
 
     void read_until_lost(SonyPadSlot& slot){
         SonyHandle& pad=*slot.handle;
-        const std::string name=std::string(sony_pad_name(pad.kind))+(pad.bluetooth?" (Bluetooth)":" (USB)")+pad.tag;
+        const std::string name=std::string(sony_pad_name(pad.kind))+(pad.bluetooth?" (Bluetooth":" (USB")+
+            (pad.writable?")":", vibration unavailable)")+pad.tag;
         std::vector<std::uint8_t> buffer(pad.input_length);
         // Bluetooth pads in their simple mode report only on change: an
         // opened pad reads as connected and released until the first report.
@@ -227,11 +228,13 @@ struct GamepadDevice::Impl {
         for(bool lost=false;!lost;){
             ResetEvent(overlapped.hEvent);
             if(!ReadFile(pad.file,buffer.data(),static_cast<DWORD>(buffer.size()),nullptr,&overlapped)&&GetLastError()!=ERROR_IO_PENDING)break;
-            const HANDLE waits[3]{stop,overlapped.hEvent,slot.vibration_changed};
+            // Wired Sony pads continuously queue input reports. Give a pending motor update priority over the
+            // completed read or the input event can win every wait and starve vibration indefinitely.
+            const HANDLE waits[3]{stop,slot.vibration_changed,overlapped.hEvent};
             DWORD length=0;
             for(;;){
                 const DWORD woke=WaitForMultipleObjects(3,waits,FALSE,INFINITE);
-                if(woke==WAIT_OBJECT_0+2){write_vibration(slot,written,false);continue;}
+                if(woke==WAIT_OBJECT_0+1){write_vibration(slot,written,false);continue;}
                 if(woke==WAIT_OBJECT_0){
                     CancelIoEx(pad.file,&overlapped);
                     GetOverlappedResult(pad.file,&overlapped,&length,TRUE);
