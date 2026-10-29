@@ -3905,8 +3905,8 @@ std::vector<std::uint32_t> object_dump_ids;   // --object-dump (diagnostic, 132u
         std::int64_t loading_capture_frame=-1;               // --loading-capture-frame (port-only, 132mt1)
         std::set<std::int64_t> frontend_lost_frames,frontend_sweep_frames,frontend_window_captures;   // --frontend-test-device-lost... (132win5)
         double frontend_profile_ms=0.0;                      // --frontend-profile (132win5)
-            std::optional<std::array<std::int64_t,2>> test_minimize,frontend_test_minimize;   // --test-minimize, --frontend-test-minimize (132win5)
-            std::int64_t test_close=-1,frontend_test_close=-1;   // --test-close, --frontend-test-close (132win5)
+        std::optional<std::array<std::int64_t,2>> test_minimize,frontend_test_minimize,debrief_test_minimize;   // 132win5 / issue #3
+        std::int64_t test_close=-1,frontend_test_close=-1,debrief_test_close=-1;   // 132win5 / issue #3
         std::optional<std::array<std::int64_t,2>> test_focus_loss,frontend_test_focus_loss;   // --test-focus-loss (132win12)
         std::vector<std::int64_t> test_alt_enter,frontend_test_alt_enter;                   // --test-alt-enter (132win12)
         // Checkpoint 132win12 (port-only): --crash-dir <folder> (the crash reporter, crash_report.hpp; the launcher
@@ -4248,11 +4248,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             else if(arg==L"--frontend-test-device-lost-sweep")frontend_sweep_frames.insert(std::stoll(value()));
             else if(arg==L"--frontend-window-capture")frontend_window_captures.insert(std::stoll(value()));
             else if(arg==L"--frontend-profile")frontend_profile_ms=std::stod(value());
-                else if(arg==L"--test-minimize"||arg==L"--frontend-test-minimize"){const auto a=std::stoll(value());const auto n=std::stoll(value());
-                    if(a<0||n<1)throw std::runtime_error("--test-minimize needs a frame >= 0 and a count >= 1");
-                    (arg==L"--test-minimize"?test_minimize:frontend_test_minimize)=std::array<std::int64_t,2>{a,n};}
-                else if(arg==L"--test-close")test_close=std::stoll(value());
-                else if(arg==L"--frontend-test-close")frontend_test_close=std::stoll(value());
+            else if(arg==L"--test-minimize"||arg==L"--frontend-test-minimize"||arg==L"--debrief-test-minimize"){const auto a=std::stoll(value());const auto n=std::stoll(value());
+                if(a<0||n<1)throw std::runtime_error("--test-minimize needs a frame >= 0 and a count >= 1");
+                (arg==L"--test-minimize"?test_minimize:arg==L"--frontend-test-minimize"?frontend_test_minimize:debrief_test_minimize)
+                    =std::array<std::int64_t,2>{a,n};}
+            else if(arg==L"--test-close")test_close=std::stoll(value());
+            else if(arg==L"--frontend-test-close")frontend_test_close=std::stoll(value());
+            else if(arg==L"--debrief-test-close")debrief_test_close=std::stoll(value());
             else if(arg==L"--window-size"){const int w=std::stoi(value()),h=std::stoi(value());
                 if(w<64||h<64||w>16384||h>16384)throw std::runtime_error("--window-size needs a client size of 64..16384");
                 window_size=std::array<int,2>{w,h};}
@@ -4365,8 +4367,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "Window ergonomics (port-only, 132win5): the windowed placement is saved as window= in the settings file at the\n"
                     "end and restored at the next start (kept on a monitor); a minimised window keeps the game running (the PS2 game\n"
                     "has no focus pause) and only skips the presents; Alt+F4 or the close button ends the session cleanly.\n"
-                    "Diagnostics: --test-minimize <frame> <frames> / --frontend-test-minimize <front-end frame> <frames> report the\n"
-                    "window minimised for <frames>; --test-close <frame> / --frontend-test-close <front-end frame> post Alt+F4.\n"
+                    "Diagnostics: --test-minimize <frame> <frames> / --frontend-test-minimize <front-end frame> <frames> /\n"
+                    "--debrief-test-minimize <debrief frame> <frames> report the window minimised for <frames>; --test-close <frame> /\n"
+                    "--frontend-test-close <front-end frame> / --debrief-test-close <debrief frame> post Alt+F4.\n"
                     "Focus loss (port-only, 132win12): while the game window is unfocused the game keeps running (the PS2 game has\n"
                     "no focus pause) but its sound is silenced (background_audio=1 in the settings file keeps it) and the keyboard,\n"
                     "the controller, the mouse and the vibration are ignored. --test-focus-loss <frame> <frames> /\n"
@@ -18292,6 +18295,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // Checkpoint 132f11: the mission debrief 00134110(G, a1) (G+1c5 clear: a success or the start menu's
                     // Quit), its own GUI loop over the play's canvas (LEVEL_END.md section 6g).
                     unsigned debrief_frames=0;
+                    bool window_closed_during_teardown=false;
                     actions.debrief=[&](std::uint32_t,std::uint32_t a1){
                         if(!gui_overlay_draw||!gui_overlay_draw->menu||!frontend_app||!gui_overlay_draw->host.card){
                             std::cout<<"Debrief (00134110) at frame "<<frame<<": skipped (port-only: it needs the front end's agent record "
@@ -18317,14 +18321,47 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // `canvas`), the brightness quad +1d0 and the fade quad +1d4 = `alpha` (0025e5b0's last store).
                         const auto debrief_frame=[&](bool canvas,std::uint8_t alpha){
                             if(debrief_frames>=20000)throw std::runtime_error("00134110: the debrief did not end in 20000 frames");
+                            if(debrief_test_minimize&&std::int64_t(debrief_frames)==(*debrief_test_minimize)[0])
+                                window.simulate_minimized(true);
+                            if(debrief_test_minimize&&std::int64_t(debrief_frames)==(*debrief_test_minimize)[0]+(*debrief_test_minimize)[1])
+                                window.simulate_minimized(false);
+                            if(debrief_test_close>=0&&std::int64_t(debrief_frames)==debrief_test_close){
+                                std::cout<<"Host window (port-only): --debrief-test-close posts Alt+F4 at debrief frame "
+                                    <<debrief_frames<<"\n";
+                                PostMessageW(window.handle(),WM_SYSKEYDOWN,VK_F4,LPARAM(1)|(LPARAM(1)<<29));
+                            }
+                            bool quit=false;
                             if(!hidden){
                                 MSG message{};
-                                while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessageW(&message);}
+                                while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){
+                                    if(message.message==WM_QUIT){quit=true;continue;}
+                                    TranslateMessage(&message);DispatchMessageW(&message);
+                                }
                                 (void)window.take_events();
                                 state.focused=window.focused();
                             }
                             if(window.focus_simulated())state.focused=window.focused();
                             if(state.focused!=focus_shown)focus_change(frame);
+                            if(quit||window.close_requested()){
+                                window_closed_during_teardown=true;
+                                running=false;
+                                std::cout<<"Host window (port-only): the game window's close (Alt+F4 / the close button) during the debrief"
+                                    <<" at debrief frame "<<debrief_frames<<": the session ends\n";
+                                return false;
+                            }
+                            if(window.minimized()!=state.minimized){
+                                state.minimized=window.minimized();
+                                if(pacing)pacing->set_refresh(state.minimized?0.0:
+                                    pacing_refresh_override>0?pacing_refresh_override:display_refresh_hz(window.handle()));
+                                std::cout<<"Host window (port-only): "<<(state.minimized?"minimised":"restored")
+                                    <<" during the debrief at debrief frame "<<debrief_frames
+                                    <<" (the game keeps running"<<(state.minimized?", presents skipped":"")<<")\n";
+                            }
+                            if(!hidden&&!state.minimized&&(window.size_serial()!=window_size_serial||render_scale_changed)){
+                                window_size_serial=window.size_serial();render_scale_changed=false;
+                                const auto client=window.buffer_size();state.renderer->resize(client[0],client[1]);
+                                if(pacing)pacing->set_refresh(pacing_refresh_override>0?pacing_refresh_override:display_refresh_hz(window.handle()));
+                            }
                             const float black[4]{0.0F,0.0F,0.0F,1.0F};
                             gfx::clear_target(*state.renderer->device(),state.renderer->render_target(),black);
                             if(canvas){
@@ -18350,6 +18387,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             render_thread.end_frame(frame);   // 132mt2: the debrief frame to the render thread
                             gui_elapsed+=double(debrief_dt);
                             ++debrief_frames;
+                            return true;
                         };
                         // 0025e6e0(*004ffc38, 1, 1.0) and its loop: 0025e660(fader, 0.05), 0025e5b0, 0037a9f0 while +4 != 0
                         // (on a copy of the world fader G+e8: the level's end left it at 255).
@@ -18357,11 +18395,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const auto fade=[&](std::uint8_t mode,const char* what){
                             start_actor_fade(fader,mode,1.0F);
                             unsigned n=0;
-                            while(fader.duration_04!=0.0F){update_actor_fader(fader,0.05F);debrief_frame(false,actor_fader_alpha(fader));sound_step();++n;}
+                            while(fader.duration_04!=0.0F){
+                                update_actor_fader(fader,0.05F);
+                                if(!debrief_frame(false,actor_fader_alpha(fader)))return false;
+                                sound_step();++n;
+                            }
                             std::cout<<"Debrief (00134110): "<<what<<" (0025e6e0 mode "<<int(mode)<<", 1.0 s at 0.05 per frame): "<<n
                                      <<" frames, alpha "<<int(actor_fader_alpha(fader))<<"\n";
+                            return true;
                         };
-                        fade(1,"fade-in");
+                        if(!fade(1,"fade-in")){o.host.debrief=false;return;}
                         if(a1!=0)throw std::runtime_error("unhosted(0x134220): the debrief's session-end popups (a1 = "+std::to_string(a1)+")");
                         gui::Widget* summary=rt.factory("GuiEndGameObjectives",std::string("SUMMARY"));
                         if(!summary)throw std::runtime_error("00134110: 00418a80 GuiEndGameObjectives \"SUMMARY\" failed");
@@ -18383,11 +18426,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             }
                             o.driver.read(held);
                             o.gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
-                            debrief_frame(true,0);
+                            if(!debrief_frame(true,0))break;
                             sound_step();
                         }
+                        if(window_closed_during_teardown){o.host.debrief=false;return;}
                         std::cout<<"Debrief (00134110): the canvas emptied after "<<debrief_frames-loop_begin<<" frames\n";
-                        fade(2,"fade-out");
+                        if(!fade(2,"fade-out")){o.host.debrief=false;return;}
                         o.host.debrief=false;
                         std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames\n";
                     };
@@ -18409,6 +18453,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // set: 0044e340, the record's upload, then 0042b1f0, the game left), which the teardown mirror
                     // answers as solo: an online game's lobby side runs here, after the teardown.
                     if(frontend_app)frontend_app->online_level_end(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,true);
+                    if(window_closed_during_teardown){++frame;running=false;break;}
                     level_end_next=next;
                     ++frame;running=false;break;
                 }
