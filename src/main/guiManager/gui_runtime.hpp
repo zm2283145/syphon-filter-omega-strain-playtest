@@ -225,6 +225,7 @@ struct PortSettingsScreen {
     virtual std::string value(std::int32_t row) const = 0;
     virtual bool act(std::int32_t row, Action a) = 0;
     virtual std::uint64_t revision() const = 0;
+    virtual bool back() { return false; }  // true: handled inside the settings model instead of leaving the screen
     virtual void opened() {}  // the screen woke (reread the settings)
     virtual void closed() {}  // the screen left (a key capture is cancelled)
 };

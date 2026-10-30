@@ -82,7 +82,7 @@ inline const char* frame_aspect_name(FrameAspect a) {
 // Checkpoint 132ws (port-only): the wide setting's two companions (port settings hud_margin= / movie_fill=, play's
 // --hud-margin / --movie-fill). hud_margin: the HUD's safe-area inset from the window's left and right edges in
 // percent of the window's width (0..20, default 0: the elements keep their PS2 distance from the frame's edge, now
-// measured from the window's edge). movie_fill zoom: movies and the loading screen scale up until they fill the
+// measured from the window's edge). movie_fill zoom: loading / briefing screens scale up until they fill the
 // window's width (the top and bottom of the 4:3 picture are cut); bars (the default) keeps them 4:3.
 inline constexpr unsigned frame_hud_margin_max = 20;
 inline unsigned& frame_hud_margin_setting() {

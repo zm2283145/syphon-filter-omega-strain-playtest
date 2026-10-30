@@ -6,16 +6,14 @@
 // menu (its "Port Settings" entry). This is its model: the rows of each page, their values read from the port
 // settings and the changes written back at once (update_port_settings_text keeps the file's comments).
 //
-// Pages (row 0 of each is the page selector; L1 / R1 turn the page anywhere):
+// Main pages (row 0 of each is the page selector; L1 / R1 turn the page anywhere):
 //   DISPLAY    fullscreen, vsync, aspect, render_scale, frame_overlay, frame_overlay_key, background_audio (132win12)
-//   INPUT      mouse_look, mouse_sensitivity, mouse_invert_y, controller_prompt, reset the key bindings, fov (132ws3:
-//              FIELD OF VIEW, 70..150%, the wide view's; here because DISPLAY's eight rows fill the screen), cutscenes
-//              (132vt2a2: CUTSCENES, FILL / BARS / STRETCH; DEMOnn trailers always keep native bars), renderer (132vk1, the PC: RENDERER,
-//              DIRECT3D 11 / VULKAN, from the next start; research/VULKAN.md)
+//   INPUT      mouse_look, mouse_sensitivity, mouse_invert_y, controller_prompt, KEY BINDINGS (a submenu), reset keys,
+//              fov (132ws3: FIELD OF VIEW, 70..150%) and renderer (132vk1, PC only)
+//   MEDIA      CUTSCENES (FILL / BARS / STRETCH; DEMOnn trailers always keep native bars) and LOADING SCREENS
+//              (BARS / ZOOM). This replaces the misleading WIDE ZOOM aspect choice from issue #7.
 //   PERFORMANCE issue #4: GAMEPLAY FPS (native 29.97 Hz or enhanced 60 Hz, applied at the next level) and
 //              RESOLUTION (native 640 x 448 picture density or the window resolution times render_scale)
-//   PLAY KEYS  bind.play.<button> (16), bind.play.stick_left / stick_right.<dir> (8), walk, menu_dpad.<dir> (4)
-//   MENU KEYS  bind.menu.<button> (16)
 //   MODS       (checkpoint 132md4) mods (ALL MODS) and one row per mod folder of the mods folder (mod.<folder>=0|1,
 //              over its manifest's enabled=), in resolution order; more than 7 mods: 6 a time and MORE MODS. A mod
 //              change applies at the next start (the assets of a running session are not reloaded): a row whose
@@ -23,6 +21,9 @@
 //              Checkpoint 132md14: a mod row's value is its place in the load order and state ("#2 ON"); Cross
 //              toggles it, Left / Right move it up / down the order (the manifests' priority=, as the launcher's
 //              mod panel and omega_mod_tool move write them).
+// KEY BINDINGS is a nested six-page submenu:
+//   PLAY KEYS  bind.play.<button> (16), bind.play.stick_left / stick_right.<dir> (8), walk, menu_dpad.<dir> (4)
+//   MENU KEYS  bind.menu.<button> (16)
 // Left / Right cycle a value; Cross toggles it, or for a key row (and the overlay key) waits for the next key
 // pressed (feed_keys; Esc cancels, F11 is reserved for the window), which replaces the input's key list.
 // Checkpoint 132win12: on a key row Right waits for a key that joins the list (a key already there is left) and Left
@@ -92,10 +93,11 @@ public:
         play_keys_4,
         menu_keys_1,
         menu_keys_2,
+        media,
         performance,
         mods
     };
-    static constexpr std::int32_t page_count = 10;
+    static constexpr std::int32_t page_count = 11;
 
     PortSettingsPage(std::shared_ptr<PortSettingsStore> store, PortSettingsHooks hooks);
 
@@ -104,6 +106,7 @@ public:
     std::string value(std::int32_t row) const override;
     bool act(std::int32_t row, Action a) override;
     std::uint64_t revision() const override { return revision_; }
+    bool back() override;
     void opened() override;
     void closed() override;
 
@@ -130,6 +133,7 @@ public:
     // row then cycles DISPLAY, INPUT, MODS. A hidden page is left for DISPLAY.
     void set_pc_rows(bool shown);
     bool pc_rows() const { return pc_rows_; }
+    bool binding_menu() const { return binding_menu_; }
     bool page_shown(std::int32_t p) const;
     std::int32_t rows_on_page() const;
     PortSettingsStore& store() { return *store_; }
@@ -157,6 +161,7 @@ private:
     std::size_t row_id(std::size_t r) const;      // a shown row's place in its page's full row list
 
     bool pc_rows_ = true;
+    bool binding_menu_ = false;
 
     const std::vector<mods::ModListing>& mod_list() const;  // 132md4: the MODS page's mods (cached)
     std::int32_t mod_rows() const;                         // the MODS page's mod rows (MORE MODS included)

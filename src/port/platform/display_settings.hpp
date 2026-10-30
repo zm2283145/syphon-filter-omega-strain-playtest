@@ -8,8 +8,8 @@
 //                                  percent of the window's width (default 0)
 //   fov=<70..150>                  132ws3: under wide, the drawn field of view in percent of the original's view tangent
 //                                  (frame_fit.hpp frame_fov_scale; default 100, the original; draw only)
-//   movie_fill=bars|zoom           132ws: under wide, the loading screen 4:3 with bars (default) or zoomed to fill the
-//                                  window's width (the movies: movies=)
+//   movie_fill=bars|zoom           132ws: under wide, loading / briefing screens stay 4:3 with bars (default) or
+//                                  zoom to fill the window's width (Port Settings MEDIA > LOADING SCREENS)
 //   movies=fill|bars|stretch       132vt2a2: under wide, story/intro cutscenes scaled to the window's width preserving
 //                                  the PS2 display aspect (fill, the default), shown at native 4:3 with bars, or
 //                                  stretched over the window (frame_fit.hpp MovieFit). DEMOnn attract trailers keep

@@ -53,31 +53,30 @@ namespace {
 constexpr std::int32_t rows_max = gui::PortSettingsScreen::rows;
 constexpr std::array<const char*, PortSettingsPage::page_count> page_names{
     "DISPLAY", "INPUT", "PLAY KEYS 1", "PLAY KEYS 2", "PLAY KEYS 3", "PLAY KEYS 4", "MENU KEYS 1", "MENU KEYS 2",
-    "PERFORMANCE", "MODS"};
+    "MEDIA", "PERFORMANCE", "MODS"};
 constexpr std::array<const char*, 8> display_rows{"FULLSCREEN",    "VSYNC",       "ASPECT",   "RENDER SCALE",
                                                  "FRAME OVERLAY", "OVERLAY KEY", "BG AUDIO", "HUD MARGIN"};
-constexpr std::array<const char*, 8> input_rows{"MOUSE LOOK", "SENSITIVITY", "INVERT Y", "PAD PROMPT", "RESET KEYS",
-                                                "FIELD OF VIEW", "CUTSCENES", "RENDERER"};  // 132ws3 / 132vt2a2 / 132vk1: the DISPLAY page is full
+constexpr std::array<const char*, 8> input_rows{"MOUSE LOOK", "SENSITIVITY", "INVERT Y", "PAD PROMPT", "KEY BINDINGS",
+                                                "RESET KEYS", "FIELD OF VIEW", "RENDERER"};
+constexpr std::array<const char*, 2> media_rows{"CUTSCENES", "LOADING SCREENS"};
 constexpr std::array<const char*, 2> performance_rows{"GAMEPLAY FPS", "RESOLUTION"};
 constexpr std::array<MovieFit, 3> movie_fits{MovieFit::bars, MovieFit::fill, MovieFit::stretch};  // 132vt2a2: movies=
 constexpr std::array<float, 8> render_scales{0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 3.0F, 4.0F};
 // 132vp4: the Vita's (the scene scale; press steps down: 100 -> 75 -> 50 -> 100 %)
 constexpr std::array<float, 3> vita_render_scales{0.5F, 0.75F, 1.0F};
 constexpr std::array<float, 14> sensitivities{0.25F, 0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 2.5F, 3.0F, 4.0F, 5.0F, 6.0F, 8.0F, 10.0F};
-// 132ws: the ASPECT row's values: the aspect settings, then wide with movie_fill=zoom (WIDE ZOOM).
+// 132ws / issue #7: ASPECT controls only the frame. Loading-screen bars/zoom is a separate MEDIA row.
 struct AspectChoice {
     FrameAspect aspect;
-    bool zoom;
     const char* label;
 };
-constexpr std::array<AspectChoice, 5> aspects{{{FrameAspect::pillarbox, false, "PILLARBOX"},
-                                              {FrameAspect::strict, false, "4:3"},
-                                              {FrameAspect::stretch, false, "STRETCH"},
-                                              {FrameAspect::wide, false, "WIDE"},
-                                              {FrameAspect::wide, true, "WIDE ZOOM"}}};
+constexpr std::array<AspectChoice, 4> aspects{{{FrameAspect::pillarbox, "PILLARBOX"},
+                                              {FrameAspect::strict, "4:3"},
+                                              {FrameAspect::stretch, "STRETCH"},
+                                              {FrameAspect::wide, "WIDE"}}};
 std::size_t aspect_choice(const DisplaySettings& d) {
     for (std::size_t i = 0; i < aspects.size(); ++i)
-        if (aspects[i].aspect == d.aspect && (d.aspect != FrameAspect::wide || aspects[i].zoom == d.movie_zoom)) return i;
+        if (aspects[i].aspect == d.aspect) return i;
     return 0;
 }
 constexpr std::array<unsigned, 6> hud_margins{0, 2, 4, 6, 8, 10};  // 132ws: percent
@@ -167,8 +166,12 @@ std::vector<PortSettingsPage::Binding> PortSettingsPage::bindings_on(std::int32_
 namespace {
 // Port-only (Vita): the PC rows set_pc_rows(false) hides, by their place in the page's full row list.
 constexpr std::array<std::size_t, 1> display_pc_rows{5};           // OVERLAY KEY
-constexpr std::array<std::size_t, 5> input_pc_rows{0, 1, 2, 4, 7}; // MOUSE LOOK, SENSITIVITY, INVERT Y, RESET KEYS, RENDERER
+constexpr std::array<std::size_t, 6> input_pc_rows{0, 1, 2, 4, 5, 7}; // mouse rows, KEY BINDINGS, RESET KEYS, RENDERER
 constexpr std::array<std::size_t, 1> performance_pc_rows{1};        // RESOLUTION
+bool binding_page(std::int32_t p) {
+    return p >= static_cast<std::int32_t>(PortSettingsPage::Page::play_keys_1) &&
+           p <= static_cast<std::int32_t>(PortSettingsPage::Page::menu_keys_2);
+}
 }  // namespace
 
 std::int32_t PortSettingsPage::rows_on_page() const {
@@ -177,6 +180,7 @@ std::int32_t PortSettingsPage::rows_on_page() const {
         return 1 + static_cast<std::int32_t>(display_rows.size() - (pc_rows_ ? 0 : display_pc_rows.size()));
     case Page::input:
         return 1 + static_cast<std::int32_t>(input_rows.size() - (pc_rows_ ? 0 : input_pc_rows.size()));
+    case Page::media: return 1 + static_cast<std::int32_t>(media_rows.size());
     case Page::performance:
         return 1 + static_cast<std::int32_t>(performance_rows.size() - (pc_rows_ ? 0 : performance_pc_rows.size()));
     case Page::mods: return 2 + mod_rows();
@@ -186,7 +190,9 @@ std::int32_t PortSettingsPage::rows_on_page() const {
 
 bool PortSettingsPage::page_shown(std::int32_t p) const {
     if (p < 0 || p >= page_count) return false;
-    return pc_rows_ || bindings_on(p).empty();
+    const bool binding = binding_page(p);
+    if (binding != binding_menu_) return false;
+    return !binding || pc_rows_;
 }
 
 std::int32_t PortSettingsPage::step_page(bool forward) const {
@@ -215,13 +221,20 @@ void PortSettingsPage::set_pc_rows(bool shown) {
     if (shown == pc_rows_) return;
     pc_rows_ = shown;
     capture_.reset();
-    if (!page_shown(page_)) page_ = static_cast<std::int32_t>(Page::display);
+    if (!shown && binding_menu_) {
+        binding_menu_ = false;
+        page_ = static_cast<std::int32_t>(Page::display);
+    } else if (!page_shown(page_)) {
+        page_ = static_cast<std::int32_t>(Page::display);
+    }
     ++revision_;
 }
 
 void PortSettingsPage::set_page(std::int32_t p) {
     if (p < 0 || p >= page_count) throw std::out_of_range("port settings page: page out of range");
-    if (!page_shown(p)) throw std::out_of_range("port settings page: page hidden (no PC rows)");
+    const bool binding = binding_page(p);
+    if (binding && !pc_rows_) throw std::out_of_range("port settings page: page hidden (no PC rows)");
+    binding_menu_ = binding;
     if (p == page_) return;
     page_ = p;
     capture_.reset();
@@ -230,7 +243,7 @@ void PortSettingsPage::set_page(std::int32_t p) {
     ++revision_;
 }
 
-std::string PortSettingsPage::title() const { return "PORT SETTINGS"; }
+std::string PortSettingsPage::title() const { return binding_menu_ ? "KEY BINDINGS" : "PORT SETTINGS"; }
 
 std::string PortSettingsPage::label(std::int32_t row) const {
     if (row < 0 || row >= rows_max || row >= rows_on_page()) return {};
@@ -239,6 +252,7 @@ std::string PortSettingsPage::label(std::int32_t row) const {
     switch (static_cast<Page>(page_)) {
     case Page::display: return display_rows[r];
     case Page::input: return input_rows[r];
+    case Page::media: return media_rows[r];
     case Page::performance: return performance_rows[r];
     case Page::mods: {
         if (r == 0) return "ALL MODS";
@@ -326,18 +340,24 @@ std::string PortSettingsPage::value(std::int32_t row) const {
         case 1: return capture_ && capture_->text ? *capture_->text + "_" : number(m.sensitivity);
         case 2: return on_off(m.invert_y);
         case 3: return on_off(controller_prompt_setting(s));
-        case 4: {
+        case 4: return "OPEN";
+        case 5: {
             const auto n = parse_input_bindings(s).overridden;
             return n == 0 ? std::string("DEFAULT") : "CUSTOM (" + std::to_string(n) + ")";
         }
-        case 5: return std::to_string(display_settings(s).fov) + "%";  // 132ws3
+        case 6: return std::to_string(display_settings(s).fov) + "%";  // 132ws3
         case 7: return display_settings(s).renderer == PcRenderer::vulkan ? "VULKAN" : "DIRECT3D 11";  // 132vk1 (PC)
-        default: {  // 132vt2a2
+        }
+        return {};
+    }
+    case Page::media: {
+        const auto d = display_settings(s);
+        if (r == 0) {  // 132vt2a2
             std::string v = frame_movie_fit_name(display_settings(s).movie_fit);
             std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
             return v;
         }
-        }
+        return d.movie_zoom ? "ZOOM" : "BARS";
     }
     case Page::performance: {
         const auto d = display_settings(s);
@@ -428,8 +448,7 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
         case 2: {
             const AspectChoice& next = aspects[step<aspects.size()>(aspect_choice(d), forward)];
             set_port_setting(s, "aspect", frame_aspect_name(next.aspect));
-            if (next.aspect == FrameAspect::wide || d.movie_zoom) set_port_setting(s, "movie_fill", next.zoom ? "zoom" : "bars");
-            commit(s, std::string("ASPECT ") + frame_aspect_name(next.aspect) + (next.zoom ? " (movie_fill zoom)" : ""));
+            commit(s, std::string("ASPECT ") + frame_aspect_name(next.aspect));
             return true;
         }
         case 3: {
@@ -497,11 +516,19 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
         }
         case 4: {
             if (a != Action::press) return false;
+            binding_menu_ = true;
+            page_ = static_cast<std::int32_t>(Page::play_keys_1);
+            capture_.reset();
+            ++revision_;
+            return true;
+        }
+        case 5: {
+            if (a != Action::press) return false;
             const auto n = erase_port_settings(s, "bind.");
             commit(s, "RESET KEYS (" + std::to_string(n) + " bind.* keys removed)");
             return true;
         }
-        case 5: {  // 132ws3: the wide view's field of view (draw only; the original 100%)
+        case 6: {  // 132ws3: the wide view's field of view (draw only; the original 100%)
             const unsigned f = display_settings(s).fov;
             const auto at = static_cast<std::size_t>(std::find(fovs.begin(), fovs.end(), f) - fovs.begin());
             const unsigned v = fovs[at == fovs.size() ? 3 : step<fovs.size()>(at, forward)];
@@ -509,21 +536,27 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
             commit(s, "FIELD OF VIEW " + std::to_string(v) + "%");
             return true;
         }
-        case 7: {  // 132vk1 (port-only, PC): the renderer backend, used from the next start (research/VULKAN.md)
+        default: {  // 132vk1 (port-only, PC): the renderer backend, used from the next start (research/VULKAN.md)
             const bool vulkan = display_settings(s).renderer == PcRenderer::vulkan;
             set_port_setting(s, "renderer", vulkan ? "d3d11" : "vulkan");
             commit(s, std::string("RENDERER ") + (vulkan ? "DIRECT3D 11" : "VULKAN") + " (from the next start)");
             return true;
         }
-        default: {  // 132vt2a2: the wide movies' fit (fill, bars, stretch)
-            const MovieFit f = display_settings(s).movie_fit;
-            const auto at = static_cast<std::size_t>(std::find(movie_fits.begin(), movie_fits.end(), f) - movie_fits.begin());
+        }
+    }
+    case Page::media: {
+        const auto d = display_settings(s);
+        if (r == 0) {
+            const auto at =
+                static_cast<std::size_t>(std::find(movie_fits.begin(), movie_fits.end(), d.movie_fit) - movie_fits.begin());
             const MovieFit v = movie_fits[step<movie_fits.size()>(at, forward)];
             set_port_setting(s, "movies", frame_movie_fit_name(v));
-            commit(s, std::string("MOVIES ") + frame_movie_fit_name(v));
+            commit(s, std::string("CUTSCENES ") + frame_movie_fit_name(v));
             return true;
         }
-        }
+        set_port_setting(s, "movie_fill", d.movie_zoom ? "bars" : "zoom");
+        commit(s, std::string("LOADING SCREENS ") + (d.movie_zoom ? "BARS" : "ZOOM"));
+        return true;
     }
     case Page::performance: {
         const auto d = display_settings(s);
@@ -675,9 +708,23 @@ void PortSettingsPage::opened() {
     ++revision_;
 }
 
+bool PortSettingsPage::back() {
+    if (!binding_menu_) return false;
+    capture_.reset();
+    binding_menu_ = false;
+    page_ = static_cast<std::int32_t>(Page::input);
+    ++revision_;
+    return true;
+}
+
 void PortSettingsPage::closed() {
     if (capture_) {
         capture_.reset();
+        ++revision_;
+    }
+    if (binding_menu_) {
+        binding_menu_ = false;
+        page_ = static_cast<std::int32_t>(Page::input);
         ++revision_;
     }
 }

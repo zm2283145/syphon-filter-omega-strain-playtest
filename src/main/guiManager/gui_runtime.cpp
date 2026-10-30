@@ -9357,6 +9357,11 @@ std::uint8_t GuiRuntime::ps_input(Widget* w, const PadEvent& ev) {
     auto pressed = [&](std::uint32_t m) { return ev.kind == 1 && ev.port == 0 && ev.mask == m && ev.released == 0; };
     PortSettingsScreen* m = host_.port_settings_screen();
     if (pressed(pad_triangle)) {
+        if (m && m->back()) {
+            send(w, &canvas_, 0x10, 4, 0);
+            ps_refresh(w);
+            return 1;
+        }
         send(w, &canvas_, 0x10, 4, 0);
         ps_leave(w);
         return 1;
