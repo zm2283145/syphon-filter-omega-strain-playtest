@@ -1916,13 +1916,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         m.write(dme::kIntcInstalled, 1, 0);
         return 0;
     }
-    case 0x42e6d0: {  // cNetObjectMgr_Reset: only the five empty transfer maps are hosted.
-        for (const auto map : {0x5826a0U, 0x5826c0U, 0x5826e0U, 0x582700U, 0x582720U}) {
-            if (m.read(map) || m.read(map + 4) || m.read(map + 0xc) != map + 4)
-                unhosted(address, "a nonempty transfer-object, pending-message or reference map");
-        }
-        return 0;
-    }
+    case 0x42e6d0: net_objects_reset_0042e6d0(m, *this); return 0;
     case 0x3e56f0: {  // cCharActionMsg_DestinationParams_ClearPrevMsg
         const auto last = m.read(0x55a228);
         if (!last) return 0;

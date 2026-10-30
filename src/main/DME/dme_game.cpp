@@ -733,21 +733,79 @@ void geninfo_send_00439390(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_
     w8(m, 0x583890, 1);  // the GenInfo object is dirty (0043a810 sends it: 002ec460)
 }
 
+namespace {
+void rb_map_erase(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map, std::uint32_t node, std::uint32_t file);
+void rb_map_clear(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map, std::uint32_t file);
+}
+
 void net_objects_update_0042eb20(LevelLoadMemory& m, LevelLoadHost& host) {
-    // 0042eaf0 / 0042da20 / 0042da10: the map's leftmost node (+0xc) against its header (+4).
-    if (r32(m, 0x58270c) != 0x582704)
-        throw std::runtime_error("0042eb20: the network objects in the map 0x00582700 (their updates) are not ported");
+    constexpr std::uint32_t map = 0x582700, payload_file = 0x4bfb00, node_file = 0x4bfb98;
+    const auto end = map + 4;
+    for (auto it = r32(m, map + 0xc); it != end;) {
+        const auto node = it;
+        it = net_map_next(m, it);
+        const auto reference = r32(m, node + 0x10);
+        const auto object = r32(m, reference);
+        const bool valid = object && r32(m, object + 0xc) == r32(m, reference + 4);
+        bool release = false;
+        if (valid && (!r8(m, object + 0x2d) || !r8(m, object + 0x2c) || r8(m, object + 0x2e))) {
+            const auto controller = r32(m, object + 0x58);
+            if (controller && (host.call(m, r32(m, r32(m, controller) + 0x88), {controller}) & 0xffU) == 2 &&
+                host.call(m, r32(m, r32(m, controller) + 0x94), {controller}) &&
+                host.call(m, r32(m, r32(m, controller) + 0x44), {controller})) {
+                host.call(m, r32(m, r32(m, object) + 0x20), {object});
+                release = true;
+            }
+        }
+        if (!valid || release) {
+            heap_enter(m, host);
+            host.call(m, 0x36b130, {0, reference, payload_file, release ? 0x40U : 0x4aU});
+            heap_leave(m, host);
+            rb_map_erase(m, host, map, node, node_file);
+        }
+    }
     host.call(m, 0x42cf30, {});
 }
 
 void net_objects_send_0042cf30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack) {
     const auto sp = stack - 0x70;
-    // 0011c7a0 / 0011bd70 / 0011c268 / 0011c200 / 0011c858 (libgcc soft double, no side effects) turn the frame
-    // count 0x00572538 into a period that only the per-object loop reads.
+    const auto ticks = static_cast<std::int32_t>(r32(m, 0x572538));
+    const auto now = static_cast<std::uint32_t>(static_cast<std::int64_t>(
+        static_cast<double>(ticks) - 0.0625 * static_cast<double>(static_cast<float>(ticks))));
     host.call(m, 0x436c00, {sp + 0x68});
-    if (r32(m, 0x58272c) != 0x582724)  // 0042d100 / 0042d0f0 / 0042d0e0
-        throw std::runtime_error("0042cf30: the network objects in the map 0x00582720 (their sends) are not ported");
+    constexpr std::uint32_t map = 0x582720, node_file = 0x4bfb88;
+    const auto end = map + 4;
+    for (auto it = r32(m, map + 0xc); it != end;) {
+        const auto node = it;
+        it = net_map_next(m, it);
+        if (r32(m, node + 0x10) >= now) continue;
+        w32(m, sp + 0x64, r32(m, node + 0xc));
+        const auto object = host.call(m, 0x40c540, {sp + 0x64});
+        if (object) {
+            const auto peer = host.call(m, 0x4343e0, {sp + 0x68, r32(m, node + 0xc)});
+            host.call(m, 0x434600, {sp + 0x68, object + 0xc, 0xffffffffU});
+            host.call(m, 0x4344c0, {sp + 0x68, object + 0xc, 0});
+            if (static_cast<std::int32_t>(peer) >= 0) host.call(m, 0x42da30, {object, 0, peer});
+        }
+        rb_map_erase(m, host, map, node, node_file);
+    }
     host.call(m, 0x436ba0, {sp + 0x68, 0xffffffffU});
+}
+
+void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host) {
+    for (const auto map : {0x5826a0U, 0x5826c0U, 0x5826e0U})
+        if (r32(m, map) || r32(m, map + 4) || r32(m, map + 0xc) != map + 4)
+            throw std::runtime_error("0042e6d0: a nonempty transfer-object, short-value or pending-message map is not ported");
+    constexpr std::uint32_t references = 0x582700, timers = 0x582720;
+    constexpr std::uint32_t payload_file = 0x4bfb00, reference_node_file = 0x4bfb98, timer_node_file = 0x4bfb88;
+    const auto end = references + 4;
+    for (auto it = r32(m, references + 0xc); it != end; it = net_map_next(m, it)) {
+        heap_enter(m, host);
+        host.call(m, 0x36b130, {0, r32(m, it + 0x10), payload_file, 0x75});
+        heap_leave(m, host);
+    }
+    rb_map_clear(m, host, references, reference_node_file);
+    rb_map_clear(m, host, timers, timer_node_file);
 }
 
 std::uint32_t voice_headset_00438340(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack) {

@@ -316,11 +316,14 @@ void geninfo_apply_interest_00439030(LevelLoadMemory& m, LevelLoadHost& host, st
 void geninfo_reset_0043ace0(LevelLoadMemory& m, LevelLoadHost& host);
 
 // 0042eb20 (from 003fbec0): the network objects' update over the map 0x00582700 (00431380 empties it at the
-// static construction: +0xc = +4), then 0042cf30. Only the empty map is ported; objects in it throw.
+// static construction: +0xc = +4), then 0042cf30. Completed transfers and stale object references are released.
 void net_objects_update_0042eb20(LevelLoadMemory& m, LevelLoadHost& host);
 // 0042cf30: a period from 0x00572538 (soft double, read only per object), 00436c00 on the stack, the sends over the
-// map 0x00582720 (004313a0 empties it), 00436ba0(.., -1). Only the empty map is ported; objects in it throw.
+// map 0x00582720 (004313a0 empties it), 00436ba0(.., -1). Expired timers retry ownership through the saved owner.
 void net_objects_send_0042cf30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack = 0x1f00000);
+// 0042e6d0: release the owned references in 0x00582700 and clear it and the transfer-timer map 0x00582720. The
+// transfer-object, short-value and pending-message maps remain required to be empty until their producers are hosted.
+void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host);
 // 00438340 (from 00438770): on the host / solo, once (0x00582cf0 clear): in a level the "HeadsetSemaphore" DME object
 // (002eaf28(sp+0x48, 2, 4, 1000, 0, 0, 0, 0), the class 0x00583868; its handle into 0x00583870, its +0x1c into
 // 0x00582cf0 when 002eb650 finds it), before the level 0x00582cf0 = 0. The first call (0x00497568) runs the headset
