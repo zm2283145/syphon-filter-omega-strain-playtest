@@ -2354,12 +2354,56 @@ void LanNetCore::set_lobby_exit(std::function<void()> exit_game) {
     lobby_exit_ = std::move(exit_game);
 }
 
-void LanNetCore::finish_level_teardown() {
+void LanNetCore::finish_level_teardown(bool retain_session) {
     level_loaded_ = false;
-    lobby_ = {};
+    // World_Teardown has already freed the native network objects. These are
+    // port-side level mirrors and delivery queues; none belongs to the lobby.
+    // In particular, the callbacks and part cache may refer to play locals
+    // that are destroyed before the front end resumes.
+    level_ = nullptr;
     lobby_exit_ = {};
-    memory_.write(0x572480, 4, 0);
-    memory_.write(0x572488, 1, 0);
+    generator_receiver_ = {};
+    npc_control_handler_ = {};
+    part_cache_ = nullptr;
+    remote_keys_.clear();
+    backpack_bindings_.clear();
+    remote_events_.clear();
+    remote_moves_.clear();
+    remote_left_.clear();
+    remote_actions_.clear();
+    remote_aims_.clear();
+    remote_weapons_.clear();
+    remote_animations_.clear();
+    remote_positions_.clear();
+    generator_blocks_.clear();
+    npc_blocks_.clear();
+    npc_generators_.clear();
+    free_npc_blocks_.clear();
+    remote_spawns_.clear();
+    npc_controls_.clear();
+    generator_releases_.clear();
+    remote_despawns_.clear();
+    remote_healths_.clear();
+    remote_damages_.clear();
+    remote_deaths_.clear();
+    objective_bindings_.clear();
+    objective_outcomes_.clear();
+    objective_actives_.clear();
+    agent_updates_.clear();
+    end_levels_.clear();
+    (void)dme_->take_backpacks();
+    pending_health_.reset();
+    pending_physical_.reset();
+    pending_npc_weapon_.reset();
+    local_floor_plane_.reset();
+    hud_line_.clear();
+    local_set_ = false;
+    local_inventory_ = false;
+    if (!retain_session) {
+        lobby_ = {};
+        memory_.write(0x572480, 4, 0);
+        memory_.write(0x572488, 1, 0);
+    }
 }
 
 void LanNetCore::level_load_begin(LevelLoadHost* level) {

@@ -12,6 +12,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   # Builds take over 25 minutes: on main a newer push queues behind the running build instead of cancelling it.

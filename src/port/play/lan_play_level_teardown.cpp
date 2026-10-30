@@ -9,15 +9,18 @@
 namespace omega {
 
 PlayTeardownReport run_lan_play_level_teardown(lan::LanNetCore& core, const GameEndState& game,
-                                               const PlayTeardownActions& actions) {
+                                               const PlayTeardownActions& actions, LanTeardownSession session) {
     auto& live = core.memory();
     if (!core.level_loaded() || live.read(dme::kNetworkGame, 1) != 1)
         throw std::runtime_error("LAN level teardown requires a loaded multiplayer game");
-    // G+1c7 skips 0042b1f0 and intentionally retains the DME connection.
-    // This adapter has no owner to carry that session into the next GUI pass.
-    if (game.b1c7)
+    // G+1c7 skips 0044e340 / 0042b1f0. The live caller has no owner to
+    // carry the core through the next GUI pass, so it must opt in explicitly.
+    const bool retain = session == LanTeardownSession::Retain;
+    if (game.b1c7 && !retain)
         throw std::runtime_error("LAN level teardown: G+1c7 keep-game continuation is not hosted");
-    if (core.call(live, 0x4294c0, {}) && !core.has_lobby_exit())
+    if (retain && !game.b1c7)
+        throw std::runtime_error("LAN level teardown: retained session requires G+1c7");
+    if (!retain && core.call(live, 0x4294c0, {}) && !core.has_lobby_exit())
         throw std::runtime_error("LAN level teardown requires a lobby-exit service");
 
     PlayTeardownNetwork network;
@@ -41,7 +44,7 @@ PlayTeardownReport run_lan_play_level_teardown(lan::LanNetCore& core, const Game
     live.write(dme::kNetworkGame, 1, report.multiplayer_after);
     live.write(dme::kQuitRequest, 1, report.quit_latch_after);
     live.write(0x5721b8, 1, report.network_after);
-    core.finish_level_teardown();
+    core.finish_level_teardown(retain);
     return report;
 }
 

@@ -135,7 +135,9 @@ public:
     bool has_lobby_exit() const { return static_cast<bool>(lobby_exit_); }
     // The state-0x14 pass has destroyed its level objects. The native DME
     // cleanup is dispatched separately by the composed teardown adapter.
-    void finish_level_teardown();
+    // G+1c7 keeps the lobby/transport for the next GUI pass. The exit
+    // callback always dies with this level because it may capture play locals.
+    void finish_level_teardown(bool retain_session = false);
 
     // PORT-ONLY (132ln5e): the TIM0 events while a level setup on the calling thread stands in for 001350e0. On
     // the original the DME thread wakes every 100 events during the load (keeping the session's traffic going);

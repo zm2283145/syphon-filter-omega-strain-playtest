@@ -13,7 +13,7 @@ lands. Each update's commit message names the development commit it was taken fr
 ## Downloading a playtest build
 
 After a successful build of `main`, download the newest **prerelease** from this repository's
-[Releases page](https://github.com/zm2283145/syphon-filter-omega-strain-playtest/releases). It contains exactly three files:
+[Releases page](https://github.com/zm2283145/syphon-filter-omega-strain-playtest/releases). It provides three build downloads:
 
 | File | Use |
 | --- | --- |
