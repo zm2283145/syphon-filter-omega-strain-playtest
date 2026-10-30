@@ -671,7 +671,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     wide_ranges.clear();
     std::uint32_t wide_anchor = 0, wide_menu_tag = 0;
     const bool wide_menu = wide && wide_menu_;
-    bool wide_pict = false, cover_run = false, wide_free = false, wide_movie = false;
+    bool wide_pict = false, cover_run = false, wide_free = false, wide_movie = false, wide_movie_native_bars = false;
     float wide_aspect = 0.0F;
     float backdrop_rows = 0.0F;  // 132ws: the GUI rows the frame-wide textured strips cover (a 4:3 backdrop picture)
     auto view_of = [&](std::uint32_t slot) {
@@ -690,7 +690,8 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                                   : cover_run ? wide_cover
                                   : wide_pict ? (wide_aspect > 0.0F ? wide_aspect_picture : wide_picture)
                                               : wide_frame;
-        const MovieFit picture_fit = wide_movie ? movie_fit : movie_zoom ? MovieFit::fill : MovieFit::bars;
+        const MovieFit picture_fit =
+            wide_movie ? (wide_movie_native_bars ? MovieFit::bars : movie_fit) : movie_zoom ? MovieFit::fill : MovieFit::bars;
         // A picture under the bars setting is the same: drawn as the pillarbox draws it (its overhang clipped).
         // 132ws2: a port_free batch (the callouts, the lock-on) is mapped over the whole target, not clipped.
         // 132ws5: the wide menu draw maps the flat 4:3 content over the whole target too (its overhang shows).
@@ -797,6 +798,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         wide_anchor = b.port_anchor;
         wide_pict = b.port_picture;
         wide_movie = b.port_picture && b.port_movie;
+        wide_movie_native_bars = wide_movie && b.port_movie_native_bars;
         wide_aspect = b.port_picture ? b.port_picture_aspect : 0.0F;
         wide_free = b.port_free;
         wide_menu_tag = wide_menu ? b.port_menu : 0;

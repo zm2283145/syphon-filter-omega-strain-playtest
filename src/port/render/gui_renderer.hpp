@@ -392,7 +392,8 @@ public:
     //   - a picture batch (GuiDrawBatch::port_picture: the loading screen) stays 4:3 with bars, or with
     //     movie_fill zoom is scaled to the target's width (top and bottom cut). A movie (GuiDrawBatch::port_movie,
     //     132vt2a2) follows frame_movie_fit_setting instead: fill (the zoom's mapping, the default), bars, or stretch
-    //     (the 4:3 picture over the whole target).
+    //     (the 4:3 picture over the whole target). Authored DEMOnn attract trailers set port_movie_native_bars
+    //     and retain their native 4:3 presentation independently of the story-cutscene setting.
     //     A picture with GuiDrawBatch::port_picture_aspect (132md14: a mod movie wider than 4:3, letterboxed in the
     //     canvas) is drawn at that aspect across the target's width (bars: scaled to fit when narrower than the target;
     //     stretch: over the whole target);

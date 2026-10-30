@@ -2580,7 +2580,7 @@ std::string App::front_end(DiscImage& disc, const std::string& iso, int frames) 
                 ++movie_pictures;
             }
             parts.lap(4);
-            shown = movie_list(session.movie_aspect());
+            shown = movie_list(session.movie_aspect(), attract_movie_native_bars(session.movie_name()));
             if (const auto* track = session.movie_subtitles()) {
                 OMEGA_ZONE("vita.subtitles");
                 append_subtitles(shown, data.fonts(), *track, session.movie_subtitle_colour(), last_render_mode);

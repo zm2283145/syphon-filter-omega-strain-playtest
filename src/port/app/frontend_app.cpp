@@ -1234,7 +1234,7 @@ void FrontendApp::Impl::step(std::uint16_t held) {
             movie_serial = s.movie_serial();
             offscreen->set_texture(movie_slot, movie_picture());
         }
-        shown = movie_list(s.movie_aspect());
+        shown = movie_list(s.movie_aspect(), attract_movie_native_bars(s.movie_name()));
         shown_is_last = true;
         if (const auto* track = s.movie_subtitles()) {
             append_subtitles(shown, data->fonts(), *track, s.movie_subtitle_colour(), last_render_mode);

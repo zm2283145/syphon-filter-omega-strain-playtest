@@ -28,6 +28,7 @@
 #include <set>
 #endif
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace omega {
@@ -49,7 +50,9 @@ constexpr std::uint32_t movie_slot = 0xffff;
 // Port-only (checkpoint 132md14): `aspect` > 0 is a mod movie's display aspect (movie_overrides=, MovieStream::
 // picture_aspect): wider than 4:3 it is letterboxed in the 4:3 canvas (and drawn at its own aspect under the wide
 // frame: GuiDrawBatch::port_picture_aspect), narrower it is pillarboxed. 0: the disc movie's 4:3 quad.
-GuiDrawList movie_list(float aspect = 0.0F);
+// native_bars keeps an authored attract trailer at 4:3 under wide, independently of the cutscene fit setting.
+GuiDrawList movie_list(float aspect = 0.0F, bool native_bars = false);
+bool attract_movie_native_bars(std::string_view name);
 Texture movie_texture(const mpeg2::Frame& frame);
 #ifdef __vita__
 // Port-only (132vt2, research/VITA.md "Movies"): the Vita app's decode-ahead (vita_main.cpp's AheadMovie) for the play

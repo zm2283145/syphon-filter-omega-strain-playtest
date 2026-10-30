@@ -585,7 +585,15 @@ const char* frontend_class_name(gui::WidgetClass c) {
     }
 }
 
-GuiDrawList movie_list(float aspect) {
+bool attract_movie_native_bars(std::string_view name) {
+    const auto upper = [](char c) {
+        return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A')) : c;
+    };
+    return name.size() >= 5 && upper(name[0]) == 'D' && upper(name[1]) == 'E' && upper(name[2]) == 'M' &&
+           upper(name[3]) == 'O' && std::isdigit(static_cast<unsigned char>(name[4])) != 0;
+}
+
+GuiDrawList movie_list(float aspect, bool native_bars) {
     GuiDrawList list;
     GuiDrawBatch b;
     b.render_mode = 5;
@@ -607,6 +615,7 @@ GuiDrawList movie_list(float aspect) {
     b.vertices = {tl, br};
     b.port_picture = true;  // port-only (132ws): a 4:3 picture under the wide aspect (bars, or movie_fill zoom)
     b.port_movie = true;    // port-only (132vt2a2): fitted by movies= (fill, bars or stretch)
+    b.port_movie_native_bars = native_bars;
     list.batches.push_back(std::move(b));
     return list;
 }

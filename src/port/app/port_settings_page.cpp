@@ -57,7 +57,7 @@ constexpr std::array<const char*, PortSettingsPage::page_count> page_names{
 constexpr std::array<const char*, 8> display_rows{"FULLSCREEN",    "VSYNC",       "ASPECT",   "RENDER SCALE",
                                                  "FRAME OVERLAY", "OVERLAY KEY", "BG AUDIO", "HUD MARGIN"};
 constexpr std::array<const char*, 8> input_rows{"MOUSE LOOK", "SENSITIVITY", "INVERT Y", "PAD PROMPT", "RESET KEYS",
-                                                "FIELD OF VIEW", "MOVIES", "RENDERER"};  // 132ws3 / 132vt2a2 / 132vk1: the DISPLAY page is full
+                                                "FIELD OF VIEW", "CUTSCENES", "RENDERER"};  // 132ws3 / 132vt2a2 / 132vk1: the DISPLAY page is full
 constexpr std::array<const char*, 2> performance_rows{"GAMEPLAY FPS", "RESOLUTION"};
 constexpr std::array<MovieFit, 3> movie_fits{MovieFit::bars, MovieFit::fill, MovieFit::stretch};  // 132vt2a2: movies=
 constexpr std::array<float, 8> render_scales{0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 3.0F, 4.0F};

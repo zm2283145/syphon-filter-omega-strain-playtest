@@ -9,8 +9,8 @@
 // Pages (row 0 of each is the page selector; L1 / R1 turn the page anywhere):
 //   DISPLAY    fullscreen, vsync, aspect, render_scale, frame_overlay, frame_overlay_key, background_audio (132win12)
 //   INPUT      mouse_look, mouse_sensitivity, mouse_invert_y, controller_prompt, reset the key bindings, fov (132ws3:
-//              FIELD OF VIEW, 70..150%, the wide view's; here because DISPLAY's eight rows fill the screen), movies
-//              (132vt2a2: MOVIES, FILL / BARS / STRETCH, the wide movies' fit), renderer (132vk1, the PC: RENDERER,
+//              FIELD OF VIEW, 70..150%, the wide view's; here because DISPLAY's eight rows fill the screen), cutscenes
+//              (132vt2a2: CUTSCENES, FILL / BARS / STRETCH; DEMOnn trailers always keep native bars), renderer (132vk1, the PC: RENDERER,
 //              DIRECT3D 11 / VULKAN, from the next start; research/VULKAN.md)
 //   PERFORMANCE issue #4: GAMEPLAY FPS (native 29.97 Hz or enhanced 60 Hz, applied at the next level) and
 //              RESOLUTION (native 640 x 448 picture density or the window resolution times render_scale)
