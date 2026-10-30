@@ -5218,6 +5218,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         }};
         lan::LanNetCore* lan_net=nullptr;   // port-only (132ln5e): the LAN network game's DME.cc game side (the front end's)
         std::chrono::steady_clock::time_point lan_timer_at{};   // port-only (132ln5e): the last in-level TIM0 catch-up
+        const auto bind_network_level=[&]{
+            // Every frontend handoff may own a different core (or no core for
+            // solo play). Never carry a borrowed pointer across frontend resume.
+            lan_net=frontend_app->lan_core();
+            lan_timer_at={};
+            if(!lan_net)return;
+            frontend_app->session().set_local_agent_client_index(static_cast<std::uint8_t>(lan_net->local_client_index()));
+            lan_net->start_load_pump();
+            std::cout<<"LAN (port-only, 132ln5e): the network level load's 001350e0 is the play's level setup; the DME "
+                       "thread's timer events are pumped meanwhile\n";
+        };
         if(frontend){
             frontend_app=std::make_unique<FrontendApp>(disc,frontend_options);
             const auto r=frontend_app->run();
@@ -5231,13 +5242,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // Checkpoint 132ln5e (port-only): a LAN network game's hand-off ran 001693f0 up to 001350e0 on the native
             // DME.cc game side (FrontendApp::lan_core); the level setup below stands in for 001350e0, while the
             // TIM0 events keep waking the DME thread on a background pump (LanNetCore::start_load_pump).
-            if(auto* lan=frontend_app->lan_core()){
-                lan_net=lan;
-                frontend_app->session().set_local_agent_client_index(static_cast<std::uint8_t>(lan->local_client_index()));
-                lan_net->start_load_pump();
-                std::cout<<"LAN (port-only, 132ln5e): the network level load's 001350e0 is the play's level setup; the DME "
-                           "thread's timer events are pumped meanwhile\n";
-            }
+            bind_network_level();
             // Checkpoint 126c: 001350e0's loading screen (00166430) runs on its thread while the level loads.
             LoadingHostOptions loading_options;loading_options.hidden=frontend_hidden;
             loading_options.capture_dir=frontend_capture;loading_options.host=host_window.get();
@@ -5263,12 +5268,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         for(;;){
         if(resume_state){
             host_window->log_handoff("level end ("+mission+") released, front end resume");
+            lan_net=nullptr;  // resume releases the old owner before opening the GUI
             const auto r=frontend_app->resume_after_level(*resume_state,0x14);
             resume_state.reset();
             if(!r.level){std::cout<<"Front end: ended ("<<r.frames<<" frames, "<<r.captures.size()<<" captures)\n";break;}
             std::cout<<"Front end: hand-off to the "<<*r.level<<" play setup (the next level, in this process; "<<r.frames<<" frames, "
                 <<r.captures.size()<<" captures)\n";
             apply_mods_at_level_boundary(*frontend_app,*r.level);
+            bind_network_level();
             mission=*r.level;
             captures=next_level_captures;
             if(!next_level_script_path.empty())script_path=next_level_script_path;
@@ -21185,6 +21192,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         }
         break;
         }   // the level loop
+        lan_net=nullptr;
         if(frontend_app)frontend_app->release_network_level();
         return 0;
     }catch(const std::exception& e){
