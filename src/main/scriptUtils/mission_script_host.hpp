@@ -1287,10 +1287,12 @@ public:
     void set_global_timer(std::function<void(float seconds, const std::string* label_key)> start) {
         global_timer_ = std::move(start);
     }
-    // game::SetPersonalTimer 002677d0 -> 00267860(gobj, seconds, 0) for the local player's GOBJ (its controller
-    // +58 answers virtual +54 and its byte +14 is set): 00244ee0(*004ffc2c +6ac, seconds + hud +6dc, null).
-    // `start` runs that HUD timer; without it the call is deferred (Checkpoint 132zf4).
-    void set_personal_timer(std::function<void(float seconds)> start) { personal_timer_ = std::move(start); }
+    // game::SetPersonalTimer 002677d0 -> 00267860(gobj, seconds, 0): a local player starts HUD +6ac, a remote
+    // player receives cNetLocalTimerMsg, and an object without an active player network controller is a no-op.
+    // The live hook classifies the GOBJ and performs that action; without it the call is deferred.
+    void set_personal_timer(std::function<void(Word object, float seconds)> start) {
+        personal_timer_ = std::move(start);
+    }
     // game::PlayXA(name) 0045ed80 -> 0045edb0(name, 0) and PlayXA(name, string) 0045ed40 -> 0045edb0(name,
     // argument 1's word) (registered by 004d7e20 at 0x004d7e68 / 0x004d7ea0): with *004ffc2c and its game
     // screen +6a4, 0045ce10(gs, name, a2, 1): the subtitle and its voice 0045ceec (checkpoint 132hud4); 0045ce10
@@ -1434,7 +1436,7 @@ private:
     GameScreenInteract* game_screen_interact_{};
     GameSoundManager* game_sound_{};
     std::function<void(float, const std::string*)> global_timer_;
-    std::function<void(float)> personal_timer_;
+    std::function<void(Word, float)> personal_timer_;
     std::function<void(const std::string&, const std::optional<std::string>&)> play_xa_;
     std::function<void(const ChooseMenuCall&)> choose_menu_;
     std::function<bool(const std::string&)> agent_objective_complete_;

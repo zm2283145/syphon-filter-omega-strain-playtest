@@ -7545,6 +7545,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::unique_ptr<audio::Mixer> sound_mixer;std::unique_ptr<SoundIopHost> sound_host;std::unique_ptr<GameSoundManager> game_sound;
         std::unique_ptr<audio::WavWriter> sound_wav;double sound_carry=0;std::vector<std::int16_t> sound_pcm;
         std::unique_ptr<audio::Device> sound_device;
+        std::uint32_t sound_player_id=0;
+        std::function<void(float)> start_personal_timer;
 #ifdef __vita__
         // Port-only (132vs1, research/VITA.md "Audio"): the level's mix on the app's sound pump (the audio core, pulled
         // by the output) as the play host's front end has it; gameSound reaches the host through the pump's lock.
@@ -8953,7 +8955,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // The owners are the play world's objects; the port's owner word is the object id (+c, the
                 // actor's (category << 16) | index), so 00150c60's *(owner + c) is the id while the actor is
                 // hosted. The player is roster record 0 (actor 0); NPCs, level-loaded or spawned, are figures.
-                const auto sound_player_id=[&roster]{
+                sound_player_id=[&roster]{
                     for(const auto& e:roster)if(e.record==0)return e.actor_id;
                     throw std::runtime_error("gameSound: no roster entry for the player");}();
                 sound_host->multiplayer_hook=[lan_net]{return lan_net!=nullptr;};
@@ -10373,14 +10375,28 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     <<(key?", label "+*key+" -> "+(label?"\""+*label+"\"":std::string("(null)")):std::string())<<", clock "<<mission_clock_6dc
                     <<" -> end "<<end<<" (00245560"<<(t->fields.timer_6c4.value?"; drawn in GAMEGUI value_timer)\n":"; no timer widgets, nothing drawn)\n");
             });
-            // Checkpoint 132zf4: game::SetPersonalTimer's 00267860 for the local player: 00244ee0(+6ac, seconds +
-            // +6dc, null) (hud_update_timers' +6ac; its expiry is timer_message(2, 1)).
-            mission_host->set_personal_timer([t=timer_host.get(),&mission_clock_6dc](float seconds){
+            // Checkpoint 132zf4 / A9: 00267860 starts +6ac for the local player, sends cNetLocalTimerMsg inner ID 19
+            // to a remote player, and does nothing for a GOBJ without an active player network controller.
+            start_personal_timer=[t=timer_host.get(),&mission_clock_6dc](float seconds){
                 t->fields.clock_6dc=mission_clock_6dc;
                 const float end=seconds+t->fields.clock_6dc;
                 hud_timer_start(t->fields.timer_6ac,end,nullptr,*t);
                 std::cout<<"SetPersonalTimer at frame "<<t->frame<<": HUD timer +6ac "<<seconds<<" s, clock "<<mission_clock_6dc
                     <<" -> end "<<end<<" (00267860 -> 00244ee0"<<(t->fields.timer_6ac.value?"; drawn in GAMEGUI value_timer)\n":"; no timer widgets, nothing drawn)\n");
+            };
+            mission_host->set_personal_timer([&](Word object,float seconds){
+                if(object==sound_player_id){
+                    start_personal_timer(seconds);
+                    return;
+                }
+                if(lan_net)for(const auto& remote:lan_remotes)
+                    if(!remote.gone&&remote.key&&remote.figure&&remote.figure->actor_id==object){
+                        lan_net->send_personal_timer(static_cast<std::uint16_t>(remote.peer),remote.key,seconds);
+                        std::cout<<"LAN SetPersonalTimer routed to client "<<remote.peer<<" for actor "<<object
+                            <<": "<<seconds<<" s\n";
+                        return;
+                    }
+                std::cout<<"SetPersonalTimer ignored for non-player GOBJ "<<object<<" (00267860: no active player controller)\n";
             });
             // Checkpoint 132f6: with the loadout screen the level load runs only 003e20a0 (init::Init); 003e1a20's
             // init::ClientStartLevel / init::StartLevel wait for the state-0x12 done path after its Accept (00168bac).
@@ -13975,6 +13991,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
+                    for(const auto& timer:lan_net->take_personal_timers()){
+                        if(timer.localization_key!=-1)
+                            throw std::runtime_error("002679f0: labeled cNetLocalTimerMsg is not exposed by the two-argument script native");
+                        start_personal_timer(timer.seconds);
+                        std::cout<<"LAN SetPersonalTimer received from client "<<timer.origin<<" for local key 0x"
+                            <<std::hex<<timer.target_key<<std::dec<<" at frame "<<frame<<": "<<timer.seconds<<" s\n";
+                    }
                     for(const auto& sound:lan_net->take_player_sounds()){
                         if(!game_sound)throw std::runtime_error("0020edd0/0020e8b0: player sound received without gameSound");
                         if(sound.type!=5||sound.priority!=0||sound.owner_key!=0||

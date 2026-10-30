@@ -317,6 +317,21 @@ public:
     std::vector<RemoteGlobalTimer> take_global_timers();
     std::uint32_t global_timers_sent() const { return global_timers_sent_; }
     std::uint32_t global_timers_received() const { return global_timers_received_; }
+    // 00267860 / 00269880 / 002679f0: cNetLocalTimerMsg is generic cNetMsg
+    // inner ID 19. Its addressed header names the target player's NetMap key;
+    // the eight-byte body is the relative float duration and localization index.
+    struct RemotePersonalTimer {
+        std::uint16_t origin{};
+        float seconds{};
+        std::int32_t localization_key{-1};
+        std::uint32_t timestamp{};
+        std::uint32_t target_key{};
+    };
+    void send_personal_timer(std::uint16_t recipient, std::uint32_t target_key, float seconds,
+                             std::int32_t localization_key = -1);
+    std::vector<RemotePersonalTimer> take_personal_timers();
+    std::uint32_t personal_timers_sent() const { return personal_timers_sent_; }
+    std::uint32_t personal_timers_received() const { return personal_timers_received_; }
     struct RemotePlayerSound {
         std::uint16_t origin = 0;
         bool stop = false;
@@ -806,6 +821,8 @@ private:
     std::uint32_t agent_updates_sent_ = 0, agent_updates_received_ = 0;
     std::vector<RemoteGlobalTimer> global_timers_;
     std::uint32_t global_timers_sent_ = 0, global_timers_received_ = 0;
+    std::vector<RemotePersonalTimer> personal_timers_;
+    std::uint32_t personal_timers_sent_ = 0, personal_timers_received_ = 0;
     std::uint32_t receive_generic_message(std::uint32_t origin, std::uint32_t data);
     std::vector<RemotePlayerSound> player_sounds_;
     std::uint32_t player_sounds_sent_ = 0, player_sounds_received_ = 0;

@@ -104,6 +104,7 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // boot image's next ID is 33; those static constructors are outside this
     // network core.
     m.write(0x4f7dc8, 4, 16);
+    m.write(0x4f8588, 4, 19);
     m.write(0x4ea0a0, 4, 32);
     m.write(0x5061d8, 4, 33);
     m.write(dme::kState, 1, 6);
@@ -512,6 +513,41 @@ std::vector<LanNetCore::RemoteGlobalTimer> LanNetCore::take_global_timers() {
     return out;
 }
 
+void LanNetCore::send_personal_timer(std::uint16_t recipient, std::uint32_t target_key, float seconds,
+                                    std::int32_t localization_key) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN personal timer send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto type = m.read(0x5061c8);
+    const auto id = m.read(0x4f8588);
+    if (!type || id != 19) unhosted(0x267860, "the cNetLocalTimerMsg registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, target_key);
+        m.write(packet + 8, 2, 8);
+        m.write(packet + 0xa, 2, id);
+        m.write(packet + 0xc, 4, std::bit_cast<std::uint32_t>(seconds));
+        m.write(packet + 0x10, 4, static_cast<std::uint32_t>(localization_key));
+        if (call(m, 0x3fad50, {type, 20, packet, recipient, 0x40U})) ++personal_timers_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemotePersonalTimer> LanNetCore::take_personal_timers() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN personal timer access during background load pump; defer until stop_load_pump");
+    std::vector<RemotePersonalTimer> out;
+    out.swap(personal_timers_);
+    return out;
+}
+
 void LanNetCore::send_player_sound(std::uint16_t recipient, bool stop, std::int32_t type, std::string_view name,
                                   std::int32_t priority, std::uint32_t owner_key, std::uint8_t flags) {
     if (pump_.joinable())
@@ -672,6 +708,18 @@ std::uint32_t LanNetCore::receive_generic_message(std::uint32_t origin, std::uin
                 }
                 global_timers_.push_back(std::move(timer));
                 ++global_timers_received_;
+            } else if (id == static_cast<std::int32_t>(m.read(0x4f8588))) {
+                if (len != 8) unhosted(0x2679f0, "an invalid cNetLocalTimerMsg payload size");
+                RemotePersonalTimer timer;
+                timer.origin = static_cast<std::uint16_t>(origin);
+                timer.seconds = std::bit_cast<float>(m.read(data + 0xc));
+                timer.localization_key = static_cast<std::int32_t>(m.read(data + 0x10));
+                timer.timestamp = m.read(data) >> 2;
+                timer.target_key = m.read(data + 4);
+                if (timer.target_key != local_player_key())
+                    unhosted(0x2679f0, "a cNetLocalTimerMsg for a non-local NetMap key");
+                personal_timers_.push_back(timer);
+                ++personal_timers_received_;
             } else {
                 unhosted(0x2822f0, "an unsupported generic cNetMsg inner ID");
             }
@@ -2538,6 +2586,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     objective_actives_.clear();
     agent_updates_.clear();
     global_timers_.clear();
+    personal_timers_.clear();
     player_sounds_.clear();
     end_levels_.clear();
     (void)dme_->take_backpacks();

@@ -1940,22 +1940,19 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
     // game::SetPersonalTimer 002677d0 (Checkpoint 132zf4): 003cc820(GOBJ) (identity), then 00267860(gobj,
     // f12 seconds, a1 0). With the GOBJ's controller +58 answering its virtual +54 and its byte +14 set (the
     // local player): 00244ee0(*004ffc2c +6ac, seconds + hud +6dc, null label: "" 0x4a7218); with byte +14 clear
-    // a message 004f8580 (+20 = 0x40, +24 = 8) to the GOBJ (multiplayer); without the controller nothing. The
-    // +6ac expiry is timer_message(2, 1):
+    // a cNetLocalTimerMsg 004f8580 (+20 = 0x40, +24 = 8) to a remote player; without an active player controller
+    // it does nothing. The +6ac expiry is timer_message(2, 1):
     // the player's TimerExpiredMsg with IsPersonal 1 (SEWER OnTimerExpiredMsg).
     if (name == "game::SetPersonalTimer") {
         require_signature(script, function, 4, {"object:GOBJ", "primitive:2"});
         const auto* object = std::get_if<RuntimeObjectHandle>(&arguments.at(0));
         if (!object || object->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*object))
             throw std::runtime_error("game::SetPersonalTimer without a live GOBJ");
-        if (object->id != objects_.player)
-            throw std::runtime_error("unhosted(0x00267860): game::SetPersonalTimer on a GOBJ other than the local player (" +
-                                     std::to_string(object->id) + "): its controller +58 virtual +54 is not hosted");
         if (!personal_timer_) {
             applied = false;
             return std::nullopt;
         }
-        personal_timer_(std::bit_cast<float>(number(arguments.at(1))));
+        personal_timer_(object->id, std::bit_cast<float>(number(arguments.at(1))));
         return std::nullopt;
     }
     // ITEM_INVENTORY.md. 00470200 -> 00470450 registers a row; the player
