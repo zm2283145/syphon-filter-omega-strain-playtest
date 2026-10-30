@@ -7416,6 +7416,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::function<bool()> prompt_map_toggle;std::function<void()> prompt_map_sticks;
         std::array<std::array<float,2>,2> map_sticks_raw{};
         std::optional<SimulationScriptWorld> script_world;std::optional<HudObject> hud_object;HudBlips hud_blips;std::size_t hud_objective_events=0;std::map<std::uint32_t,std::uint32_t> hud_objective_serials;std::uint32_t hud_objective_serial_next=PlayGuiHost::objective_serial_base;HudMatrix hud_marker_m{};std::function<RootVector(std::size_t)> gob_position_e4;std::function<std::optional<CombatHostObject>(std::int32_t)> host_object_by_id;bool hud_waypoint_selected=false;bool hud_map_marker_shown=false;int hud_waypoint_shown=-1;bool hud_release_noted=false;std::size_t hud_blips_logged=0;std::unique_ptr<GuiDecorAssets> gui_assets;std::optional<GameScreenInteract> game_screen_interact;unsigned hud_frame=0,headshot_popup_frame=0;std::unique_ptr<MissionScriptHost> mission_host;ScriptFrameClock script_clock;
+        // The background loading pump exclusively owns LanNetCore's memory.
+        // Replay objective construction/configuration in order after it stops,
+        // before the in-level barrier, just like the generator network tails.
+        bool objective_network_ready=false;
+        std::vector<std::function<void()>> objective_network_load_calls;
+        const auto objective_network_call=[&](std::function<void()> call){
+            if(objective_network_ready)call();
+            else objective_network_load_calls.push_back(std::move(call));
+        };
         // Checkpoint 132pt1 (port-only, coop_partner.hpp coop_level_tasks): an objective is open for the Level tasks list while it is
         // not destroyed and not decided (ObjectiveStage status 0), shown on the HUD or not yet (TORONTO1's laptop, objective 3, is
         // created at the level start and shown only once the water main, its partner task, is turned); its name is its own menu
@@ -8393,6 +8402,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // Keep the authority across the loadout's delayed start_level_entries call as well.
             if(lan_net)mission_host->set_network_context(lan_net->memory().read(dme::kNetworkGame,1)!=0,
                 lan_net->memory().read(dme::kHostRole,1)!=0);
+            if(lan_net)mission_host->objectives().set_network_services({
+                [&](Word id){objective_network_call([&,id]{lan_net->register_objective(id);});},
+                [&](Word id){objective_network_call([&,id]{lan_net->unregister_objective(id);});},
+                [&](Word id,bool success){objective_network_call([&,id,success]{lan_net->send_objective_outcome(id,success);});},
+                [&](Word id,bool active){objective_network_call([&,id,active]{lan_net->send_objective_active(id,active);});},
+                lan_net->memory().read(dme::kHostRole,1)!=0});
             if(const auto* set=omega::mods::active();set&&set->has_data())
                 for(const auto& [name,value]:omega::mods::tohit_overrides(*set))
                     mission_host->to_hit().set_field(name,Word{std::bit_cast<std::uint32_t>(value)});   // 132md16: [tohit]
@@ -12556,6 +12571,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         };
         if(lan_net&&!lan_net->level_loaded()){
             const double pumped=lan_net->stop_load_pump();
+            for(auto& call:objective_network_load_calls)call();
+            objective_network_load_calls.clear();
+            objective_network_ready=true;
             struct PlayNetLevel final:LevelLoadHost{
                 std::function<void()> generators;   // 132ln5h11: the generators' network constructor parts
                 std::uint32_t call(LevelLoadMemory&,std::uint32_t address,std::initializer_list<std::uint32_t>)override{
@@ -14904,7 +14922,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         <<", at ("<<p[0]<<", "<<p[1]<<", "<<p[2]<<")\n";
                 }
                 OMEGA_ZONE_LAP(step_laps,"sim.input");
-                if(mission_host){ProfileScope scope(prof,FrameProfile::script);mission_host->pump(script_clock.delta(elapsed));}
+                if(mission_host){
+                    ProfileScope scope(prof,FrameProfile::script);
+                    if(lan_net)for(const auto& activation:lan_net->take_objective_actives()){
+                        const bool applied=mission_host->receive_objective_active(activation.local_script_id,activation.active);
+                        std::cout<<"LAN objective "<<activation.local_script_id<<" key 0x"<<std::hex<<activation.network_key<<std::dec
+                                 <<(activation.active?" activated":" deactivated")<<" at frame "<<frame
+                                 <<(applied?" (received, no echo)":" (deleted before queue delivery)")<<"\n";
+                    }
+                    if(lan_net)for(const auto& outcome:lan_net->take_objective_outcomes()){
+                        const bool applied=mission_host->receive_objective_outcome(outcome.local_script_id,outcome.success);
+                        std::cout<<"LAN objective "<<outcome.local_script_id<<" key 0x"<<std::hex<<outcome.network_key<<std::dec
+                                 <<(outcome.success?" succeeded":" failed")<<" at frame "<<frame
+                                 <<(applied?" (received, no echo)":" (deleted before queue delivery)")<<"\n";
+                    }
+                    mission_host->pump(script_clock.delta(elapsed));
+                }
                 OMEGA_ZONE_LAP(step_laps,"sim.mission_script");
                 sound_step();
                 // The blast damage events run in the event pump; the DamageMsgs their 003ccb00 queued to host

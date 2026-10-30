@@ -36,6 +36,10 @@ struct ObjectiveOutcome {
 // this function does not deliver them or perform progression-key updates.
 ObjectiveOutcome apply_objective_outcome(ObjectiveStage& stage, std::uint32_t id,
     bool success, const std::optional<std::string>& text, ObjectiveOutcomeContext context);
+// 00228e10's received action 0/1 calls the objective itself (00228dc0 /
+// 00228d50), not the manager wrapper: status + notice, no threshold/actor cue.
+ObjectiveOutcome apply_received_objective_outcome(ObjectiveStage& stage, std::uint32_t id,
+    bool success, const std::optional<std::string>& text);
 void write_objective_outcome(std::ostream& out, const ObjectiveOutcome& outcome);
 
 }

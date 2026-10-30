@@ -36,6 +36,7 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
                                         if (function == dme::kSyncCallback) dme_sync_callback_00429c00(m, arg);
                                         else if (function == dme::kClientJoinedGame) dme_remote_client_joined_003faab0(m, *this, arg);
                                         else if (function == 0x429920) call(m, 0x429920, {arg});
+                                        else if (function == 0x2d7620) receive_objective_message(arg);
                                         else unhosted(function, "a DME callback that is not ported");
                                     },
                                     [this](LevelLoadMemory& m, std::uint32_t address, std::initializer_list<std::uint32_t> args) {
@@ -72,6 +73,19 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4a4a68, 4, 0x4a4ab0);
     m.write(0x4a4a70, 4, 0x4a4ad0);
     m.write(0x4a4a78, 4, 0x4a4af0);
+    // 004d3600: MSGGAME_NET_OBJECTIVE_MESSAGE's class name is distinct from the action class.
+    // Only pointer identity is used here; this port address stands in for its rodata string.
+    m.write(0x51f0b0, 4, 0x4de4f0);
+    m.write(0x4de4f0 + 0x10, 4, 0x2d7580);
+    // SFOLib's ActivateMsg and DeactivateMsg class-name pointers and pack slots.
+    m.write(0x572188, 4, 0x4e0e60);
+    m.write(0x572198, 4, 0x4e0e80);
+    m.write(0x4e0e60 + 0x10, 4, 0x428cd0);
+    m.write(0x4e0e80 + 0x10, 4, 0x429150);
+    // Both Objective vtables use cSystem_SendCreated at +0x1c. The matched
+    // 0012ed00 simply returns 1, so 003fa940 creates no objective snapshot.
+    m.write(0x4db790 + 0x1c, 4, 0x12ed00);
+    m.write(0x4db7d0 + 0x1c, 4, 0x12ed00);
     m.write(0x4ffc04, 4, kGuiApp);  // PORT-ONLY: the GUI app pointer (the front end's), read only for nonzero
     // The session state LanSession's host / join leave in place of 0042a870 / 00429790 (see the header).
     m.write(dme::kNetworkGame, 1, 1);
@@ -84,6 +98,15 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     call(m, 0x165bc0, {});
     if (!m.read(dme::kMessagesReady, 1)) throw std::runtime_error("LanNetCore: 00165bc0 did not register the network messages");
     m.write(dme::kState, 1, 6);
+    // 00227ed0: the objective manager constructor consumes category 0xF6's first key.
+    // Its NetObj registration precedes every objective constructor on each console.
+    objective_counter_ = 1;
+    m.write(kObjectiveManager, 4, 0x4db790);
+    m.write(kObjectiveManager + 0xc, 4, 0x00f60001);
+    m.write(kObjectiveManager + 0x10, 4, 0x00f60001);
+    // cSystem_ctor enables the manager; 00227ed0 clears it on a client.
+    m.write(kObjectiveManager + 0x14, 1, transport_.is_host() ? 1 : 0);
+    call(m, 0x3fb650, {0x00f60001, transport_.is_host() ? transport_.local_index() : session_host(), kObjectiveManager});
     // 132ln5f: the .data the character send 00185a30 reads: the default weapon list 0x0048a2f8 (twelve 0xff bytes)
     // and the player vtable 0x004da690's +0x1c (00185a30 itself).
     for (std::uint32_t k = 0; k < 12; k += 4) m.write(0x48a2f8 + k, 4, 0xffffffffU);
@@ -226,6 +249,211 @@ void LanNetCore::bind_backpack(std::uint32_t id, std::uint16_t owner, std::uint3
 void LanNetCore::send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
                                std::uint16_t recipient) {
     dme_->send_backpack(type, owner, id, target, recipient);
+}
+
+void LanNetCore::require_objective_main_thread() const {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN objective access during background load pump; defer until stop_load_pump");
+}
+
+void LanNetCore::register_objective(std::uint32_t local_script_id) {
+    require_objective_main_thread();
+    if (!local_script_id) unhosted(0x229900, "an objective with script ID zero");
+    if (objective_bindings_.contains(local_script_id))
+        unhosted(0x229900, "an objective registered twice (" + std::to_string(local_script_id) + ")");
+    // 0040c240: one category counter, manager first, then each objective constructor.
+    // The original wraps and searches visible GOBJs; this bounded port arena cannot
+    // host that many, so fail explicitly before inventing a wrap search.
+    if (objective_counter_ == 0xffffU) unhosted(0x40c240, "objective network key counter wrapped");
+    ++objective_counter_;
+    const auto key = 0x00f60000U | objective_counter_;
+    const auto block = next_objective_block_;
+    if (block + 0x40 > kNpcBlocks) unhosted(0x229900, "more objectives than the port's blocks hold");
+    next_objective_block_ += 0x40;
+    auto& m = memory_;
+    for (std::uint32_t k = 0; k < 0x40; k += 4) m.write(block + k, 4, 0);
+    m.write(block, 4, 0x4db7d0);
+    m.write(block + 0xc, 4, key);
+    m.write(block + 0x10, 4, key);
+    // cSystem_ctor enables the objective; 00229900 clears it on a client.
+    m.write(block + 0x14, 1, transport_.is_host() ? 1 : 0);
+    // 00229900 calls Activate before assigning the key, then explicitly
+    // clears active on a client. No constructor activation packet is sent.
+    m.write(block + 0x25, 1, transport_.is_host() ? 1 : 0);
+    // cNetObj_AddSystem (00229900) is represented by the existing NetMap object slot.
+    // NetObjId: a client binds to the peer-to-peer host, not its local slot.
+    call(m, 0x3fb650, {key, transport_.is_host() ? transport_.local_index() : session_host(), block});
+    objective_bindings_.emplace(local_script_id, std::pair{key, block});
+}
+
+void LanNetCore::unregister_objective(std::uint32_t local_script_id) {
+    require_objective_main_thread();
+    const auto found = objective_bindings_.find(local_script_id);
+    if (found == objective_bindings_.end()) return;
+    if (const auto object = call(memory_, 0x3fbb10, {found->second.first}))
+        memory_.write(object, 4, 0); // stale packets now fail the original's receiver lookup
+    objective_bindings_.erase(found);
+}
+
+std::uint32_t LanNetCore::objective_network_key(std::uint32_t local_script_id) const {
+    require_objective_main_thread();
+    const auto found = objective_bindings_.find(local_script_id);
+    return found == objective_bindings_.end() ? 0U : found->second.first;
+}
+
+void LanNetCore::send_objective_outcome(std::uint32_t local_script_id, bool success) {
+    require_objective_main_thread();
+    const auto found = objective_bindings_.find(local_script_id);
+    if (found == objective_bindings_.end())
+        unhosted(0x225fa0, "an outcome for an objective without a category-0xF6 key");
+    if (!memory_.read(dme::kNetworkGame, 1)) return;
+    auto& m = memory_;
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto msg = sp_ + 0x40;
+    try {
+        // 00225fa0 / 002260f0: cNetObjectiveMsg, action 1 / 0, stage -1,
+        // flags 4 (all peers), reliable ordered 0x40. The source path uses 003c9420
+        // to clone and then reaches the same 003fb020 generic sender; the port has
+        // no local objective message queue, so the script host applies locally.
+        call(m, 0x3c9e30, {msg, 0x51f0b0});
+        m.write(msg, 4, 0x4de4f0);
+        m.write(msg + 0x1c, 4, 0x40);
+        m.write(msg + 0x20, 1, 4);
+        m.write(msg + 0x2c, 1, success ? 1 : 0);
+        m.write(msg + 0x30, 4, 0xffffffffU);
+        // Succeed/Fail leave +0x34/name uninitialised in the original stack
+        // object. They are unused for actions 0/1; use deterministic padding.
+        m.write(msg + 0x34, 4, 0);
+        for (std::uint32_t i = 0; i < 16; ++i) m.write(msg + 0x38 + i, 1, 0);
+        call(m, 0x3fb020, {found->second.first, msg, 0xffffffffU, 0xffffffffU});
+        m.write(msg, 4, 0x4de4f0);
+        call(m, 0x3c9d60, {msg, 0});
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+    if (m.read(dme::kInLevel, 1)) ++objective_sent_;
+}
+
+std::uint32_t LanNetCore::receive_objective_message(std::uint32_t data) {
+    auto& m = memory_;
+    if (!m.read(dme::kBusy, 1)) m.write(dme::kBusy, 1, 1);
+    try {
+        if (m.read(dme::kInLevel, 1)) {
+            // 002d7620 copies every field into cNetObjectiveMsg before looking up
+            // d->id in cNetObj. The port queues the outcome for the script host.
+            const auto key = m.read(data + 4);
+            if (const auto object = call(m, 0x3fbb10, {key}); object && m.read(object)) {
+                const auto found = std::find_if(objective_bindings_.begin(), objective_bindings_.end(),
+                                                [key](const auto& b) { return b.second.first == key; });
+                if (found == objective_bindings_.end())
+                    unhosted(0x225cf0, "a known objective-manager packet action outside the implemented outcome bridge");
+                const auto action = m.read(data + 8, 1);
+                if (action != 0 && action != 1)
+                    unhosted(0x228e10, "an objective message action outside Fail / Succeed");
+                RemoteObjectiveOutcome outcome;
+                outcome.local_script_id = found->first;
+                outcome.success = action == 1;
+                outcome.network_key = key;
+                outcome.timestamp = m.read(data);
+                outcome.stage = static_cast<std::int32_t>(m.read(data + 0xc));
+                outcome.value = static_cast<std::int32_t>(m.read(data + 0x10));
+                for (std::uint32_t i = 0; i < 16; ++i)
+                    outcome.name[i] = static_cast<std::uint8_t>(m.read(data + 0x14 + i, 1));
+                objective_outcomes_.push_back(outcome);
+                ++objective_received_;
+            }
+        }
+    } catch (...) {
+        m.write(dme::kBusy, 1, 0);
+        throw;
+    }
+    m.write(dme::kBusy, 1, 0);
+    return 0x24;
+}
+
+std::vector<LanNetCore::RemoteObjectiveOutcome> LanNetCore::take_objective_outcomes() {
+    require_objective_main_thread();
+    std::vector<RemoteObjectiveOutcome> out;
+    out.swap(objective_outcomes_);
+    return out;
+}
+
+bool LanNetCore::objective_network_active(std::uint32_t local_script_id) const {
+    require_objective_main_thread();
+    const auto found = objective_bindings_.find(local_script_id);
+    if (found == objective_bindings_.end()) return false;
+    return memory_.read(found->second.second + 0x25, 1) != 0;
+}
+
+void LanNetCore::send_objective_active(std::uint32_t local_script_id, bool active) {
+    require_objective_main_thread();
+    const auto found = objective_bindings_.find(local_script_id);
+    if (found == objective_bindings_.end())
+        unhosted(active ? 0x229000 : 0x229100, "an activation for an objective without a category-0xF6 key");
+    auto& m = memory_;
+    m.write(found->second.second + 0x25, 1, active ? 1 : 0);
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto msg = sp_ + 0x40;
+    try {
+        call(m, 0x3c9e30, {msg, active ? 0x572188U : 0x572198U});
+        m.write(msg, 4, active ? 0x4e0e60U : 0x4e0e80U);
+        if (active) {
+            // 00229000: the value -1 makes 00428ef0 call only the object's
+            // virtual +0x18; +0x28 is state 0, +0x1c reliable ordered.
+            m.write(msg + 0x1c, 4, 0x40);
+            m.write(msg + 0x24, 4, 0xffffffffU);
+            m.write(msg + 0x28, 1, 0);
+        }
+        // 00428fd0 / 00429200 both swap the target key and message, then
+        // call the generic sender with -1 for recipient and mode.
+        call(m, 0x3fb020, {found->second.first, msg, 0xffffffffU, 0xffffffffU});
+        m.write(msg, 4, active ? 0x4e0e60U : 0x4e0e80U);
+        call(m, 0x3c9d60, {msg, 0});
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+    ++objective_active_sent_;
+}
+
+std::uint32_t LanNetCore::receive_objective_active(std::uint32_t data, bool active) {
+    auto& m = memory_;
+    if (!m.read(dme::kBusy, 1)) m.write(dme::kBusy, 1, 1);
+    try {
+        if (m.read(dme::kInLevel, 1)) {
+            const auto key = m.read(data + 4);
+            if (const auto object = call(m, 0x3fbb10, {key}); object && m.read(object)) {
+                const auto found = std::find_if(objective_bindings_.begin(), objective_bindings_.end(),
+                                                [key](const auto& b) { return b.second.first == key; });
+                if (found == objective_bindings_.end())
+                    unhosted(active ? 0x428ef0 : 0x429190, "a known non-objective activation packet");
+                if (active && static_cast<std::int32_t>(m.read(data + 8)) != -1)
+                    unhosted(0x428ef0, "an objective activation packet with ownership transfer");
+                // 00428ef0 / 00429190 call objective virtuals +0x18 / +0x1c.
+                m.write(found->second.second + 0x25, 1, active ? 1 : 0);
+                objective_actives_.push_back({found->first, active, key});
+                ++objective_active_received_;
+            }
+        }
+    } catch (...) {
+        m.write(dme::kBusy, 1, 0);
+        throw;
+    }
+    m.write(dme::kBusy, 1, 0);
+    return active ? 0x10U : 8U;
+}
+
+std::vector<LanNetCore::RemoteObjectiveActive> LanNetCore::take_objective_actives() {
+    require_objective_main_thread();
+    std::vector<RemoteObjectiveActive> out;
+    out.swap(objective_actives_);
+    return out;
 }
 
 // 132ln5h11 (the header).
@@ -1380,6 +1608,46 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         if (r == 0x28) ++moves_sent_;
         return r;
     }
+    case 0x428cd0: {  // cActivateMsg_Pack (00428cd0), 0x10-byte packet
+        if (arg(5) < 8 || !arg(6)) return 0xffffffffU;
+        const auto transport = static_cast<std::int32_t>(m.read(arg(0) + 0x18));
+        m.write(arg(6), 4, call(m, 0x42b1a0, {0}) << 2 |
+                                 (transport < 4 ? static_cast<std::uint32_t>(transport) & 3U : 3U));
+        m.write(arg(6) + 4, 4, arg(1));
+        if (arg(5) <= 0x10) return 0xffffffffU;
+        m.write(arg(6) + 8, 4, m.read(arg(0) + 0x24));
+        m.write(arg(6) + 0xc, 1, m.read(arg(0) + 0x28, 1));
+        if (arg(2)) m.write(arg(2), 4, m.read(0x572190));
+        return arg(2) ? 0x10U : 0xffffffffU;
+    }
+    case 0x429150: {  // cDeactivateMsg_Pack (00429150), only the header
+        if (arg(5) < 8 || !arg(6) || !arg(2)) return 0xffffffffU;
+        const auto transport = static_cast<std::int32_t>(m.read(arg(0) + 0x18));
+        m.write(arg(6), 4, call(m, 0x42b1a0, {0}) << 2 |
+                                 (transport < 4 ? static_cast<std::uint32_t>(transport) & 3U : 3U));
+        m.write(arg(6) + 4, 4, arg(1));
+        m.write(arg(2), 4, m.read(0x5721a0));
+        return 8;
+    }
+    case 0x2d7580: {  // cNetObjectiveMsg_Pack: header, action, stage/value, and 16-byte name
+        if (arg(5) < 0x24 || !arg(6)) return 0xffffffffU;
+        // Event_PackHeader (003c9ca0): clock/transport word and target NetObj key.
+        const auto transport = static_cast<std::int32_t>(m.read(arg(0) + 0x18));
+        m.write(arg(6), 4, call(m, 0x42b1a0, {0}) << 2 |
+                                 (transport < 4 ? static_cast<std::uint32_t>(transport) & 3U : 3U));
+        m.write(arg(6) + 4, 4, arg(1));
+        m.write(arg(6) + 8, 1, m.read(arg(0) + 0x2c, 1));
+        m.write(arg(6) + 0xc, 4, m.read(arg(0) + 0x30));
+        m.write(arg(6) + 0x10, 4, m.read(arg(0) + 0x34));
+        bool ended = false;
+        for (std::uint32_t i = 0; i < 16; ++i) {
+            const auto byte = ended ? 0U : m.read(arg(0) + 0x38 + i, 1);
+            m.write(arg(6) + 0x14 + i, 1, byte);
+            if (byte == 0) ended = true;  // 002d7580 calls strncpy(..., 0x10)
+        }
+        if (arg(2)) m.write(arg(2), 4, m.read(0x51f0b8));
+        return arg(2) ? 0x24U : 0xffffffffU;
+    }
     case 0x3fb020: { Frame f(sp_, 0x600); return net_message_send_003fb020(m, *this, arg(0), arg(1), arg(2), arg(3), f.caller); }
     case 0x3c9350: { Frame f(sp_); return actor_message_deliver_003c9350(m, *this, arg(0), arg(1), arg(2), f.caller); }
     case 0x3e4430: {
@@ -1387,6 +1655,10 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         ++moves_received_;
         return move_message_receive_003e4430(m, *this, arg(3), f.caller);
     }
+    case 0x2d7620: return receive_objective_message(arg(3));
+    case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
+    case 0x428ef0: return receive_objective_active(arg(3), true);
+    case 0x429190: return receive_objective_active(arg(3), false);
     case 0x1770f0: { Frame f(sp_); player_net_update_001770f0(m, *this, arg(0), arg(1), f.caller); return 0; }
     case 0x184cc0: return 1;  // the actor's virtual +0x18: networked
     case 0x132280: {  // PORT-ONLY: the player's placement (virtual +0xf4) into a0: the component's +0x10 matrix

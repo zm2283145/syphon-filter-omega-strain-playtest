@@ -119,6 +119,20 @@ public:
     // game::IsMultiplayer's answer for the next calls (solo: false). Port-only
     // (132ob8): the mission host sets it around an allow-listed call site.
     void set_multiplayer_answer(bool multiplayer) { host_.set_multiplayer(multiplayer); }
+    // Network keys are owned by the network host and are NOT script IDs.
+    // Install before AddObjective; absent in solo/CPU-partner simulation.
+    struct NetworkServices {
+        std::function<void(Word)> created;
+        std::function<void(Word)> destroyed;
+        std::function<void(Word, bool)> send_outcome;
+        std::function<void(Word, bool)> send_active;
+        bool host_role = true;
+    };
+    void set_network_services(NetworkServices services);
+    // Queue delivery to an objective that is still alive. No outbound send or
+    // manager-level voice cues. False if it was destroyed before delivery.
+    bool receive_network_outcome(Word objective, bool success);
+    bool receive_network_active(Word objective, bool active);
     // game::AddObjective(key) (0032e150 -> 0032e180 -> 00333b90 on the local
     // agent; solo sends no event). false (not applied) without the inputs.
     bool add_progression(const Script& script, const Function& function, const std::vector<Value>& arguments);
@@ -224,6 +238,8 @@ public:
     };
     const std::vector<StringLookup>& string_lookups() const { return string_lookups_; }
 private:
+    std::optional<std::string> outcome_text(Word objective, bool success) const;
+    std::optional<NetworkServices> network_services_;
     MissionObjectiveInputs inputs_;
     std::vector<StringLookup> string_lookups_;
     ObjectiveHost host_{false};
@@ -909,6 +925,8 @@ public:
     // before the authoritative StartLevel entry. Set before Init so every script stage
     // sees the session mode. Objective/state replication is a separate network path.
     void set_network_context(bool multiplayer, bool host);
+    bool receive_objective_outcome(Word objective, bool success);
+    bool receive_objective_active(Word objective, bool active);
     // 003d9d30 on the NPC's AI component holder (+18, allocated {0, 0, -1} by
     // 002300d0 when the actor's +3264 name is set): an empty name binds
     // nothing; otherwise 003e15b0 finds the script type by name (003e0be0,

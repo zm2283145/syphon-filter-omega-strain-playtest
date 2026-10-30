@@ -44,6 +44,14 @@ ObjectiveOutcome apply_objective_outcome(ObjectiveStage& stage, std::uint32_t id
     return result;
 }
 
+ObjectiveOutcome apply_received_objective_outcome(ObjectiveStage& stage, std::uint32_t id,
+    bool success, const std::optional<std::string>& text) {
+    ObjectiveOutcome result;
+    if (text) result.effects.emplace_back(ObjectiveNotification{*text});
+    stage.set_outcome(id, success);
+    return result;
+}
+
 void write_objective_outcome(std::ostream& out, const ObjectiveOutcome& outcome) {
     out << "{\"total\":" << outcome.total << ",\"completed\":" << outcome.completed
         << ",\"threshold\":";

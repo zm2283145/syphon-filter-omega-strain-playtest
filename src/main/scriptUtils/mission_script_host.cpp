@@ -347,6 +347,37 @@ bool ObjectiveNatives::remove_hud_objective(Word object) {
 
 // Signatures and semantics were checked against the original callbacks; text
 // and type configuration stays in ObjectiveHost, status in ObjectiveStage.
+void ObjectiveNatives::set_network_services(NetworkServices services) {
+    if (network_services_ || !stage_.records().empty())
+        throw std::runtime_error("Objective network services must be installed once before objective creation");
+    if (!services.created || !services.destroyed || !services.send_outcome || !services.send_active)
+        throw std::runtime_error("Incomplete objective network services");
+    network_services_ = std::move(services);
+}
+
+std::optional<std::string> ObjectiveNatives::outcome_text(Word objective, bool success) const {
+    const auto& properties = host_.objectives.at(objective - 1).properties;
+    const auto found = properties.find(success ? "SetCompleteString" : "SetFailString");
+    if (found == properties.end()) return std::nullopt;
+    if (found->second.size() != 1 || !std::holds_alternative<std::string>(found->second[0]))
+        throw std::runtime_error("Objective outcome text is not a string");
+    return std::get<std::string>(found->second[0]);
+}
+
+bool ObjectiveNatives::receive_network_outcome(Word objective, bool success) {
+    if (!stage_.find(objective)) return false;
+    outcomes_.push_back({objective, success,
+        apply_received_objective_outcome(stage_, objective, success, outcome_text(objective, success))});
+    return true;
+}
+
+bool ObjectiveNatives::receive_network_active(Word objective, bool active) {
+    if (!stage_.find(objective)) return false;
+    // 00428ef0 / 00429190 dispatch NetActivate / NetDeactivate: no send.
+    stage_.set_active(objective, active);
+    return true;
+}
+
 std::optional<Value> ObjectiveNatives::call(const Script& script, const Function& function,
                                             const std::vector<Value>& arguments) {
     const auto& name = function.name;
@@ -362,14 +393,9 @@ std::optional<Value> ObjectiveNatives::call(const Script& script, const Function
         if (handle->id == 0) return std::nullopt;
         if (!stage_.find(handle->id)) throw std::runtime_error(name + " on an objective outside the stage");
         const bool success = name == "Succeed";
-        const auto& properties = host_.objectives.at(handle->id - 1).properties;
-        const auto found = properties.find(success ? "SetCompleteString" : "SetFailString");
-        std::optional<std::string> text;
-        if (found != properties.end()) {
-            if (found->second.size() != 1 || !std::holds_alternative<std::string>(found->second[0]))
-                throw std::runtime_error(name + ": objective text is not a string");
-            text = std::get<std::string>(found->second[0]);
-        }
+        const auto text = outcome_text(handle->id, success);
+        // 00225fa0 / 002260f0 send before applying the local objective outcome.
+        if (network_services_) network_services_->send_outcome(handle->id, success);
         outcomes_.push_back({handle->id, success,
                              apply_objective_outcome(stage_, handle->id, success, text, {inputs_.mission_cue, false})});
         // 00245400(threshold, 1) at 00226088 / 002260b0: the mission cue line, delivered at once.
@@ -413,6 +439,9 @@ std::optional<Value> ObjectiveNatives::call(const Script& script, const Function
         // The markers are not touched: 00229180 frees only the strings.
         require_signature(script, function, 4, {"object:ObjectiveMan"});
         manager(arguments[0]);
+        if (network_services_)
+            for (const auto& objective : stage_.records())
+                if (!objective.destroyed) network_services_->destroyed(objective.id);
         stage_.destroy_all();
         for (auto& objective : host_.objectives) objective.destroyed = true;
         return std::nullopt;
@@ -429,7 +458,11 @@ std::optional<Value> ObjectiveNatives::call(const Script& script, const Function
         if (!handle || handle->kind != ObjectHandle::Kind::objective)
             throw std::runtime_error("Objective activation expected a typed objective");
         // A typed null is the interpreter's skipped call, not a native dereference.
-        if (handle->id != 0) stage_.set_active(handle->id, name == "Activate");
+        if (handle->id != 0) {
+            const bool active = name == "Activate";
+            stage_.set_active(handle->id, active);
+            if (network_services_) network_services_->send_active(handle->id, active);
+        }
         return std::nullopt;
     }
     if (name == "AddObjective") {
@@ -440,6 +473,12 @@ std::optional<Value> ObjectiveNatives::call(const Script& script, const Function
         const auto result = host_.call(script, function, arguments);
         if (!result || !std::holds_alternative<Word>(*result) || std::get<Word>(*result) != id)
             throw std::runtime_error("Stage/configuration objective identities diverged");
+        if (network_services_) {
+            // 00229900: Activate occurs before registration; the client then
+            // clears +25. No constructor packet or synthetic join snapshot.
+            if (!network_services_->host_role) stage_.set_active(id, false);
+            network_services_->created(id);
+        }
         return result;
     }
     if (name == "game::GetString") {
@@ -569,6 +608,25 @@ void MissionScriptHost::set_network_context(bool multiplayer, bool host) {
     multiplayer_ = multiplayer;
     objectives_.set_multiplayer_answer(multiplayer);
     run_host_start_level_ = !multiplayer || host;
+}
+
+bool MissionScriptHost::receive_objective_outcome(Word objective, bool success) {
+    if (!started_ || !multiplayer_)
+        throw std::runtime_error("Network objective delivery requires a started multiplayer mission");
+    const auto before = objectives_.outcomes().size();
+    if (!objectives_.receive_network_outcome(objective, success)) return false;
+    if (hud_object_) {
+        for (const auto& effect : objectives_.outcomes().at(before).outcome.effects)
+            if (const auto* note = std::get_if<ObjectiveNotification>(&effect)) hud_object_->notice(note->text);
+        objectives_.mark_notice_delivered(before);
+    }
+    return true;
+}
+
+bool MissionScriptHost::receive_objective_active(Word objective, bool active) {
+    if (!started_ || !multiplayer_)
+        throw std::runtime_error("Network objective delivery requires a started multiplayer mission");
+    return objectives_.receive_network_active(objective, active);
 }
 
 void MissionScriptHost::start_level_entries() {

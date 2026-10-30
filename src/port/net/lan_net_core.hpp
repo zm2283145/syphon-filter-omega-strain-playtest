@@ -275,6 +275,38 @@ public:
     bool hosting() const { return transport_.is_host(); }
     std::uint16_t session_host() const { return 0; }
 
+    // Objective.c's category-0xF6 NetObj registrations. The manager consumes the first key;
+    // objective script IDs only index this port-side binding and never appear on the wire.
+    struct RemoteObjectiveOutcome {
+        std::uint32_t local_script_id = 0;
+        bool success = false;
+        std::uint32_t network_key = 0;
+        std::uint32_t timestamp = 0;
+        std::int32_t stage = -1;
+        std::int32_t value = -1;
+        std::array<std::uint8_t, 16> name{};
+    };
+    void register_objective(std::uint32_t local_script_id);
+    void unregister_objective(std::uint32_t local_script_id);
+    std::uint32_t objective_network_key(std::uint32_t local_script_id) const;
+    void send_objective_outcome(std::uint32_t local_script_id, bool success);
+    std::vector<RemoteObjectiveOutcome> take_objective_outcomes();
+    std::uint32_t objective_messages_sent() const { return objective_sent_; }
+    std::uint32_t objective_messages_received() const { return objective_received_; }
+    // 00229000 / 00229100 send the separate cActivateMsg / cDeactivateMsg
+    // after changing the local active byte. Their receivers call objective
+    // virtuals +0x18 / +0x1c without re-sending.
+    struct RemoteObjectiveActive {
+        std::uint32_t local_script_id = 0;
+        bool active = false;
+        std::uint32_t network_key = 0;
+    };
+    void send_objective_active(std::uint32_t local_script_id, bool active);
+    bool objective_network_active(std::uint32_t local_script_id) const;
+    std::vector<RemoteObjectiveActive> take_objective_actives();
+    std::uint32_t objective_actives_sent() const { return objective_active_sent_; }
+    std::uint32_t objective_actives_received() const { return objective_active_received_; }
+
     // 132ln5h11 (research/NET_INLEVEL.md 4.21): the level's generators (cGenerator 004db680) in the network game.
     // register_generator gives a generator (its population id: the block's +0xc and +0x10, the key everywhere) a
     // PORT-ONLY block in this memory (vtable: +0x28 the remote enable 00220e60, +0x2c the remote disable 00220d00,
@@ -670,6 +702,17 @@ private:
     std::vector<RemoteDeath> remote_deaths_;
     std::uint32_t deaths_sent_ = 0, deaths_received_ = 0;
     std::uint32_t despawns_sent_ = 0, despawns_received_ = 0;
+    static constexpr std::uint32_t kObjectiveManager = 0x1d46000, kObjectiveBlocks = 0x1d46100;
+    std::uint32_t objective_counter_ = 0;
+    std::uint32_t next_objective_block_ = kObjectiveBlocks;
+    std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> objective_bindings_; // script id -> (key, block)
+    std::vector<RemoteObjectiveOutcome> objective_outcomes_;
+    std::uint32_t objective_sent_ = 0, objective_received_ = 0;
+    std::uint32_t receive_objective_message(std::uint32_t data);
+    void require_objective_main_thread() const;
+    std::vector<RemoteObjectiveActive> objective_actives_;
+    std::uint32_t objective_active_sent_ = 0, objective_active_received_ = 0;
+    std::uint32_t receive_objective_active(std::uint32_t data, bool active);
 };
 
 }  // namespace omega::lan
