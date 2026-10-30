@@ -107,6 +107,15 @@ void hud_map_release(HudMap& map, std::int32_t player_id);
 // false: an empty list, or fewer than two records with a highlight (return 0, no commit).
 bool hud_map_prev(HudMap& map, const std::vector<std::uint32_t>& records);
 bool hud_map_next(HudMap& map, const std::vector<std::uint32_t>& records);
+// 0026c8d0: the first kind-1/2 marker immediately becomes the objective target.
+// 0026c830: removing the selected marker advances in the pre-removal +24 list,
+// or clears it when that list contains only the marker. True means the caller
+// must run cMap_ObjectiveSelected (0026c570) after updating the highlight.
+bool hud_map_target_added(HudMap& map, std::uint32_t id, std::uint32_t kind);
+bool hud_map_target_removed(HudMap& map, std::uint32_t id, std::uint32_t kind,
+                            const std::vector<std::uint32_t>& records_before);
+// 0026c7e0: the next HUD update selects the list head if no target remains.
+bool hud_map_update_selection(HudMap& map, const std::vector<std::uint32_t>& records);
 // 0026c570's tail (0x0026c694..0x0026c7c0): zoom = min(max(atan(s (20 + |player - target|) w / h / |ff084|), zoom),
 // pi / 4) for the camera record *00538c60's viewport (+8 w, +c h).
 void hud_map_fit(HudMap& map, const RootVector& target, const RootVector& player, const std::array<float, 4>& viewport);

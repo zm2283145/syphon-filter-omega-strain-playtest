@@ -110,6 +110,13 @@ public:
     // frame in every state but the level load: 00472080 and the DME update 00429d30 on this thread, then the lobby
     // keep-alive 002ca580), then 003fbec0 (states 0xf / 0x13 with 005721c8 set).
     void net_frame();
+    // Retail 00134640 stops its cleanup update thread at teardown tail;
+    // frontend InitGui starts the lobby's DME thread again with MP off.
+    // Call once per GUI
+    // frame with elapsed milliseconds while this core owns the transport;
+    // LanSession may pump discovery only, never transport.poll({}). The next
+    // 001693f0 reuses this thread and 0042a1b0 stops it.
+    void retained_frontend_tick(double milliseconds);
     // 132ln5h7: 00169360 on the network memory (run_gameplay_state reads and clears the quit request 0x005721d8
     // before its quit dialog 002cae30); quit_text() is the dialog's message, the C string at 0x005721e0.
     bool take_quit_request();

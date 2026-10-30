@@ -294,6 +294,35 @@ bool hud_map_next(HudMap& map, const std::vector<std::uint32_t>& records) {
     return true;
 }
 
+bool hud_map_target_added(HudMap& map, std::uint32_t id, std::uint32_t kind) {
+    if ((kind != 1 && kind != 2) || map.highlight_3c) return false;
+    map.highlight_3c = id;
+    return true;
+}
+
+bool hud_map_target_removed(HudMap& map, std::uint32_t id, std::uint32_t kind,
+                            const std::vector<std::uint32_t>& records_before) {
+    if ((kind != 1 && kind != 2) || map.highlight_3c != id) return false;
+    // cMap_TargetRemoved sees the manager's +24 count before Remove erases the
+    // record. With exactly one entry it clears the target; otherwise it calls
+    // cMap_NextObjective, which selects the following entry and wraps.
+    if (records_before.size() == 1 && records_before.front() == id) {
+        map.highlight_3c.reset();
+        return true;
+    }
+    if (std::find(records_before.begin(), records_before.end(), id) != records_before.end() &&
+        hud_map_next(map, records_before))
+        return true;
+    // A marker added and removed before +24 was rebuilt is not in the list.
+    // The target manager still clears its +3c pointer after the listener.
+    map.highlight_3c.reset();
+    return false;
+}
+
+bool hud_map_update_selection(HudMap& map, const std::vector<std::uint32_t>& records) {
+    return !map.highlight_3c && hud_map_next(map, records);
+}
+
 void hud_map_fit(HudMap& map, const RootVector& target, const RootVector& player, const std::array<float, 4>& viewport) {
     // 0x0026c6c4: player - target (vsub.xyzw), its xyz length.
     const RootVector d{player[0] - target[0], player[1] - target[1], player[2] - target[2], player[3] - target[3]};

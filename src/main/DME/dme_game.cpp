@@ -2195,8 +2195,15 @@ void npc_info_created_00433160(LevelLoadMemory& m, LevelLoadHost& host, std::uin
             w8(m, kNpcReleased, 1);
             const auto host_side = r8(m, kNetworkGame) ? r8(m, kHostRole) : 1U;
             if (!host_side && old) {
+                // 00433218..004332d4: retain the joiner's local entry after the
+                // replicated block replaces slot 0. The two calls use the same
+                // stack key and original owner byte before the old block is freed.
                 w32(m, 0x582a68, r32(m, 0x582a68) + 1);
-                throw std::runtime_error("00433160: the joiner's NPC info block 0 merge (00435f30 / 00434600) is not ported");
+                w32(m, sp + 0x50, r32(m, old));
+                host.call(m, 0x435f30, {sp + 0x54, sp + 0x50, r8(m, old + 4)});
+                host.call(m, 0x434600, {sp + 0x54, sp + 0x50, r8(m, old + 4)});
+                heap_free(m, host, old, kNpcSource, 0x620);
+                w32(m, 0x582a68, r32(m, 0x582a68) - 1);
             }
             w32(m, kNpcHandles, handle);
         } else {

@@ -610,6 +610,12 @@ const char* const copy_fragment_glsl =
     "layout(location = 0) out vec4 colour;\n"
     "void main() { colour = texelFetch(source, ivec2(gl_FragCoord.xy) + offset, 0); }\n";
 
+// Bypass the PS5 driver's fast colour-clear path with the same raster path as GUI/copy draws.
+const char* const clear_fragment_glsl =
+    "uniform vec4 clear_colour;\n"
+    "layout(location = 0) out vec4 colour;\n"
+    "void main() { colour = clear_colour; }\n";
+
 void GLAPIENTRY debug_message(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei, const GLchar* message,
                               const void*) {
     static std::atomic<unsigned> count{0};
@@ -625,6 +631,7 @@ void GLAPIENTRY debug_message(GLenum source, GLenum type, GLuint id, GLenum seve
 // state_cache (execute skips unchanged state and uniforms), partial_updates (a partial "whole" buffer update writes
 // only its range), overlay_reuse (SceneRenderer keeps unchanged overlay images). All default to 1.
 std::atomic<bool> g_copy_draw{true}, g_barrier{true}, g_state_cache{true}, g_partial_updates{true};
+std::atomic<bool> g_clear_draw{true};
 
 // 132ps5d hw2 (hw1: still about 520 textures made per 10 s): textures made per creation label since the last stats line.
 std::mutex g_label_mutex;
@@ -730,6 +737,9 @@ private:
     // 132ps5d: copy_region as a draw (texelFetch of the source), see copy_region.
     GLuint copy_program_ = 0;
     GLint copy_source_ = -1, copy_offset_ = -1;
+    GLuint clear_program_ = 0;
+    GLint clear_colour_ = -1;
+    unsigned clear_readbacks_ = 0;
     // 132ps5d (hw11 stalls): commands slower than 50 ms are logged with what they did.
     unsigned slow_logged_ = 0;
     int swap_interval_ = -1;
@@ -931,6 +941,20 @@ void Impl::init() {
     present_image_ = glGetUniformLocation(present_program_, "image");
     glUseProgram(present_program_);
     if (present_image_ >= 0) glUniform1i(present_image_, 0);
+    {
+        bool clear_ok = false;
+        const GLuint fragment = compile_glsl(GL_FRAGMENT_SHADER, g_glsl_version + clear_fragment_glsl,
+                                             "clear_fs", clear_ok);
+        clear_program_ = glCreateProgram();
+        glAttachShader(clear_program_, vs);
+        glAttachShader(clear_program_, fragment);
+        glLinkProgram(clear_program_);
+        GLint clear_linked = 0;
+        glGetProgramiv(clear_program_, GL_LINK_STATUS, &clear_linked);
+        if (!clear_ok || !clear_linked) throw std::runtime_error("gfx gl46: the colour-clear program did not build");
+        clear_colour_ = glGetUniformLocation(clear_program_, "clear_colour");
+        if (clear_colour_ < 0) throw std::runtime_error("gfx gl46: the colour-clear uniform is missing");
+    }
     {
         bool cv = false, cf = false;
         const GLuint v = compile_glsl(GL_VERTEX_SHADER, g_glsl_version + present_vertex_glsl, "copy_vs", cv);
@@ -1203,7 +1227,7 @@ void Impl::poll_options() {
     const long long mtime = stat("ps5_gl.txt", &st) == 0 ? (long long)st.st_mtime : -2;
     if (mtime == options_mtime_) return;
     options_mtime_ = mtime;
-    bool copy_draw = true, barrier = true, state_cache = true, partial = true, reuse = true;
+    bool copy_draw = true, barrier = true, state_cache = true, partial = true, reuse = true, clear_draw = true;
     if (FILE* f = std::fopen("ps5_gl.txt", "r")) {
         char line[128];
         while (std::fgets(line, sizeof line, f)) {
@@ -1212,6 +1236,7 @@ void Impl::poll_options() {
             if (std::sscanf(line, " %63[a-z_] = %d", name, &value) != 2) continue;
             const std::string n = name;
             if (n == "copy_draw") copy_draw = value != 0;
+            else if (n == "clear_draw") clear_draw = value != 0;
             else if (n == "barrier") barrier = value != 0;
             else if (n == "state_cache") state_cache = value != 0;
             else if (n == "partial_updates") partial = value != 0;
@@ -1220,14 +1245,15 @@ void Impl::poll_options() {
         std::fclose(f);
     }
     g_copy_draw = copy_draw;
+    g_clear_draw = clear_draw;
     g_barrier = barrier;
     g_state_cache = state_cache;
     g_partial_updates = partial;
     omega_ps5_overlay_reuse = reuse ? 1 : 0;
     invalidate_state();
-    logf("ps5_gl.txt %s: copy_draw %d, barrier %d, state_cache %d, partial_updates %d, overlay_reuse %d",
+    logf("ps5_gl.txt %s: copy_draw %d, barrier %d, state_cache %d, partial_updates %d, overlay_reuse %d, clear_draw %d",
          mtime >= 0 ? "read" : "absent (defaults)", int(copy_draw), int(barrier), int(state_cache), int(partial),
-         int(reuse));
+         int(reuse), int(clear_draw));
 }
 
 // 132ps5d: true when the GL calls since the last check ran out of memory (other errors are logged as check_errors does).
@@ -1567,13 +1593,30 @@ void Impl::execute(Pipeline& p) {
 
 // ---- clears, copies, updates, read-back ----
 
-// A colour clear (D3D ClearRenderTargetView / ClearView): glClear inside a scissor of the layer's rows.
+// A colour clear (D3D ClearRenderTargetView / ClearView). Work around retained menu pixels on PS5:
+// a texture barrier alone did not resolve them. Bypass the fast clear with a solid triangle, scissored to the requested
+// layer/rect; no texture sampling, depth writes, blending or CPU uploads. clear_draw=0 retains an A/B path.
 void Impl::clear_colour(const GlTexture* target, unsigned layer, const float rgba[4], const Rect* rects, unsigned count) {
     invalidate_state();  // 132ps5d: GL state set outside execute (cache_)
     if (!target) return;
     bind_target(target, nullptr);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glClearColor(rgba[0], rgba[1], rgba[2], rgba[3]);
+    const bool draw_clear = g_clear_draw.load(std::memory_order_relaxed);
+    if (draw_clear) {
+        glViewport(0, 0, GLsizei(target->desc().width), GLsizei(target->rows()));
+        glDepthRange(0.0, 1.0);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_STENCIL_TEST);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glUseProgram(clear_program_);
+        glUniform4fv(clear_colour_, 1, rgba);
+        for (unsigned k = 0; k < 8; ++k) glDisableVertexAttribArray(k);
+    } else {
+        glClearColor(rgba[0], rgba[1], rgba[2], rgba[3]);
+    }
     glEnable(GL_SCISSOR_TEST);
     const unsigned n = rects ? count : 1;
     for (unsigned k = 0; k < n; ++k) {
@@ -1586,9 +1629,20 @@ void Impl::clear_colour(const GlTexture* target, unsigned layer, const float rgb
         }
         if (right <= left || bottom <= top) continue;
         glScissor(left, top + int(layer * target->layer_rows), right - left, bottom - top);
-        glClear(GL_COLOR_BUFFER_BIT);
+        if (draw_clear) glDrawArrays(GL_TRIANGLES, 0, 3);
+        else glClear(GL_COLOR_BUFFER_BIT);
     }
     glDisable(GL_SCISSOR_TEST);
+    // Four bounded readbacks, including later menu pages. These distinguish
+    // a failed clear from stale sampling at presentation without adding a readback to every frame.
+    if (target == back.get() && !rects && clear_readbacks_ < 4 && presents >= clear_readbacks_ * 600u) {
+        ++clear_readbacks_;
+        std::uint8_t pixel[4]{};
+        glReadPixels(width / 2, height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        logf("colour clear present %llu: mode %s, requested %.3f %.3f %.3f %.3f, read %02x%02x%02x%02x",
+             static_cast<unsigned long long>(presents), draw_clear ? "draw" : "glClear",
+             rgba[0], rgba[1], rgba[2], rgba[3], pixel[0], pixel[1], pixel[2], pixel[3]);
+    }
 }
 
 void Impl::clear_depth(const GlTexture* depth, std::uint8_t flags, float value, std::uint8_t stencil) {

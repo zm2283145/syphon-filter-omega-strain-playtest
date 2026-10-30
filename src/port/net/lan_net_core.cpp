@@ -2483,6 +2483,16 @@ LanNetCore::QuitNotice LanNetCore::quit_notice() const {
     return out;
 }
 
+void LanNetCore::retained_frontend_tick(double milliseconds) {
+    if (pump_.joinable() || level_loaded_ || memory_.read(dme::kNetworkGame, 1) ||
+        memory_.read(dme::kInLevel, 1) || !lobby_)
+        throw std::logic_error("LAN retained frontend tick requires a quiescent MP-off core with a lobby");
+    if (!std::isfinite(milliseconds) || milliseconds < 0.0)
+        throw std::invalid_argument("LAN retained frontend tick requires finite nonnegative elapsed time");
+    if (!thread_alive()) call(memory_, 0x42a770, {});
+    advance_timer(milliseconds);
+}
+
 void LanNetCore::net_frame() {
     if (dme_->refused_messages() != refused_logged_) {
         log_.push_back("00305a48: " + std::to_string(dme_->refused_messages() - refused_logged_) +

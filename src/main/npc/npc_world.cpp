@@ -596,13 +596,22 @@ void NpcAiController::hit_notice_78(SoloActorSimulation& actor,std::uint64_t sou
     h.send(s);
 }
 void NpcAiController::death_notice_7c(SoloActorSimulation& actor,const ActorDeathNotice& notice){
-    if(remote_)throw std::runtime_error("NPC AI: the death notice of a remote NPC (the remote controller 0x004de2a0's virtual +7c, 002d4640) is not ported");
     if(!combat_.inventory||!combat_.database)throw std::runtime_error("NPC AI: the death notice +7c needs the combat link's inventory");
     WeaponInventory* inventory=combat_.inventory();
     if(!inventory)throw std::runtime_error("NPC AI: the death notice +7c for an actor without a combat inventory");
     WeaponInventoryHost ih;ih.player=false;ih.apply=combat_.apply;                                // an AI component's +54 answers 0
     std::vector<WeaponInventoryEvent> inventory_events;
     WeaponInventoryOps ops(*inventory,*combat_.database,ih,inventory_events);
+    if(remote_){
+        // 002d4640: remote +7c calls only cWeapon_SetAmmoNpcDeath(00142170),
+        // then cAITarget_dtor(0016dc60). The local 0014f680 script, kill
+        // statistics, corpse-list and route-reservation effects do not run.
+        if(system_.npc_ammo_pct){const auto pct=system_.npc_ammo_pct();ops.randomize_dropped_ammunition(combat_.random,pct[0],pct[1]);}
+        else ops.randomize_dropped_ammunition(combat_.random);
+        perception_clear(perception_);
+        if(combat_.inventory_changed)combat_.inventory_changed();
+        return;
+    }
     NpcDeathNoticeHost h;
     h.actor=actor.handle();
     h.actor_root={1,actor.byte_2d(),0};                                       // +2c = 1, +2e = 0 (constructor 003cf120 / 003cf130)

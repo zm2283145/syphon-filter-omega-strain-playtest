@@ -1694,7 +1694,7 @@ struct PlayGuiHost final:GuiStaticHost{
         }
     }
     // Checkpoint 132hud5: 0026c8d0, the HUD map's listener +c on the targets' list (00273890 calls it with a new
-    // marker). States 1 / 2: the highlight 00272ac0 / 00272ad0 / 0026c570 (the port adds state-0 markers only);
+    // marker). States 1 / 2 are replayed from objective events below, after their sprites are built;
     // another nonzero state: nothing. State 0 while the IAMAP root's +60 is set: Object_LookupById, and for a +54
     // object the team as 0026d940's, 002c9170(buf, team, 1) and 00242fa0(*004ffc2c, marker, buf + 1, 4, 1, 0,
     // -1.0, -1.0). In a solo game only the player answers +54, and it never has a marker.
@@ -3406,8 +3406,10 @@ struct PlayGuiOverlay{
         renderer.draw(list,scene.render_target(),scene.width(),scene.height(),view);
         OMEGA_ZONE_LAP(gui_laps,"gui.render");
         wide_menu_next=renderer.wide_backdrop();
-        // port-only (132ws): a 4:3 backdrop gets the side fill, unless (132ws5) the wide menu draw extended its art
-        if(renderer.wide_backdrop()&&(!renderer.wide_menu()||renderer.wide_edge_images()==0)){
+        // A fitted first frame can use side fill. Once the menu draws wide, its controls and background
+        // already occupy those side areas; drawing a blurred overlay afterward would cover them.
+        // The old edge-image count described mirrored copies, which wide menus no longer generate.
+        if(renderer.wide_backdrop()&&!renderer.wide_menu()){
             renderer.draw_wide_fill(scene.render_target(),scene.width(),scene.height());
             if(!wide_fill_reported)std::cout<<"Play GUI (port-only, 132ws wide): a 4:3 backdrop picture at frame "<<frame<<", the side areas filled from it\n";
             wide_fill_reported=true;
@@ -7504,7 +7506,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // hosting, and this frame's Pad_GetSticks 00369980 axes ([-127.5, 127.5] after 00369a10, y down): left, right.
         std::function<bool()> prompt_map_toggle;std::function<void()> prompt_map_sticks;
         std::array<std::array<float,2>,2> map_sticks_raw{};
-        std::optional<SimulationScriptWorld> script_world;std::optional<HudObject> hud_object;HudBlips hud_blips;std::size_t hud_objective_events=0;std::map<std::uint32_t,std::uint32_t> hud_objective_serials;std::uint32_t hud_objective_serial_next=PlayGuiHost::objective_serial_base;HudMatrix hud_marker_m{};std::function<RootVector(std::size_t)> gob_position_e4;std::function<std::optional<CombatHostObject>(std::int32_t)> host_object_by_id;bool hud_waypoint_selected=false;bool hud_map_marker_shown=false;int hud_waypoint_shown=-1;bool hud_release_noted=false;std::size_t hud_blips_logged=0;std::unique_ptr<GuiDecorAssets> gui_assets;std::optional<GameScreenInteract> game_screen_interact;unsigned hud_frame=0,headshot_popup_frame=0;std::unique_ptr<MissionScriptHost> mission_host;ScriptFrameClock script_clock;
+        std::optional<SimulationScriptWorld> script_world;std::optional<HudObject> hud_object;HudBlips hud_blips;std::size_t hud_objective_events=0;std::map<std::uint32_t,std::uint32_t> hud_objective_serials;std::vector<std::uint32_t> hud_objective_list_24;std::uint32_t hud_objective_serial_next=PlayGuiHost::objective_serial_base;HudMatrix hud_marker_m{};std::function<RootVector(std::size_t)> gob_position_e4;std::function<std::optional<CombatHostObject>(std::int32_t)> host_object_by_id;bool hud_waypoint_selected=false;bool hud_map_marker_shown=false;int hud_waypoint_shown=-1;bool hud_release_noted=false;std::size_t hud_blips_logged=0;std::unique_ptr<GuiDecorAssets> gui_assets;std::optional<GameScreenInteract> game_screen_interact;unsigned hud_frame=0,headshot_popup_frame=0;std::unique_ptr<MissionScriptHost> mission_host;ScriptFrameClock script_clock;
         // The background loading pump exclusively owns LanNetCore's memory.
         // Replay objective construction/configuration in order after it stops,
         // before the in-level barrier, just like the generator network tails.
@@ -14883,7 +14885,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 // The frame's sound: the message pump, the receiver's frame update and the mix (also in the
                 // frames the start menu pauses: 00133420 keeps the sound pump running).
-                auto sound_step=[&]{
+                auto sound_step=[&](float audio_dt){
                     if(!game_sound)return;
                     // The natives' posts (003c9420 transport 0) are delivered by this frame's message pump 003c8de0;
                     // the receiver's frame update 001c8e10 follows; then this frame's audio is mixed.
@@ -14921,7 +14923,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     sound_host->lpd_service();
                     game_sound->pump();
                     game_sound->frame();
-                    sound_carry+=static_cast<double>(step_dt)*audio::Mixer::output_rate;
+                    sound_carry+=static_cast<double>(audio_dt)*audio::Mixer::output_rate;
                     const auto mixed=static_cast<std::size_t>(sound_carry);
                     sound_carry-=static_cast<double>(mixed);
                     sound_pcm.clear();
@@ -15005,8 +15007,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             while(rt.popup_close(-1)!=0)++closed;   // 002cac80(*004ffc04, -1)
                             std::cout<<"Debrief (00134110) at frame "<<frame<<": a1 "<<a1<<", "<<popped<<" canvas screen(s) popped, "
                                      <<closed<<" popup(s) closed\n";
-                            // Port: a fixed GUI dt of 1/60 s (the original's T-clock delta / 100000) for the loop's frames.
-                            constexpr float debrief_dt=1.0F/60.0F;
+                            // 00134110 measures one T-clock delta for the GUI/motion/canvas iteration.
+                            // Use that same interval for host audio; hidden probes retain deterministic time.
+                            float debrief_dt=1.0F/60.0F;
+                            auto debrief_frame_at=std::chrono::steady_clock::now();
+                            double debrief_seconds=0.0;
                             const bool auto_advance=!script.empty()||hidden;
                             const gui::Widget* page_widget=nullptr;
                             // One pass of the loop's tail: 0037a9f0's flip of the frame (cleared; the canvas +5c when
@@ -15041,6 +15046,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                         <<" at debrief frame "<<debrief_frames<<": the session ends\n";
                                     return false;
                                 }
+                                const bool debrief_was_paused=window.application_paused();
                                 if(!wait_application_pause("during the debrief at debrief frame "+std::to_string(debrief_frames))){
                                     window_closed_during_teardown=true;
                                     running=false;
@@ -15048,6 +15054,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                         <<" the debrief at debrief frame "<<debrief_frames<<": the session ends\n";
                                     return false;
                                 }
+                                // Pause/Break may wait for minutes; the resumed frame should mix only its own duration.
+                                if(debrief_was_paused)debrief_frame_at=std::chrono::steady_clock::now();
+                                const auto debrief_now=std::chrono::steady_clock::now();
+                                debrief_dt=hidden?1.0F/60.0F:std::max(0.0F,
+                                    std::chrono::duration<float>(debrief_now-debrief_frame_at).count());
+                                debrief_frame_at=debrief_now;
                                 if(window.minimized()!=state.minimized){
                                     state.minimized=window.minimized();
                                     if(pacing)pacing->set_refresh(state.minimized?0.0:
@@ -15085,6 +15097,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     recover_display("display device lost at present (the debrief)");
                                 render_thread.end_frame(frame);   // 132mt2: the debrief frame to the render thread
                                 gui_elapsed+=double(debrief_dt);
+                                debrief_seconds+=double(debrief_dt);
                                 ++debrief_frames;
                                 return true;
                             };
@@ -15097,7 +15110,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 while(fader.duration_04!=0.0F){
                                     update_actor_fader(fader,0.05F);
                                     if(!debrief_frame(false,actor_fader_alpha(fader)))return false;
-                                    sound_step();++n;
+                                    sound_step(debrief_dt);++n;
                                 }
                                 std::cout<<"Debrief (00134110): "<<what<<" (0025e6e0 mode "<<int(mode)<<", 1.0 s at 0.05 per frame): "<<n
                                          <<" frames, alpha "<<int(actor_fader_alpha(fader))<<"\n";
@@ -15126,13 +15139,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 o.driver.read(held);
                                 o.gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
                                 if(!debrief_frame(true,0))break;
-                                sound_step();
+                                sound_step(debrief_dt);
                             }
                             if(window_closed_during_teardown){o.host.debrief=false;return;}
                             std::cout<<"Debrief (00134110): the canvas emptied after "<<debrief_frames-loop_begin<<" frames\n";
                             if(!fade(2,"fade-out")){o.host.debrief=false;return;}
                             o.host.debrief=false;
-                            std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames\n";
+                            std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames, "
+                                     <<debrief_seconds<<" s shared GUI/audio time\n";
                         };
                         const auto teardown=network_debrief?run_lan_play_level_teardown(*lan_net,*ending,actions)
                             :run_play_level_teardown(*ending,actions);
@@ -15240,7 +15254,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             const auto& snaps=combat_session->snapshot_crates();
                             std::cout<<"Loadout done path (00168bc0): 00256b40 crate snapshot list 004f7f48: "<<snaps.size()<<" INV: crate record(s)\n";
                         }
-                        sound_step();
+                        sound_step(step_dt);
                         ++frame;hud_frame=frame;gui_elapsed+=double(step_dt);
                         if(max_frames&&frame>=max_frames&&frames_hold_released(frame))running=false;
                         continue;
@@ -15261,7 +15275,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         }
                         gui_overlay_draw->gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
                         if(sim.game_end().state_50==0x14&&!native_flow&&finish_level_end())break;
-                        sound_step();
+                        sound_step(step_dt);
                         ++frame;hud_frame=frame;gui_elapsed+=double(step_dt);
                         if(max_frames&&frame>=max_frames&&frames_hold_released(frame))running=false;
                         continue;
@@ -15396,7 +15410,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                 }
                 OMEGA_ZONE_LAP(step_laps,"sim.mission_script");
-                sound_step();
+                sound_step(step_dt);
                 // The blast damage events run in the event pump; the DamageMsgs their 003ccb00 queued to host
                 // objects (003c9420 transport 0) are delivered by this frame's message pump (003c8de0).
                 OMEGA_ZONE_LAP(step_laps,"sim.sound");
@@ -19038,21 +19052,38 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                         hud_blips.apply(screen,*hud_object->radar_d0,b,hud_object->f_c0,meter_vars.danger_mag);
                                         hud_blips.set_colour(screen,serial,hud_marker_white_4ffda0);
                                         if(map_host)map_host->map_sprites.set_colour(*map_host->iamap,serial,hud_marker_white_4ffda0);
+                                        // 0026c8d0: the map listener selects the first kind-1/2 marker as soon
+                                        // as its sprites exist, independently of the later +24 list update.
+                                        if(map_host&&map_host->hud_map){
+                                            map_host->objective_serials[ev.marker.object_id]=serial;
+                                            if(hud_map_target_added(*map_host->hud_map,ev.marker.object_id,ev.marker.kind)){
+                                                map_host->map_highlight();
+                                                map_host->map_commit();
+                                            }
+                                        }
                                         std::cout<<"HUD objective marker at frame "<<frame<<": 00274750 builds record "<<id<<" (kind "
                                             <<ev.marker.kind<<") on the radar"<<(map_host?" and the map":"")<<"\n";
                                     }else{
                                         const auto s=hud_objective_serials.find(ev.marker.object_id);
                                         if(s==hud_objective_serials.end())throw std::runtime_error("00272d50: an objective record removed before it was built");
                                         if(map_host&&map_host->hud_map){
-                                            auto& m=*map_host->hud_map;
-                                            if(m.highlight_3c==ev.marker.object_id)m.highlight_3c.reset();
-                                            if(map_host->sprite_highlight==ev.marker.object_id)map_host->sprite_highlight.reset();
+                                            // 0026c830 runs before the manager erases this record from +24.
+                                            // The snapshot is advanced below, after the listener has seen it.
+                                            const bool commit=hud_map_target_removed(*map_host->hud_map,ev.marker.object_id,
+                                                                                    ev.marker.kind,hud_objective_list_24);
+                                            if(commit){map_host->map_highlight();map_host->map_commit();}
+                                            else if(map_host->sprite_highlight==ev.marker.object_id)
+                                                map_host->sprite_highlight.reset();
                                         }
+                                        if(const auto p=std::find(hud_objective_list_24.begin(),hud_objective_list_24.end(),
+                                                                  ev.marker.object_id);p!=hud_objective_list_24.end())
+                                            hud_objective_list_24.erase(p);
                                         HudSpriteEvent k;
                                         k.kind=HudSpriteEvent::Kind::kill;k.serial=s->second;k.id=id;
                                         if(map_host)map_host->map_sprites.apply(*map_host->iamap,map_host->iamap_nodes,k,hud_object->f_c0,meter_vars.danger_mag);
                                         hud_blips.apply(screen,*hud_object->radar_d0,k,hud_object->f_c0,meter_vars.danger_mag);
                                         hud_objective_serials.erase(s);
+                                        if(map_host)map_host->objective_serials.erase(ev.marker.object_id);
                                         std::cout<<"HUD objective marker at frame "<<frame<<": 00272d50 removes record "<<id<<"\n";
                                     }
                                 }
@@ -19115,7 +19146,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     std::cout<<"HUD objective markers at frame "<<frame<<": 00273b40 ends "
                                              <<before-mission_host->objectives().markers().records().size()<<" record(s) whose object is gone\n";
                                 replay_objective_markers();
+                                hud_objective_list_24=mission_host->objectives().markers().list_24();
                             }
+                        }
+                        // 0026c7e0: if a removal left the target empty, the map update selects
+                        // the head of the freshly rebuilt objective list.
+                        PlayGuiHost* update_map_host=gui_overlay_draw&&gui_overlay_draw->host.iamap?&gui_overlay_draw->host:nullptr;
+                        if(update_map_host&&update_map_host->hud_map&&
+                           hud_map_update_selection(*update_map_host->hud_map,hud_objective_list_24)){
+                            update_map_host->map_highlight();
+                            update_map_host->map_commit();
                         }
                         // 00273b40's sprite calls (00274750 builds, 003e9770 kills, 00274260's 003e7ee0 colours with
                         // the targets' +30 before this update's 00261540).

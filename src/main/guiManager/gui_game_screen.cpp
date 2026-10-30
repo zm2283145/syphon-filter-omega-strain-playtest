@@ -422,6 +422,14 @@ std::uint8_t GuiRuntime::gs_input_d420(const PadEvent& ev) {  // 0045d420
 }
 
 void GuiRuntime::gs_update_d960(float) {  // 0045d960 after 0041e3b0
+    // 0045d984..0045d9a8: the base update has already advanced the child
+    // GuiSubTitleDisplay's +54 clock. Its last line end is a strict bound;
+    // once it is earlier than the clock, hide the subtitle widget.
+    if (gs.sub_68 && (gs.sub_68->flags & flag_visible)) {
+        const auto& st = *gs.sub_68->st;
+        if (st.times.empty() || st.times.back() < st.time)
+            gs.sub_68->flags &= static_cast<std::uint16_t>(~flag_visible);
+    }
     // 0045d9b8..0045db3c: with the voice chat byte 00582b88 (written only by the network voice code), +120 is shown
     // and named after the talker 00437600(*00582cf0) (+124 shown for another player's). The port has no voice chat
     // (the byte stays 0; the port-only co-op HUD's CPU partner never talks): 0045db40 clears +120's +14 bit 2, with

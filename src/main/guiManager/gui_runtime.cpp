@@ -9505,10 +9505,15 @@ std::int32_t GuiRuntime::em_box_model(const Widget& screen, std::uint32_t callba
     } else if (callback == 0x2c21c0) {
         if (e.list_8c == 0) return 0;
         if (e.sel_108 >= static_cast<std::int32_t>(e.items.size())) return 0;
-        const auto r = host_.weapon_record(e.items.at(static_cast<std::size_t>(e.sel_108)));
+        const auto item = e.items.at(static_cast<std::size_t>(e.sel_108));
+        const auto r = host_.weapon_record(item);
         if (!r) unhosted(0x2c2218, "a null weapon record for the selected list item (+13c of null)");
         if (r->model_13c == 0 || !e.box2) return 0;
-        record = e.items.at(static_cast<std::size_t>(e.sel_108));  // the loaded model's +40a
+        // PORT-ONLY visual match to the retail loadout: ThrowingKnife's grenade-list selection has no visible
+        // preview. The retail wrapper selects its hold-7 secondary model; the later reason it draws no pixels is
+        // unproved. Keep the current box, name, ratings, HUD and gameplay model unchanged.
+        if (e.cat_84 == 4 && e.point_88 == 8 && item == 156) return 0;
+        record = item;  // the loaded model's +40a
         if (!host_.weapon_record(record)) unhosted(0x2c2248, "a null weapon record of the box model");
         return r->hold_f0 == 7 ? r->icon_11c : r->model_13c;
     } else {
