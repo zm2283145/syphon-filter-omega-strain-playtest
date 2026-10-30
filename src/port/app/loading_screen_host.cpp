@@ -16,6 +16,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #include "device_lost.hpp"
 #include "worker_pool.hpp"
@@ -282,7 +283,7 @@ void LoadingScreenHost::run() {
                 phase_ = "application paused";
                 while (window->application_paused() && !window->close_requested() &&
                        (!stop_ || (fixed_clock && frames_ < options_.capture_frame)))
-                    Sleep(16);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
                 paused_time += Clock::now() - paused_at;
                 next = Clock::now();
                 if (window->close_requested()) {
