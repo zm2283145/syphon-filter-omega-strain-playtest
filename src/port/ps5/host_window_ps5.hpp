@@ -86,6 +86,9 @@ public:
     bool focused() const { return focused_; }
     bool minimized() const { return minimized_; }
     bool close_requested() const { return close_; }
+    bool application_paused() const { return false; }
+    void set_application_paused(bool) {}
+    void toggle_application_pause() {}
     void request_close() { close_ = true; }
     void simulate_minimized(bool on) { minimized_ = on; }
     void simulate_focus(bool on) {

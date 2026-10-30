@@ -242,12 +242,13 @@ void LoadingScreenHost::run() {
         std::optional<std::int64_t> sweep_call;  // port-only diagnostic (132win5): LoadingHostOptions sweep
         std::vector<std::string> sweep_sites;
         const auto epoch = Clock::now();
+        Clock::duration paused_time{};
         std::uint64_t vblank_count = 0;  // port-only (132mt1): the fixed clock of --loading-capture-frame
         const bool fixed_clock = options_.capture_frame >= 0;
         const auto ticks = [&] {  // 10 us ticks
             if (fixed_clock) return static_cast<std::uint64_t>(vblank_count * 1001000ULL / 600ULL);
             return static_cast<std::uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count() / 10);
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch - paused_time).count() / 10);
         };
         const auto capture_path = [&] {
             char name[32];
@@ -267,9 +268,34 @@ void LoadingScreenHost::run() {
         services.font = [&](std::uint32_t h) { return assets_->font(h); };
         GuiDrawList last;
         std::int64_t drawn_frames = 0;
+        bool application_pause_shown = false;
         // --loading-capture-frame: the thread runs on until that frame is drawn, even after stop() (the level load is
         // often quicker than 30 frames).
         while (!stop_ || (fixed_clock && frames_ < options_.capture_frame)) {
+            if (window && window->application_paused()) {
+                const auto paused_at = Clock::now();
+                if (!application_pause_shown) {
+                    application_pause_shown = true;
+                    std::cout << "Loading screen: application paused at loading frame " << frames_
+                              << " (Pause/Break or the window system menu)\n";
+                }
+                phase_ = "application paused";
+                while (window->application_paused() && !window->close_requested() &&
+                       (!stop_ || (fixed_clock && frames_ < options_.capture_frame)))
+                    Sleep(16);
+                paused_time += Clock::now() - paused_at;
+                next = Clock::now();
+                if (window->close_requested()) {
+                    closed_ = true;
+                    break;
+                }
+                if (stop_ && !(fixed_clock && frames_ < options_.capture_frame)) break;
+                if (!window->application_paused()) {
+                    application_pause_shown = false;
+                    std::cout << "Loading screen: application resumed at loading frame " << frames_ << "\n";
+                }
+                continue;
+            }
             next += std::chrono::duration_cast<Clock::duration>(vblank);
             phase_ = "sleep to the vblank";
             pacer.sleep_until(next);

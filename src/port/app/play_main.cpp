@@ -4347,7 +4347,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "uses local/port_settings.txt; scripted runs only an explicit --port-settings). --no-coop-partner forces it off.\n"
                     "--fullscreen (port-only) starts the game window in borderless fullscreen on its monitor; Alt+Enter or F11 toggle\n"
                     "it at any time, as does the front end's Options > Video \"FULLSCREEN\" row, and the choice is kept as fullscreen=1\n"
-                    "in the port settings file. The one game window and D3D11 device stay from the boot movies to the exit\n"
+                    "in the port settings file. Pause/Break or the window system menu pauses/resumes the entire application without\n"
+                    "changing focus, minimise, resize, fullscreen or the game's Start-menu pause.\n"
+                    "The one game window and D3D11 device stay from the boot movies to the exit\n"
                     "(host_window.hpp; hidden runs keep theirs invisible, without the hotkeys). The 2D layers (front end, movies,\n"
                     "loading screens, the HUD and menus) keep the PS2 frame's 4:3 shape with black bars on any window shape; the\n"
                     "3D scene fills the window. A lost display device (driver reset, display-mode change) is re-created in play\n"
@@ -13598,18 +13600,46 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // silenced (the voice at volume 0, the mixing goes on: no desync, no gap; background_audio=1 keeps it), the
         // keyboard / controller / mouse input is ignored (state.focused) and the motors are stopped.
         bool focus_shown=state.focused;
-        const auto focus_change=[&](std::uint64_t at){
-            focus_shown=state.focused;
+        const auto apply_window_mute=[&](bool application_paused){
             bool background=false;
             try{background=background_audio_setting(settings_store->read());}
             catch(const std::exception& e){std::cerr<<"Port settings (port-only): "<<e.what()<<"; background_audio=0\n";}
-            if(sound_device)sound_device->set_background_muted(!focus_shown&&!background);
+            if(sound_device)sound_device->set_background_muted(application_paused||(!focus_shown&&!background));
+            return background;
+        };
+        const auto focus_change=[&](std::uint64_t at){
+            focus_shown=state.focused;
+            const bool background=apply_window_mute(false);
             if(!focus_shown&&session_gamepad&&(script.empty()||pad_simulation))session_gamepad->set_vibration(false,0);
             std::cout<<"Host window (port-only): focus "<<(focus_shown?"back":"lost")<<" at frame "<<at
                 <<(focus_shown?": the sound and the input are back"
                    :background?": the sound kept (background_audio=1), the input ignored; the game keeps running"
                    :": the sound silenced, the input ignored; the game keeps running")
                 <<(sound_device?"":" (no real-time sound output)")<<"\n";
+        };
+        bool application_pause_shown=false;
+        const auto wait_application_pause=[&](const std::string& where){
+            if(!window.application_paused())return true;
+            if(!application_pause_shown){
+                application_pause_shown=true;
+                render_thread.drain();
+                window.want_mouse_capture(false);
+                if(session_gamepad)session_gamepad->set_vibration(false,0);
+                apply_window_mute(true);
+                std::cout<<"Host window (port-only): application paused "<<where
+                    <<" (Pause/Break or the window system menu; focus, minimise, resize and the game's Start pause stay separate)\n";
+            }
+            while(window.application_paused()&&!window.close_requested())Sleep(16);
+            if(window.close_requested())return false;
+            application_pause_shown=false;
+            const auto resumed=std::chrono::steady_clock::now();
+            last=resumed;accumulator=0;measured_dt_last.reset();lan_timer_at=resumed;pacing_refresh_at={};
+            if(pacing)pacing->start(resumed);
+            if(!hidden)state.focused=window.focused();
+            if(window.focus_simulated())state.focused=window.focused();
+            if(state.focused!=focus_shown)focus_change(frame);else apply_window_mute(false);
+            std::cout<<"Host window (port-only): application resumed "<<where<<"\n";
+            return true;
         };
         // The camera object *(00159560(004ffc14)): the player camera's +50 node (00133190) unless a takedown camera
         // (G +d4, 00131540) or a PushCurrent CAM: record (00583878) is the published one. Its +60 is the horizontal
@@ -13671,6 +13701,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     <<": the session ends\n";
             }
             if(!running)break;
+            if(!wait_application_pause("at frame "+std::to_string(frame))){
+                running=false;
+                std::cout<<"Host window (port-only): the game window closed while the application was paused at frame "<<frame
+                    <<": the session ends\n";
+                break;
+            }
             // Checkpoint 132ln5e (port-only): a LAN network game's per-frame update 003fbec0 (00167c40 runs it in states 0xf
             // / 0x13 with 005721c8 set) on the native DME.cc game side. The TIM0 events that wake the DME thread
             // (00429d30 every ~100 ms) are the real time since the last frame, played here at the frame boundary on
@@ -18347,6 +18383,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 running=false;
                                 std::cout<<"Host window (port-only): the game window's close (Alt+F4 / the close button) during the debrief"
                                     <<" at debrief frame "<<debrief_frames<<": the session ends\n";
+                                return false;
+                            }
+                            if(!wait_application_pause("during the debrief at debrief frame "+std::to_string(debrief_frames))){
+                                window_closed_during_teardown=true;
+                                running=false;
+                                std::cout<<"Host window (port-only): the game window closed while the application was paused during"
+                                    <<" the debrief at debrief frame "<<debrief_frames<<": the session ends\n";
                                 return false;
                             }
                             if(window.minimized()!=state.minimized){

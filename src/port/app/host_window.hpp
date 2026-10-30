@@ -21,6 +21,8 @@
 // PS2 frame (front end, movies, loading screen, the play's flat GUI) is drawn into the centred 4:3 rectangle
 // of the client (render/frame_fit.hpp; black pillarbox / letterbox bars), never stretched; the play's 3D
 // scene fills the client at its own aspect (Hor+, fixed vertical field of view).
+// Issue #3: Pause/Break and a checked item in the window system menu manually pause the hosted application.
+// This is independent of focus loss, minimise, resize, fullscreen and the game's own Start-menu pause.
 //
 // HiDPI (port-only, checkpoint 132win14): the process is per-monitor DPI aware (v2, enable_per_monitor_dpi_awareness
 // at the top of wmain), so every size and position here is in physical pixels and the swap chain matches the
@@ -163,6 +165,7 @@ public:
     bool focused() const { return focused_; }
     bool minimized() const { return minimized_; }
     bool close_requested() const { return close_; }
+    bool application_paused() const { return application_paused_; }
     // Port-only diagnostic (checkpoint 132win5, --test-minimize): reports the window minimised as WM_SIZE's
     // SIZE_MINIMIZED does (a hidden window cannot be minimised); off restores it (size serial + 1, as WM_SIZE).
     void simulate_minimized(bool on);
@@ -195,6 +198,10 @@ public:
     void hide();
     bool visible() const;
     void set_title(const std::wstring& title);
+    // Port-only (issue #3): a manual application/emulation pause, independent of focus, minimise, resize,
+    // fullscreen and the game's Start-menu pause. Pause/Break and the window system menu toggle it.
+    void set_application_paused(bool paused);
+    void toggle_application_pause() { set_application_paused(!application_paused_); }
     // The outer size (windowed; leaves fullscreen first).
     void set_outer_size(int width, int height);
     WindowRect rect() const;
@@ -282,7 +289,7 @@ private:
     HRESULT lost_reason_ = S_OK;
 
     std::atomic<bool> focused_{false}, minimized_{false}, close_{false}, fullscreen_{false}, hotkeys_{true}, keep_hidden_{false},
-        focus_simulated_{false}, dpi_test_{false};
+        focus_simulated_{false}, dpi_test_{false}, application_paused_{false};
     std::atomic<unsigned> dpi_{96};
     bool log_shutdown_ = false;
     std::atomic<bool> mouse_wanted_{false}, mouse_captured_{false};

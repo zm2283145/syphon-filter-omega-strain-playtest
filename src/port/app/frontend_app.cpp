@@ -515,6 +515,7 @@ struct FrontendApp::Impl {
     // Port-only (checkpoint 132win12): focus loss. The front end keeps stepping (no focus pause in the PS2 game);
     // its sound is silenced (background_audio=1 keeps it), its input and the motors are off while unfocused.
     bool was_focused = true;
+    bool was_application_paused = false;
     bool window_focused() const;
     void follow_focus();
     void apply_focus_mute();
@@ -1729,7 +1730,7 @@ void FrontendApp::Impl::apply_focus_mute() {
     } catch (const std::exception& e) {
         std::cerr << "Front end: port settings: " << e.what() << "; background_audio=0\n";
     }
-    sound->set_background_muted(!was_focused && !background);
+    sound->set_background_muted((host && host->application_paused()) || (!was_focused && !background));
     for (const auto& line : sound->take_log()) std::cout << "Front end: " << line << " at frame " << session->frames() << "\n";
 }
 
@@ -1819,6 +1820,26 @@ FrontendResult FrontendApp::Impl::loop() {
             window_tests();
             follow_minimized();
             follow_focus();
+            if (host->application_paused()) {
+                if (!was_application_paused) {
+                    was_application_paused = true;
+                    finish_present();
+                    if (gamepad) gamepad->set_vibration(false, 0);
+                    apply_focus_mute();
+                    std::cout << "Front end: application paused at front-end frame " << s.frames()
+                              << " (Pause/Break or the window system menu; focus, minimise and resize remain independent)\n";
+                }
+                while (host->application_paused() && !host->close_requested()) Sleep(16);
+                if (host->close_requested()) continue;
+                was_application_paused = false;
+                const auto resumed = std::chrono::steady_clock::now();
+                last = resumed;
+                accumulator = 0;
+                refresh_at = resumed + std::chrono::seconds(2);
+                if (pacing) pacing->start(resumed);
+                apply_focus_mute();
+                std::cout << "Front end: application resumed at front-end frame " << s.frames() << "\n";
+            }
         }
         if (!script.empty()) {
             if (script_index >= script.size()) break;

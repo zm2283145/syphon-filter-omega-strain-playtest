@@ -27,6 +27,7 @@ namespace {
 
 constexpr UINT run_message = WM_APP + 0x132;
 constexpr UINT capture_message = WM_APP + 0x133;   // re-evaluates the mouse capture (132win7)
+constexpr UINT pause_command = 0x1320;
 constexpr const wchar_t* window_class = L"OmegaGameWindow";
 
 // Port-only (132win3): a device loss throws DeviceLost (device_lost.hpp); the owner of the frame recovers.
@@ -141,6 +142,10 @@ HostWindow::HostWindow(const HostWindowOptions& options) {
                                     CW_USEDEFAULT, first.outer_width, first.outer_height, nullptr,
                                     nullptr, instance, this);
             if (!hwnd_) throw std::runtime_error("Cannot create the game window");
+            if (HMENU menu = GetSystemMenu(hwnd_, FALSE)) {
+                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                AppendMenuW(menu, MF_STRING, pause_command, L"Pause application\tPause/Break");
+            }
             // Checkpoint 132win14 (port-only HiDPI): the size at the DPI of the monitor the window was placed on (the
             // window is not shown yet). An unaware process's window is always 96 DPI, so nothing changes there.
             dpi_ = options.dpi_override ? options.dpi_override : std::max(96u, GetDpiForWindow(hwnd_));
@@ -560,7 +565,32 @@ void HostWindow::hide() {
 bool HostWindow::visible() const { return IsWindowVisible(hwnd_) != FALSE; }
 
 void HostWindow::set_title(const std::wstring& title) {
-    on_ui([this, &title] { SetWindowTextW(hwnd_, title.c_str()); });
+    on_ui([this, &title] {
+        title_ = title;
+        refresh_title();
+    });
+}
+
+void HostWindow::set_application_paused(bool paused) {
+    on_ui([this, paused] { apply_application_pause(paused); });
+}
+
+void HostWindow::apply_application_pause(bool paused) {
+    if (application_paused_.exchange(paused) == paused) return;
+    if (HMENU menu = GetSystemMenu(hwnd_, FALSE)) {
+        ModifyMenuW(menu, pause_command, MF_BYCOMMAND | MF_STRING, pause_command,
+                    paused ? L"Resume application\tPause/Break" : L"Pause application\tPause/Break");
+        CheckMenuItem(menu, pause_command, MF_BYCOMMAND | (paused ? MF_CHECKED : MF_UNCHECKED));
+    }
+    refresh_title();
+    update_mouse_capture();
+    std::cout << "Host window (port-only): application " << (paused ? "paused" : "resumed")
+              << " (Pause/Break or the window system menu)\n";
+}
+
+void HostWindow::refresh_title() {
+    const std::wstring shown = application_paused_ ? title_ + L" [PAUSED]" : title_;
+    SetWindowTextW(hwnd_, shown.c_str());
 }
 
 void HostWindow::set_outer_size(int width, int height) {
@@ -843,7 +873,17 @@ LRESULT HostWindow::handle_message(HWND window, UINT message, WPARAM w, LPARAM l
             }
             break;  // DefWindowProc cleans the input up
         case WM_CLOSE: close_ = true; return 0;
+        case WM_SYSCOMMAND:
+            if ((w & 0xfff0) == pause_command) {
+                apply_application_pause(!application_paused_);
+                return 0;
+            }
+            break;
         case WM_KEYDOWN:
+            if (w == VK_PAUSE) {
+                if (!(l & (1 << 30)) && hotkeys_) apply_application_pause(!application_paused_);
+                return 0;
+            }
             if (w == VK_F11) {
                 if (!(l & (1 << 30)) && hotkeys_) apply_fullscreen(!fullscreen_);
                 return 0;
