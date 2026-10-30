@@ -1324,6 +1324,8 @@ public:
     virtual void sound_pause(std::int32_t v);     // 001c96d0(003caa50(004ffb50, "GameSoundManager"), v)
     virtual void ticker_show(bool v);             // 003f9e30(*004ffc2c + 100, v)
     virtual void app_12fa60(std::int32_t v);      // 0012fa60(004ffb50, v)
+    // 00572400 is read when GuiGameCanvas handles popup answer 0x667.
+    virtual bool network_play_game_572400();
 
     // GuiGameOptions' game services (checkpoint 132f2).
     virtual void rumble_stop();                   // 0026bd60
@@ -1897,6 +1899,11 @@ public:
     // message_key is the NUL-terminated key at 005721e0 (used by mode 1).
     void debrief_session_end_popup(std::uint32_t mode, const std::string& message_key,
                                    const std::optional<std::string>& inline_message = std::nullopt);
+    // The gameplay quit latch's 002cae30 dialog. message_kind is 005723b0:
+    // 1 chooses answer tag 0x668; every other value chooses 0x667. The
+    // message key and optional inline text are 005721e0 / 005721f0.
+    void gameplay_network_quit_popup(std::uint8_t message_kind, const std::string& message_key,
+                                     const std::optional<std::string>& inline_message = std::nullopt);
     void msgbox_setup(Widget* mb, std::int32_t type, const std::string& title, const std::string& message,
                       Widget* target, std::int32_t arg);  // 002a7e90
 

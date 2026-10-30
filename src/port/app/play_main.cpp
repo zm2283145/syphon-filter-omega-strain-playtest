@@ -1388,6 +1388,11 @@ struct PlayGuiHost final:GuiStaticHost{
     float mission_time() override{return clock_6dc();}
     // Checkpoint 132f3: 0012fa60(G, v) (the start menu's Quit, 004569d0) on the simulation's game state.
     std::function<void(std::int32_t)> level_end;
+    std::function<bool()> network_game_playing;
+    bool network_play_game_572400() override{
+        if(!network_game_playing)throw std::runtime_error("004653b0: missing live network game flag");
+        return network_game_playing();
+    }
     void app_12fa60(std::int32_t v) override{
         if(!level_end)throw std::runtime_error("unhosted(0x12fa60): the level end without the play's game state");
         level_end(v);
@@ -12994,23 +12999,29 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(frontend_app)o.host.agent_b70=frontend_app->session().agent()[0xb70];
             if(lan_net){
                 const auto local_key=lan_net->local_player_key();
+                o.host.network_game_playing=[&]{return lan_net->memory().read(0x572400,1)!=0;};
                 o.host.network_local_slot=lan_net->local_client_index();
                 // PORT-ONLY: the UDP transport has no retail send-capacity
                 // trackers for 0042b320. Hide unavailable connection icons.
                 o.host.network_score_connection=[](std::int32_t)->std::optional<float>{return std::nullopt;};
-                o.host.network_score_player=[&,local_key](std::int32_t i)->std::optional<std::uint32_t>{
-                    if(i==0)return local_key;
-                    if(i<1||static_cast<std::size_t>(i)>lan_remotes.size())return std::nullopt;
-                    const auto& remote=lan_remotes[static_cast<std::size_t>(i-1)];
-                    if(!remote.key||remote.gone||!remote.figure)return std::nullopt;
-                    return remote.key;
+                // 003fb9c0 inserts by encoded client slot; 003fb8d0 looks
+                // up that exact slot, including holes after a player leaves.
+                const auto score_slot=[](std::uint32_t key){
+                    return std::max(0,static_cast<int>((key&0x7f000000U)>>24)-1);
                 };
-                o.host.network_score_actor=[&](std::int32_t i)->std::optional<std::size_t>{
-                    if(i==0)return std::size_t{0};
-                    if(i<1||static_cast<std::size_t>(i)>lan_remotes.size())return std::nullopt;
-                    const auto& remote=lan_remotes[static_cast<std::size_t>(i-1)];
-                    if(!remote.key||remote.gone||!remote.figure)return std::nullopt;
-                    return remote.figure->actor;
+                o.host.network_score_player=[&,local_key,score_slot](std::int32_t i)->std::optional<std::uint32_t>{
+                    if(i<0||i>=4)return std::nullopt;
+                    if(i==score_slot(local_key))return local_key;
+                    for(const auto& remote:lan_remotes)
+                        if(remote.key&&!remote.gone&&remote.figure&&score_slot(remote.key)==i)return remote.key;
+                    return std::nullopt;
+                };
+                o.host.network_score_actor=[&,local_key,score_slot](std::int32_t i)->std::optional<std::size_t>{
+                    if(i<0||i>=4)return std::nullopt;
+                    if(i==score_slot(local_key))return std::size_t{0};
+                    for(const auto& remote:lan_remotes)
+                        if(remote.key&&!remote.gone&&remote.figure&&score_slot(remote.key)==i)return remote.figure->actor;
+                    return std::nullopt;
                 };
             }
             // Checkpoint 132hud5: 0026c8d0 on the targets' list, and the port-only co-op HUD's roster (the agent slots).
@@ -13960,16 +13971,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             std::cout<<"HUD notice at frame "<<frame<<" (00242b00 ticker, port-only connection path): "<<n<<"\n";
                             if(hud_object)hud_object->notice(n);
                         }
-                    // Port-only (132ln5h7): run_gameplay_state's quit check 00169360 on the network memory (the play's
-                    // own copy of 0x005721d8 is never set: the LAN state is LanNetCore's). The original then opens the
-                    // network quit dialog 002cae30 (message 0x667 / 0x668) and returns to the front end; neither is
-                    // hosted in the play, so the session ends here, as at a window close.
+                    // 00169360 consumes the network quit latch. The opt-in live
+                    // path opens the original canvas-owned acknowledgement;
+                    // its answer requests the native kind2/kind3 level end.
                     if(!(lan_end_results&&(sim.game_end().state_50==0x13||sim.game_end().state_50==0x14))&&lan_net->take_quit_request()){
                         lan_print_log();
-                        std::cout<<"LAN (port-only, 132ln5h7): the quit request (00169360) at frame "<<frame<<" (\""
-                            <<lan_net->quit_text()<<"\"): the network quit dialog 002cae30 (message 0x667 / 0x668) and its"
-                            " return to the front end are not hosted; the session ends\n";
-                        running=false;
+                        const auto notice=lan_net->quit_notice();
+                        if(lan_end_results&&sim.game_end().state_50==0x0f){
+                            gui_overlay_draw->rt.gameplay_network_quit_popup(notice.kind,notice.key,notice.message);
+                            std::cout<<"LAN network quit popup at frame "<<frame<<": key "<<notice.key<<", tag "
+                                <<(notice.kind==1?"0x668":"0x667")<<"; awaiting acknowledgement\n";
+                        }else{
+                            std::cout<<"LAN: the quit request (00169360) at frame "<<frame<<" ("<<notice.key
+                                <<"): ending the process outside opt-in gameplay recovery\n";
+                            running=false;
+                        }
                     }
                 }catch(const std::exception& e){
                     lan_print_log();
@@ -18594,17 +18610,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     unsigned debrief_frames=0;
                     bool window_closed_during_teardown=false;
                     const bool network_debrief=lan_end_results&&lan_net;
-                    const std::string end_quit_key=network_debrief?lan_net->quit_text():std::string{};
-                    std::optional<std::string> end_quit_message;
-                    if(network_debrief&&lan_net->memory().read(0x5721f0,1)){
-                        std::string text;
-                        for(std::uint32_t i=0;i<0x80;++i){
-                            const auto c=static_cast<char>(lan_net->memory().read(0x5721f0+i,1));
-                            if(!c)break;
-                            text.push_back(c);
-                        }
-                        end_quit_message=std::move(text);
-                    }
+                    const auto end_notice=network_debrief?lan_net->quit_notice():lan::LanNetCore::QuitNotice{};
                     actions.debrief=[&](std::uint32_t,std::uint32_t a1){
                         if(!gui_overlay_draw||!gui_overlay_draw->menu||!frontend_app||!gui_overlay_draw->host.card){
                             std::cout<<"Debrief (00134110) at frame "<<frame<<": skipped (port-only: it needs the front end's agent record "
@@ -18727,7 +18733,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             return true;
                         };
                         if(!fade(1,"fade-in")){o.host.debrief=false;return;}
-                        rt.debrief_session_end_popup(a1,end_quit_key,end_quit_message);
+                        rt.debrief_session_end_popup(a1,end_notice.key,end_notice.message);
                         gui::Widget* summary=rt.factory("GuiEndGameObjectives",std::string("SUMMARY"));
                         if(!summary)throw std::runtime_error("00134110: 00418a80 GuiEndGameObjectives \"SUMMARY\" failed");
                         rt.push(summary,0);

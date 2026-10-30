@@ -429,6 +429,7 @@ void GuiHost::map_release() { unhosted(0x26d6d0, "the HUD map release (hud + 6a0
 void GuiHost::pad_mask(std::int32_t) { unhosted(0x2427b0, "the pad driver's reset mask *0055a6c0"); }
 void GuiHost::ticker_show(bool) { unhosted(0x3f9e30, "HUD ticker visibility"); }
 void GuiHost::app_12fa60(std::int32_t) { unhosted(0x12fa60, "mission end request"); }
+bool GuiHost::network_play_game_572400() { unhosted(0x4653e4, "00572400 for the network quit popup answer"); }
 void GuiHost::rumble_stop() { unhosted(0x26bd60, "pad vibration stop"); }
 void GuiHost::rumble_start(std::int32_t, std::int32_t, std::int32_t, std::int32_t, float) {
     unhosted(0x26bde0, "pad vibration start");
@@ -6377,7 +6378,14 @@ void GuiRuntime::start_press() {  // 0024cd30's Start edge
 std::uint8_t GuiRuntime::game_canvas_event(Widget* sender, std::uint32_t type, std::int32_t a3,
                                            std::int32_t t0) {  // 004653b0
     const std::uint32_t t = type & 0xffff;
-    if (t == 0x1a && (a3 == 0x667 || a3 == 0x668)) unhosted(0x12fa60, "game canvas mission end popup answer");
+    if (t == 0x1a && a3 == 0x667) {
+        host_.app_12fa60(host_.network_play_game_572400() ? 2 : 3);
+        return 1;
+    }
+    if (t == 0x1a && a3 == 0x668) {
+        host_.app_12fa60(3);
+        return 1;
+    }
     if ((t == 0x10 || t == 0x11) && static_cast<std::uint32_t>(a3) < 10) {
         std::uint32_t table = 0;
         switch (a3) {

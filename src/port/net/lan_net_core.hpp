@@ -114,6 +114,13 @@ public:
     // before its quit dialog 002cae30); quit_text() is the dialog's message, the C string at 0x005721e0.
     bool take_quit_request();
     std::string quit_text();
+    struct QuitNotice {
+        std::uint8_t kind{};  // 005723b0: 1 selects canvas message 0x668, otherwise 0x667
+        std::string key;      // cDME::m_ErrStr[16]
+        std::optional<std::string> message;  // nonempty cDME::m_ErrMsg[128]
+    };
+    // Snapshot the original error fields without consuming the request latch.
+    QuitNotice quit_notice() const;
     // PORT-ONLY (132ln5f): the lobby session's update 004536b0 (from 002ca580): LanSession's discovery (the
     // advertisement and the browser) stands in for SFOLobby's Medius lobby connection. With a pump set,
     // 004294c0 returns a sentinel session; without one, 0 (no lobby, as when 0x00572488 is clear).
@@ -280,7 +287,7 @@ public:
     void send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
                        std::uint16_t recipient = kLanAll);
     std::vector<RemoteBackpack> take_remote_backpacks() { return dme_->take_backpacks(); }
-    std::uint16_t local_client_index() const { return transport_.local_index(); }
+    std::uint16_t local_client_index() const { return dme_->local_index(); }
     bool hosting() const { return transport_.is_host(); }
     std::uint16_t session_host() const { return 0; }
 

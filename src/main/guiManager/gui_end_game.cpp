@@ -103,6 +103,22 @@ void GuiRuntime::debrief_session_end_popup(std::uint32_t mode, const std::string
     }
 }
 
+void GuiRuntime::gameplay_network_quit_popup(std::uint8_t message_kind, const std::string& message_key,
+                                             const std::optional<std::string>& inline_message) {  // 00168e80
+    if (!game_canvas) throw std::runtime_error("network quit popup requires GuiGameCanvas");
+    std::optional<std::string> title;
+    std::optional<std::string> message;
+    if (inline_message && !inline_message->empty()) {  // 00169330 / 001692f0: 005721f0 set
+        title = host_.get_string(message_key);
+        title = title ? host_.get_string(message_key) : host_.get_string("QuitTitle");
+        message = *inline_message;
+    } else {
+        title = host_.get_string("QuitTitle");
+        message = host_.get_string(message_key);
+    }
+    popup_open(2, title, message, &canvas_, message_kind == 1 ? 0x668 : 0x667);
+}
+
 // ---------------------------------------------------------------- the voice queue
 
 void GuiRuntime::vq_push(Widget* w, const std::string& name, float f) {  // 00460ac0

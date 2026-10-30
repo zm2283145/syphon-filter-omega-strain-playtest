@@ -22,8 +22,8 @@ constexpr std::uint32_t kRegMax = 0x529808, kRegCategories = 0x52980c, kRegBuffe
 }  // namespace
 
 LanDme::LanDme(LanTransport& transport, LanClock clock, Invoke invoke, Library library, std::uint32_t scratch)
-    : transport_(transport), clock_(clock),
-      application_commits_(transport.session_id(), transport.local_index(), 1, 0, std::move(clock)),
+    : transport_(transport), local_index_(transport.local_index()), clock_(clock),
+      application_commits_(transport.session_id(), local_index_, 1, 0, std::move(clock)),
       invoke_(std::move(invoke)), library_(std::move(library)), scratch_(scratch) {}
 
 std::uint32_t LanDme::local_clock() const { return static_cast<std::uint32_t>(clock_()); }
@@ -43,14 +43,14 @@ static std::uint32_t library_gate(const LevelLoadMemory& m) {
 
 std::vector<std::uint16_t> LanDme::connected() const {
     auto out = transport_.clients();
-    out.push_back(transport_.local_index());
+    out.push_back(local_index_);
     std::sort(out.begin(), out.end());
     return out;
 }
 
 // START_READY's words are u16, START_GO's u32 / u16 / u16 (the header).
 void LanDme::send_control(std::uint16_t to, std::uint8_t kind, std::initializer_list<std::uint32_t> words) {
-    std::vector<std::uint8_t> frame{kChannelControl, kind, static_cast<std::uint8_t>(transport_.local_index())};
+    std::vector<std::uint8_t> frame{kChannelControl, kind, static_cast<std::uint8_t>(local_index_)};
     std::size_t k = 0;
     for (const auto w : words) {
         const int size = (kind == kStartGo && k == 0) ? 4 : 2;
@@ -63,7 +63,7 @@ void LanDme::send_control(std::uint16_t to, std::uint8_t kind, std::initializer_
 
 void LanDme::send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t backpack, std::uint32_t target,
                            std::uint16_t recipient) {
-    std::vector<std::uint8_t> frame{kChannelBackpack, static_cast<std::uint8_t>(transport_.local_index()), type, owner};
+    std::vector<std::uint8_t> frame{kChannelBackpack, static_cast<std::uint8_t>(local_index_), type, owner};
     for (const auto word : {backpack, target})
         for (int b = 0; b < 4; ++b) frame.push_back(static_cast<std::uint8_t>(word >> (8 * b)));
     if (transport_.send(recipient, frame, kLanReliableOrdered) != LanSendResult::Sent)
@@ -84,7 +84,7 @@ std::uint32_t LanDme::record(LevelLoadMemory& m, std::uint16_t client) {
 
 // 002e15e0's world and record steps (the header); PORT-ONLY: world 0 itself (the lobby's join is not ported).
 void LanDme::start_records(LevelLoadMemory& m, std::uint32_t p) {
-    const auto me = transport_.local_index();
+    const auto me = local_index_;
     const auto out = scratch_ + 0x40;
     if (library_(m, 0x2e51f0, {0, out}) || !m.read(out)) unhosted(0x2e51f0, "world 0 could not be created");
     const auto w = m.read(out);
@@ -145,7 +145,7 @@ void LanDme::set_session_host(LevelLoadMemory& m, std::uint32_t client) {
 // The local client's start (002e1918 alone, 002e8730 the host, 002e6f40 a client): its handle bases, 0x0048c454,
 // then 002db688's record steps.
 void LanDme::activate(LevelLoadMemory& m, std::uint32_t base, std::uint32_t base2) {
-    const auto rec = record(m, transport_.local_index());
+    const auto rec = record(m, local_index_);
     if (!rec) unhosted(0x2db688, "the local client record is missing at the start");
     m.write(rec + 0xa, 2, base2);
     m.write(rec + 6, 2, base);
@@ -185,7 +185,7 @@ std::uint32_t LanDme::next_join_order(LevelLoadMemory& m) {
 }
 
 void LanDme::send_join_order(LevelLoadMemory&, std::uint16_t to, std::uint16_t client, std::uint32_t order) {
-    std::vector<std::uint8_t> frame{kChannelControl, kJoinOrder, static_cast<std::uint8_t>(transport_.local_index()),
+    std::vector<std::uint8_t> frame{kChannelControl, kJoinOrder, static_cast<std::uint8_t>(local_index_),
                                     static_cast<std::uint8_t>(client), static_cast<std::uint8_t>(client >> 8)};
     for (int b = 0; b < 4; ++b) frame.push_back(static_cast<std::uint8_t>(order >> (8 * b)));
     if (transport_.send(to, frame, kLanReliableOrdered) != LanSendResult::Sent)
@@ -201,7 +201,7 @@ void LanDme::receive_join_order(LevelLoadMemory& m, const std::vector<std::uint8
 }
 
 void LanDme::send_client_record(LevelLoadMemory& m, std::uint16_t to) {
-    const auto me = transport_.local_index();
+    const auto me = local_index_;
     const auto rec = record(m, me);
     if (!rec) return;
     std::vector<std::uint8_t> frame(3 + 0x24);
@@ -285,11 +285,11 @@ void LanDme::control(LevelLoadMemory& memory, std::uint16_t origin, const std::v
         // in state 3 with 002e8c50 (its record, the handle bases and START_GO) at once: the join in progress
         // (checkpoint 132ln5f). PORT-ONLY: then the host's own state, which a late joiner of the original has from
         // the world join's member list (002e0118, not ported).
-        if (started_ && (host_flag_ == 1 || host_flag_ == 2) && state_[transport_.local_index()] == 5 &&
+        if (started_ && (host_flag_ == 1 || host_flag_ == 2) && state_[local_index_] == 5 &&
             state_[origin] == 3) {
             start_go(memory, origin);
             send_control(origin, kClientInfo);
-        } else if (started_ && state_[transport_.local_index()] == 4 && state_[origin] == 3) {
+        } else if (started_ && state_[local_index_] == 4 && state_[origin] == 3) {
             // PORT-ONLY (132ln5h): a started client announces itself to a late joiner too (the original's joiner has
             // it from the world join's member list, 002e0118, not ported): the joiner's all-ready check (002e5d68)
             // wants every member's state, and its joined callback for this client (003faab0 clears 0x00493a10[c])
@@ -303,12 +303,12 @@ void LanDme::control(LevelLoadMemory& memory, std::uint16_t origin, const std::v
             sync_callback(memory, 7);
             break;
         }
-        state_[transport_.local_index()] = 4;
+        state_[local_index_] = 4;
         started_ = true;
         send_control(kLanAll, kClientInfo);
         const auto clock = u16(3) | u16(5) << 16;
         memory.write(0x58806c, 4, clock);  // 002dd2d8
-        const auto rec = record(memory, transport_.local_index());
+        const auto rec = record(memory, local_index_);
         if (!rec) unhosted(0x2e6f40, "START_GO without the local client record");
         memory.write(rec, 4, clock);
         activate(memory, u16(7), u16(9));
@@ -337,7 +337,7 @@ std::uint32_t LanDme::send_message(LevelLoadMemory& m, std::uint32_t kind, std::
     if (size + 4 > kLanMaxPayload) unhosted(0x2de398, "a game message larger than one LAN frame");
     std::uint16_t recipient = kLanAll;
     if (to != 0xffffffffU && to != 0xffffU) {
-        if (to >= kLanMaxClients || to == transport_.local_index()) return 0x17;
+        if (to >= kLanMaxClients || to == local_index_) return 0x17;
         recipient = static_cast<std::uint16_t>(to);
     }
     const auto mode = static_cast<std::uint8_t>(kind);
@@ -345,7 +345,7 @@ std::uint32_t LanDme::send_message(LevelLoadMemory& m, std::uint32_t kind, std::
                        : (mode & 0x10) ? kLanSequenced
                        : (mode & 0x80) ? kLanUnreliable
                                        : kLanReliableOrdered;
-    std::vector<std::uint8_t> frame{kChannelGame, static_cast<std::uint8_t>(transport_.local_index()),
+    std::vector<std::uint8_t> frame{kChannelGame, static_cast<std::uint8_t>(local_index_),
                                     static_cast<std::uint8_t>(category), static_cast<std::uint8_t>(id)};
     for (std::uint32_t k = 0; k < size; ++k) frame.push_back(static_cast<std::uint8_t>(m.read(data + k, 1)));
     switch (transport_.send(recipient, frame, flags)) {
@@ -414,6 +414,9 @@ void LanDme::game_message(LevelLoadMemory& m, std::uint16_t origin, const std::v
 }
 
 std::uint32_t LanDme::update(LevelLoadMemory& memory) {
+    // 002e47b0 clears each world's transient status before polling its stream.
+    // A lost host reports one failure to 00429d30; later frames do not replay it.
+    link_status_ = 0;
     std::vector<std::pair<std::uint16_t, std::vector<std::uint8_t>>> frames;
     LanTransportHandlers handlers;
     std::vector<std::uint16_t> left;
@@ -459,7 +462,7 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
         }
     }
 
-    const auto me = transport_.local_index();
+    const auto me = local_index_;
     const auto clients = connected();
     // The host's start (002e8730).
     if (barrier_ && !started_ && (host_flag_ == 1 || host_flag_ == 2)) {
@@ -506,7 +509,7 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
                 break;
             }
     }
-    return link_status_;  // 002e4a30 returns 002e47b0's last nonzero world status (00429d30 then reads 002ec580)
+    return link_status_;  // 002e4a30 returns this update's 002e47b0 world status (00429d30 then reads 002ec580)
 }
 
 std::uint32_t LanDme::call(LevelLoadMemory& m, std::uint32_t address, std::initializer_list<std::uint32_t> list) {
@@ -537,7 +540,7 @@ std::uint32_t LanDme::call(LevelLoadMemory& m, std::uint32_t address, std::initi
         // No world record: 002dd178 returns 0 with 0x100. PORT-ONLY: world 0 before the barrier made it (the
         // original's exists from the world join 002e0118, not ported) gives the transport's index, which the
         // barrier then stores at +0x400.
-        if (arg(1) == 0 && !disconnected_) m.write(arg(0), 4, transport_.local_index());
+        if (arg(1) == 0 && !disconnected_) m.write(arg(0), 4, local_index_);
         return 0;
     }
     case 0x2ec6a0: {  // leave the world (132ln5h7): the gate, the lock 00302260 / 003023d8, then 002e1a20
@@ -619,7 +622,7 @@ std::uint32_t LanDme::call(LevelLoadMemory& m, std::uint32_t address, std::initi
             sync_user_ = m.read(p + 0x24);
             joined_cb_ = m.read(p + 0x28);
             joined_user_ = m.read(p + 0x2c);
-            const auto me = transport_.local_index();
+            const auto me = local_index_;
             m.write(0x58806c, 4, session_clock());
             start_records(m, p);
             state_[me] = 3;

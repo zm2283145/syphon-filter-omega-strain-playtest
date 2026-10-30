@@ -119,6 +119,9 @@ public:
     // Diagnostics for the tests and the log.
     std::uint8_t state(std::uint16_t client) const { return client < kLanMaxClients ? state_[client] : 0; }
     bool started() const { return started_; }
+    // The native world's assigned client slot survives a transport close.
+    // LanTransport resets its handshake index to zero when the socket closes.
+    std::uint16_t local_index() const { return local_index_; }
     // The client's record in world 0 (002db188), 0 when it has none.
     std::uint32_t record(LevelLoadMemory& memory, std::uint16_t client);
     std::uint32_t joined_callbacks() const { return joined_calls_; }
@@ -187,6 +190,7 @@ private:
     std::uint32_t session_clock() const;
 
     LanTransport& transport_;
+    const std::uint16_t local_index_;
     LanClock clock_;
     LanDmeCommitLog application_commits_;
     Invoke invoke_;
@@ -206,7 +210,7 @@ private:
     // [I] 003144c8's code when world 0 has no connection (0x00491432 <= 0); any nonzero other than 0xc posts
     // GAME_DISCONNECT in 00429d30's walk.
     static constexpr std::uint32_t kLinkLost = 0x11;
-    std::uint32_t link_status_ = 0;  // world 0's entry of 0x00520340 (002e47b0): the local link to the host
+    std::uint32_t link_status_ = 0;  // world 0's transient 002e47b0 status, cleared at each update
     std::uint32_t joined_calls_ = 0;
     std::uint32_t left_cb_ = 0, left_calls_ = 0;
     std::uint32_t messages_sent_ = 0, messages_received_ = 0;

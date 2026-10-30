@@ -113,7 +113,7 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(kObjectiveManager + 0x10, 4, 0x00f60001);
     // cSystem_ctor enables the manager; 00227ed0 clears it on a client.
     m.write(kObjectiveManager + 0x14, 1, transport_.is_host() ? 1 : 0);
-    call(m, 0x3fb650, {0x00f60001, transport_.is_host() ? transport_.local_index() : session_host(), kObjectiveManager});
+    call(m, 0x3fb650, {0x00f60001, transport_.is_host() ? dme_->local_index() : session_host(), kObjectiveManager});
     // 132ln5f: the .data the character send 00185a30 reads: the default weapon list 0x0048a2f8 (twelve 0xff bytes)
     // and the player vtable 0x004da690's +0x1c (00185a30 itself).
     for (std::uint32_t k = 0; k < 12; k += 4) m.write(0x48a2f8 + k, 4, 0xffffffffU);
@@ -243,7 +243,7 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
 }
 
 std::uint32_t LanNetCore::local_player_key() const {
-    return (static_cast<std::uint32_t>(transport_.local_index()) + 1) << 24 | kLocalPlayerId;
+    return (static_cast<std::uint32_t>(dme_->local_index()) + 1) << 24 | kLocalPlayerId;
 }
 
 void LanNetCore::bind_backpack(std::uint32_t id, std::uint16_t owner, std::uint32_t address) {
@@ -289,7 +289,7 @@ void LanNetCore::register_objective(std::uint32_t local_script_id) {
     m.write(block + 0x25, 1, transport_.is_host() ? 1 : 0);
     // cNetObj_AddSystem (00229900) is represented by the existing NetMap object slot.
     // NetObjId: a client binds to the peer-to-peer host, not its local slot.
-    call(m, 0x3fb650, {key, transport_.is_host() ? transport_.local_index() : session_host(), block});
+    call(m, 0x3fb650, {key, transport_.is_host() ? dme_->local_index() : session_host(), block});
     objective_bindings_.emplace(local_script_id, std::pair{key, block});
 }
 
@@ -466,7 +466,7 @@ std::vector<LanNetCore::RemoteObjectiveActive> LanNetCore::take_objective_active
 void LanNetCore::send_agent_update(std::span<const std::uint8_t> inner) {
     if (pump_.joinable())
         throw std::runtime_error("LAN agent update during background load pump; defer until stop_load_pump");
-    if (inner.size() < 3 || inner.size() > 0x100 || inner[0] != transport_.local_index())
+    if (inner.size() < 3 || inner.size() > 0x100 || inner[0] != dme_->local_index())
         throw std::runtime_error("LAN agent update: invalid local AgentData stream");
     auto& m = memory_;
     const auto type = m.read(0x5061c8);  // 002824d0's DME registration, category 2
@@ -641,7 +641,7 @@ std::uint32_t LanNetCore::generator_block(std::uint32_t id) const {
 // not ported): the local player for the local client once set, a remote human whose key's top byte is client + 1.
 std::uint32_t LanNetCore::client_player_003fb8d0(std::int32_t client) {
     if (client < 0) return 0;
-    if (local_set_ && client == static_cast<std::int32_t>(transport_.local_index())) return kLocalPlayer;
+    if (local_set_ && client == static_cast<std::int32_t>(dme_->local_index())) return kLocalPlayer;
     for (const auto& [key, human] : remote_keys_)
         if (static_cast<std::int32_t>((memory_.read(human + 0xc) & 0x7f000000U) >> 24) - 1 == client) return human;
     return 0;
@@ -2404,6 +2404,26 @@ std::string LanNetCore::quit_text() {
         text.push_back(c);
     }
     return text;
+}
+
+LanNetCore::QuitNotice LanNetCore::quit_notice() const {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN quit notice access during background load pump");
+    const auto bounded = [&](std::uint32_t base, std::uint32_t size) {
+        std::string text;
+        for (std::uint32_t i = 0; i < size; ++i) {
+            const auto c = static_cast<char>(memory_.read(base + i, 1));
+            if (!c) break;
+            text.push_back(c);
+        }
+        return text;
+    };
+    QuitNotice out;
+    out.kind = static_cast<std::uint8_t>(memory_.read(0x5723b0, 1));
+    out.key = bounded(0x5721e0, 16);
+    const auto message = bounded(0x5721f0, 128);
+    if (!message.empty()) out.message = message;
+    return out;
 }
 
 void LanNetCore::net_frame() {
