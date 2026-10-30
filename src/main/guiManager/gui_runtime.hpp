@@ -1167,6 +1167,11 @@ public:
     virtual std::int32_t card_space_needed(std::int32_t size) = 0;                // 0040d580
     virtual std::int32_t profile_size(std::uint32_t profile) = 0;                 // 00334100
     virtual std::int32_t current_profile() = 0;                                   // 001314f0
+    // 001314f0(G, slot) in the network debrief, where slot is 0..3. -1 means
+    // the slot has no agent record. Offline paths use current_profile().
+    virtual std::int32_t debrief_profile_slot(std::int32_t slot);
+    virtual std::int32_t debrief_local_slot();  // *004ffd28, used by SUMMARY's quip
+    virtual std::int32_t debrief_statistic(std::int32_t slot, std::uint32_t index);  // 00333ee0(001314f0(G, slot), index)
     virtual void profile_select(std::uint32_t profile) = 0;                       // 003361b0
     virtual void app_2c9af0(std::int32_t value) = 0;                              // 002c9af0
     virtual void app_131470(std::int32_t value) = 0;                              // 00131470
@@ -1728,6 +1733,10 @@ public:
     // Player i's render model's attach table (+60 + 2410, ten points): each
     // point's model's weapon record (lh +40a), -1 for an empty point.
     virtual std::array<std::int32_t, 10> scores_attach(std::int32_t i);
+    // 0035c91c: nullopt when player i's +14 hides its icon, or when port
+    // telemetry is unavailable. Otherwise the native 0042b320 normalized
+    // send-capacity value (0..1); never substitute an invented latency score.
+    virtual std::optional<float> scores_connection_status(std::int32_t i);
 
     // GuiEquipmentModify's game services (checkpoint 132f4), for the screen's
     // player +48 (solo: player 0, whose attach table is scores_attach(0)).
@@ -1882,6 +1891,12 @@ public:
     // 002caba0 returns the matching payload pointer (callers only test it
     // for nonzero); natively 1 when an entry with `id` is queued, else 0.
     std::int32_t popup_query(std::int32_t id);   // 002caba0
+
+    // 00134220: the debrief's session-end message, after its fade-in and
+    // before SUMMARY is pushed. inline_message represents nonempty 005721f0;
+    // message_key is the NUL-terminated key at 005721e0 (used by mode 1).
+    void debrief_session_end_popup(std::uint32_t mode, const std::string& message_key,
+                                   const std::optional<std::string>& inline_message = std::nullopt);
     void msgbox_setup(Widget* mb, std::int32_t type, const std::string& title, const std::string& message,
                       Widget* target, std::int32_t arg);  // 002a7e90
 

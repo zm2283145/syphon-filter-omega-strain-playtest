@@ -121,6 +121,14 @@ public:
     // them natively), so the DME thread's 00429d30 also updates the lobby (004536b0) while it runs during the
     // level load, as the original does with its Medius session: the host keeps answering the LAN browse.
     void set_lobby(std::function<void()> pump);
+    // 0044e340 is the caller's lobby transition (LanSession::exit_game on LAN).
+    // It must retain the transport until 0042b1f0 has left the DME world.
+    // A live lobby without this service is an unhosted teardown path.
+    void set_lobby_exit(std::function<void()> exit_game);
+    bool has_lobby_exit() const { return static_cast<bool>(lobby_exit_); }
+    // The state-0x14 pass has destroyed its level objects. The native DME
+    // cleanup is dispatched separately by the composed teardown adapter.
+    void finish_level_teardown();
 
     // PORT-ONLY (132ln5e): the TIM0 events while a level setup on the calling thread stands in for 001350e0. On
     // the original the DME thread wakes every 100 events during the load (keeping the session's traffic going);
@@ -629,6 +637,7 @@ private:
     std::vector<std::string> log_;
     bool level_loaded_ = false;
     std::function<void()> lobby_;
+    std::function<void()> lobby_exit_;
     // PORT-ONLY: the GUI app 0x004ffc04 (the front end's; nothing here reads it) and the lobby session 004294c0
     // returns (only 002ca580 reads it, at +0x255c, after 00452fd0 reports a disconnect, which a LAN lobby never does).
     static constexpr std::uint32_t kGuiApp = 0x1d30000, kLobbySession = 0x1d31000;

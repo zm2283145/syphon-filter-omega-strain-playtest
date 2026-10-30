@@ -227,6 +227,11 @@ std::uint8_t GuiHost::agent_load(std::int32_t, const std::string&, std::int32_t)
 void GuiHost::agent_activate(std::int32_t) { unhosted(0x292c54, "loaded agent copy to 0055d510"); }
 bool GuiHost::class_stopped(const std::string&) { return false; }
 std::optional<std::string> GuiHost::profile_name(std::int32_t) { unhosted(0x336170, "profile agent name"); }
+std::int32_t GuiHost::debrief_profile_slot(std::int32_t) { unhosted(0x1314f0, "the network debrief's agent slot"); }
+std::int32_t GuiHost::debrief_local_slot() { unhosted(0x4ffd28, "the network debrief's local player index"); }
+std::int32_t GuiHost::debrief_statistic(std::int32_t, std::uint32_t) {
+    unhosted(0x333ee0, "the network debrief's agent statistic");
+}
 std::optional<std::string> GuiHost::profile_rank(std::int32_t) { unhosted(0x336110, "profile rank string"); }
 std::int32_t GuiHost::profile_clp(std::int32_t) { unhosted(0x3305d0, "profile CLP"); }
 std::int32_t GuiHost::level_done(std::int32_t, const std::string& key) {
@@ -496,6 +501,9 @@ std::string GuiHost::scores_agent_name(std::int32_t) { unhosted(0x336170, "the a
 std::int32_t GuiHost::scores_statistic(std::int32_t, std::uint32_t) { unhosted(0x333ee0, "the agent statistics"); }
 std::array<std::int32_t, 10> GuiHost::scores_attach(std::int32_t) {
     unhosted(0x3927a0, "the player's render model attach table");
+}
+std::optional<float> GuiHost::scores_connection_status(std::int32_t) {
+    unhosted(0x42b320, "the player's measured network connection status");
 }
 // Port-only (checkpoint 132f5): no Cheats entry unless a host offers one.
 bool GuiHost::port_cheat_menu() { return false; }
@@ -9007,7 +9015,16 @@ void GuiRuntime::se_init(Widget* w) {  // 0035cd00
             e.net[i] = find(w, "networkconnection" + std::to_string(i + 1));
             if (e.net[i]) e.net[i]->flags &= ~flag_visible;
         }
-        if (g.b_21c8 && e.net[0]) unhosted(0x35cedc, "the network icons' onWake record (+58 / +5c)");
+        if (g.b_21c8 && e.net[0]) {
+            // 0035cedc: the first icon's decorator onWake record supplies the
+            // shared frame range for all four networkconnection widgets.
+            deco_record_ = nullptr;
+            if (send(w, e.net[0], 4, 0x4bffa8, 0) && deco_record_) {
+                e.wake_58 = deco_record_->a;
+                e.wake_5c = deco_record_->b;
+            }
+            deco_record_ = nullptr;
+        }
     }
     for (std::size_t i = 0; i < 4; ++i) {
         e.grp_230[i] = find(w, std::to_string(i + 1) + "player_stats_grp");
@@ -9178,8 +9195,25 @@ void GuiRuntime::se_update(Widget* w, float dt) {  // 0035bfb0
         }
     }
     if (e.b60) {
-        for (std::size_t i = 0; i < 4; ++i)
-            if (e.net[i]) unhosted(0x35c91c, "the network connection icons");
+        for (std::size_t i = 0; i < 4; ++i) {
+            Widget* icon = e.net[i];
+            if (!icon) continue;
+            // 0035c91c: no player or player +14 set hides the icon.
+            const auto player = host_.scores_player(static_cast<std::int32_t>(i));
+            const auto status = player ? host_.scores_connection_status(static_cast<std::int32_t>(i))
+                                       : std::nullopt;
+            if (!status) {
+                icon->flags &= ~flag_visible;
+                continue;
+            }
+            if (!std::isfinite(*status) || *status < 0.0f || *status > 1.0f)
+                unhosted(0x42b320, "a connection status outside the original 0..1 range");
+            icon->flags |= flag_visible;
+            const float fraction = fsub(1.0f, *status);
+            const std::int32_t frame = e.wake_58 +
+                cvt_w(fmul(static_cast<float>(e.wake_5c - e.wake_58), fraction), 0x35ca04);
+            send(w, icon, 0xb, frame, 0);  // 0041e0f0 -> decorator 003f44e0
+        }
     }
     if (top() == w) {  // 004147a0()->+2c->+8
         constexpr float pi = 3.14159274f;  // 0x40490fdb

@@ -32,7 +32,7 @@ lands. Each update's commit message names the development commit it was taken fr
   stealth behaviour (silenced weapons, disguises, stopping alarms) is planned. Choose the number of partners with
   `coop_partners=1|2|3` in `local\port_settings.txt`.
 - **LAN in-level sync:** damage to enemies the other console controls, their aim and fire, and shared objectives are
-  still being finished. A full mission through synchronized debrief has not yet been accepted. Expect desyncs.
+  still being finished. An opt-in diagnostic path now connects shared endings, multiplayer results, local saves and return to the menu; it is not yet enabled by default. A naturally played full mission through synchronized debrief remains unaccepted. Expect desyncs.
 - **Online:** the server works, but in-level online play has the same gaps as LAN. Agency cells (clans) are not done.
 - **PS Vita:** in-level play is brand new and still being tested on hardware. Speed (30 fps target) and memory are
   being worked on.

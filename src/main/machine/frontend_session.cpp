@@ -392,6 +392,72 @@ FrontendSession::agent_for_client(std::uint8_t client) const {
     return std::span<const std::uint8_t, agent_record_size>(other_agents_[client]->record);
 }
 
+const AgentLoadState& FrontendSession::state_for_client(std::uint8_t client) const {
+    if (!agent_for_client(client)) throw std::runtime_error("Front end: network debrief agent slot is unavailable");
+    return client == local_agent_client_index_ ? agent_state_ : other_agents_[client]->state;
+}
+
+std::uint8_t FrontendSession::debrief_agent_byte(std::uint8_t client, std::uint32_t offset) const {
+    const auto record = agent_for_client(client);
+    if (!record) throw std::runtime_error("Front end: network debrief agent slot is unavailable");
+    if (offset >= agent_record_size) throw std::runtime_error("Front end: network debrief byte past AgentData");
+    return (*record)[offset];
+}
+
+std::int32_t FrontendSession::debrief_agent_word(std::uint8_t client, std::uint32_t offset) const {
+    const auto record = agent_for_client(client);
+    if (!record) throw std::runtime_error("Front end: network debrief agent slot is unavailable");
+    if (offset % 4 != 0 || offset > agent_record_size - 4)
+        throw std::runtime_error("Front end: bad network debrief AgentData word offset");
+    return static_cast<std::int32_t>(agent_word(*record, offset));
+}
+
+std::int32_t FrontendSession::debrief_agent_statistic(std::uint8_t client, std::uint32_t index) const {
+    if (index > 0x1e) throw std::runtime_error("Front end: network debrief statistic outside AgentData");
+    return debrief_agent_word(client, 8 + 4 * index);  // 00333ee0(agent, index)
+}
+
+std::vector<gui::GuiHost::BonusRow> FrontendSession::debrief_agent_vec(std::uint8_t client, std::int32_t kind) const {
+    const auto& state = state_for_client(client);
+    std::vector<BonusRow> out;
+    for (const auto& r : agent_award_rows(state, services_.awards->registries, kind))
+        out.push_back({r.key, r.flag, r.unlock, 0});
+    return out;
+}
+
+std::vector<gui::GuiHost::BonusRow> FrontendSession::debrief_agent_ratings(std::uint8_t client) const {
+    const auto record = agent_for_client(client);
+    if (!record) throw std::runtime_error("Front end: network debrief agent slot is unavailable");
+    const auto& state = state_for_client(client);
+    std::vector<BonusRow> out;
+    for (const auto& r : agent_rating_rows(*record, state, services_.awards->registries))
+        out.push_back({r.key, static_cast<std::uint8_t>(r.flag), r.unlock, r.percent});
+    return out;
+}
+
+std::optional<MultiplayerScoreAgent> FrontendSession::score_agent_for_player(
+    std::uint32_t player_id, bool networked, const AgentStatistics* live_local) const {
+    const std::uint32_t encoded = networked ? (player_id & 0x7f000000U) >> 24 : 0;
+    if (encoded > other_agents_.size())
+        throw std::runtime_error("Front end: SCORES player id encodes a client outside four slots");
+    const std::uint8_t client = encoded == 0 ? local_agent_client_index_
+                                             : static_cast<std::uint8_t>(encoded - 1);
+    const auto record = agent_for_client(client);
+    if (!record) return std::nullopt;
+    MultiplayerScoreAgent out;
+    out.client = client;
+    out.ready = (*record)[0xb70] != 0;
+    out.name = agent_name(*record, {false, true, -1}, services_.strings).value_or(std::string{});
+    if (client == local_agent_client_index_ && live_local) {
+        out.statistics = *live_local;
+    } else {
+        std::memcpy(out.statistics.statistics.data(), record->data() + 0x8, sizeof out.statistics.statistics);
+        std::memcpy(out.statistics.words_84.data(), record->data() + 0x84, sizeof out.statistics.words_84);
+        std::memcpy(out.statistics.words_a4.data(), record->data() + 0xa4, sizeof out.statistics.words_a4);
+    }
+    return out;
+}
+
 std::vector<std::uint8_t> FrontendSession::encode_local_agent_update(std::uint8_t stats_only,
                                                                        std::uint8_t awards) const {
     if (!constructed_) throw std::runtime_error("Front end: AgentData not constructed before network encode");
@@ -907,6 +973,11 @@ void FrontendSession::resume_after_level(std::uint8_t state_50, std::uint8_t pre
     if (g_.state_50 != 0xe) throw std::runtime_error("Front end: a level-end resume without the level load hand-off (state 0xe)");
     if (state_50 != 0x0c && state_50 != 1)
         throw std::runtime_error("Front end: a level-end resume to state " + std::to_string(state_50) + " (001690f0 leaves 0x0c or 1)");
+    // World_Teardown clears 005721c8 and 005721b8 even when G+1c7 keeps
+    // the DME connection. Keep the persistent GameFlow and GUI alias in sync.
+    g_.mp_5721c8 = 0;
+    g_.mp_5721b8 = 0;
+    rt_.g.b_21c8 = 0;
     g_.state_50 = state_50;
     g_.previous_51 = previous_51;
 }

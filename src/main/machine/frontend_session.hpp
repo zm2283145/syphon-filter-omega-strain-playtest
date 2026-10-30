@@ -56,6 +56,16 @@
 
 namespace omega {
 
+// Read-only 00185c70 / 0035bfb0 view for one SCORES player. The record remains owned by FrontendSession;
+// statistics are copied so the caller can use the local combat values during play and the AgentData values
+// after the level's final sync. This carries no memory-card or profile handle.
+struct MultiplayerScoreAgent {
+    std::uint8_t client = 0;
+    bool ready = false;  // AgentData +b70
+    std::string name;
+    AgentStatistics statistics;
+};
+
 class WeaponModelLibrary;
 
 // The GUI's GS_* sound descriptors (static inits 004d8180 / 004d8458): the
@@ -322,6 +332,19 @@ public:
     void set_local_agent_client_index(std::uint8_t client);
     std::uint8_t local_agent_client_index() const { return local_agent_client_index_; }
     std::optional<std::span<const std::uint8_t, agent_record_size>> agent_for_client(std::uint8_t client) const;
+    // Read-only 001314f0(G, client) services for the network debrief. These
+    // address the four AgentData slots, never the selected memory-card profile.
+    std::uint8_t debrief_agent_byte(std::uint8_t client, std::uint32_t offset) const;
+    std::int32_t debrief_agent_word(std::uint8_t client, std::uint32_t offset) const;
+    std::int32_t debrief_agent_statistic(std::uint8_t client, std::uint32_t index) const;
+    std::vector<gui::GuiHost::BonusRow> debrief_agent_vec(std::uint8_t client, std::int32_t kind) const;
+    std::vector<gui::GuiHost::BonusRow> debrief_agent_ratings(std::uint8_t client) const;
+    // 00185c70(player) in multiplayer: when its controller is networked, player id bits 24..30 encode
+    // client+1; an unnetworked controller (or encoded zero) selects the current local AgentData record.
+    // SCORES gets the player's id from 003fb8d0(i), then reads +b70, 00336170 and 00333ee0 from this record.
+    // live_local is the combat session's current local statistics; omit it after sync_play_statistics.
+    std::optional<MultiplayerScoreAgent> score_agent_for_player(std::uint32_t player_id, bool networked,
+                                                                const AgentStatistics* live_local = nullptr) const;
     std::vector<std::uint8_t> encode_local_agent_update(std::uint8_t stats_only, std::uint8_t awards) const;
     // 0012f0d0: the callback asks the caller to find a present player and
     // refresh its HUD name after a full update. Stats-only skips it. A full
@@ -364,7 +387,9 @@ public:
     // 001690f0 after the level's teardown: G+50 / G+51 as level_end_teardown
     // left them (0x0c or 1, 0x14); the main update's front-end blocks run
     // again from the next frame (state 0x0c: the EOL movie, then state 1 and
-    // 002cb3d0, which opens CMDCENTR while app +35 is set).
+    // 002cb3d0, which opens CMDCENTR while app +35 is set). World_Teardown
+    // clears the multiplayer bytes for both normal and G+1c7 keep-game returns;
+    // G+1c7 retains the DME connection, which is owned outside this session.
     void resume_after_level(std::uint8_t state_50, std::uint8_t previous_51);
 
     // Port-only (checkpoint 132f5, the pause menu's cheats). The agent patch
@@ -651,6 +676,7 @@ private:
     gui::PadInput pad_input() const;
     void check_profile(std::int32_t profile) const;
     AgentRecordView view() const { return AgentRecordView(agent_); }
+    const AgentLoadState& state_for_client(std::uint8_t client) const;
     // profile_refill_host, followed by the PORT-ONLY cheats that are on.
     AgentRefillHost refill_host();
     FrontendServices services_;

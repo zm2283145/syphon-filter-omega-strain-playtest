@@ -75,6 +75,34 @@ const std::array<std::array<std::int32_t, 3>, 15> end_award_rows = {{
     {3, 3, 3}, {3, 4, 3}, {3, 4, 4}, {4, 4, 4}, {4, 5, 4}, {4, 5, 5}, {5, 5, 5},
 }};
 
+void GuiRuntime::debrief_session_end_popup(std::uint32_t mode, const std::string& message_key,
+                                           const std::optional<std::string>& inline_message) {  // 00134220..00134318
+    switch (mode & 0xffu) {
+    case 1: {
+        std::optional<std::string> title;
+        std::optional<std::string> message;
+        if (inline_message && !inline_message->empty()) {  // lb 005721f0
+            title = host_.get_string(message_key);  // 00134240: test the selected title
+            if (title) title = host_.get_string(message_key);  // 00134260: original repeats the lookup
+            else title = host_.get_string("QuitTitle");
+            message = *inline_message;  // 00134290: pointer to the inline 005721f0 bytes
+        } else {
+            title = host_.get_string("QuitTitle");
+            message = host_.get_string(message_key);  // 0013429c
+        }
+        popup_open(2, title, message, nullptr, 0);  // 002cae30(app, 2, title, message, 0, 0)
+        break;
+    }
+    case 2: {
+        const auto title = host_.get_string("QuitTitle");
+        const auto message = host_.get_string("HOST_LEFTGAME");
+        popup_open(2, title, message, nullptr, 0);
+        break;
+    }
+    default: break;
+    }
+}
+
 // ---------------------------------------------------------------- the voice queue
 
 void GuiRuntime::vq_push(Widget* w, const std::string& name, float f) {  // 00460ac0
@@ -118,9 +146,10 @@ void GuiRuntime::eo_wake(Widget* w) {  // 004624e0
     ob_wake(w);  // 00368760
     const std::int32_t cp = host_.current_profile();  // 001314f0(G, -1)
     // *004ffd28 = G+1d8, the active agent index: 0 offline (00136870 swaps the local agent to slot 0).
-    if (g.b_21c8) unhosted(0x462514, "the debrief's network agent index (*004ffd28)");
+    const std::int32_t player = g.b_21c8 ? host_.debrief_local_slot() : 0;
     Widget::VoiceQueue::Entry e;
-    if (host_.scores_statistic(0, 0x19) > 0) e.name = fmt2("21_13_%d", 0 + 1, 0);  // 0x4c2698
+    if ((g.b_21c8 ? host_.debrief_statistic(player, 0x19) : host_.scores_statistic(0, 0x19)) > 0)
+        e.name = fmt2("21_13_%d", player + 1, 0);  // 0x4c2698
     else e.garbage = true;  // the stack buffer stays uninitialised (port: plays nothing)
     e.delay = 0x1e;         // 00462650(entry, name, 0x1e)
     w->vq->entries.push_back(e);  // 00462620
@@ -162,12 +191,41 @@ void GuiRuntime::es_wake(Widget* w) {  // 00463a20
 }
 
 void GuiRuntime::es_voices(Widget* w) {  // 00463390
-    if (g.b_21c8) unhosted(0x4633cc, "the network game's statistics quips");
-    // Offline: the players list holds player 0 (*00497bd8) when the agent's +b74 (the level completed)
-    // is set and statistic 0x1a is 0.
+    if (g.b_21c8) {  // 004633cc..00463590: highest two percentages, first player wins ties
+        std::array<std::int32_t, 2> best{};
+        std::array<std::int32_t, 2> winner{-1, -1};
+        for (std::int32_t p = 0; p < 4; ++p) {
+            const std::int32_t cp = host_.debrief_profile_slot(p);
+            if (cp < 0 || !host_.profile_byte(cp, 0xb70) || !host_.profile_byte(cp, 0xb74)) continue;
+            for (std::int32_t k = 0; k < 2; ++k) {
+                const std::uint32_t numerator = k == 0 ? 0x1d : 0x1b;
+                const std::int32_t count = host_.debrief_statistic(p, numerator);
+                const std::int32_t denominator = host_.debrief_statistic(p, numerator + 1);
+                // EE div uses the wrapped 32-bit numerator. Compute the quotient in 64 bits so
+                // INT_MIN / -1 cannot overflow C++, then retain the EE's low 32 bits.
+                const std::int32_t value = denominator == 0 ? 0 : std::bit_cast<std::int32_t>(
+                    static_cast<std::uint32_t>(static_cast<std::int64_t>(
+                        std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(count) * 100u)) / denominator));
+                if (value > best[static_cast<std::size_t>(k)]) {
+                    best[static_cast<std::size_t>(k)] = value;
+                    winner[static_cast<std::size_t>(k)] = p;
+                }
+            }
+        }
+        for (std::int32_t k = 0; k < 2; ++k) {
+            if (w->es->b254[static_cast<std::size_t>(k)] || winner[static_cast<std::size_t>(k)] < 0) continue;
+            w->es->b254[static_cast<std::size_t>(k)] = 1;
+            vq_push(w, fmt2(k == 0 ? "21_3_%d" : "21_4_%d", winner[static_cast<std::size_t>(k)] + 1, 0), 1.0f);
+        }
+    }
+    // The players list holds each active, completed agent whose statistic 0x1a is 0.
     std::vector<std::int32_t> players;
-    const std::int32_t cp = host_.current_profile();
-    if (host_.profile_byte(cp, 0xb74) && host_.scores_statistic(0, 0x1a) == 0) players.push_back(0);
+    for (std::int32_t p = 0; p < (g.b_21c8 ? 4 : 1); ++p) {
+        const std::int32_t cp = g.b_21c8 ? host_.debrief_profile_slot(p) : host_.current_profile();
+        if (cp < 0) continue;
+        if ((!g.b_21c8 || host_.profile_byte(cp, 0xb70)) && host_.profile_byte(cp, 0xb74) &&
+            (g.b_21c8 ? host_.debrief_statistic(p, 0x1a) : host_.scores_statistic(0, 0x1a)) == 0) players.push_back(p);
+    }
     if (players.empty()) return;
     if (players.size() >= 2) {
         for (std::int32_t p : players) vq_push(w, fmt2("21_2_%d", p + 1, 0), 0.0f);  // 0x4c2610
@@ -306,12 +364,12 @@ void GuiRuntime::aw_layout(Widget* w) {  // 0045f860
 }
 
 void GuiRuntime::aw_voices(Widget* w) {  // 00460450
-    if (g.b_21c8) unhosted(0x4604c0, "the network game's award quips (four agents)");
-    // Offline the loop covers player 0 (001314f0(G, 0)); each list collects the players with:
+    // The loop covers player 0 offline and all four agent slots in a network game (001314f0(G, p)).
     // A the rank changed, B a rating flag of 1 (00333600), C a kind-1 row flag of 1, D a kind-2 one.
     std::array<std::vector<std::int32_t>, 4> lists;
-    for (std::int32_t p = 0; p < 1; ++p) {
-        const std::int32_t cp = host_.current_profile();
+    for (std::int32_t p = 0; p < (g.b_21c8 ? 4 : 1); ++p) {
+        const std::int32_t cp = g.b_21c8 ? host_.debrief_profile_slot(p) : host_.current_profile();
+        if (cp < 0) continue;
         if (!host_.profile_byte(cp, 0xb70)) continue;
         const std::int32_t b54 = host_.profile_word(cp, 0xb54);
         if (b54 != 0 && host_.profile_word(cp, 0xb50) != b54) lists[0].push_back(p);

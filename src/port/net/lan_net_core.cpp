@@ -1667,7 +1667,9 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     }
     case 0x44e340:
         if (arg(0) != kLobbySession) unhosted(address, "a lobby other than LanSession's");
-        unhosted(address, "SFOLobby_ExitGame needs LAN lobby idle publication and client-state transition");
+        if (!lobby_exit_) unhosted(address, "SFOLobby_ExitGame has no caller lobby-exit service");
+        lobby_exit_();
+        return 0;
     case 0x2c7b20: return 0;  // tNetGenerator_NetGeneratorDeleteCallback is empty in the original.
     case 0x437bf0: dme_voice_end_00437bf0(m, *this); return 0;
     case 0x42b230: dme_session_reset_0042b230(m); return 0;
@@ -2346,6 +2348,18 @@ void LanNetCore::set_lobby(std::function<void()> pump) {
     lobby_ = std::move(pump);
     memory_.write(0x572480, 4, lobby_ ? kLobbySession : 0U);  // PORT-ONLY: the sentinel stands in for SFOLobby's session
     memory_.write(0x572488, 1, lobby_ ? 1U : 0U);
+}
+
+void LanNetCore::set_lobby_exit(std::function<void()> exit_game) {
+    lobby_exit_ = std::move(exit_game);
+}
+
+void LanNetCore::finish_level_teardown() {
+    level_loaded_ = false;
+    lobby_ = {};
+    lobby_exit_ = {};
+    memory_.write(0x572480, 4, 0);
+    memory_.write(0x572488, 1, 0);
 }
 
 void LanNetCore::level_load_begin(LevelLoadHost* level) {

@@ -133,6 +133,7 @@
 #include "launcher.hpp"
 #include "play_native_flow.hpp"
 #include "play_level_teardown.hpp"
+#include "lan_play_level_teardown.hpp"
 #include "video_frame.hpp"
 #include "gamepad_device.hpp"
 #include "input_bindings.hpp"
@@ -1980,27 +1981,59 @@ struct PlayGuiHost final:GuiStaticHost{
     // statistics are the combat session's (00333ee0), its name the session's 00336170 copy.
     std::optional<std::uint32_t> player_id;
     std::optional<std::uint8_t> agent_b70;   // --frontend: the agent record's +b70
+    std::function<std::optional<std::uint32_t>(std::int32_t)> network_score_player;
+    std::function<std::optional<std::size_t>(std::int32_t)> network_score_actor;
+    std::function<std::optional<float>(std::int32_t)> network_score_connection;
+    std::int32_t network_local_slot=0;
+    std::optional<float> scores_connection_status(std::int32_t i) override{
+        if(!network_score_connection)throw std::runtime_error("0042b320: network score status is unavailable");
+        return network_score_connection(i);
+    }
+    std::optional<MultiplayerScoreAgent> network_score_agent(std::int32_t i){
+        if(!rt||!rt->g.b_21c8||!card||!network_score_player)return std::nullopt;
+        const auto id=network_score_player(i);
+        if(!id)return std::nullopt;
+        const auto& live=combat_player(0x333ee0).agent_statistics();
+        return card->score_agent_for_player(*id,true,!debrief&&live?&*live:nullptr);
+    }
     std::optional<std::int32_t> scores_player(std::int32_t i) override{
+        if(rt&&rt->g.b_21c8&&network_score_player){
+            const auto id=network_score_player(i);
+            return id?std::optional<std::int32_t>(static_cast<std::int32_t>(*id)):std::nullopt;
+        }
         if(i!=0)return std::nullopt;
         if(!player_id)throw std::runtime_error("unhosted(0x3fb8d0): the player's id without the roster");
         return static_cast<std::int32_t>(*player_id);
     }
-    bool scores_agent_b70(std::int32_t) override{return agent_b70.value_or(1)!=0;}
-    std::string scores_agent_name(std::int32_t) override{
+    bool scores_agent_b70(std::int32_t i) override{
+        if(rt&&rt->g.b_21c8&&network_score_player){const auto a=network_score_agent(i);return a&&a->ready;}
+        return agent_b70.value_or(1)!=0;
+    }
+    std::string scores_agent_name(std::int32_t i) override{
+        if(const auto a=network_score_agent(i))return a->name;
+        if(rt&&rt->g.b_21c8)throw std::runtime_error("00336170: absent network score agent");
         const auto& n=combat_player(0x336170).player_name();
         if(!n)throw std::runtime_error("unhosted(0x336170): the agent name");
         return *n;
     }
-    std::int32_t scores_statistic(std::int32_t,std::uint32_t index) override{
+    std::int32_t scores_statistic(std::int32_t i,std::uint32_t index) override{
+        if(const auto a=network_score_agent(i))return read_agent_statistic(a->statistics,index);
+        if(rt&&rt->g.b_21c8)throw std::runtime_error("00333ee0: absent network score agent");
         // The debrief (checkpoint 132f11) runs after 00335830: the agent record the play's statistics went to.
         if(debrief&&card)return read_agent_statistic(card->agent_statistics(),index);
         const auto& st=combat_player(0x333ee0).agent_statistics();
         if(!st)throw std::runtime_error("unhosted(0x333ee0): the agent statistics");
         return read_agent_statistic(*st,index);
     }
-    std::array<std::int32_t,10> scores_attach(std::int32_t) override{
+    std::array<std::int32_t,10> scores_attach(std::int32_t i) override{
         if(!weapon_models)throw std::runtime_error("unhosted(0x3927a0): the attached weapon models without --weapon-models");
-        const auto& table=combat_player(0x3927a0).combat().attach_table(0);
+        std::size_t actor=0;
+        if(rt&&rt->g.b_21c8&&network_score_actor){
+            const auto found=network_score_actor(i);
+            if(!found)throw std::runtime_error("003927a0: absent multiplayer scores actor");
+            actor=*found;
+        }
+        const auto& table=combat_player(0x3927a0).combat().attach_table(actor);
         std::array<std::int32_t,10> r{};
         for(std::size_t k=0;k<r.size();++k)r[k]=table[k]==0?-1:weapon_models->attached(table[k]).item_40a;   // lh +40a
         return r;
@@ -2092,11 +2125,33 @@ struct PlayGuiHost final:GuiStaticHost{
         return *card;
     }
     std::int32_t current_profile() override{return card?card->current_profile():GuiStaticHost::current_profile();}
-    std::uint8_t profile_byte(std::int32_t p,std::uint32_t offset) override{return agent_card(0x1314f0).profile_byte(p,offset);}
-    std::int32_t profile_word(std::int32_t p,std::uint32_t offset) override{return agent_card(0x1314f0).profile_word(p,offset);}
+    static bool network_profile(std::int32_t p){return p>=0x100&&p<0x104;}
+    std::int32_t debrief_local_slot() override{return network_local_slot;}
+    std::int32_t debrief_profile_slot(std::int32_t p) override{
+        if(p<0||p>=4||!agent_card(0x1314f0).agent_for_client(static_cast<std::uint8_t>(p)))return -1;
+        return 0x100+p;
+    }
+    std::int32_t debrief_statistic(std::int32_t p,std::uint32_t index) override{
+        if(p<0||p>=4)throw std::runtime_error("00333ee0: debrief client outside four slots");
+        return agent_card(0x333ee0).debrief_agent_statistic(static_cast<std::uint8_t>(p),index);
+    }
+    std::uint8_t profile_byte(std::int32_t p,std::uint32_t offset) override{
+        auto& s=agent_card(0x1314f0);
+        return network_profile(p)?s.debrief_agent_byte(static_cast<std::uint8_t>(p-0x100),offset):s.profile_byte(p,offset);
+    }
+    std::int32_t profile_word(std::int32_t p,std::uint32_t offset) override{
+        auto& s=agent_card(0x1314f0);
+        return network_profile(p)?s.debrief_agent_word(static_cast<std::uint8_t>(p-0x100),offset):s.profile_word(p,offset);
+    }
     std::string profile_text(std::int32_t p,std::uint32_t offset) override{return agent_card(0x1314f0).profile_text(p,offset);}
-    std::vector<BonusRow> profile_vec(std::int32_t p,std::int32_t kind) override{return agent_card(0x3334c0).profile_vec(p,kind);}
-    std::vector<BonusRow> profile_ratings(std::int32_t p) override{return agent_card(0x333600).profile_ratings(p);}
+    std::vector<BonusRow> profile_vec(std::int32_t p,std::int32_t kind) override{
+        auto& s=agent_card(0x3334c0);
+        return network_profile(p)?s.debrief_agent_vec(static_cast<std::uint8_t>(p-0x100),kind):s.profile_vec(p,kind);
+    }
+    std::vector<BonusRow> profile_ratings(std::int32_t p) override{
+        auto& s=agent_card(0x333600);
+        return network_profile(p)?s.debrief_agent_ratings(static_cast<std::uint8_t>(p-0x100)):s.profile_ratings(p);
+    }
     RankRow profile_rank_row(std::int32_t p) override{return agent_card(0x336110).profile_rank_row(p);}
     std::optional<std::string> loc_text(std::int32_t id) override{return agent_card(0x3fe650).loc_text(id);}
     std::uint32_t zeus_archive() override{return card?card->zeus_archive():0;}
@@ -2194,7 +2249,7 @@ struct PlayGuiOverlay{
     std::size_t log_seen=0;
     std::size_t host_log_seen=0;   // PlayGuiHost::log lines already printed
     std::set<std::string> reported;
-    std::function<void()> build_stats_figure;   // 0035d430's display actor for slot 0 (built on the first draw)
+    std::function<void(std::size_t)> build_stats_figure;   // 0035d430's display actors, built on first draw
     bool eqmodify_figure_logged=false;   // the loadout figure's draw (parts and held guns) reported once
     // Checkpoint 132ws6: camera record 0's +0x100 as the last figure draw 002bfa90 left it (0x3f060a92; it does not
     // restore it). Cleared at loadout_open: what the load and the front end leave there is not modelled.
@@ -2220,7 +2275,7 @@ struct PlayGuiOverlay{
     // Checkpoint 132f7: the stats screen's figure, 0035d430's display actor +1a4[slot] (00393ff0) that
     // 0035bfb0 fills from the player (003927a0(display, p + 60): the player's parts, +2c71 = 1); solo play
     // has the one player, slot 0.
-    std::optional<LoadoutFigure> stats_figure;
+    std::array<std::optional<LoadoutFigure>,4> stats_figures;
     bool stats_figure_logged=false;
     static constexpr std::uint32_t figure_slot_base=0x90000000U;
     static constexpr std::uint32_t stats_figure_slot_base=0x90100000U;
@@ -2445,8 +2500,10 @@ struct PlayGuiOverlay{
     void set_stats_figure(std::unique_ptr<AnimatedCharacter> character,const AnimationGraphManifest& manifest,
                           const AnimationClipBank& clips,const ActorMotionRegistry& registry,
                           const std::vector<Texture>& images,const std::vector<bool>& textured,
-                          std::shared_ptr<const omega::mods::CharacterModelOverrides> models){
-        stats_figure=make_display_figure(std::move(character),manifest,clips,registry,images,textured,stats_figure_slot_base,"0035d430",std::move(models));
+                          std::shared_ptr<const omega::mods::CharacterModelOverrides> models,std::size_t slot=0){
+        if(slot>=stats_figures.size())throw std::runtime_error("0035d430: scores display slot outside four players");
+        stats_figures[slot]=make_display_figure(std::move(character),manifest,clips,registry,images,textured,
+            stats_figure_slot_base+static_cast<std::uint32_t>(slot)*0x10000U,"0035d430",std::move(models));
     }
     // 002bfa90 (the figure callback 002c2340): the turn +68 eased (em_figure_turn), the placement of the
     // display actor's 'flor' anchor (3ae5e0(actor + 0x2ec0 + 0xb0, "flor")): sp+1c0 = (0.6, 5, -2) and the
@@ -2530,8 +2587,12 @@ struct PlayGuiOverlay{
             if(fig.b2c3a<0)continue;   // 003870c0 (00387108): +2bda < 0
             if(!fig.b2c71)throw std::runtime_error("0035b390: display actor "+std::to_string(slot)
                 +" without 3927a0's player copy (0035d430's default appearance 0055d510 is not ported)");
-            if(slot!=0||!stats_figure)throw std::runtime_error("0035b390: display actor "+std::to_string(slot)
-                +" (only solo slot 0, the player's figure, is built)");
+            auto& stats_figure=stats_figures[slot];
+            if(!stats_figure){
+                if(!build_stats_figure)throw std::runtime_error("0035d430: the stats display actor cannot be built here");
+                build_stats_figure(slot);
+            }
+            if(!stats_figure)throw std::runtime_error("0035b390: missing display actor "+std::to_string(slot));
             const auto placed=figure_slot_placement(e.rot_1c0,e.pos_1e0[slot],camera);
             const RootParentTransform placement{placed.orientation,placed.position};
             const auto& anchors=stats_figure->character->model().player().anchors;
@@ -3273,10 +3334,6 @@ struct PlayGuiOverlay{
             }
             if(display.cd_callback!=0x35df30)
                 throw std::runtime_error("GuiCharacterDisplay: callback "+std::to_string(display.cd_callback)+" is not hosted");
-            if(!stats_figure){
-                if(!build_stats_figure)throw std::runtime_error("0035d430: the stats figure's display actor cannot be built here");
-                build_stats_figure();
-            }
             stats_figures_draw(out,screen,guns);
         };
         OMEGA_ZONE_LAP(gui_laps,"gui.callbacks");
@@ -3988,6 +4045,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<std::pair<unsigned,std::uint32_t>> debug_ni_plays;   // harness: (frame, NIE/NIL id) Plays outside the scripts
         std::vector<std::pair<unsigned,std::string>> debug_script_calls;   // harness: (frame, module::function) script calls
         std::set<unsigned> debug_objective_state_frames;   // read-only snapshot after this frame's script/network delivery
+        bool lan_end_results=false;   // opt-in composed multiplayer ending validation
         std::vector<std::pair<unsigned,std::uint32_t>> diagnostic_resets;   // PORT-ONLY --reset-npc: (frame, NPC ID) ResetNpc 00148600 calls
         std::set<unsigned> flashlight_taps;   // --flashlight-tap: frames D-pad Right is held (scripted runs)
         std::optional<std::int32_t> goggles_item;   // --goggles-item: port-only 00143df0 add of a goggles item after the start
@@ -4049,6 +4107,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(!resolution_flag)throw std::runtime_error("--resolution needs native or window");}
                 else if(arg==L"--freed-ai-resend-skip")freed_ai_resend_skip=true;   // 132ms3 (port-only aid)
                 else if(arg==L"--debug-objective-state")debug_objective_state_frames.insert(number<unsigned>(value()));
+                else if(arg==L"--lan-end-results")lan_end_results=true;
                 else if(arg==L"--mods")mods_flag=fs::path(value());   // 132md1 (port-only, research/MODDING.md)
                 else if(arg==L"--no-mods")no_mods_flag=true;
                 else if(arg==L"--mods-cpu-skinning")mods_cpu_skinning=true;
@@ -12933,6 +12992,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             o.host.item_strings=&o.strings;
             for(const auto& e:roster)if(e.record==0)o.host.player_id=e.actor_id;
             if(frontend_app)o.host.agent_b70=frontend_app->session().agent()[0xb70];
+            if(lan_net){
+                const auto local_key=lan_net->local_player_key();
+                o.host.network_local_slot=lan_net->local_client_index();
+                // PORT-ONLY: the UDP transport has no retail send-capacity
+                // trackers for 0042b320. Hide unavailable connection icons.
+                o.host.network_score_connection=[](std::int32_t)->std::optional<float>{return std::nullopt;};
+                o.host.network_score_player=[&,local_key](std::int32_t i)->std::optional<std::uint32_t>{
+                    if(i==0)return local_key;
+                    if(i<1||static_cast<std::size_t>(i)>lan_remotes.size())return std::nullopt;
+                    const auto& remote=lan_remotes[static_cast<std::size_t>(i-1)];
+                    if(!remote.key||remote.gone||!remote.figure)return std::nullopt;
+                    return remote.key;
+                };
+                o.host.network_score_actor=[&](std::int32_t i)->std::optional<std::size_t>{
+                    if(i==0)return std::size_t{0};
+                    if(i<1||static_cast<std::size_t>(i)>lan_remotes.size())return std::nullopt;
+                    const auto& remote=lan_remotes[static_cast<std::size_t>(i-1)];
+                    if(!remote.key||remote.gone||!remote.figure)return std::nullopt;
+                    return remote.figure->actor;
+                };
+            }
             // Checkpoint 132hud5: 0026c8d0 on the targets' list, and the port-only co-op HUD's roster (the agent slots).
             hud_map_listener=[&o](std::int32_t id,std::uint32_t st){o.host.map_marker_added(id,st);};
             if(coop_partner_figure&&!no_coop_hud)
@@ -12985,11 +13065,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // Checkpoint 132pc3: 3927a0 copies the player's model as it is now, so after game::SwitchBodies (TORONTO1's
             // CHA suit) the figure has the switched parts, matching part_images / textured_parts (0038e030's images of
             // the switch); the start-up --part list stays the loadout figure's (002c1100, before any switch).
-            o.build_stats_figure=[&o,&character,&skeleton,&player_manifest,&clips,&player_registry,&part_images,&textured_parts,&player_models]{
+            o.build_stats_figure=[&o,&character,&skeleton,&player_manifest,&clips,&player_registry,&part_images,&textured_parts,&player_models,&lan_net,&lan_remotes](std::size_t slot){
+                if(o.rt.g.b_21c8&&lan_net&&slot!=static_cast<std::size_t>(o.host.network_local_slot)){
+                    for(const auto& remote:lan_remotes)if(remote.peer==slot&&remote.key&&!remote.gone&&remote.figure){
+                        const auto& f=*remote.figure;
+                        if(!f.character||!f.model||!f.registry)throw std::runtime_error("0035d430: remote display actor has no animation model");
+                        std::vector<AnimatedCharacterPart> parts;
+                        for(const auto& p:f.character->parts())parts.push_back({p.name,p.mesh});
+                        o.set_stats_figure(std::make_unique<AnimatedCharacter>(f.character->skeleton(),*f.model,std::move(parts),MorphHostConfig{}),
+                            *f.model,clips,*f.registry,f.images,f.textured,f.models,slot);
+                        return;
+                    }
+                    throw std::runtime_error("0035d430: no present remote player for display slot "+std::to_string(slot));
+                }
                 std::vector<AnimatedCharacterPart> figure_parts;
                 for(const auto& p:character.parts())figure_parts.push_back({p.name,p.mesh});
                 o.set_stats_figure(std::make_unique<AnimatedCharacter>(skeleton,player_manifest,std::move(figure_parts),MorphHostConfig{}),
-                                   player_manifest,clips,player_registry,part_images,textured_parts,player_models);   // 132md3: the current parts' replacements
+                                   player_manifest,clips,player_registry,part_images,textured_parts,player_models,slot);   // 132md3: the current parts' replacements
             };
             if(loadout_screen){
                 // 002c1100: the display actor with the player's skeleton and appearance (the player's parts).
@@ -13652,6 +13744,47 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
         };
         std::optional<std::uint8_t> level_end_next;   // 001690f0's next state at the level end
+        if(lan_end_results&&lan_net){
+            if(!frontend_app||!gui_overlay_draw||!gui_overlay_draw->menu||native_flow)
+                throw std::runtime_error("--lan-end-results requires the front end and GUI canvas, without --native-flow");
+            SoloLevelEndNetworkServices services;
+            services.message.host_role=lan_net->hosting();
+            services.message.send_agent_data=[&]{
+                // end_agent has already synchronized/finalized the local record.
+                lan_net->send_agent_update(frontend_app->session().encode_local_agent_update(0,1));
+                std::cout<<"LAN AgentData final awards sent for client "<<lan_net->local_client_index()<<" at frame "<<frame<<"\n";
+            };
+            services.message.continue_message=[&](std::uint8_t flags,std::uint8_t kind,std::uint32_t quit){
+                if(flags&4){
+                    lan_net->send_end_level(kind,quit!=0);
+                    std::cout<<"LAN ENDLEVEL sent: kind "<<int(kind)<<", quit "<<quit<<", frame "<<frame<<"\n";
+                }
+            };
+            services.remote_players_ready=[&]{
+                std::array<bool,4> present{};
+                present.at(frontend_app->session().local_agent_client_index())=true;
+                for(const auto& remote:lan_remotes)
+                    if(remote.peer<4&&remote.key&&!remote.gone&&remote.figure)present[remote.peer]=true;
+                const bool ready=frontend_app->session().all_remote_agent_data_received(present);
+                if(ready)std::cout<<"LAN ending: all present remote AgentData ready at frame "<<frame<<"\n";
+                return ready;
+            };
+            services.host_left_game=[&]{
+                lan_net->memory().write(0x5721d8,1,1);
+                lan_net->memory().write(0x5723b0,1,2);
+                if(hud_object){
+                    const auto message=gui_overlay_draw->strings.resolve("HOST_LEFTGAME");
+                    if(!message)throw std::runtime_error("0020e350: missing HOST_LEFTGAME string");
+                    hud_object->notice(std::string(*message));
+                }
+            };
+            sim.set_level_end_network(std::move(services));
+            lan_net->set_lobby_exit([&]{
+                frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,
+                    sim.game_end().agent_b74!=0);
+            });
+            std::cout<<"LAN shared endings: opt-in native request, final records, results and teardown enabled\n";
+        }
         std::uint64_t minimized_presents_skipped=0;   // port-only (132win5)
         // Port-only (132win12): focus loss. The game keeps stepping (the PS2 game has no focus pause); the sound is
         // silenced (the voice at volume 0, the mixing goes on: no desync, no gap; background_audio=1 keeps it), the
@@ -13808,6 +13941,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         std::cout<<"LAN AgentData "<<(update.inner[1]?"stats":"full")<<" from client "<<int(update.client)
                             <<" (origin "<<update.origin<<", "<<update.inner.size()<<" bytes) applied at frame "<<frame
                             <<" (received, no echo; ready "<<int((*session.agent_for_client(update.client))[0xb70])<<")\n";
+                        if(!update.inner[1]&&update.inner[2])
+                            std::cout<<"LAN AgentData final awards received from client "<<int(update.client)<<" at frame "<<frame<<"\n";
+                    }
+                    if(lan_end_results)for(const auto& end:lan_net->take_end_levels()){
+                        const auto result=sim.receive_level_end_message(static_cast<std::uint8_t>(end.kind),end.quit,
+                            lan_net->memory().read(0x5721d0,1)!=0);
+                        std::cout<<"LAN ENDLEVEL received: origin "<<end.origin<<", kind "<<int(end.kind)<<", quit "<<end.quit
+                            <<", frame "<<frame<<", "<<(result.handled?"applied":"ignored by game state")<<"\n";
                     }
                     lan_backpacks(frame);
                     lan_npc_sections(frame);
@@ -13823,7 +13964,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // own copy of 0x005721d8 is never set: the LAN state is LanNetCore's). The original then opens the
                     // network quit dialog 002cae30 (message 0x667 / 0x668) and returns to the front end; neither is
                     // hosted in the play, so the session ends here, as at a window close.
-                    if(lan_net->take_quit_request()){
+                    if(!(lan_end_results&&(sim.game_end().state_50==0x13||sim.game_end().state_50==0x14))&&lan_net->take_quit_request()){
                         lan_print_log();
                         std::cout<<"LAN (port-only, 132ln5h7): the quit request (00169360) at frame "<<frame<<" (\""
                             <<lan_net->quit_text()<<"\"): the network quit dialog 002cae30 (message 0x667 / 0x668) and its"
@@ -18452,6 +18593,18 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // Quit), its own GUI loop over the play's canvas (LEVEL_END.md section 6g).
                     unsigned debrief_frames=0;
                     bool window_closed_during_teardown=false;
+                    const bool network_debrief=lan_end_results&&lan_net;
+                    const std::string end_quit_key=network_debrief?lan_net->quit_text():std::string{};
+                    std::optional<std::string> end_quit_message;
+                    if(network_debrief&&lan_net->memory().read(0x5721f0,1)){
+                        std::string text;
+                        for(std::uint32_t i=0;i<0x80;++i){
+                            const auto c=static_cast<char>(lan_net->memory().read(0x5721f0+i,1));
+                            if(!c)break;
+                            text.push_back(c);
+                        }
+                        end_quit_message=std::move(text);
+                    }
                     actions.debrief=[&](std::uint32_t,std::uint32_t a1){
                         if(!gui_overlay_draw||!gui_overlay_draw->menu||!frontend_app||!gui_overlay_draw->host.card){
                             std::cout<<"Debrief (00134110) at frame "<<frame<<": skipped (port-only: it needs the front end's agent record "
@@ -18461,6 +18614,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         auto& o=*gui_overlay_draw;
                         auto& rt=o.rt;
                         o.host.debrief=true;
+                        rt.g.b_21c8=network_debrief?1:0;
+                        if(network_debrief){
+                            for(auto& figure:o.stats_figures)figure.reset();
+                            o.stats_figure_logged=false;
+                            std::cout<<"LAN debrief screen: SCORES (local client "<<o.host.network_local_slot<<")\n";
+                        }
                         o.zeus=&frontend_app->zeus_images();
                         // 003c8c70: the pending messages are dropped (the port queues none here).
                         unsigned popped=0;
@@ -18568,7 +18727,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             return true;
                         };
                         if(!fade(1,"fade-in")){o.host.debrief=false;return;}
-                        if(a1!=0)throw std::runtime_error("unhosted(0x134220): the debrief's session-end popups (a1 = "+std::to_string(a1)+")");
+                        rt.debrief_session_end_popup(a1,end_quit_key,end_quit_message);
                         gui::Widget* summary=rt.factory("GuiEndGameObjectives",std::string("SUMMARY"));
                         if(!summary)throw std::runtime_error("00134110: 00418a80 GuiEndGameObjectives \"SUMMARY\" failed");
                         rt.push(summary,0);
@@ -18598,7 +18757,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         o.host.debrief=false;
                         std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames\n";
                     };
-                    const auto teardown=run_play_level_teardown(*ending,actions);
+                    const auto teardown=network_debrief?run_lan_play_level_teardown(*lan_net,*ending,actions)
+                        :run_play_level_teardown(*ending,actions);
+                    if(network_debrief){
+                        std::cout<<"LAN native teardown: live services";
+                        for(const auto& call:teardown.calls)if(call.kind=="network")std::cout<<" "<<hex_word(call.address);
+                        std::cout<<"; MP "<<int(teardown.multiplayer_after)<<", quit latch "<<int(teardown.quit_latch_after)<<"\n";
+                    }
                     if(teardown.state_50!=*next||teardown.previous_51!=sim.game_end().previous_51)
                         throw std::runtime_error("001690f0: the native teardown's next state differs from the play's");
                     std::cout<<"World_Teardown at frame "<<frame<<": pad vibration stopped (0026bd60; port 0 bytes "<<int(writes[0].bytes[0])
@@ -18615,7 +18780,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // Port-only (132on2d, ONLINE.md §3.6): World_Teardown's network branch 0013493c (with 004294c0
                     // set: 0044e340, the record's upload, then 0042b1f0, the game left), which the teardown mirror
                     // answers as solo: an online game's lobby side runs here, after the teardown.
-                    if(frontend_app)frontend_app->online_level_end(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,true);
+                    if(frontend_app)frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,ending->agent_b74!=0);
                     if(window_closed_during_teardown){++frame;running=false;break;}
                     level_end_next=next;
                     ++frame;running=false;break;
@@ -20973,7 +21138,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         if(!state.error.empty())throw std::runtime_error(state.error);
         // Port-only (132on2d): an online game the level left without its teardown (a frame limit, the window's close):
         // the game's end as 0044e340 / 0042b1f0 (nothing when the teardown's ran).
-        if(frontend_app)frontend_app->online_level_end(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,false);
+        if(frontend_app)frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,false);
         if(frontend_app&&level_end_next){
             // The level's teardown ran natively at the level end (001690f0, play_level_teardown.hpp); the
             // objects its "pass" / "renderer" services destroy are this pass's locals, released at the pass's
@@ -21011,6 +21176,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         }
         break;
         }   // the level loop
+        if(frontend_app)frontend_app->release_network_level();
         return 0;
     }catch(const std::exception& e){
         omega::crash::disarm_shutdown();   // 132ws8: the teardown is over; the dialogs below wait on the user

@@ -151,6 +151,7 @@ add_library(omega_core
     src/main/game/remote_players_ready.cpp
     src/main/machine/play_native_flow.cpp
     src/port/play/play_level_teardown.cpp
+    src/port/play/lan_play_level_teardown.cpp
     src/main/ai/team_setup.cpp
     src/main/gameFrontEnd/level_selector.cpp
     src/main/human/spawned_actor_ctor.cpp
@@ -652,7 +653,7 @@ target_sources(omega_core_tests PRIVATE tests/gamepad_reports_tests.cpp tests/pa
 target_sources(omega_core_tests PRIVATE tests/coop_partner_tests.cpp tests/coop_breadcrumbs_tests.cpp tests/coop_command_menu_tests.cpp tests/interact_gobj_pairing_tests.cpp tests/host_window_tests.cpp tests/frame_pacer_tests.cpp tests/card_tools_tests.cpp)
 target_sources(omega_core_tests PRIVATE tests/port_cheats_tests.cpp)
 target_sources(omega_core_tests PRIVATE tests/online_server_tests.cpp)   # 132on1 (port-only)
-target_sources(omega_core_tests PRIVATE tests/lan_net_tests.cpp tests/lan_inlevel_tests.cpp tests/lan_envelope_wire_tests.cpp tests/dme_game_tests.cpp
+target_sources(omega_core_tests PRIVATE tests/lan_net_tests.cpp tests/lan_inlevel_tests.cpp tests/lan_envelope_wire_tests.cpp tests/lan_play_level_teardown_tests.cpp tests/dme_game_tests.cpp
     tests/net_registry_tests.cpp tests/lan_mod_gate_tests.cpp tests/lan_teardown_services_tests.cpp)
 target_sources(omega_core_tests PRIVATE tests/input_device_tests.cpp tests/port_settings_page_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/vita_pad_map_tests.cpp)   # 132vt1 (port-only)

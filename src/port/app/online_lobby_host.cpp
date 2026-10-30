@@ -463,6 +463,7 @@ void OnlineLobbyHost::game_cleanup() {
     joining_ = 0;
     pending_ = Pending::None;
     level_ = false;
+    level_exit_reported_ = false;
     report_player_ms_ = report_world_ms_ = level_start_ms_ = 0;
 }
 
@@ -508,7 +509,7 @@ std::optional<std::int32_t> OnlineLobbyHost::player_rank(std::int32_t account) {
 }
 
 void OnlineLobbyHost::level_frame() {
-    if (!lobby_.logged_in() || world_ == 0) return;
+    if (!lobby_.logged_in() || world_ == 0 || level_exit_reported_) return;
     lobby_.client().pump(0);
     portmap_poll();
     const std::uint64_t now = now_ms();
@@ -543,10 +544,17 @@ void OnlineLobbyHost::level_frame() {
     }
 }
 
-void OnlineLobbyHost::level_end(bool completed) {
-    if (!lobby_.logged_in() || world_ == 0) return;
+void OnlineLobbyHost::level_exit(bool completed) {
+    if (!lobby_.logged_in() || world_ == 0 || level_exit_reported_) return;
     log("online: the level ended (" + std::string(completed ? "completed" : "not completed") + ")");
     entry_end();
+    if (lan_) lan_->exit_game();
+    level_exit_reported_ = true;
+}
+
+void OnlineLobbyHost::level_end(bool completed) {
+    if (!lobby_.logged_in() || world_ == 0) return;
+    level_exit(completed);
     game_cleanup();
 }
 

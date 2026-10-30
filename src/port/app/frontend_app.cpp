@@ -375,6 +375,7 @@ struct FrontendApp::Impl {
     std::deque<std::pair<std::string, std::int64_t>> lan_notices;  // the text, the front-end frame it ends at
     void draw_lan_notices();
     std::unique_ptr<lan::LanNetCore> lan_core;  // port-only (132ln5): the network game's DME.cc game side
+    bool network_exit_started = false;
     // Port-only test (132on2f, --online-portmap-test): the fake PCP / NAT-PMP gateway (outlives online_lobby, whose
     // destructor waits for the mapping's removal).
     std::unique_ptr<online::FakePortMapGateway> portmap_test_gateway;
@@ -503,6 +504,7 @@ struct FrontendApp::Impl {
     std::size_t page_listener = 0;
     std::uint16_t page_input(std::uint16_t held, bool keys_down, const KeyboardState& keys);
     ~Impl() {
+        lan_core.reset();  // stop any load pump before releasing its session/clock dependencies
         if (present_job) present_job->wait();  // 132vf2: the job uses this front end's renderer and window
         if (page) page->unlisten(page_listener);
     }
@@ -2047,19 +2049,44 @@ std::vector<std::string> FrontendApp::online_level_frame() {
     return m.online_lobby->take_path_notices();
 }
 
-void FrontendApp::online_level_end(const AgentStatistics* live, bool completed) {
+void FrontendApp::network_level_exit(const AgentStatistics* live, bool completed) {
     auto& m = *impl_;
-    if (!m.online_lobby || !m.online_lobby->in_game()) return;
+    if (m.network_exit_started || !m.lan_core) return;
     m.online_live_stats = live;
-    m.online_lobby->level_end(completed);
+    try {
+        if (m.online_lobby && m.online_lobby->in_game()) m.online_lobby->level_exit(completed);
+        else if (auto* session = m.net_session()) session->exit_game();
+    } catch (...) {
+        m.online_live_stats = nullptr;
+        throw;
+    }
     m.online_live_stats = nullptr;
-    for (const auto& line : m.online_lobby->take_log()) std::cout << "Front end: " << line << "\n";
+    m.network_exit_started = true;
+    if (m.online_lobby)
+        for (const auto& line : m.online_lobby->take_log()) std::cout << "Front end: " << line << "\n";
+}
+
+void FrontendApp::release_network_level() {
+    auto& m = *impl_;
+    if (!m.lan_core) return;
+    // All level-local borrowers are gone before this API is called. The core
+    // itself still borrows the transport and its clock, so destroy it first.
+    auto* session = m.net_session();
+    m.lan_core.reset();
+    if (m.online_lobby && m.online_lobby->in_game()) m.online_lobby->game_cleanup();
+    else if (session) {
+        if (session->hosting()) session->leave();
+        else session->cancel_join();
+    }
+    m.network_exit_started = false;
+    std::cout << "Front end: network level released (core before session transport)\n";
 }
 std::string FrontendApp::port_settings_source() const {
     return impl_->store->where();
 }
 
 FrontendResult FrontendApp::resume_after_level(std::uint8_t state_50, std::uint8_t previous_51) {
+    release_network_level();
     impl_->session->resume_after_level(state_50, previous_51);
     std::cout << "Front end: resumed after the level end (state 0x" << std::hex << int(state_50) << ", previous 0x"
               << int(previous_51) << std::dec << ")";

@@ -221,12 +221,14 @@ public:
     // not change it at a level boundary.
     bool network_session() const;
     // Port-only (checkpoint 132on2d, research/ONLINE.md §3.6): an online game's lobby side in the level: the frame
-    // (004536b0 state 10 -> 004446e0(1): PlayerReport / WorldReport every 15 s) and the level's end (World_Teardown's
-    // network branch 0013493c: 0044e340's record upload, then 0042b1f0 the game left). `live`: the level's
-    // statistics (null: the agent's). Both do nothing outside an online game. The frame returns the connection-path
+    // (004536b0 state 10 -> 004446e0(1): PlayerReport / WorldReport every 15 s).
+    // Does nothing outside an online game. The frame returns the connection-path
     // notices (132on2f, port-only; none for an original-kind session) for the level's HUD ticker.
     std::vector<std::string> online_level_frame();
-    void online_level_end(const AgentStatistics* live, bool completed);
+    // End reporting/advertising without destroying the connection borrowed by
+    // the level's LanNetCore. release_network_level runs after level locals die.
+    void network_level_exit(const AgentStatistics* live, bool completed);
+    void release_network_level();
 
 private:
     struct Impl;

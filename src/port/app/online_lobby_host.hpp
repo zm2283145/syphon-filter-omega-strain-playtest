@@ -215,6 +215,10 @@ public:
     // The level's end (World_Teardown's network branch 0013493c: 0044e340, then 0042b1f0): the record rebuilt and
     // uploaded (reason 3), then the game left. `completed` is logged only.
     void level_end(bool completed);
+    // 0044e340's reporting phase only. Keeps the game transport alive for native
+    // teardown; game_cleanup is called after its borrowers have been released.
+    // Repeated calls for one world do not upload the final record twice.
+    void level_exit(bool completed);
     bool in_game() const { return world_ != 0; }
 
     // Checkpoint 132on2e (see the header's stage E). The relay: the mode (online_relay) and the link the game socket
@@ -333,6 +337,7 @@ private:
     std::int32_t game_agents_ = 0;       // the created game's agents (its players' limit)
     std::uint64_t report_player_ms_ = 0, report_world_ms_ = 0, level_start_ms_ = 0;
     bool level_ = false;
+    bool level_exit_reported_ = false;
 
     // Checkpoint 132on2e: the relay, the game port and UPnP; 132on2f: the PCP / NAT-PMP fallbacks and the renewal.
     void apply_relay_ticket();
