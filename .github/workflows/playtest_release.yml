@@ -7,6 +7,15 @@ on:
     workflows: [Build]
     types: [completed]
     branches: [main]
+  push:
+    branches: [main]
+    paths: [.github/workflows/playtest_release.yml]
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Build run ID to republish (blank selects the latest successful main Build)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -14,48 +23,95 @@ permissions:
 jobs:
   release:
     if: >-
-      ${{ github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.head_repository.full_name == github.repository &&
-          github.event.workflow_run.head_branch == 'main' &&
-          (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') }}
+      ${{ (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.head_repository.full_name == github.repository &&
+           github.event.workflow_run.head_branch == 'main' &&
+           (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')) ||
+          ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+           github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write
     concurrency:
-      group: playtest-release-${{ github.event.workflow_run.id }}
+      group: playtest-prerelease-publisher
       cancel-in-progress: false
     env:
-      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
-      SOURCE_RUN: ${{ github.event.workflow_run.id }}
-      SOURCE_NUMBER: ${{ github.event.workflow_run.run_number }}
       SOURCE_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Resolve and validate successful Build
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          if [[ "$EVENT_NAME" == workflow_run ]]; then
+            run_id="$TRIGGER_RUN_ID"
+          elif [[ "$EVENT_NAME" == workflow_dispatch && -n "$INPUT_RUN_ID" ]]; then
+            run_id="$INPUT_RUN_ID"
+          else
+            listing=$(gh api "repos/$SOURCE_REPO/actions/workflows/build.yml/runs?branch=main&status=success&per_page=20")
+            selected=$(jq -c --arg repo "$SOURCE_REPO" '
+              [.workflow_runs[] | select(
+                .conclusion == "success" and .head_branch == "main" and
+                .head_repository.full_name == $repo and
+                (.event == "push" or .event == "workflow_dispatch") and
+                (.path == ".github/workflows/build.yml" or
+                 (.path | startswith(".github/workflows/build.yml@")))
+              )] | sort_by(.run_number) | last // null' <<< "$listing")
+            if [[ "$selected" == null ]]; then
+              echo "No qualifying successful main Build found; skipping release"
+              echo 'ready=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            run_id=$(jq -r '.id' <<< "$selected")
+          fi
+          [[ "$run_id" =~ ^[0-9]+$ ]]
+          run=$(gh api "repos/$SOURCE_REPO/actions/runs/$run_id")
+          jq -e --arg repo "$SOURCE_REPO" '
+            .conclusion == "success" and .head_branch == "main" and
+            .head_repository.full_name == $repo and
+            (.event == "push" or .event == "workflow_dispatch") and
+            (.path == ".github/workflows/build.yml" or
+             (.path | startswith(".github/workflows/build.yml@")))' <<< "$run" > /dev/null
+          sha=$(jq -r '.head_sha' <<< "$run")
+          number=$(jq -r '.run_number' <<< "$run")
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$number" =~ ^[0-9]+$ ]]
+          printf 'ready=true\nsha=%s\nrun_id=%s\nnumber=%s\n' "$sha" "$run_id" "$number" >> "$GITHUB_OUTPUT"
       # Exact names and run ID bind every payload to the successful Build.
       # Do not check out or execute anything from a downloaded artifact.
       - name: Download Windows package
+        if: steps.resolve.outputs.ready == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: OmegaStrain-windows-${{ github.event.workflow_run.head_sha }}
+          name: OmegaStrain-windows-${{ steps.resolve.outputs.sha }}
           path: ${{ runner.temp }}/playtest-artifacts/windows
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
       - name: Download Vita GXM package
+        if: steps.resolve.outputs.ready == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: omega_vita_gxm-${{ github.event.workflow_run.head_sha }}
+          name: omega_vita_gxm-${{ steps.resolve.outputs.sha }}
           path: ${{ runner.temp }}/playtest-artifacts/vita-gxm
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
       - name: Download PS5 folder title
+        if: steps.resolve.outputs.ready == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: omega_ps5-PPSA99720-${{ github.event.workflow_run.head_sha }}
+          name: omega_ps5-PPSA99720-${{ steps.resolve.outputs.sha }}
           path: ${{ runner.temp }}/playtest-artifacts/ps5
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
       - name: Package exactly three release files
+        if: steps.resolve.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -75,7 +131,12 @@ jobs:
           test -s "$RELEASE_DIR/OmegaStrain-vita-GXM.vpk"
           test -s "$RELEASE_DIR/OmegaStrain-ps5-PPSA99720.zip"
       - name: Create, upload, then publish prerelease
+        if: steps.resolve.outputs.ready == 'true'
         shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.resolve.outputs.sha }}
+          SOURCE_RUN: ${{ steps.resolve.outputs.run_id }}
+          SOURCE_NUMBER: ${{ steps.resolve.outputs.number }}
         run: |
           set -euo pipefail
           RELEASE_DIR="$RUNNER_TEMP/playtest-release"
@@ -85,12 +146,23 @@ jobs:
           [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
           short="${SOURCE_SHA:0:8}"
           tag="playtest-${SOURCE_NUMBER}-${short}"
-          ref=$(gh api "repos/$SOURCE_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)
+          if ref=$(gh api "repos/$SOURCE_REPO/git/ref/tags/$tag" --jq '.object.sha' \
+                    2>"$RELEASE_DIR/tag-lookup-error"); then
+            :
+          elif grep -q 'HTTP 404' "$RELEASE_DIR/tag-lookup-error"; then
+            ref=''
+          else
+            cat "$RELEASE_DIR/tag-lookup-error" >&2
+            exit 1
+          fi
           if [[ -n "$ref" && "$ref" != "$SOURCE_SHA" ]]; then
             echo "Tag $tag points to a different source commit" >&2
             exit 1
           fi
-          release=$(gh api "repos/$SOURCE_REPO/releases/tags/$tag" 2>/dev/null || true)
+          # The by-tag release endpoint omits drafts. List authenticated
+          # releases so a failed upload can resume its existing draft.
+          releases=$(gh api --paginate "repos/$SOURCE_REPO/releases?per_page=100")
+          release=$(jq -c --arg tag "$tag" '.[] | select(.tag_name == $tag)' <<< "$releases")
           if [[ -n "$release" ]]; then
             target=$(jq -r '.target_commitish' <<< "$release")
             draft=$(jq -r '.draft' <<< "$release")
