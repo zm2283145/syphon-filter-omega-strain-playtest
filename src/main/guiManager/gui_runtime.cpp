@@ -279,7 +279,6 @@ std::int32_t GuiHost::profile_statistic(std::int32_t, std::int32_t) { unhosted(0
 std::optional<omega::AgentPacking> GuiHost::profile_appearance(std::int32_t) {
     unhosted(0x3609f0, "the agent's appearance (*(agent + 9a4))");
 }
-bool GuiHost::port_cheats() { return false; }
 bool GuiHost::port_lan_play() { return false; }
 bool GuiHost::net_session() { return false; }  // 004294c0: byte 00572488 is never set (no network start)
 std::int32_t GuiHost::net_start() {
@@ -403,10 +402,6 @@ void GuiHost::lan_join_cancel() {}
 std::optional<std::string> GuiHost::lan_join_notice() { return std::nullopt; }
 void GuiHost::lan_pump() {}
 std::int64_t GuiHost::lan_clock_ms() { return 0; }
-void GuiHost::port_unlock_all() { throw std::runtime_error("gui runtime: the PORT-ONLY unlock-all cheat is not hosted"); }
-void GuiHost::port_unlock_all_weapons() {
-    throw std::runtime_error("gui runtime: the PORT-ONLY unlock-all-weapons cheat is not hosted");
-}
 float GuiHost::mission_time() { unhosted(0x245890, "mission clock"); }
 std::int32_t GuiHost::par_time() { unhosted(0x330c30, "mission par time"); }
 bool GuiHost::objective_manager() { unhosted(0x225cd0, "ObjectiveManager lookup"); }
@@ -5817,8 +5812,6 @@ void GuiRuntime::go_init(Widget* w) {  // 0029b360
     o.mb_on = host_.get_string("MB_On");
     o.mb_off = host_.get_string("MB_Off");
     o.b401 = 1;
-    o.port_all = of(port_cheat_all_widget, WidgetClass::button);  // PORT-ONLY: present only with a cheat host
-    o.port_weapons = of(port_cheat_weapons_widget, WidgetClass::button);
 }
 
 void GuiRuntime::go_wake(Widget* w) {  // 0029b1e0
@@ -5870,10 +5863,7 @@ std::uint8_t GuiRuntime::go_input(Widget* w, const PadEvent& ev) {  // 00299b90
     auto pressed = [&](std::uint32_t m) { return ev.kind == 1 && ev.port == 0 && ev.mask == m && ev.released == 0; };
     auto released = [&](std::uint32_t m) { return ev.kind == 1 && ev.port == 0 && ev.mask == m && ev.released == 1; };
     if (pressed(pad_triangle)) {
-        // PORT-ONLY: the cheat entries sit beside the tabs, so Triangle there
-        // leaves the screen as on a tab.
-        const bool port_entry = canvas_.focus && (canvas_.focus == o.port_all || canvas_.focus == o.port_weapons);
-        if (canvas_.focus && canvas_.focus->id10 == -1 && !port_entry) {
+        if (canvas_.focus && canvas_.focus->id10 == -1) {
             go_menu(w);
             return 1;
         }
@@ -5923,15 +5913,6 @@ std::uint8_t GuiRuntime::go_event(Widget* w, Widget* sender, std::uint32_t type,
     if (t == 2) {
         if (sender->id10 != -1) {
             go_enter(w);
-            return 1;
-        }
-        // PORT-ONLY: the cheat entries ask first (the original's Yes/No popup, type 4).
-        if (sender && (sender == o.port_all || sender == o.port_weapons)) {
-            const bool all = sender == o.port_all;
-            popup_open(4, std::string("PORT-ONLY CHEAT"),
-                       std::string(all ? "Unlock all levels, weapons, outfits, perks and awards for this agent?"
-                                       : "Unlock every weapon in the loadout for this agent?"),
-                       w, all ? port_cheat_all_popup : port_cheat_weapons_popup);
             return 1;
         }
         if (sender == o.manual_aim) {
@@ -5993,13 +5974,6 @@ std::uint8_t GuiRuntime::go_event(Widget* w, Widget* sender, std::uint32_t type,
         }
         if (a3 == 0xd) {
             if (t == 0x1a) unhosted(0x29a698, "the kick popup accepted");
-            return 1;
-        }
-        if (a3 == port_cheat_all_popup || a3 == port_cheat_weapons_popup) {  // PORT-ONLY cheat reply
-            if (t == 0x1a) {
-                if (a3 == port_cheat_all_popup) host_.port_unlock_all();
-                else host_.port_unlock_all_weapons();
-            }
             return 1;
         }
         return save_widget_event(w, sender, type, a3, t0);

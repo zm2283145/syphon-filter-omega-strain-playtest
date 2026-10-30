@@ -212,13 +212,6 @@ std::uint32_t options_diff(const GameOptionsRecord& a, const GameOptionsRecord& 
 const char* widget_class_name(WidgetClass c);
 // SFO.CFG (the name at *004979a0), the options file: 0x24 bytes in the record's layout.
 inline constexpr const char* options_file_name = "SFO.CFG";
-// PORT-ONLY (not in the original): the names of the options screen's cheat
-// entries (FrontendSession::add_port_cheat_entries) and their popup tags.
-inline constexpr const char* port_cheat_all_widget = "port_cheat_all";
-inline constexpr const char* port_cheat_weapons_widget = "port_cheat_weapons";
-inline constexpr std::int32_t port_cheat_all_popup = 0x43485441;      // 'CHTA'; the original uses 0xa..0xd
-inline constexpr std::int32_t port_cheat_weapons_popup = 0x43485457;  // 'CHTW'
-
 // Port-only (checkpoint 132win11, not in the original): the model of the Port Settings screen PortGuiSettings
 // (PORTSETTINGS, synthesised from GAMEOPT2's widgets; omega::PortSettingsPage implements it). The screen has
 // `rows` fixed slots ("ps_label%d" / "ps_value%d" / "ps_background%d"); a slot whose label is empty is hidden.
@@ -522,9 +515,6 @@ struct Widget {
         std::array<std::optional<std::string>, 2> video_text;  // +440 VideoMode0 / 1
         std::array<std::optional<std::string>, 4> headers;     // +448 OptionsHeader0..3
         std::optional<std::string> invert, normal, mb_on, mb_off;  // +458 / +45c / +460 / +464
-        // PORT-ONLY (not in the original): the cheat entries a cheat host adds to optionmain_grp.
-        Widget* port_all = nullptr;
-        Widget* port_weapons = nullptr;
     };
     std::unique_ptr<GameOpt> go;
     // GuiScrollBarWidget (ctor 0043bef0 over 0041f690). The position is
@@ -1294,13 +1284,6 @@ public:
     // *0055a838 = 00441c10 while a save flow polls: run once per pass of a card call's wait loop
     // (0040e270 & co.): 002cc260(0, 0), the nested GUI update 002cbb30 and draw 002cbad0.
     virtual void card_poll();
-    // PORT-ONLY (not in the original): the options screen's added cheat
-    // entries (port_cheats.hpp). port_cheats() false (the default) adds no
-    // entries; the unlocks throw unless a host provides them.
-    virtual bool port_cheats();
-    virtual void port_unlock_all();
-    virtual void port_unlock_all_weapons();
-
     // The in-game start menu's game services (checkpoint 132f).
     virtual float mission_time();                 // 00245890(*004ffc2c): the mission clock in seconds
     virtual std::int32_t par_time();              // 00330c30(004ffc90, mp): the par in seconds (< 0: none)

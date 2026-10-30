@@ -315,14 +315,13 @@ public:
     std::span<const std::uint8_t, agent_record_size> agent() const { return agent_; }
     FolderAgentCard& card() { return card_; }
 
-    // PORT-ONLY cheats (port_cheats.hpp), offered by the options screen's
-    // added "PORT CHEAT" entries (open_gui) and --unlock-all. Each applies
-    // its unlocks to the agent now and stays on for the session: the refill
+    // PORT-ONLY unlock helpers (port_cheats.hpp), used by --unlock-all and tests. The visible cheat controls live
+    // only in the in-game pause menu. Each helper applies its unlocks to the agent now and stays on for the session:
+    // the refill
     // 00335e50 (load, create, level end) clears the unlock bits, so
     // refill_host re-applies them after the script.
-    bool port_cheats() override { return true; }
-    void port_unlock_all() override;
-    void port_unlock_all_weapons() override;
+    void port_unlock_all();
+    void port_unlock_all_weapons();
     // --unlock-all: on from boot, applied by the refill of the agent the front end loads or creates
     // (the constructed agent before that has no award lists to unlock).
     void port_unlock_all_at_boot();
@@ -638,8 +637,6 @@ private:
     AgentRecordView view() const { return AgentRecordView(agent_); }
     // profile_refill_host, followed by the PORT-ONLY cheats that are on.
     AgentRefillHost refill_host();
-    void add_port_cheat_entries(GuiNode& root);
-
     FrontendServices services_;
     bool port_unlock_all_ = false;
     bool port_unlock_weapons_ = false;

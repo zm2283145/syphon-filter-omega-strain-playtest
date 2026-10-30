@@ -1427,60 +1427,9 @@ const GuiNode* FrontendSession::open_gui(const std::string& file, std::int32_t r
         const auto bytes = services_.gui_file(screen);
         if (bytes.size() < 3 || bytes[0] != 'G' || bytes[1] != 'U' || bytes[2] != 'I') return nullptr;
         it = gui_files_.emplace(key, std::make_unique<GuiFile>(decode_gui(bytes))).first;
-        if (screen == "GAMEOPT" && port_cheats()) add_port_cheat_entries(it->second->root);
         if (services_.port_rows.patch) services_.port_rows.patch(screen, *it->second);  // port-only (132ob6)
     }
     return &it->second->root;
-}
-
-// PORT-ONLY (not in the original): the options screen's cheat entries. Two
-// copies of its own tab button "2video" (GuiButtonWidget, ie game, with its
-// textbackground child) are added to optionmain_grp below it, 40 units apart
-// as the tabs are (8 units right for the longer labels), with the arrow-less "bracketbutton" node of the value
-// buttons (value_manualaim's scale) and literal labels. They are not tabs
-// (id10 stays -1); GuiRuntime::go_event opens their Yes/No popup.
-void FrontendSession::add_port_cheat_entries(GuiNode& root) {
-    std::function<GuiNode*(GuiNode&, const std::string&)> find = [&](GuiNode& n, const std::string& name) -> GuiNode* {
-        if (n.name == name) return &n;
-        for (auto& c : n.children)
-            if (GuiNode* f = find(c, name)) return f;
-        return nullptr;
-    };
-    GuiNode* grp = find(root, "optionmain_grp");
-    GuiNode* video = grp ? find(*grp, "2video") : nullptr;
-    if (!video || !video->text || !video->decorator)
-        throw std::runtime_error("frontend: GAMEOPT has no optionmain_grp / 2video to copy the PORT-ONLY cheat entries from");
-    const GuiNode source = *video;
-    std::function<void(GuiNode&, float, float, const std::string&)> shift = [&](GuiNode& n, float dx, float dy,
-                                                                         const std::string& tag) {
-        n.rect[0] += dx;
-        n.rect[1] += dy;
-        if (n.decorator) {
-            n.decorator->matrix[9] += dx;
-            n.decorator->matrix[11] += dy;
-        }
-        n.name += tag;
-        for (auto& c : n.children) shift(c, dx, dy, tag);
-    };
-    struct Entry {
-        const char* name;
-        const char* label;
-        float dy;
-        float bracket_x;   // the bracket's x scale: value_manualaim's 0.9235, widened for the longer label
-    };
-    static constexpr Entry entries[] = {{gui::port_cheat_all_widget, "CHEAT: ALL", -40.0f, 0.9235f},
-                                        {gui::port_cheat_weapons_widget, "CHEAT: WEAPONS", -80.0f, 1.25f}};
-    for (const Entry& e : entries) {
-        GuiNode n = source;
-        shift(n, 8.0f, e.dy, "_port");   // 8 units right: "CHEAT: WEAPONS" is wider than the tabs' column
-        n.name = e.name;
-        n.text->text = e.label;
-        n.decorator->node = "bracketbutton";
-        n.decorator->matrix[0] = e.bracket_x;   // value_manualaim's bracketbutton scale (0.9235, 0.8915)
-        n.decorator->matrix[5] = 0.8915f;
-        grp->children.push_back(std::move(n));
-    }
-    record("PORT-ONLY: GAMEOPT cheat entries added (port_cheats.hpp)");
 }
 
 std::uint8_t FrontendSession::agent_load(std::int32_t agent, const std::string& name, std::int32_t slot) {
