@@ -449,7 +449,15 @@ std::optional<Value> ObjectiveNatives::call(const Script& script, const Function
     if (name == "StartStage") {
         require_signature(script, function, 4, {"object:ObjectiveMan", "primitive:1"});
         manager(arguments[0]);
-        stage_.start_stage(word_signed(number(arguments[1])));
+        const auto next = word_signed(number(arguments[1]));
+        // 00227330 constructs action 4 with stage field -1, but the manager
+        // uses cSystem_IsNetworked (+0x18 = 001383d0, always 0). 003c9420
+        // therefore drops that message before 003fb020. The observable wire
+        // traffic comes from 00229100: deactivate every object in the old
+        // stage, in insertion order, before writing the new current stage.
+        stage_.start_stage(next, [this](Word id) {
+            if (network_services_) network_services_->send_active(id, false);
+        });
         return std::nullopt;
     }
     if (name == "Activate" || name == "Deactivate") {

@@ -3987,6 +3987,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         bool frontend=false,frontend_only=false,frontend_hidden=false,frontend_memory=false;std::string frontend_card_sim;fs::path frontend_card="local/frontend_card",        memcard_path,frontend_script,frontend_capture,frontend_wav;std::set<std::int64_t> frontend_capture_frames;bool unlock_all_levels=false,unlock_all=false;
         std::vector<std::pair<unsigned,std::uint32_t>> debug_ni_plays;   // harness: (frame, NIE/NIL id) Plays outside the scripts
         std::vector<std::pair<unsigned,std::string>> debug_script_calls;   // harness: (frame, module::function) script calls
+        std::set<unsigned> debug_objective_state_frames;   // read-only snapshot after this frame's script/network delivery
         std::vector<std::pair<unsigned,std::uint32_t>> diagnostic_resets;   // PORT-ONLY --reset-npc: (frame, NPC ID) ResetNpc 00148600 calls
         std::set<unsigned> flashlight_taps;   // --flashlight-tap: frames D-pad Right is held (scripted runs)
         std::optional<std::int32_t> goggles_item;   // --goggles-item: port-only 00143df0 add of a goggles item after the start
@@ -4047,6 +4048,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 else if(arg==L"--resolution"){resolution_flag=parse_internal_resolution(narrow(value()));   // issue #4
                     if(!resolution_flag)throw std::runtime_error("--resolution needs native or window");}
                 else if(arg==L"--freed-ai-resend-skip")freed_ai_resend_skip=true;   // 132ms3 (port-only aid)
+                else if(arg==L"--debug-objective-state")debug_objective_state_frames.insert(number<unsigned>(value()));
                 else if(arg==L"--mods")mods_flag=fs::path(value());   // 132md1 (port-only, research/MODDING.md)
                 else if(arg==L"--no-mods")no_mods_flag=true;
                 else if(arg==L"--mods-cpu-skinning")mods_cpu_skinning=true;
@@ -4591,6 +4593,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "left at the hand-off. --debug-script-call <module::function> <frame> (port testing convenience, with\n"
                     "--mission-scripts) calls a mission script function at that frame, e.g. objectives::LevelEnd (TORONTO1's\n"
                     "mission-complete branch of LevelEndCheck, which schedules game::RequestLevelEnd 10 s later; LEVEL_END.md).\n"
+                    "--debug-objective-state <frame> (with --mission-scripts) prints the local stage and each objective's\n"
+                    "stage, active bit and status after that frame's received network events and script pump.\n"
                     "Keys: WASD/arrows stick (Shift = 60% deflection), E/Q strafe pressure slots 10/11, TFGH camera look (right stick),\n"
                     "C toggle the diagnostic orbit view (wheel zoom), P pause, O wireframe, L vertex-colour-only lighting, Esc quit.\n"
                     "Space Cross, R Triangle, K Circle (the roll, action 8), I L1 (the manual aim view 0024a850); with --combat J Square, U R1\n"
@@ -14983,6 +14987,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                  <<(applied?" (received, no echo)":" (deleted before queue delivery)")<<"\n";
                     }
                     mission_host->pump(script_clock.delta(elapsed));
+                    if(debug_objective_state_frames.contains(frame)){
+                        const auto& objectives=mission_host->objectives().stage();
+                        std::size_t live=0;
+                        for(const auto& object:objectives.records())if(!object.destroyed)++live;
+                        std::cout<<"LAN objective snapshot frame "<<frame<<": current stage "
+                                 <<objectives.current_stage()<<", "<<live<<" records\n";
+                        for(const auto& object:objectives.records())if(!object.destroyed)
+                            std::cout<<"LAN objective snapshot frame "<<frame<<": id "<<object.id
+                                     <<" stage "<<object.stage<<" active "<<(object.active?1:0)
+                                     <<" status "<<unsigned(object.status)<<"\n";
+                    }
                 }
                 OMEGA_ZONE_LAP(step_laps,"sim.mission_script");
                 sound_step();
@@ -20984,7 +20999,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             npc_serial=static_cast<std::int32_t>(serial_counter);
             // The first level's harness and diagnostic inputs (placement, script calls, pilot, captures, dumps,
             // surveys, selections) do not carry over; --next-level-frames / --next-level-capture replace the run's.
-            start_override.reset();debug_ni_plays.clear();debug_script_calls.clear();diagnostic_resets.clear();flashlight_taps.clear();goggles_item.reset();debug_pda_quips.clear();
+            start_override.reset();debug_ni_plays.clear();debug_script_calls.clear();debug_objective_state_frames.clear();diagnostic_resets.clear();flashlight_taps.clear();goggles_item.reset();debug_pda_quips.clear();
             diagnostic_moves.clear();pilot_path.clear();record_path.clear();collision_dump_path.clear();dt_trace_path.clear();
             audio_wav_path.clear();ledge_survey=0;hotbox_survey=false;shadow_capture=0;waypoint_id.reset();map_marker_id.reset();
             // Port-only (132vp1, research/VITA.md "Playability, memory and coverage"): the front end resumes at the

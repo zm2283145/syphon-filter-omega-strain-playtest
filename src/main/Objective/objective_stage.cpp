@@ -31,12 +31,15 @@ void ObjectiveStage::set_outcome(std::uint32_t id, bool success) {
     records_[id - 1].status = success ? 1 : 2;
 }
 
-void ObjectiveStage::start_stage(std::int32_t stage) {
+void ObjectiveStage::start_stage(std::int32_t stage, const std::function<void(std::uint32_t)>& on_deactivate) {
     if (stage < 0 || stage >= 32)
         throw std::runtime_error("Current objective stage outside supported bucket range");
     if (stage == current_stage_) return;
     for (auto& object : records_) {
-        if (!object.destroyed && object.stage == current_stage_) object.active = false;
+        if (!object.destroyed && object.stage == current_stage_) {
+            object.active = false;
+            if (on_deactivate) on_deactivate(object.id);
+        }
     }
     current_stage_ = stage;
 }

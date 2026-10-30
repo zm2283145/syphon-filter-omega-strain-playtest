@@ -82,6 +82,11 @@ public:
     // Checkpoint 132on2e (online create): the port the next host() binds (0: an ephemeral port).
     void set_game_port(std::uint16_t port) { config_.game_port = port; }
     std::uint16_t game_port() const { return config_.game_port; }
+    // LAN lifecycle mapping for 0044e340, before 0042b1f0 leaves the DME game: withdraw a hosted game from
+    // discovery and refuse further joins while preserving the game transport for the rest of teardown. A joined
+    // client has no LAN advertisement to withdraw. This is not the retail idle publication: the caller handles
+    // the original reason-3 stats upload and lobby client-state transitions separately.
+    void exit_game();
     // Close the game and stop the advertisement.
     void leave();
     // Serve the discovery sockets (host and browser) and the transport (call once per frame).

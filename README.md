@@ -21,7 +21,7 @@ lands. Each update's commit message names the development commit it was taken fr
 | Port Settings page | Display, control and port options inside the game's own Options menu |
 | CPU co-op partners (port-only) | 1–3 CPU agents that follow, fight and climb, and take orders from a command menu (D-pad Up). They do the co-op objectives in TORONTO1–3, BELARUS2 and UKRAINE |
 | Mods (port-only) | Replace any disc file, texture (PNG / DDS, any resolution), character, gun or level model (glTF 2.0) without touching your disc ([docs/MODDING.md](docs/MODDING.md)) |
-| LAN Play (port-only) | **Play LAN** on the Offline / Online screen: host, browse and join on the local network (peer to peer, no server). Two-player startup, objective results, loadout agent records and periodic statistics exchange are tested; full mission completion remains open |
+| LAN Play (port-only) | **Play LAN** on the Offline / Online screen: host, browse and join on the local network (peer to peer, no server). Two-player startup, objective results/stage deactivation, loadout agent records and periodic statistics exchange are tested; full mission completion remains open |
 | Online (port-only server) | `omega_server`: accounts, lobby, game list, create / join, chat, contacts, stats, admin tools, relay and UPnP ([docs/ONLINE_DEPLOY.md](docs/ONLINE_DEPLOY.md)) |
 | PS Vita | Boot, intro movies and all menus run on real hardware in 16:9. The first in-level build (TORONTO1 / TRAINING) is being tested |
 

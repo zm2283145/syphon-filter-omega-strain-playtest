@@ -57,6 +57,8 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // 004d7544 / 004d7574 (00431380 / 004313a0): the network object maps 0x00582700 / 0x00582720 are empty.
     m.write(0x58270c, 4, 0x582704);
     m.write(0x58272c, 4, 0x582724);
+    // The three transfer maps that 0042e6d0 resets also start empty in the executable's static state.
+    for (const auto map : {0x5826a0U, 0x5826c0U, 0x5826e0U}) m.write(map + 0xc, 4, map + 4);
     m.write(0x497568, 1, 1);            // the headset library's first-call latch (00438340)
     m.write(0x497548, 4, 0xffffffffU);  // the headset device: none
     // 004d8c10 / 00472380: cNetMsgThrottle's map 0x00588020 is empty, its leftmost node (+0xc) its header (+4).
@@ -1457,6 +1459,8 @@ void LanNetCore::run_thread() {
     const auto main_sp = sp_;
     sp_ = kThreadStack;
     const bool sleeps = thread_->resume(memory_, *this);
+    // ExitDeleteThread removes the kernel object. A later 0042a770 (World_Teardown) may create another one.
+    if (!sleeps && thread_->exited()) thread_.reset();
     sp_ = main_sp;
     running_ = false;
     sleeping_ = sleeps;
@@ -1588,6 +1592,83 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x429d30: { Frame f(sp_); return dme_update_00429d30(m, *this, f.caller); }
     case 0x42a770: { Frame f(sp_); return dme_thread_start_0042a770(m, *this, f.caller); }
     case 0x42a1b0: { Frame f(sp_); dme_stop_thread_and_sync_0042a1b0(m, *this, f.caller); return 0; }
+    case 0x42a680: {  // 0042a680 stops the update thread without 0042a1b0's session barrier.
+        Frame f(sp_);
+        const auto status = f.caller - 0xe0;
+        call(m, 0x10d060, {m.read(dme::kThreadId), status + 0x60});
+        call(m, 0x10d060, {m.read(dme::kMainThread), status + 0x30});
+        if (static_cast<std::int32_t>(m.read(status + 0x78)) <=
+            static_cast<std::int32_t>(m.read(status + 0x48)))
+            call(m, 0x10cff0, {m.read(dme::kThreadId), 0});
+        m.write(dme::kThreadStop, 1, 1);
+        const auto woken = call(m, 0x10e010, {m.read(dme::kThreadId)});
+        call(m, 0x10e1c0, {10});
+        if (woken == m.read(dme::kThreadId)) {
+            while (!m.read(dme::kThreadDone, 1)) call(m, 0x10e1c0, {10});
+        }
+        m.write(dme::kThreadStop, 1, 0);
+        m.write(dme::kThreadStarted, 1, 0);
+        m.write(dme::kThreadWake, 4, 0);
+        m.write(dme::kThreadDone, 1, 0);
+        m.write(dme::kIntcInstalled, 1, 0);
+        return 0;
+    }
+    case 0x42e6d0: {  // cNetObjectMgr_Reset: only the five empty transfer maps are hosted.
+        for (const auto map : {0x5826a0U, 0x5826c0U, 0x5826e0U, 0x582700U, 0x582720U}) {
+            if (m.read(map) || m.read(map + 4) || m.read(map + 0xc) != map + 4)
+                unhosted(address, "a nonempty transfer-object, pending-message or reference map");
+        }
+        return 0;
+    }
+    case 0x3e56f0: {  // cCharActionMsg_DestinationParams_ClearPrevMsg
+        const auto last = m.read(0x55a228);
+        if (!last) return 0;
+        if (m.read(last) != 0x4e0100 || !game_live_.contains(last))
+            unhosted(address, "a previous locomotion message outside the game heap or of another class");
+        call(m, m.read(m.read(last) + 8), {last, 0xffffffffU});
+        call(m, 0x36b130, {0, last, 0x4bdd08, 0x37b});
+        m.write(0x55a228, 4, 0);
+        return 0;
+    }
+    case 0x42b2d0: {  // cDME_Restart: the library object's release is a separate, guarded service below.
+        m.write(0x5721d0, 1, 0);
+        m.write(0x5723f8, 1, 0);
+        m.write(0x572408, 1, 1);
+        m.write(0x572400, 1, 0);
+        m.write(0x497540, 1, 0);
+        const auto result = call(m, 0x2ec340, {});
+        m.write(0x5721b8, 1, 1);
+        return result;
+    }
+    case 0x2ec340: {  // NetFreeAllObjects / NetIFreeAllObjects (002df8e8).
+        if (m.read(0x48c4d7, 1) != 1) return 0x11;
+        if (m.read(0x48c4dc, 1) != 1) return 0x2b;
+        // Preflight all live handles: 002dea68 invokes the registered remove callback before deleting an
+        // object's buffers. Other registered classes (notably GameGOBJ's 00210780 / 00212040 / 002128a0)
+        // remain unhosted, so none of the earlier handles may be freed when one of those is present.
+        for (std::uint32_t i = 0; i < 0x1000; ++i) {
+            if (m.read(0x58c178 + i, 1) != 2) continue;
+            const auto obj = m.read(0x5880b0 + 4 * i);
+            if (!obj || m.read(0x48c450) >= 4)
+                unhosted(address, "a live handle without an object in the current DME world");
+            const auto cls = m.read(obj, 1);
+            if (cls >= 16) unhosted(address, "a live object with an unregistered class");
+            const auto cb = m.read(0x58c138 + 4 * cls);
+            if (cb && cb != 0x2d1d50 && cb != 0x16a450 && cb != 0x438c20 && cb != 0x4321d0 &&
+                cb != 0x4375d0 && cb != 0x2c7b20)
+                unhosted(address, "a live object's unhosted remove callback 0x" + hex8(cb));
+        }
+        if (call(m, 0x302260, {0x5253f0, 0})) return 0x2b;  // rt_mutex_lock
+        for (std::uint32_t i = 0; i < 0x1000; ++i)
+            if (m.read(0x58c178 + i, 1) == 2) call(m, 0x2dea68, {i});
+        for (std::uint32_t i = 0; i < 0x1000; ++i) m.write(0x58c178 + i, 1, 0);
+        if (call(m, 0x3023d8, {0x5253f0, 0})) return 0x2b;  // rt_mutex_unlock
+        return 0;
+    }
+    case 0x44e340:
+        if (arg(0) != kLobbySession) unhosted(address, "a lobby other than LanSession's");
+        unhosted(address, "SFOLobby_ExitGame needs LAN lobby idle publication and client-state transition");
+    case 0x2c7b20: return 0;  // tNetGenerator_NetGeneratorDeleteCallback is empty in the original.
     case 0x437bf0: dme_voice_end_00437bf0(m, *this); return 0;
     case 0x42b230: dme_session_reset_0042b230(m); return 0;
     case 0x42b1f0: dme_session_end_0042b1f0(m, *this); return 0;

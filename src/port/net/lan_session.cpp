@@ -81,6 +81,13 @@ bool LanSession::host(const LanHostSetup& setup) {
     return true;
 }
 
+void LanSession::exit_game() {
+    if (!hosting_) return;
+    if (transport_) transport_->set_accepting_joins(false);
+    if (discovery_) discovery_->stop();
+    discovery_.reset();
+}
+
 void LanSession::leave() {
     if (discovery_) discovery_->stop();
     if (transport_) transport_->close();

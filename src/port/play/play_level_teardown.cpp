@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 
 namespace omega {
 namespace {
@@ -35,7 +36,7 @@ struct Disposition {
     const char* role;
 };
 
-// Every service the teardown natives reach on the solo path, by address.
+// Every service the teardown natives reach on the solo and MP paths, by address.
 const std::map<std::uint32_t, Disposition>& dispositions() {
     static const std::map<std::uint32_t, Disposition> table{
         // World_Teardown 00134640
@@ -71,13 +72,19 @@ const std::map<std::uint32_t, Disposition>& dispositions() {
         {0x3ec3e0, {"pass", "effects: release all"}},
         {0x136cd0, {"pass", "G release (role not labelled)"}},
         {0x257150, {"pass", "role not labelled"}},
+        {0x42e6d0, {"network", "cNetObjectMgr_Reset"}},
+        {0x3e56f0, {"network", "cCharActionMsg_DestinationParams_ClearPrevMsg"}},
+        {0x42b2d0, {"network", "cDME_Restart"}},
+        {0x44e340, {"network", "SFOLobby_ExitGame"}},
+        {0x42b1f0, {"network", "Net_CleanupGame"}},
         // Checkpoint 132f10: 00134110 is the mission debrief (G+1c5 clear: level-end kinds 0 and 2, a success or
         // the start menu's Quit): GuiEndGameObjectives "SUMMARY" -> GuiEndGameStatistics "SCORES" / "SCOREONE" ->
         // GuiEndGameAwards "AWARDS" -> GuiAutoSaver, in its own GUI loop (LEVEL_END.md §6g). Checkpoint 132f11:
         // the play's action runs it (play_main's debrief loop).
         {0x134110, {"port", "the mission debrief (00134110)"}},
         {0x3fbcd0, {"pass", "objective transport map cleanup"}},
-        {0x4294c0, {"mirror", "network manager (null offline)"}},
+        {0x4294c0, {"network", "cDME_GetLobby (null offline)"}},
+        {0x42a770, {"network", "cDME_StartUpdateThread"}},
         {0x3d0fb0, {"pass", "003d1020 static object release"}},
         {0x224530, {"mirror", "zone object"}},
         {0x224140, {"pass", "zone object release"}},
@@ -110,6 +117,7 @@ const std::map<std::uint32_t, Disposition>& dispositions() {
         {0x3eba50, {"mirror", "async loader"}},
         {0x3eb750, {"pass", "async loader stop"}},
         {0x227c60, {"pass", "objective deletion"}},
+        {0x42a680, {"network", "cDME_StopUpdateThread"}},
         {0x3c8c70, {"pass", "pending messages cleared"}},
         // 003f9470 (not reached with the empty archive list)
         {0x36cd80, {"pass", "archive close"}},
@@ -128,8 +136,9 @@ const std::map<std::uint32_t, Disposition>& dispositions() {
 
 class TeardownHost final : public PlayFlowHost {
 public:
-    TeardownHost(const PlayTeardownActions& actions, PlayTeardownReport& report)
-        : actions_(actions), report_(report) {}
+    TeardownHost(const PlayTeardownActions& actions, PlayTeardownReport& report,
+                 const PlayTeardownNetwork* network)
+        : actions_(actions), report_(report), network_(network) {}
 
     std::set<std::uint32_t> renderer_freed;
     std::size_t renderer_double{};
@@ -147,7 +156,16 @@ public:
             throw std::runtime_error("Play level teardown: no disposition for EE service " + hex8(address));
         }
         const auto& d = found->second;
+        if (address == 0x4294c0 && !network_) {
+            record(address, args, "mirror", "network manager (null offline)");
+            return 0;
+        }
         record(address, args, d.kind, d.role);
+        if (std::string_view(d.kind) == "network") {
+            if (!network_ || !network_->call)
+                throw std::runtime_error("Play level teardown: missing multiplayer service " + hex8(address));
+            return network_->call(m, address, args);
+        }
         const auto* a = args.begin();
         switch (address) {
         case 0x26bd60:
@@ -173,7 +191,6 @@ public:
         case 0x225cd0: return token_service + 2;
         case 0x224530: return token_service + 4;
         case 0x3eba50: return token_service + 5;
-        case 0x4294c0: return 0;
         case 0x3cab50: return component_object;
         case 0x36b130:
             if (args.size() == 4 && a[2] == renderer_file) {
@@ -237,6 +254,7 @@ private:
     }
     const PlayTeardownActions& actions_;
     PlayTeardownReport& report_;
+    const PlayTeardownNetwork* network_;
 };
 
 // The level load's renderer init on the mirror: allocations answer tokens.
@@ -271,8 +289,13 @@ std::size_t PlayTeardownReport::count(const std::string& kind) const {
     return n;
 }
 
-PlayTeardownReport run_play_level_teardown(const GameEndState& g, const PlayTeardownActions& actions) {
+PlayTeardownReport run_play_level_teardown(const GameEndState& g, const PlayTeardownActions& actions,
+                                          const PlayTeardownNetwork* network) {
     if (g.state_50 != 0x14) throw std::runtime_error("Play level teardown: G+50 is not 0x14");
+    if (network && (!network->multiplayer_5721c8 || !network->call))
+        throw std::runtime_error("Play level teardown: multiplayer network service is incomplete");
+    if (network && !g.b1c5 && !actions.debrief)
+        throw std::runtime_error("Play level teardown: multiplayer debrief service is missing");
     PlayTeardownReport report;
     LevelLoadMemory m;
     const auto w8 = [&](std::uint32_t a, std::uint32_t v) { m.write(a, 1, v); };
@@ -283,7 +306,11 @@ PlayTeardownReport run_play_level_teardown(const GameEndState& g, const PlayTear
     w8(game + 0x1c5, g.b1c5);
     w8(game + 0x1c6, g.b1c6);
     w8(game + 0x1c7, g.b1c7);
-    for (const std::uint32_t a : {0x5721c8U, 0x5721d8U, 0x5723b0U, 0x5721b8U, 0x533880U}) w8(a, 0);
+    w8(0x5721c8, network ? network->multiplayer_5721c8 : 0);
+    w8(0x5721d8, network ? network->quit_latch_5721d8 : 0);
+    w8(0x5723b0, network ? network->popup_kind_5723b0 : 0);
+    w8(0x5721b8, network ? network->network_5721b8 : 0);
+    w8(0x533880, 0);
     w32(0x533888, 0);
     w32(app + 0x274, 0);
     for (const std::uint32_t f : {0x80U, 0x84U, 0x88U, 0x8cU, 0xa4U, 0xccU, 0xd0U, 0xdcU, 0xe0U, 0xe4U, 0xe8U, 0xecU,
@@ -307,10 +334,13 @@ PlayTeardownReport run_play_level_teardown(const GameEndState& g, const PlayTear
     renderer_init_0037e780(m, init, video, 640, 448, 0x20, 0x10, 0, 0x157c, 0xffffffffU);
     report.renderer_allocations = init.allocations.size();
 
-    TeardownHost host(actions, report);
+    TeardownHost host(actions, report, network);
     run_teardown_state(m, host, app, stack);
     report.state_50 = static_cast<std::uint8_t>(m.read(game + 0x50, 1));
     report.previous_51 = static_cast<std::uint8_t>(m.read(game + 0x51, 1));
+    report.multiplayer_after = static_cast<std::uint8_t>(m.read(0x5721c8, 1));
+    report.quit_latch_after = static_cast<std::uint8_t>(m.read(0x5721d8, 1));
+    report.network_after = static_cast<std::uint8_t>(m.read(0x5721b8, 1));
     report.renderer_balanced = host.renderer_double == 0 && host.renderer_freed == init.allocations;
     if (m.read(video) != 0xffffffffU) throw std::runtime_error("Play level teardown: 0037e320 left the video object live");
     return report;

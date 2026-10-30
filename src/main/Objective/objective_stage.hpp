@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace omega {
@@ -21,7 +22,9 @@ class ObjectiveStage {
 public:
     std::uint32_t add(std::int32_t stage);
     void set_active(std::uint32_t id, bool active);
-    void start_stage(std::int32_t stage);
+    // 00227330 deactivates the old bucket in order before changing +0xa4.
+    // The callback mirrors 00229100's separate network notification.
+    void start_stage(std::int32_t stage, const std::function<void(std::uint32_t)>& on_deactivate = {});
     void set_outcome(std::uint32_t id, bool success);
     // DestroyObjectives(manager) 002257f0 -> 00227c60: every object of the 32
     // stage buckets (+b0 + 0x80 g, counts +1130) and of the global bucket

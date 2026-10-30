@@ -17,12 +17,14 @@
 //   renderer - the level's renderer state, which in the port is the play
 //              window's device, released when the window closes at the resume;
 //   ps2      - PS2 kernel, heap or DMA service with no PC counterpart;
-//   mirror   - a lookup that answers the mirror (G component tokens; 004294c0
-//              is null offline).
+//   mirror   - a lookup that answers the mirror (G component tokens; null
+//              004294c0 offline);
+//   network  - the multiplayer session services supplied by the caller.
 // A service with no disposition throws naming its address.
 //
 // The mirror: G+50 = 0x14 and G+51 / G+1c4..+1c7 from GameEndState; the MP
-// bytes 005721c8 / 005721d8 / 005723b0 / 005721b8 = 0 (omega_play is solo);
+// bytes 005721c8 / 005721d8 / 005723b0 / 005721b8 come from the optional
+// network boundary (zero for the existing solo call);
 // the allocator lock flag 00533880 = 0 (no other EE thread at the level end);
 // app+274 = 0 because 00166190 already ran at state 0x12's first entry (the
 // port's LoadingScreenHost::stop after the setup), so 00166190 returns at once
@@ -42,10 +44,26 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
 namespace omega {
+class LevelLoadMemory;
+
+// Original World_Teardown multiplayer globals and its external network
+// services. The callback is required for an MP run. It must dispatch each
+// address to the real session service, return the lobby pointer for 004294c0,
+// and may write the mirror (for example, 0042e6d0 can change G+1c7).
+// There are no default or success-shaped network answers.
+struct PlayTeardownNetwork {
+    std::uint8_t multiplayer_5721c8{1};
+    std::uint8_t quit_latch_5721d8{};
+    std::uint8_t popup_kind_5723b0{};
+    std::uint8_t network_5721b8{};
+    std::function<std::uint32_t(LevelLoadMemory&, std::uint32_t address,
+                                std::initializer_list<std::uint32_t> args)> call;
+};
 
 struct PlayTeardownActions {
     std::function<void()> stop_pad_vibration;                     // 0026bd60
@@ -60,7 +78,7 @@ struct PlayTeardownActions {
 struct PlayTeardownCall {
     std::uint32_t address{};
     std::vector<std::uint32_t> args;
-    std::string kind;          // native, port, pass, renderer, ps2, mirror
+    std::string kind;          // native, port, pass, renderer, ps2, mirror, network
     std::string role;
 };
 
@@ -72,9 +90,13 @@ struct PlayTeardownReport {
     std::size_t renderer_frees{};          // 0036b130 by 0037e320 (file 004bc200)
     bool renderer_balanced{};              // every allocation freed exactly once
     std::size_t world_frees{};             // 0036b130 by World_Teardown (machine 0049a890 / 0049aea0)
+    std::uint8_t multiplayer_after{};      // 00134640 clears 005721c8
+    std::uint8_t quit_latch_after{};       // one-shot 005721d8
+    std::uint8_t network_after{};          // 00134640 clears 005721b8
     std::size_t count(const std::string& kind) const;
 };
 
-PlayTeardownReport run_play_level_teardown(const GameEndState& game, const PlayTeardownActions& actions);
+PlayTeardownReport run_play_level_teardown(const GameEndState& game, const PlayTeardownActions& actions,
+                                          const PlayTeardownNetwork* network = nullptr);
 
 }  // namespace omega
