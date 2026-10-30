@@ -27,11 +27,24 @@ struct LevelEndRequestResult {
     bool fade_started{};   // 0025e6e0(*(G+e8), 2, 1.0)
 };
 
+// Explicit boundaries of the multiplayer request. The original receiver calls
+// 0012eee0(G, 0, 1) before changing state, then 003c9420 continues to 003c94a0
+// after local delivery (even when the receiver's re-entry guard rejects it).
+// continue_message must respect the routing flags: client flag 1 is local-only.
+// These callbacks must provide the real network services, not silent no-ops.
+struct LevelEndNetworkHost {
+    bool host_role{};       // *005721c0 != 0
+    std::function<void()> send_agent_data;   // 0012eee0(G, 0, 1)
+    std::function<void(std::uint8_t flags_20, std::uint8_t kind_24, std::uint32_t quit_28)> continue_message;
+};
+
 // 0012fa60(G, kind) and the synchronous MSGGAME_ENDLEVEL delivery (key
 // 004f5398, 003c9420 transport 1) to G's receiver 00136a90. `fader` is
 // *(G+e8) = *004ffc38, the fader the death code 16 (00176d30) also starts.
-// Multiplayer (0012eee0, msg +20, the remote slots) throws.
-LevelEndRequestResult request_level_end(GameEndState& g, std::uint8_t kind, ActorFader& fader, bool multiplayer);
+// Multiplayer requires both network services; otherwise throws before writes.
+// This does not supply remote readiness, incoming delivery, or debrief transport.
+LevelEndRequestResult request_level_end(GameEndState& g, std::uint8_t kind, ActorFader& fader, bool multiplayer,
+                                       const LevelEndNetworkHost* network = nullptr);
 
 // 00168f10, before the gameplay block of the main update 00167c40: state
 // 0x13 with fader +4 == 0.0f and 0012ed60(G) (every active remote player

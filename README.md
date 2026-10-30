@@ -15,7 +15,7 @@ lands. Each update's commit message names the development commit it was taken fr
 | Area | State |
 | --- | --- |
 | Front end | Boot movies, title, options, agent profiles and memory card, command centre, loadout, loading screens, debriefs |
-| Levels that play to their end | **17 of 18:** TRAINING, TORONTO1, TORONTO2, TORONTO3, BELARUS1, BELARUS2, UKRAINE, MNTNEGR1, TOKYO, YEMEN1, YEMEN2, ITALY, KYRGSTAN, MINSK, ZURICH, LORELEI, CHECHNYA |
+| Mission coverage | All 18 load; historical scripted level-end routes cover 17. TOKYO still needs a complete route. Full campaign acceptance at the current native frame rate remains open |
 | Widescreen | True 16:9 (and wider) in levels and menus: a wider view with the HUD, headers and button hints anchored to the screen edges. 4:3, pillarbox and stretch options |
 | Controls | Gamepads and keyboard / mouse |
 | Port Settings page | Display, control and port options inside the game's own Options menu |
@@ -27,14 +27,12 @@ lands. Each update's commit message names the development commit it was taken fr
 
 ## What does not work yet
 
-- **Level still in progress:** MYANMAR loads and plays part of the way, then
-  stop. When the port reaches something that is not ported yet, it stops with an "unhosted …" or "… not ported"
-  message naming the original function; it never guesses. Please report where it stopped (see below).
+- **TOKYO:** the current replay completes the chopper defense, but its remaining street, tower and extraction route is unfinished. Individual mission routes do not prove every objective branch, restart or a full saved campaign.
 - **CPU partners:** they don't use lifts yet, BELARUS1's co-op objective "save all 7 workers" is not escorted, and
   stealth behaviour (silenced weapons, disguises, stopping alarms) is planned. Choose the number of partners with
   `coop_partners=1|2|3` in `local\port_settings.txt`.
 - **LAN in-level sync:** damage to enemies the other console controls, their aim and fire, and shared objectives are
-  still being finished. Expect desyncs.
+  still being finished. A full mission through synchronized debrief has not yet been accepted. Expect desyncs.
 - **Online:** the server works, but in-level online play has the same gaps as LAN. Agency cells (clans) are not done.
 - **PS Vita:** in-level play is brand new and still being tested on hardware. Speed (30 fps target) and memory are
   being worked on.

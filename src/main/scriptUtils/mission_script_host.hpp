@@ -895,7 +895,7 @@ public:
     MissionScriptHost(const MissionScriptHost&) = delete;
     MissionScriptHost& operator=(const MissionScriptHost&) = delete;
     // 003e20a0 (load init/utils, initializers, init::Init, reference check),
-    // then init::ClientStartLevel and, in solo, init::StartLevel. Throws when a
+    // then init::ClientStartLevel and, in solo or on the network host, init::StartLevel. Throws when a
     // stage fails.
     void start();
     // start() in its two halves. start_init: 003e20a0's part, run by the level
@@ -905,6 +905,10 @@ public:
     // cleared 004ffc29. Messages and calls need both halves run.
     void start_init();
     void start_level_entries();
+    // 0012f810 reads 005721c8 for IsMultiplayer; 003e1a20 also reads 005721c0
+    // before the authoritative StartLevel entry. Set before Init so every script stage
+    // sees the session mode. Objective/state replication is a separate network path.
+    void set_network_context(bool multiplayer, bool host);
     // 003d9d30 on the NPC's AI component holder (+18, allocated {0, 0, -1} by
     // 002300d0 when the actor's +3264 name is set): an empty name binds
     // nothing; otherwise 003e15b0 finds the script type by name (003e0be0,
@@ -1426,6 +1430,8 @@ private:
     InterfaceTextGlobals interface_text_;
     bool started_{};
     bool init_run_{};
+    bool run_host_start_level_{true};
+    bool multiplayer_{};
     bool partner_objectives_{};
     bool freed_ai_resend_skip_{};
     std::size_t freed_ai_resends_skipped_{};

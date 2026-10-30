@@ -3,14 +3,15 @@
 
 namespace omega {
 
-LevelEndRequestResult request_level_end(GameEndState& g, std::uint8_t kind, ActorFader& fader, bool multiplayer) {
-    if (multiplayer)
+LevelEndRequestResult request_level_end(GameEndState& g, std::uint8_t kind, ActorFader& fader, bool multiplayer,
+                                       const LevelEndNetworkHost* network) {
+    if (multiplayer && (!network || !network->send_agent_data || !network->continue_message))
         throw std::runtime_error("Level end: multiplayer (0012eee0, ENDLEVEL +20, the remote slots) is not hosted");
     bool completed = false;
     if (kind == 2 || kind == 3) {
         g.b1c4 = 1; g.b1c5 = kind == 3 ? 1 : 0; g.b1c6 = 1; g.b1c7 = 0;
     } else if (kind == 0) {
-        g.b1c4 = 0; g.b1c5 = 0; g.b1c6 = 0; g.b1c7 = 0;   // +1c6 = *005721c8, 0 in solo
+        g.b1c4 = 0; g.b1c5 = 0; g.b1c6 = multiplayer ? 1 : 0; g.b1c7 = 0;
         completed = true;
     } else if (kind == 1) {
         g.b1c4 = 0; g.b1c5 = 1; g.b1c6 = 1; g.b1c7 = 1;
@@ -22,15 +23,20 @@ LevelEndRequestResult request_level_end(GameEndState& g, std::uint8_t kind, Acto
     // 00136a90. 003caca0 first forwards the message to G's child list; the
     // port hosts no G child (its result is not used on the ENDLEVEL path).
     LevelEndRequestResult r;
-    if (g.state_50 == 0x13 || g.state_50 == 0x14) return r;
-    g.previous_51 = g.state_50;
-    if (g.b1c4 && g.b1c5 && g.b1c6) g.state_50 = 0x14;
-    else {
-        g.state_50 = 0x13;
-        start_actor_fade(fader, 2, 1.0F);
-        r.fade_started = true;
+    if (g.state_50 != 0x13 && g.state_50 != 0x14) {
+        if (multiplayer) network->send_agent_data();   // 0012eee0(G, 0, 1)
+        g.previous_51 = g.state_50;
+        if (g.b1c4 && g.b1c5 && g.b1c6) g.state_50 = 0x14;
+        else {
+            g.state_50 = 0x13;
+            start_actor_fade(fader, 2, 1.0F);
+            r.fade_started = true;
+        }
+        r.handled = true;
     }
-    r.handled = true;
+    // 003c9e30 initializes +20 to 5; 0012fa60 replaces it with 1 on a
+    // multiplayer client. +24 is the kind byte; +28 is the kind-2 word.
+    if (multiplayer) network->continue_message(network->host_role ? 5 : 1, kind, kind == 2 ? 1U : 0U);
     return r;
 }
 

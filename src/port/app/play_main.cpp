@@ -8389,6 +8389,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 decode_string_pool(disc.read(disc.file({"GAMEDATA",mission,"STRINGS.DAT"}))));
             const auto mission_cue=objective_inputs.mission_cue;
             mission_host=std::make_unique<MissionScriptHost>(std::move(modules),population,*script_world,std::move(objective_inputs));
+            // 003e1a20: every console runs ClientStartLevel; only solo or the host runs StartLevel.
+            // Keep the authority across the loadout's delayed start_level_entries call as well.
+            if(lan_net)mission_host->set_network_context(lan_net->memory().read(dme::kNetworkGame,1)!=0,
+                lan_net->memory().read(dme::kHostRole,1)!=0);
             if(const auto* set=omega::mods::active();set&&set->has_data())
                 for(const auto& [name,value]:omega::mods::tohit_overrides(*set))
                     mission_host->to_hit().set_field(name,Word{std::bit_cast<std::uint32_t>(value)});   // 132md16: [tohit]
@@ -15214,7 +15218,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 // The boxes' EnableMsg / DisableMsg to generators queued since the last pump (the load-time ones at frame 0;
                 // a box event's during the actor step, before the generators' prelogic queues its SpawnedNPCMsgs). Each is offered
-                // to the generator's script filter first (003c8de0); unhandled, its receiver 00221610: +64 / +68 (single player).
+                // to the generator's script filter first (003c8de0); unhandled, its receiver 00221610 dispatches by authority.
                 if(mission_host&&!generator_link_msgs.empty()){
                     const auto queued=std::move(generator_link_msgs);generator_link_msgs.clear();
                     for(const auto& [generator,enable]:queued){
@@ -15222,7 +15226,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         if(load_time)--generator_load_links_left;
                         const bool handled=mission_host->deliver_generator_link_message(generator,enable);
                         auto& s=*generator_world->find(generator);const int before=s.enabled_2c;
-                        // 132ln5h11: in a network game 00221610's +64 / +68 take the message's +24: the load loop's
+                        // 132ln5h11: 00221610 takes the message's +24: the load loop's
                         // DisableMsg carries -1 (001731d4). 132ln5h12: a box event's carries 003fb340 of the occupant's +c
                         // (the enter 00172450..00172460 always, the exit branches 00171f70..00171f90 / 001720c8..001720e8
                         // with 005721c8 set; -1 without an occupant). PORT-ONLY: the play's box events are the local
@@ -15232,16 +15236,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             const auto net=generator_world->network_host();
                             if(!load_time){
                                 client_24=lan_net->generator_prelogic_host().netmap_client_3fb340(lan_net->local_player_key());
-                                if(enable)generator_enable_network(s,client_24,net);
-                                else generator_disable_network(s,client_24,net);
                             }else{
                                 if(enable)throw std::runtime_error("Generator "+std::to_string(generator)+": a load-time EnableMsg (00172ae0 sends only DisableMsgs)");
-                                generator_disable_network(s,-1,net);
                             }
+                            generator_receive_enable_disable(s,enable,client_24,net);
                         }else if(!handled)generator_receive_link_message(s,enable);
                         std::cout<<(enable?"EnableMsg":"DisableMsg")<<" -> generator "<<generator<<" at frame "<<frame<<(handled?": script handler"
                             :(generator_world->network_host?": 00221610 "+std::string(enable?"+64(":"+68(")+std::to_string(client_24)
-                                +(enable?") network (00220fd0) +2c ":") network (00220d70) +2c "):": 00221610 +2c ")+std::to_string(before)+" -> "
+                                +(lan_net->generator_net_host().host_role
+                                    ?(enable?") host (00220e60) +2c ":") host (00220d00) +2c ")
+                                    :(enable?") client (00220fd0) +2c ":") client (00220d70) +2c "))
+                                :": 00221610 +2c ")+std::to_string(before)+" -> "
                              +std::to_string(int(s.enabled_2c))+(generator_world->network_host?", +cc 0x"+hex_word(s.interest_cc):std::string()))<<"\n";
                     }
                 }

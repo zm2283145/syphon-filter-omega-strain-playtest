@@ -434,6 +434,19 @@ void generator_remote_disable(GeneratorState& s, std::int32_t client, const Gene
     net_need(net.clear_interest_43a030, "clear_interest_43a030")(s.id);  // 00220d50
 }
 
+void generator_receive_enable_disable(GeneratorState& s, bool enable, std::int32_t client,
+                                      const GeneratorNetHost& net) {
+    if (!net.network) {
+        generator_receive_link_message(s, enable);
+    } else if (net.host_role) {
+        if (enable) generator_remote_enable(s, client, net);
+        else generator_remote_disable(s, client, net);
+    } else {
+        if (enable) generator_enable_network(s, client, net);
+        else generator_disable_network(s, client, net);
+    }
+}
+
 void generator_activate_5c_network(GeneratorState& s, const GeneratorNetHost& net) {
     s.present_2d = 1;                                                // 002214c4: 003ce980
     if (!net.network || !generator_active(s)) return;                // 002214d4, 002214dc..00221508

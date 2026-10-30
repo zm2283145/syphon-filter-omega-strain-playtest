@@ -564,10 +564,18 @@ void MissionScriptHost::start_init() {
     init_run_ = true;
 }
 
+void MissionScriptHost::set_network_context(bool multiplayer, bool host) {
+    if (init_run_ || started_) throw std::runtime_error("Mission script network context changed after initialization");
+    multiplayer_ = multiplayer;
+    objectives_.set_multiplayer_answer(multiplayer);
+    run_host_start_level_ = !multiplayer || host;
+}
+
 void MissionScriptHost::start_level_entries() {
     if (!init_run_) throw std::runtime_error("003e1a20 before the level load's 003e20a0 (init::Init)");
     if (started_) throw std::runtime_error("Mission scripts already started");
     for (const auto* entry : {"init::ClientStartLevel", "init::StartLevel"}) {
+        if (!run_host_start_level_ && std::string_view(entry) == "init::StartLevel") continue;
         stage_ = entry;
         // 003e1b60: when 003e0f50 finds no definition, 003e1bd4 prints 004bd920 through 003d7930 and returns 0.
         // 003e0f50 compares with 00128e80 (strcasecmp): LORELEI's init::startlevel
@@ -1210,7 +1218,7 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                                                     const std::vector<Value>& arguments, bool& applied) {
     const auto& name = function.name;
     applied = true;
-    if (name == "game::IsMultiplayer" && partner_objectives_) {
+    if (name == "game::IsMultiplayer" && partner_objectives_ && !multiplayer_) {
         // Port-only (132ob8): the partner is the second player at the allow-listed objective call sites only.
         const auto site = context_.native_call_site(script);
         MultiplayerAnswer answer;
