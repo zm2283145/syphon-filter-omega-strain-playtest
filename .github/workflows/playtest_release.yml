@@ -161,12 +161,13 @@ jobs:
           fi
           # The by-tag release endpoint omits drafts. List authenticated
           # releases so a failed upload can resume its existing draft.
+          echo "Checking for an existing release: $tag"
           releases=$(gh api --paginate "repos/$SOURCE_REPO/releases?per_page=100")
           release=$(jq -c --arg tag "$tag" '.[] | select(.tag_name == $tag)' <<< "$releases")
           if [[ -n "$release" ]]; then
             target=$(jq -r '.target_commitish' <<< "$release")
             draft=$(jq -r '.draft' <<< "$release")
-            [[ "$target" == "$SOURCE_SHA" ]] || { echo "Release $tag targets another commit" >&2; exit 1; }
+            [[ "$ref" == "$SOURCE_SHA" || "$target" == "$SOURCE_SHA" ]] || { echo "Release $tag targets another commit" >&2; exit 1; }
             if [[ "$draft" == false ]]; then
               echo "Published release $tag already exists; leaving it untouched"
               exit 0
@@ -179,14 +180,23 @@ jobs:
 
           Downloads: Windows folder zip, PS Vita GXM VPK (SFOS00004), and PS5 folder title zip (PPSA99720). The Vita vitaGL build is checked by CI but is not published in this prerelease.
           EOF
-            gh release create "$tag" --repo "$SOURCE_REPO" --target "$SOURCE_SHA" \
+            # An existing tag already fixes the source commit. Do not request
+            # tag creation at an older workflow revision a second time.
+            target_args=(--target "$SOURCE_SHA")
+            if [[ "$ref" == "$SOURCE_SHA" ]]; then
+              target_args=(--verify-tag)
+            fi
+            echo "Creating draft release: $tag"
+            gh release create "$tag" --repo "$SOURCE_REPO" "${target_args[@]}" \
               --title "Playtest #$SOURCE_NUMBER ($short)" --notes-file "$RELEASE_DIR/notes.md" \
               --draft --prerelease --latest=false
           fi
           # A failed upload leaves only a draft. Reruns may repair that draft;
           # a published release is never overwritten.
+          echo "Uploading the three packages: $tag"
           gh release upload "$tag" --repo "$SOURCE_REPO" --clobber \
             "$RELEASE_DIR/OmegaStrain-windows.zip" \
             "$RELEASE_DIR/OmegaStrain-vita-GXM.vpk" \
             "$RELEASE_DIR/OmegaStrain-ps5-PPSA99720.zip"
+          echo "Publishing prerelease: $tag"
           gh release edit "$tag" --repo "$SOURCE_REPO" --draft=false --prerelease --latest=false
