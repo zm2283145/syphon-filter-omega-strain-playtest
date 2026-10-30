@@ -136,6 +136,13 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // 0x0055c770 empty (003fb750 reads it; its inserts 003fb9c0 come from the stubbed 001ae450, so it stays empty).
     dme_->set_client_left_callback(0x429920);
     m.write(0x55c77c, 4, 0x55c774);
+    // NPCInfo's static list/tree constructors: an empty list links both ends
+    // to its sentinel. Native cleanup must not traverse a zero next pointer.
+    for (const auto list : {0x582ab0U, 0x582ad0U, 0x582af0U, 0x582b10U, 0x582b30U}) {
+        m.write(list + 4, 4, list + 4);
+        m.write(list + 8, 4, list + 4);
+    }
+    m.write(0x582b5c, 4, 0x582b54);
     // The GenInfo queues (static construction's state: empty): the lists 0x005838b8 / 0x005838d8 (header +4: prev
     // +4, next +8) and the map 0x00583900 (root +4, leftmost +0xc = the header +4).
     m.write(0x5838bc, 4, 0x5838bc);
@@ -1674,11 +1681,13 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x437bf0: dme_voice_end_00437bf0(m, *this); return 0;
     case 0x42b230: dme_session_reset_0042b230(m); return 0;
     case 0x42b1f0: dme_session_end_0042b1f0(m, *this); return 0;
+    case 0x3fbcd0: { Frame f(sp_); net_objects_clear_003fbcd0(m, *this, f.caller); return 0; }
     case 0x42b0c0: { Frame f(sp_); dme_level_net_start_0042b0c0(m, *this); return 0; }
     case 0x42b1a0: { Frame f(sp_); return dme_clock_0042b1a0(m, *this, arg(0), f.caller); }
     case 0x3fac40: { Frame f(sp_); dme_send_network_data_003fac40(m, *this, arg(0)); return 0; }
     case 0x43a810: { Frame f(sp_); dme_geninfo_update_0043a810(m, *this, f.caller); return 0; }
     case 0x436c00: { Frame f(sp_); return npc_info_update_00436c00(m, *this, arg(0)); }
+    case 0x436380: { Frame f(sp_); npc_info_clear_00436380(m, *this, arg(0)); return 0; }
     case 0x4355d0: { Frame f(sp_); npc_info_objects_004355d0(m, *this, arg(0)); return 0; }
     case 0x433a60: { Frame f(sp_); npc_info_objects_create_00433a60(m, *this, f.caller); return 0; }
     case 0x434740: { Frame f(sp_); npc_info_send_timers_00434740(m, *this); return 0; }

@@ -1274,6 +1274,28 @@ void rb_map_erase(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map, st
     w32(m, map, r32(m, map) - 1);
 }
 
+// 003fc200 / 003fc080: the two NetObj red-black trees free their nodes
+// left subtree, right subtree, then parent. Unlike a repeated erase, clearing
+// does not rebalance or run a NetObj receiver's destructor. The pair stored in
+// each node contains only scalar fields and pointers; the pointed-to game
+// objects are destroyed later in World_Teardown.
+void rb_map_clear_nodes(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t node, std::uint32_t file) {
+    if (const auto left = r32(m, node)) rb_map_clear_nodes(m, host, left, file);
+    if (const auto right = r32(m, node + 4)) rb_map_clear_nodes(m, host, right, file);
+    heap_enter(m, host);
+    host.call(m, 0x36b130, {0, node, file, 0x64});
+    heap_leave(m, host);
+}
+
+void rb_map_clear(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map, std::uint32_t file) {
+    if (const auto root = r32(m, map + 4)) {
+        rb_map_clear_nodes(m, host, root, file);
+        w32(m, map, 0);
+        w32(m, map + 4, 0);
+        w32(m, map + 0xc, map + 4);
+    }
+}
+
 // 003fc000 / 001bb080(&out, map, &key): the node with the key (+0xc, signed), or the end (map + 4).
 std::uint32_t rb_map_find(const LevelLoadMemory& m, std::uint32_t map, std::uint32_t key) {
     const auto end = map + 4;
@@ -1290,6 +1312,48 @@ std::uint32_t rb_map_find(const LevelLoadMemory& m, std::uint32_t map, std::uint
     return at;
 }
 }  // namespace
+
+// 003fbcd0, cNetObj_Clear, runs after the end screens and before the level's
+// GOBJ destruction. The NetObj and client maps own their tree nodes, not the
+// receivers. The NPC/GenInfo constructors make temporary stack objects whose
+// clear calls reset the corresponding global stores.
+void net_objects_clear_003fbcd0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack) {
+    constexpr std::uint32_t kClientMap = 0x55c770;
+    const auto frame = stack - 0x30;
+    const auto npc_temp = frame + 0x2c;
+    const auto gen_temp = frame + 0x28;
+    w32(m, 0x55c990, 0);
+    if (s32(r32(m, kNetMap)) > 0) rb_map_clear(m, host, kNetMap, 0x49ed08);
+    rb_map_clear(m, host, kClientMap, 0x4be3a0);
+    host.call(m, 0x436c00, {npc_temp});
+    host.call(m, 0x436380, {npc_temp});
+    host.call(m, 0x43b190, {gen_temp});
+    host.call(m, 0x43ace0, {gen_temp});
+    for (std::uint32_t slot = 0; slot < 3; ++slot) {
+        const auto base = 0x55c7c0 + slot * 0x98;
+        w8(m, base + 0x14, 0);
+        w32(m, base + 0x18, 0);
+        w16(m, base + 0x94, 0);
+        for (std::uint32_t sub = 0; sub < 5; ++sub)
+            for (std::uint32_t offset = 0x1c; offset <= 0x30; offset += 4)
+                w32(m, base + sub * 0x18 + offset, 0);
+    }
+    if (const auto npc = r32(m, 0x55c988)) {
+        // The global NPC object has its own outer allocator guard. The
+        // original reenables interrupts, clears the pointer, then lowers the
+        // guard depth; heap_leave would reverse the last two writes.
+        heap_enter(m, host);
+        host.call(m, 0x436ba0, {npc, 0xffffffffU});
+        host.call(m, 0x36b130, {0, npc, 0x4be228, 0x12e});
+        if (r8(m, kIntcInstalled)) host.call(m, 0x10dca8, {9});
+        w32(m, 0x55c988, 0);
+        w32(m, kHeapCounter, r32(m, kHeapCounter) - 1);
+    }
+    for (std::uint32_t client = 0; client < 4; ++client) w8(m, 0x55c780 + client, 0);
+    for (std::uint32_t client = 0; client < 4; ++client) w8(m, 0x493a10 + client, 2);
+    for (std::uint32_t offset = 0; offset < 0x14; offset += 4) w32(m, 0x55c9a0 + offset, 0);
+    host.call(m, 0x436ba0, {npc_temp, 0xffffffffU});
+}
 
 std::uint32_t client_map_remove_003fb750(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t client) {
     constexpr std::uint32_t kClientMap = 0x55c770;
@@ -1912,17 +1976,18 @@ void geninfo_map_insert(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t m
     net_map_rebalance(m, node, r32(m, map + 4));
     if (leftmost) w32(m, map + 0xc, node);
 }
-// 0043b410(map, node): the subtree freed in post-order (0x004bfdb0 line 0x64).
-void geninfo_map_free_subtree(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t node) {
-    if (const auto left = r32(m, node)) geninfo_map_free_subtree(m, host, left);
-    if (const auto right = r32(m, node + 4)) geninfo_map_free_subtree(m, host, right);
-    heap_free(m, host, node, 0x4bfdb0, 0x64);
+// 0043b410 / 00436c50: both info maps free their nodes left, right, root;
+// NPCInfo's allocator source is 004bfd10 rather than GenInfo's 004bfdb0.
+void info_map_free_subtree(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t node, std::uint32_t source) {
+    if (const auto left = r32(m, node)) info_map_free_subtree(m, host, left, source);
+    if (const auto right = r32(m, node + 4)) info_map_free_subtree(m, host, right, source);
+    heap_free(m, host, node, source, 0x64);
 }
-// 0043b1c0(map): with a root, every node freed and the map emptied.
-void geninfo_map_clear(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map) {
+// 0043b1c0 / 00436c50: with a root, every node is freed and the map emptied.
+void info_map_clear(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map, std::uint32_t source) {
     const auto root = r32(m, map + 4);
     if (!root) return;
-    geninfo_map_free_subtree(m, host, root);
+    info_map_free_subtree(m, host, root, source);
     w32(m, map, 0);
     w32(m, map + 4, 0);
     w32(m, map + 0xc, map + 4);
@@ -2095,7 +2160,7 @@ void geninfo_apply_interest_00439030(LevelLoadMemory& m, LevelLoadHost& host, st
         rb_map_erase(m, host, kGenInfoInterest, n, 0x4bfdb0);
         n = next;
     }
-    geninfo_map_clear(m, host, kGenInfoInterest);
+    info_map_clear(m, host, kGenInfoInterest, 0x4bfdb0);
 }
 
 void geninfo_reset_0043ace0(LevelLoadMemory& m, LevelLoadHost& host) {
@@ -2114,7 +2179,7 @@ void geninfo_reset_0043ace0(LevelLoadMemory& m, LevelLoadHost& host) {
     }
     for (auto n = r32(m, kGenInfoInterest + 0xc); n != kGenInfoInterest + 4; n = net_map_next(m, n))
         heap_free(m, host, r32(m, n + 0xc), kGenInfoSource, 0x4c);
-    geninfo_map_clear(m, host, kGenInfoInterest);
+    info_map_clear(m, host, kGenInfoInterest, 0x4bfdb0);
     for (std::uint32_t client = 0; client < 4; ++client) w8(m, 0x5838a0 + client, 0);
 }
 
@@ -2460,6 +2525,38 @@ void npc_info_set_contact_00433f20(LevelLoadMemory& m, LevelLoadHost& host, std:
 void npc_info_removed_004321d0(LevelLoadMemory& m) {
     for (std::uint32_t k = 0; k < 5; ++k) w32(m, kNpcBlocks + 8 * k, 0);
     for (std::uint32_t k = 0; k < 5; ++k) w8(m, kNpcCreated + 8 * k, 0);
+}
+
+// 00436380: the five NPCInfo queues and one alive tree are cleared before
+// the five block pointers and module state. This is only the Clear body;
+// 003fbcd0's surrounding NPCInfo ctor/dtor own the shared-reference count.
+void npc_info_clear_00436380(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t self) {
+    (void)self;  // 00433760's DestroyNPCInfoStruct ignores the temporary object.
+    const auto clear_list = [&](std::uint32_t list, std::uint32_t line) {
+        for (auto node = r32(m, list + 8); node != list + 4; node = r32(m, node + 4))
+            heap_free(m, host, r32(m, node + 8), kNpcSource, line);
+        geninfo_list_erase_range(m, host, list, r32(m, list + 8), list + 4);
+    };
+    clear_list(kNpcInterestSet, 0x7b);
+    clear_list(kNpcInterestClear, 0x86);
+    clear_list(kNpcAdds, 0x91);
+    for (auto node = r32(m, kNpcAlive + 0xc); node != kNpcAlive + 4; node = net_map_next(m, node))
+        heap_free(m, host, r32(m, node + 0xc), kNpcSource, 0x9c);
+    info_map_clear(m, host, kNpcAlive, 0x4bfd10);
+    clear_list(kNpcOwnerChanges, 0xa7);
+    clear_list(kNpcOwners, 0xb1);
+
+    // 00433760: when block 0 is not owned by the DME object, free every
+    // non-null block in order, then clear all five pointers. Otherwise the
+    // blocks belong to the DME object and only the pointers are cleared.
+    if (!r8(m, kNpcReleased)) {
+        for (std::uint32_t k = 0; k < 5; ++k)
+            if (const auto block = r32(m, kNpcBlocks + 8 * k))
+                heap_free(m, host, block, kNpcSource, 0x5aa + 3 * k);
+    }
+    for (std::uint32_t k = 0; k < 5; ++k) w32(m, kNpcBlocks + 8 * k, 0);
+    for (std::uint32_t k = 0; k < 5; ++k) w8(m, kNpcCreated + 8 * k, 0);
+    for (std::uint32_t k = 0; k < 5; ++k) w32(m, kNpcTimers + 8 * k, 0);
 }
 
 namespace {

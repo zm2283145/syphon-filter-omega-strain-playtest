@@ -209,6 +209,10 @@ void net_map_set_003fa8c0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t
 // result is &node+0x10; otherwise the static dummy entry 0x0055c9c0 (built once under the guard byte 0x0055c9b8).
 std::uint32_t net_map_set_object_003fb650(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t key, std::uint32_t a,
                                           std::uint32_t object);
+// 003fbcd0, cNetObj_Clear: after World_Teardown's DME object restart and end
+// screens, clear both NetObj trees, NPC/GenInfo stores, client records and
+// per-client counters. `stack` is the caller's EE stack pointer.
+void net_objects_clear_003fbcd0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack = 0x1f00000);
 // 0040bf10: the local player 0x00571770 when it is nonzero and its +0xc equals 0x00571774; otherwise 0.
 std::uint32_t local_player_0040bf10(const LevelLoadMemory& m);
 // 003fa940(client) (from 003fac40 once the client is loaded): 0x0055c780[client] = 2; 00429b30 when 0x00572400 is
@@ -602,6 +606,10 @@ void npc_info_queue_alive_00434be0(LevelLoadMemory& m, LevelLoadHost& host, std:
                                    std::uint32_t stack);
 // 004321d0: removed: the five block pointers and the five bytes 0x00582778 + 8k cleared.
 void npc_info_removed_004321d0(LevelLoadMemory& m);
+// 00436380: frees queued NPCInfo copies and nodes, clears the alive tree,
+// frees locally owned NPC blocks, and resets five block/flag/timer slots.
+// The caller owns the surrounding 00436c00/00436ba0 reference-count pair.
+void npc_info_clear_00436380(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t self);
 // 00437830(master, handle): the headset semaphore created: 0x00583870 = handle, 0x00582cf0 = its data. Frame 0x30.
 void headset_created_00437830(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t handle, std::uint32_t stack);
 // 00437640(owner, handle, mode): for -2 with the local client the owner: the talk request (byte 0x00583860:

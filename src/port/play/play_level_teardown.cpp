@@ -156,6 +156,13 @@ public:
             throw std::runtime_error("Play level teardown: no disposition for EE service " + hex8(address));
         }
         const auto& d = found->second;
+        // cNetObj_Clear also runs offline, where this mirror has no live
+        // network objects. A network play must clear the core's actual maps
+        // and NPC/GenInfo queues at this exact point, after the debrief.
+        if (address == 0x3fbcd0 && network_) {
+            record(address, args, "network", "cNetObj_Clear");
+            return network_->call(m, address, args);
+        }
         if (address == 0x4294c0 && !network_) {
             record(address, args, "mirror", "network manager (null offline)");
             return 0;
