@@ -317,6 +317,19 @@ public:
     std::vector<RemoteGlobalTimer> take_global_timers();
     std::uint32_t global_timers_sent() const { return global_timers_sent_; }
     std::uint32_t global_timers_received() const { return global_timers_received_; }
+    struct RemotePlayerSound {
+        std::uint16_t origin = 0;
+        bool stop = false;
+        std::int32_t type = 0, priority = 0;
+        std::uint32_t owner_key = 0;
+        std::uint8_t flags = 0;
+        std::string name;
+    };
+    void send_player_sound(std::uint16_t recipient, bool stop, std::int32_t type, std::string_view name,
+                           std::int32_t priority = 0, std::uint32_t owner_key = 0, std::uint8_t flags = 0);
+    std::vector<RemotePlayerSound> take_player_sounds();
+    std::uint32_t player_sounds_sent() const { return player_sounds_sent_; }
+    std::uint32_t player_sounds_received() const { return player_sounds_received_; }
 
     // Objective.c's category-0xF6 NetObj registrations start at F60001 each level;
     // objective script IDs only index this port-side binding and never appear on the wire.
@@ -794,6 +807,9 @@ private:
     std::vector<RemoteGlobalTimer> global_timers_;
     std::uint32_t global_timers_sent_ = 0, global_timers_received_ = 0;
     std::uint32_t receive_generic_message(std::uint32_t origin, std::uint32_t data);
+    std::vector<RemotePlayerSound> player_sounds_;
+    std::uint32_t player_sounds_sent_ = 0, player_sounds_received_ = 0;
+    std::uint32_t receive_player_sound(std::uint32_t origin, std::uint32_t data, bool stop);
     std::vector<RemoteEndLevel> end_levels_;
     std::uint32_t end_levels_sent_ = 0, end_levels_received_ = 0;
     std::uint32_t receive_end_level(std::uint32_t origin, std::uint32_t data);

@@ -1542,6 +1542,11 @@ public:
     std::uint8_t language_55d470() override { Guard g(m_); return h_.language_55d470(); }
     std::uint8_t game_mode_4ffba0() override { Guard g(m_); return h_.game_mode_4ffba0(); }
     bool multiplayer_5721c8() override { Guard g(m_); return h_.multiplayer_5721c8(); }
+    bool authority_5721c0() override { Guard g(m_); return h_.authority_5721c0(); }
+    bool local_player_14(std::uint32_t o) override { Guard g(m_); return h_.local_player_14(o); }
+    void send_player_music(std::uint32_t o, std::string_view n, bool s) override {
+        Guard g(m_); h_.send_player_music(o, n, s);
+    }
     std::uint32_t output_mode_4ffd2c_14() override { Guard g(m_); return h_.output_mode_4ffd2c_14(); }
     GameSoundHog open_hog_3f96e0(const std::string& p) override { Guard g(m_); return h_.open_hog_3f96e0(p); }
     void load_lpd_3eae60(std::size_t s, const GameSoundResource& r) override { Guard g(m_); h_.load_lpd_3eae60(s, r); }

@@ -76,6 +76,10 @@ std::uint32_t SoundIopHost::owner_serial(std::uint32_t owner) {
     if (!owner_serial_hook) unhosted("00150c60", "an owned sound's object serial");
     return owner_serial_hook(owner);
 }
+void SoundIopHost::send_player_music(std::uint32_t owner, std::string_view name, bool stop) {
+    if (!player_music_hook) unhosted("001c6890 / 001c6a00", "the multiplayer player-targeted music route");
+    player_music_hook(owner, name, stop);
+}
 GameSoundOwnerView SoundIopHost::owner_view(std::uint32_t owner) {
     if (!owner_view_hook) unhosted("001c75c0", "an owned sound's object view (+2c..+2e, +49, +50 root)");
     return owner_view_hook(owner);

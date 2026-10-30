@@ -93,6 +93,10 @@ public:
     std::function<std::uint8_t(std::uint32_t)> owner_state_hook;
     std::function<void(std::uint32_t, const std::string&, std::span<const std::uint8_t>)> lip_sync_hook;
     std::function<void(std::uint32_t)> owner_clear_hook;
+    std::function<bool()> multiplayer_hook;
+    std::function<bool()> authority_hook;
+    std::function<bool(std::uint32_t)> local_player_hook;
+    std::function<void(std::uint32_t, std::string_view, bool)> player_music_hook;
 
     // 003eb340(003eba50()) once per game frame (00167dd0), after 00165610's frame count 0055a818.
     std::int32_t lpd_service();
@@ -129,7 +133,10 @@ public:
     std::string level_name_4ffc90() override { return config_.level; }
     std::uint8_t language_55d470() override { return config_.language; }
     std::uint8_t game_mode_4ffba0() override { return config_.game_mode; }
-    bool multiplayer_5721c8() override { return false; }
+    bool multiplayer_5721c8() override { return multiplayer_hook ? multiplayer_hook() : false; }
+    bool authority_5721c0() override { return authority_hook ? authority_hook() : true; }
+    bool local_player_14(std::uint32_t owner) override { return local_player_hook ? local_player_hook(owner) : true; }
+    void send_player_music(std::uint32_t owner, std::string_view name, bool stop) override;
     std::uint32_t output_mode_4ffd2c_14() override { return config_.output_mode; }
     GameSoundHog open_hog_3f96e0(const std::string& path) override;
     void load_lpd_3eae60(std::size_t slot, const GameSoundResource& lpd) override;

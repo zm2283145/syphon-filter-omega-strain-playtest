@@ -124,6 +124,9 @@ public:
     virtual std::uint8_t language_55d470() = 0;
     virtual std::uint8_t game_mode_4ffba0() = 0;
     virtual bool multiplayer_5721c8() = 0;
+    virtual bool authority_5721c0() { return true; }
+    virtual bool local_player_14(std::uint32_t) { return true; }
+    virtual void send_player_music(std::uint32_t owner, std::string_view name, bool stop);
     virtual std::uint32_t output_mode_4ffd2c_14() = 0;               // *(*(004ffd2c) + 14)
     virtual GameSoundHog open_hog_3f96e0(const std::string& path) = 0;
     // 003eae60(003eba50(), slot +e4, 001c9400, slot, 0, 0, 1): completes later
@@ -148,8 +151,11 @@ public:
     // The workers (each posts at most one message).
     void play_quip(std::string_view name, std::uint32_t owner, std::int32_t priority); // 001c6720
     void play_quip(std::string_view name, std::int32_t priority);                      // 001c67c0
-    void stop_music(std::string_view name);                                            // 001c6890
-    void play_music(std::string_view name);                                            // 001c6a00
+    void stop_music(std::string_view name, std::uint32_t player = 0);                  // 001c6890
+    void play_music(std::string_view name, std::uint32_t player = 0);                  // 001c6a00
+    // The cNetObj receiver callbacks 0020edd0 / 0020e8b0 queue the reconstructed
+    // message with +20 = 1 on the addressed console.
+    void receive_player_music(std::string_view name, bool stop);
     // 001c6d00(type, name, owner): PlaySnd's worker (type 4: a quip message, else a play message).
     void play_sound(std::int8_t type, std::string_view name, std::uint32_t owner);
     // 001c6ea0(type, name): PlaySnd(type, name)'s worker (001c7310; checkpoint 132sx12). It builds the message twice

@@ -148,20 +148,46 @@ void GameSoundManager::play_quip(std::string_view name, std::int32_t priority) {
     if (name.empty()) return;
     auto r = request(4, name, 0, priority);
     r.subtitle_186 = 1;
-    if (host_.multiplayer_5721c8()) unhosted("001c6800", "the multiplayer quip gate (*005721c0)");
+    if (host_.multiplayer_5721c8() && !host_.authority_5721c0()) return;
     post({GameSoundMessage::Kind::quip_20f2a0, 5, message_copy(r, false)});
 }
 
-void GameSoundManager::stop_music(std::string_view name) {
-    auto r = request(5, name, 0, 0);
-    if (host_.multiplayer_5721c8()) unhosted("001c68e4", "the multiplayer StopMusic routing");
-    post({GameSoundMessage::Kind::stop_20ecb0, 5, message_copy(r, true)});
+void GameSoundHost::send_player_music(std::uint32_t, std::string_view, bool) {
+    unhosted("001c6890 / 001c6a00", "the multiplayer player-targeted music route");
 }
 
-void GameSoundManager::play_music(std::string_view name) {
+void GameSoundManager::stop_music(std::string_view name, std::uint32_t player) {
     auto r = request(5, name, 0, 0);
-    if (host_.multiplayer_5721c8()) unhosted("001c6a50", "the multiplayer PlayMusic routing");
-    post({GameSoundMessage::Kind::play_20faa0, 5, message_copy(r, false)});
+    if (host_.multiplayer_5721c8()) {
+        if (!player) unhosted("001c6890", "multiplayer StopMusic without a player");
+        if (!host_.local_player_14(player)) {
+            host_.send_player_music(player, name, true);
+            return;
+        }
+        post({GameSoundMessage::Kind::stop_20ecb0, 1, message_copy(r, true)});
+    } else {
+        post({GameSoundMessage::Kind::stop_20ecb0, 5, message_copy(r, true)});
+    }
+}
+
+void GameSoundManager::play_music(std::string_view name, std::uint32_t player) {
+    auto r = request(5, name, 0, 0);
+    if (host_.multiplayer_5721c8()) {
+        if (!player) unhosted("001c6a00", "multiplayer PlayMusic without a player");
+        if (!host_.local_player_14(player)) {
+            host_.send_player_music(player, name, false);
+            return;
+        }
+        post({GameSoundMessage::Kind::play_20faa0, 1, message_copy(r, false)});
+    } else {
+        post({GameSoundMessage::Kind::play_20faa0, 5, message_copy(r, false)});
+    }
+}
+
+void GameSoundManager::receive_player_music(std::string_view name, bool stop) {
+    auto r = request(5, name, 0, 0);
+    post({stop ? GameSoundMessage::Kind::stop_20ecb0 : GameSoundMessage::Kind::play_20faa0, 1,
+          message_copy(r, stop)});
 }
 
 void GameSoundManager::play_sound(std::int8_t type, std::string_view name, std::uint32_t owner) {

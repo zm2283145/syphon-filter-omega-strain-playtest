@@ -512,6 +512,80 @@ std::vector<LanNetCore::RemoteGlobalTimer> LanNetCore::take_global_timers() {
     return out;
 }
 
+void LanNetCore::send_player_sound(std::uint16_t recipient, bool stop, std::int32_t type, std::string_view name,
+                                  std::int32_t priority, std::uint32_t owner_key, std::uint8_t flags) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN player sound send during background load pump; defer until stop_load_pump");
+    if (name.size() > 15)
+        throw std::runtime_error("LAN player sound: name exceeds the retail 16-byte field");
+    auto& m = memory_;
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto id = m.read(stop ? 0x4f53e0 : 0x4f53d0);
+    if (!id || id >= 0x100) unhosted(stop ? 0x20e950 : 0x20ee70, "the player sound registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto data = sp_ + 0x20;
+    try {
+        m.write(data, 4, static_cast<std::uint32_t>(type));
+        for (std::uint32_t k = 0; k < 16; ++k)
+            m.write(data + 4 + k, 1, k < name.size() ? static_cast<std::uint8_t>(name[k]) : 0);
+        m.write(data + 20, 4, static_cast<std::uint32_t>(priority));
+        const auto size = stop ? 25U : 29U;
+        if (stop) {
+            m.write(data + 24, 1, flags);
+        } else {
+            m.write(data + 24, 4, owner_key);
+            m.write(data + 28, 1, flags);
+        }
+        const auto result = dme_->send_message(m, 0x40, 0, recipient, 2, id, size, data);
+        if (result) throw std::runtime_error("LAN player sound send failed with DME error " + std::to_string(result));
+        ++player_sounds_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemotePlayerSound> LanNetCore::take_player_sounds() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN player sound access during background load pump; defer until stop_load_pump");
+    std::vector<RemotePlayerSound> out;
+    out.swap(player_sounds_);
+    return out;
+}
+
+std::uint32_t LanNetCore::receive_player_sound(std::uint32_t origin, std::uint32_t data, bool stop) {
+    auto& m = memory_;
+    const auto size = stop ? 25U : 29U;
+    const auto available = dme_->incoming_message_remaining();
+    if (available != 0xffffffffU && available < size)
+        unhosted(stop ? 0x20e8b0 : 0x20edd0, "a truncated player sound message");
+    if (!m.read(dme::kInLevel, 1)) return size;
+    RemotePlayerSound sound;
+    sound.origin = static_cast<std::uint16_t>(origin);
+    sound.stop = stop;
+    sound.type = static_cast<std::int32_t>(m.read(data));
+    for (std::uint32_t k = 0; k < 16; ++k) {
+        const auto c = static_cast<char>(m.read(data + 4 + k, 1));
+        if (!c) break;
+        sound.name.push_back(c);
+    }
+    if (sound.name.size() == 16 ||
+        m.read(data + 4 + static_cast<std::uint32_t>(sound.name.size()), 1) != 0)
+        unhosted(stop ? 0x20e8b0 : 0x20edd0, "a player sound name without a terminator");
+    sound.priority = static_cast<std::int32_t>(m.read(data + 20));
+    if (stop) {
+        sound.flags = static_cast<std::uint8_t>(m.read(data + 24, 1));
+    } else {
+        sound.owner_key = m.read(data + 24);
+        sound.flags = static_cast<std::uint8_t>(m.read(data + 28, 1));
+    }
+    player_sounds_.push_back(std::move(sound));
+    ++player_sounds_received_;
+    return size;
+}
+
 void LanNetCore::send_agent_update(std::span<const std::uint8_t> inner) {
     if (pump_.joinable())
         throw std::runtime_error("LAN agent update during background load pump; defer until stop_load_pump");
@@ -1979,6 +2053,8 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     }
     case 0x2d7620: return receive_objective_message(arg(3));
     case 0x2822f0: return receive_generic_message(arg(2), arg(3));
+    case 0x20edd0: return receive_player_sound(arg(2), arg(3), false);
+    case 0x20e8b0: return receive_player_sound(arg(2), arg(3), true);
     case 0x20e350: return receive_end_level(arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);
@@ -2462,6 +2538,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     objective_actives_.clear();
     agent_updates_.clear();
     global_timers_.clear();
+    player_sounds_.clear();
     end_levels_.clear();
     (void)dme_->take_backpacks();
     pending_health_.reset();

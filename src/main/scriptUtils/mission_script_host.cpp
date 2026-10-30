@@ -1644,12 +1644,13 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         choose_menu_(call);
         return std::nullopt;
     }
-    // The gameSound natives (game_sound.hpp), solo game (005721c8 clear):
+    // The gameSound natives (game_sound.hpp):
     // PlayQuip(name, prio) 001c7180 -> 001c67c0(name, prio, 0) and
     // PlayQuip(name, GOBJ, prio) 001c7120 -> 001c6720(name, 003cc820(GOBJ),
     // prio); PlayMusic(name, GOBJ) 001c7200 -> 001c6a00 and StopMusic(name,
-    // GOBJ) 001c71c0 -> 001c6890, whose GOBJ (003cc820) only the multiplayer
-    // branch reads. Each posts one message for the next pump 003c8de0.
+    // GOBJ) 001c71c0 -> 001c6890. In multiplayer the GOBJ selects the local
+    // player or the cNetObj recipient. Each local result posts one message for
+    // the next pump 003c8de0.
     // Deferred without the manager. An owned quip's owner word is the object
     // id, as for PlaySnd: actors (the player, "npc" objects) and population
     // GOBs ("object", Checkpoint 132k: +49 0xf / 0xe, so the LPD 003eae60 and
@@ -1852,12 +1853,21 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         require_signature(script, function, 4, {"primitive:3", "object:GOBJ"});
         const auto* track = std::get_if<std::string>(&arguments.at(0));
         if (!track) throw std::runtime_error(name + " without a name string");
+        std::uint32_t player = 0;
+        if (!null_handle(arguments.at(1))) {
+            const auto actor = actor_owner(arguments.at(1), name);
+            if (!actor) {
+                applied = false;
+                return std::nullopt;
+            }
+            player = *actor;
+        }
         if (!game_sound_) {
             applied = false;
             return std::nullopt;
         }
-        if (name == "game::PlayMusic") game_sound_->play_music(*track);
-        else game_sound_->stop_music(*track);
+        if (name == "game::PlayMusic") game_sound_->play_music(*track, player);
+        else game_sound_->stop_music(*track, player);
         return std::nullopt;
     }
     // StartGlobalTimer 0012f860 (Checkpoint 132sx3): 0012f890(f12 seconds, a0 0) -> j 00245560(*004ffc2c, 0,

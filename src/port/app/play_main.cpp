@@ -8956,6 +8956,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto sound_player_id=[&roster]{
                     for(const auto& e:roster)if(e.record==0)return e.actor_id;
                     throw std::runtime_error("gameSound: no roster entry for the player");}();
+                sound_host->multiplayer_hook=[lan_net]{return lan_net!=nullptr;};
+                sound_host->authority_hook=[lan_net]{return !lan_net||lan_net->hosting();};
+                sound_host->local_player_hook=[sound_player_id](std::uint32_t owner){return owner==sound_player_id;};
+                sound_host->player_music_hook=[lan_net,&lan_remotes](std::uint32_t owner,std::string_view name,bool stop){
+                    if(!lan_net)throw std::runtime_error("gameSound: player-targeted network music requested outside LAN");
+                    for(const auto& remote:lan_remotes)
+                        if(!remote.gone&&remote.figure&&remote.figure->actor_id==owner){
+                            lan_net->send_player_sound(static_cast<std::uint16_t>(remote.peer),stop,5,name,0,0,stop?1:0);
+                            std::cout<<"LAN "<<(stop?"StopMusic":"PlayMusic")<<" routed to client "<<remote.peer
+                                <<" for actor "<<owner<<": "<<name<<"\n";
+                            return;
+                        }
+                    throw std::runtime_error("gameSound: multiplayer music target "+std::to_string(owner)+" is not a present remote player");
+                };
                 const auto sound_actor=[&npcs,sound_player_id](std::uint32_t id,const char* service)->std::pair<std::size_t,std::uint32_t>{
                     if(id==sound_player_id)return {0,id};
                     // A spawned actor's +c carries the 1 << 24 of 001b801c..001b8078; the scripts' key does not.
@@ -13961,6 +13975,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
+                    for(const auto& sound:lan_net->take_player_sounds()){
+                        if(!game_sound)throw std::runtime_error("0020edd0/0020e8b0: player sound received without gameSound");
+                        if(sound.type!=5||sound.priority!=0||sound.owner_key!=0||
+                           sound.flags!=(sound.stop?1:0))
+                            throw std::runtime_error("0020edd0/0020e8b0: unsupported player sound payload");
+                        game_sound->receive_player_music(sound.name,sound.stop);
+                        std::cout<<"LAN "<<(sound.stop?"StopMusic":"PlayMusic")<<" received from client "<<sound.origin
+                            <<" at frame "<<frame<<": "<<sound.name<<" (+20 = 1)\n";
+                    }
                     for(const auto& timer:lan_net->take_global_timers()){
                         if(!timer_host||!mission_host)
                             throw std::runtime_error("00245750: cNetTimerMsg received without the mission HUD timer host");
