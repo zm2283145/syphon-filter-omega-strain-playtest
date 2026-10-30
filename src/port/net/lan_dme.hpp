@@ -135,6 +135,8 @@ public:
     std::uint32_t refused_messages() const { return refused_; }
     std::uint32_t last_refused() const { return last_refused_; }
     std::uint16_t last_refused_origin() const { return last_refused_origin_; }
+    // 0042b1a0(0): host local time, or the client's local time plus the JOIN_ACK host offset.
+    std::uint32_t shared_clock() const { return session_clock(); }
     // Only while a registered game-message callback runs: bytes remaining
     // after its category/type pair in the current DME frame. A standalone
     // direct callback has no frame bound (0xffffffff).

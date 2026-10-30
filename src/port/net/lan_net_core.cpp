@@ -99,9 +99,11 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     net_registry_image(m);
     call(m, 0x165bc0, {});
     if (!m.read(dme::kMessagesReady, 1)) throw std::runtime_error("LanNetCore: 00165bc0 did not register the network messages");
-    // 004c3700's static constructor registered cNetAgentUpdateMsg in the
-    // generic cNetMsg callback vector. The verified boot image has ID 32 and
-    // the next ID 33; that static constructor is outside this network core.
+    // StaticInit_hud registered cNetTimerMsg as generic cNetMsg inner ID 16;
+    // 004c3700 later registered cNetAgentUpdateMsg as ID 32. The verified
+    // boot image's next ID is 33; those static constructors are outside this
+    // network core.
+    m.write(0x4f7dc8, 4, 16);
     m.write(0x4ea0a0, 4, 32);
     m.write(0x5061d8, 4, 33);
     m.write(dme::kState, 1, 6);
@@ -464,6 +466,52 @@ std::vector<LanNetCore::RemoteObjectiveActive> LanNetCore::take_objective_active
     return out;
 }
 
+void LanNetCore::send_global_timer(float end, std::string_view label_key) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN global timer send during background load pump; defer until stop_load_pump");
+    if (label_key.size() > 15)
+        throw std::runtime_error("LAN global timer: localization key exceeds cNetTimerMsg's 16-byte buffer");
+    auto& m = memory_;
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1) || !transport_.is_host()) return;
+    const auto type = m.read(0x5061c8);  // 002824d0's generic category-2 envelope
+    const auto id = m.read(0x4f7dc8);    // StaticInit_hud: cNetTimerMsg
+    if (!type || id != 16 || m.read(0x5061d8) != 33)
+        unhosted(0x245560, "the cNetTimerMsg registrations are unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto packet = sp_ + 0x20;
+    try {
+        const auto text_bytes = static_cast<std::uint32_t>(label_key.size() + 1);
+        const auto inner_size = 6U + text_bytes;
+        // 002823e0's generic header, followed by 002467d0's exact payload:
+        // raw float bits, u16 strlen+1, then the key including its NUL.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, local_player_key());
+        m.write(packet + 8, 2, inner_size);
+        m.write(packet + 0xa, 2, id);
+        m.write(packet + 0xc, 4, std::bit_cast<std::uint32_t>(end));
+        m.write(packet + 0x10, 2, text_bytes);
+        for (std::size_t i = 0; i < label_key.size(); ++i)
+            m.write(packet + 0x12 + static_cast<std::uint32_t>(i), 1,
+                    static_cast<std::uint8_t>(label_key[i]));
+        m.write(packet + 0x12 + static_cast<std::uint32_t>(label_key.size()), 1, 0);
+        if (call(m, 0x3fad50, {type, inner_size + 0xc, packet, 0xffffffffU, 0x40U}))
+            ++global_timers_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemoteGlobalTimer> LanNetCore::take_global_timers() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN global timer access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteGlobalTimer> out;
+    out.swap(global_timers_);
+    return out;
+}
+
 void LanNetCore::send_agent_update(std::span<const std::uint8_t> inner) {
     if (pump_.joinable())
         throw std::runtime_error("LAN agent update during background load pump; defer until stop_load_pump");
@@ -499,7 +547,7 @@ void LanNetCore::send_agent_update(std::span<const std::uint8_t> inner) {
     sp_ = caller;
 }
 
-std::uint32_t LanNetCore::receive_agent_update(std::uint32_t origin, std::uint32_t data) {
+std::uint32_t LanNetCore::receive_generic_message(std::uint32_t origin, std::uint32_t data) {
     auto& m = memory_;
     const auto available = dme_->incoming_message_remaining();
     if (available != 0xffffffffU && available < 0xc)
@@ -515,24 +563,44 @@ std::uint32_t LanNetCore::receive_agent_update(std::uint32_t origin, std::uint32
     try {
         if (m.read(dme::kInLevel, 1)) {
             const auto id = static_cast<std::int16_t>(m.read(data + 0xa, 2));
-            if (id != static_cast<std::int32_t>(m.read(0x4ea0a0)) || id < 0 ||
-                static_cast<std::uint32_t>(id) >= m.read(0x5061d8))
-                unhosted(0x2822f0, "a generic cNetMsg inner ID other than AgentUpdate");
-            if (len < 3 || origin >= 4) unhosted(0x12f0d0, "an invalid AgentUpdate stream or origin");
-            RemoteAgentUpdate update;
-            update.origin = static_cast<std::uint16_t>(origin);
-            update.timestamp = m.read(data) >> 2;
-            update.target_key = m.read(data + 4);
-            update.inner.reserve(len);
-            for (std::uint32_t i = 0; i < len; ++i)
-                update.inner.push_back(static_cast<std::uint8_t>(m.read(data + 0xc + i, 1)));
-            update.client = update.inner[0];
-            if (update.client >= 4) unhosted(0x12f0d0, "an AgentUpdate client outside four slots");
-            // 0012f0d0 indexes G+0x1c8 with the declared client byte. It does
-            // not require that byte to equal the immediate DME origin, since
-            // a host may forward a client's update.
-            agent_updates_.push_back(std::move(update));
-            ++agent_updates_received_;
+            if (id == static_cast<std::int32_t>(m.read(0x4ea0a0))) {
+                if (len < 3 || origin >= 4) unhosted(0x12f0d0, "an invalid AgentUpdate stream or origin");
+                RemoteAgentUpdate update;
+                update.origin = static_cast<std::uint16_t>(origin);
+                update.timestamp = m.read(data) >> 2;
+                update.target_key = m.read(data + 4);
+                update.inner.reserve(len);
+                for (std::uint32_t i = 0; i < len; ++i)
+                    update.inner.push_back(static_cast<std::uint8_t>(m.read(data + 0xc + i, 1)));
+                update.client = update.inner[0];
+                if (update.client >= 4) unhosted(0x12f0d0, "an AgentUpdate client outside four slots");
+                // 0012f0d0 indexes G+0x1c8 with the declared client byte. It
+                // may differ from the immediate origin when the host forwards.
+                agent_updates_.push_back(std::move(update));
+                ++agent_updates_received_;
+            } else if (id == static_cast<std::int32_t>(m.read(0x4f7dc8))) {
+                if (origin != 0) unhosted(0x245750, "a cNetTimerMsg from a non-authoritative client");
+                if (len < 7 || len > 22) unhosted(0x245750, "an invalid cNetTimerMsg payload size");
+                const auto text_bytes = m.read(data + 0x10, 2);
+                if (!text_bytes || text_bytes > 16 || len != 6 + text_bytes ||
+                    m.read(data + 0x11 + text_bytes, 1) != 0)
+                    unhosted(0x245750, "an invalid cNetTimerMsg localization key");
+                RemoteGlobalTimer timer;
+                timer.origin = static_cast<std::uint16_t>(origin);
+                timer.end = std::bit_cast<float>(m.read(data + 0xc));
+                timer.timestamp = m.read(data) >> 2;
+                timer.target_key = m.read(data + 4);
+                timer.label_key.reserve(text_bytes - 1);
+                for (std::uint32_t i = 0; i + 1 < text_bytes; ++i) {
+                    const auto byte = static_cast<char>(m.read(data + 0x12 + i, 1));
+                    if (!byte) unhosted(0x245750, "an embedded NUL in cNetTimerMsg's localization key");
+                    timer.label_key.push_back(byte);
+                }
+                global_timers_.push_back(std::move(timer));
+                ++global_timers_received_;
+            } else {
+                unhosted(0x2822f0, "an unsupported generic cNetMsg inner ID");
+            }
         }
     } catch (...) {
         m.write(dme::kBusy, 1, 0);
@@ -1910,7 +1978,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         return move_message_receive_003e4430(m, *this, arg(3), f.caller);
     }
     case 0x2d7620: return receive_objective_message(arg(3));
-    case 0x2822f0: return receive_agent_update(arg(2), arg(3));
+    case 0x2822f0: return receive_generic_message(arg(2), arg(3));
     case 0x20e350: return receive_end_level(arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);
@@ -2393,6 +2461,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     objective_outcomes_.clear();
     objective_actives_.clear();
     agent_updates_.clear();
+    global_timers_.clear();
     end_levels_.clear();
     (void)dme_->take_backpacks();
     pending_health_.reset();

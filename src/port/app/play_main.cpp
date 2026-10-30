@@ -1194,14 +1194,19 @@ struct PlayPadDriver{
 struct PlayMissionCueHost final:HudMissionCueHost{
     const MissionScriptHost* mission=nullptr;
     GameSoundManager* game_sound=nullptr;
+    const lan::LanNetCore* network=nullptr;
     std::optional<std::int32_t> par;
     std::string par_error;
+    bool par_multiplayer=false;
     unsigned frame=0;
     std::vector<std::string> fired;
-    bool multiplayer() override{return false;}
-    std::int32_t network_clock() override{throw std::runtime_error("unhosted(0x42b1a0): the network clock (multiplayer)");}
+    bool multiplayer() override{return network!=nullptr;}
+    std::int32_t network_clock() override{
+        if(!network)throw std::runtime_error("unhosted(0x42b1a0): the network clock requested in solo play");
+        return static_cast<std::int32_t>(network->session_clock_ms());
+    }
     std::int32_t par_time(bool mp) override{
-        if(mp)throw std::runtime_error("unhosted(0x330c30): the multiplayer par time");
+        if(mp!=par_multiplayer)throw std::runtime_error("unhosted(0x330c30): the loaded par time does not match the session mode");
         if(!par)throw std::runtime_error("unhosted(0x330c30): par time: "+(par_error.empty()?std::string("no AWARDS level rows"):par_error));
         return *par;
     }
@@ -1231,6 +1236,7 @@ struct PlayHudTimerHost final:HudTimerHost{
     HudUpdateFields fields;   // timer_6ac / timer_6c4; clock_6dc copied from the play clock before each use
     MissionScriptHost* mission=nullptr;
     PlayTimerWidgets* widgets=nullptr;
+    const lan::LanNetCore* network=nullptr;
     unsigned frame=0;
     bool reported_shown=false;unsigned reported_frame=0;
     PlayTimerWidget& widget(std::uint32_t h){
@@ -1252,13 +1258,16 @@ struct PlayHudTimerHost final:HudTimerHost{
             <<" colour ("<<w.rgba[0]<<", "<<w.rgba[1]<<", "<<w.rgba[2]<<", "<<w.rgba[3]<<")\n";
         reported_shown=shown;reported_frame=frame;
     }
-    bool multiplayer() override{return false;}
-    std::int32_t network_clock() override{throw std::runtime_error("unhosted(0x42b1a0): the network clock (multiplayer)");}
+    bool multiplayer() override{return network!=nullptr;}
+    std::int32_t network_clock() override{
+        if(!network)throw std::runtime_error("unhosted(0x42b1a0): the network clock requested in solo play");
+        return static_cast<std::int32_t>(network->session_clock_ms());
+    }
     std::int32_t par_time(bool) override{throw std::runtime_error("HUD timers: par time not read");}
     std::int32_t objective_total() override{throw std::runtime_error("HUD timers: objective total not read");}
     std::int32_t objectives_completed() override{throw std::runtime_error("HUD timers: objectives not read");}
     void mission_cue(std::int32_t) override{throw std::runtime_error("HUD timers: no mission cue");}
-    bool byte_5721c0() override{throw std::runtime_error("HUD timers: byte 005721c0 is read only in multiplayer");}
+    bool byte_5721c0() override{return network&&network->hosting();}
     void timer_message(std::uint8_t kind,std::int32_t value) override{
         const bool handled=mission->deliver_timer_expired(value);
         std::cout<<"TimerExpiredMsg at frame "<<frame<<": HUD timer "<<(kind==1?"+6c4":"+6ac")<<" expired (kind "<<int(kind)
@@ -10320,6 +10329,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             VITA_LOAD_PHASE(disc,"combat session (weapons, HUD, backpack, hosts)");
             timer_host=std::make_unique<PlayHudTimerHost>();
             timer_host->mission=mission_host.get();
+            timer_host->network=lan_net;
             // Checkpoint 132sx4: 0x00246440..0x00246450: +6d4 / +6bc the description, +6d8 / +6c0 the value (0 when
             // not found).
             if(hud_object&&timer_widgets){
@@ -10328,7 +10338,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 timer_host->fields.timer_6ac.description=timer_host->fields.timer_6c4.description=d.value_or(0);
                 timer_host->fields.timer_6ac.value=timer_host->fields.timer_6c4.value=v.value_or(0);
             }
-            mission_host->set_global_timer([t=timer_host.get(),&mission_clock_6dc,&mission_host](float seconds,const std::string* key){
+            mission_host->set_global_timer([t=timer_host.get(),&mission_clock_6dc,&mission_host,lan_net](float seconds,const std::string* key){
+                if(lan_net&&!lan_net->hosting()){
+                    std::cout<<"StartGlobalTimer at frame "<<t->frame
+                        <<": client script copy leaves the authoritative LAN timer unchanged"
+                        <<" (E_TIMER still posts locally; awaiting cNetTimerMsg ID 16)\n";
+                    return;
+                }
                 t->fields.clock_6dc=mission_clock_6dc;
                 // 0x0024558c: the keyed form's label is 003fdb50(key); null (no key, or no string) is "".
                 std::optional<std::string> label;
@@ -10338,6 +10354,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(const auto r=loc->resolve(*key))label=std::string(*r);
                 }
                 const float end=hud_global_timer_start(t->fields,seconds,label?label->c_str():nullptr,*t,*t);
+                if(lan_net)lan_net->send_global_timer(end,key?std::string_view(*key):std::string_view{});
                 std::cout<<"StartGlobalTimer at frame "<<t->frame<<": HUD timer +6c4 "<<seconds<<" s"
                     <<(key?", label "+*key+" -> "+(label?"\""+*label+"\"":std::string("(null)")):std::string())<<", clock "<<mission_clock_6dc
                     <<" -> end "<<end<<" (00245560"<<(t->fields.timer_6c4.value?"; drawn in GAMEGUI value_timer)\n":"; no timer widgets, nothing drawn)\n");
@@ -12853,8 +12870,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::optional<PlayMissionCueHost> cue_host;HudUpdateStatics cue_statics;
         if(mission_host){
             auto& h=cue_host.emplace();
-            h.mission=mission_host.get();h.game_sound=game_sound.get();
-            try{h.par=hud_par_time(load_profile_awards(disc).tables.levels,mission,false);}
+            h.mission=mission_host.get();h.game_sound=game_sound.get();h.network=lan_net;h.par_multiplayer=lan_net!=nullptr;
+            try{h.par=hud_par_time(load_profile_awards(disc).tables.levels,mission,h.par_multiplayer);}
             catch(const std::exception& e){h.par_error=e.what();}
             std::cout<<"Mission time cues: 00244fa0 head hosted (par "<<(h.par?std::to_string(*h.par)+" s":"unavailable: "+h.par_error)
                 <<", cue "<<mission_host->objectives().inputs().mission_cue<<")\n";
@@ -13944,6 +13961,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
+                    for(const auto& timer:lan_net->take_global_timers()){
+                        if(!timer_host||!mission_host)
+                            throw std::runtime_error("00245750: cNetTimerMsg received without the mission HUD timer host");
+                        std::optional<std::string> label;
+                        if(!timer.label_key.empty()){
+                            const auto& loc=mission_host->objectives().inputs().localization;
+                            if(!loc)throw std::runtime_error("00245750: cNetTimerMsg GetString needs the localization");
+                            if(const auto r=loc->resolve(timer.label_key))label=std::string(*r);
+                        }
+                        hud_timer_start(timer_host->fields.timer_6c4,timer.end,label?label->c_str():nullptr,*timer_host);
+                        std::cout<<"LAN cNetTimerMsg ID 16 from client "<<timer.origin<<" applied at frame "<<frame
+                            <<": absolute end "<<timer.end<<(timer.label_key.empty()?std::string(", no label"):
+                                ", label "+timer.label_key+" -> "+(label?"\""+*label+"\"":std::string("(null)")))
+                            <<" (received, no E_TIMER echo)\n";
+                    }
                     for(const auto& update:lan_net->take_agent_updates()){
                         auto& session=frontend_app->session();
                         session.receive_agent_update(update.inner,[&](std::uint8_t client){

@@ -74,6 +74,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -299,6 +300,23 @@ public:
     std::uint16_t local_client_index() const { return dme_->local_index(); }
     bool hosting() const { return transport_.is_host(); }
     std::uint16_t session_host() const { return 0; }
+    std::uint32_t session_clock_ms() const { return dme_->shared_clock(); }
+
+    // 00245560 / 002467d0 / 00245750: cNetTimerMsg is generic cNetMsg inner
+    // ID 16. The authority sends the shared absolute HUD end time followed by
+    // the localization key as a u16-sized NUL-terminated string. The receiver
+    // schedules the same +6c4 timer without posting E_TIMER again.
+    struct RemoteGlobalTimer {
+        std::uint16_t origin{};
+        float end{};
+        std::string label_key;
+        std::uint32_t timestamp{};
+        std::uint32_t target_key{};
+    };
+    void send_global_timer(float end, std::string_view label_key);
+    std::vector<RemoteGlobalTimer> take_global_timers();
+    std::uint32_t global_timers_sent() const { return global_timers_sent_; }
+    std::uint32_t global_timers_received() const { return global_timers_received_; }
 
     // Objective.c's category-0xF6 NetObj registrations start at F60001 each level;
     // objective script IDs only index this port-side binding and never appear on the wire.
@@ -773,7 +791,9 @@ private:
     std::uint32_t receive_objective_active(std::uint32_t data, bool active);
     std::vector<RemoteAgentUpdate> agent_updates_;
     std::uint32_t agent_updates_sent_ = 0, agent_updates_received_ = 0;
-    std::uint32_t receive_agent_update(std::uint32_t origin, std::uint32_t data);
+    std::vector<RemoteGlobalTimer> global_timers_;
+    std::uint32_t global_timers_sent_ = 0, global_timers_received_ = 0;
+    std::uint32_t receive_generic_message(std::uint32_t origin, std::uint32_t data);
     std::vector<RemoteEndLevel> end_levels_;
     std::uint32_t end_levels_sent_ = 0, end_levels_received_ = 0;
     std::uint32_t receive_end_level(std::uint32_t origin, std::uint32_t data);
