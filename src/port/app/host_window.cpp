@@ -122,7 +122,7 @@ std::string process_memory_line() {
            std::to_string(c.PrivateUsage / 1024) + " KB, handles " + std::to_string(handles);
 }
 
-HostWindow::HostWindow(const HostWindowOptions& options) {
+HostWindow::HostWindow(const HostWindowOptions& options) : title_(options.title) {
     std::mutex m;
     std::condition_variable cv;
     bool ready = false;
@@ -891,6 +891,7 @@ LRESULT HostWindow::handle_message(HWND window, UINT message, WPARAM w, LPARAM l
             push(HostEvent::Type::key, static_cast<int>(w));
             return 0;
         case WM_SYSKEYDOWN:
+            if (w == VK_SPACE && (l & (1 << 29))) return DefWindowProcW(window, message, w, l);
             if (w == VK_RETURN && (l & (1 << 29))) {
                 if (!(l & (1 << 30)) && hotkeys_) apply_fullscreen(!fullscreen_);
                 return 0;
