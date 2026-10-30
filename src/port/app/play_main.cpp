@@ -3932,6 +3932,7 @@ std::vector<std::uint32_t> object_dump_ids;   // --object-dump (diagnostic, 132u
         // Checkpoint 132win10 (port-only, display_settings.hpp): --aspect pillarbox|4:3|stretch, --render-scale <0.25..4>,
         // --frame-overlay (else the settings file's aspect / render_scale / frame_overlay).
         std::optional<FrameAspect> aspect_flag;std::optional<float> render_scale_flag;bool frame_overlay_flag=false;
+        std::optional<GameplayFrameRate> gameplay_fps_flag;std::optional<InternalResolution> resolution_flag;   // issue #4
         std::optional<unsigned> hud_margin_flag;std::optional<bool> movie_fill_flag;std::optional<MovieFit> movies_flag;   // --hud-margin / --movie-fill (port-only, 132ws); --movies (132vt2a2)
         std::optional<unsigned> fov_flag;   // --fov (port-only, 132ws3)
         std::optional<bool> render_thread_flag;   // --render-thread 0|1 (port-only, checkpoint 132mt2; else render_thread=)
@@ -4035,6 +4036,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(!movies_flag)throw std::runtime_error("--movies needs fill, bars or stretch");}
                 else if(arg==L"--fov"){fov_flag=parse_fov(narrow(value()));   // 132ws3 (port-only)
                     if(!fov_flag)throw std::runtime_error("--fov needs 70..150 (percent)");}
+                else if(arg==L"--gameplay-fps"){gameplay_fps_flag=parse_gameplay_frame_rate(narrow(value()));   // issue #4
+                    if(!gameplay_fps_flag)throw std::runtime_error("--gameplay-fps needs native or 60");}
+                else if(arg==L"--resolution"){resolution_flag=parse_internal_resolution(narrow(value()));   // issue #4
+                    if(!resolution_flag)throw std::runtime_error("--resolution needs native or window");}
                 else if(arg==L"--freed-ai-resend-skip")freed_ai_resend_skip=true;   // 132ms3 (port-only aid)
                 else if(arg==L"--mods")mods_flag=fs::path(value());   // 132md1 (port-only, research/MODDING.md)
                 else if(arg==L"--no-mods")no_mods_flag=true;
@@ -4428,7 +4433,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "screens keep 4:3 with bars or zoom to the window's width; --movies fill|bars|stretch [movies=, default fill]:\n"
                     "wide's movies shown in native 4:3, scaled to the window's width (top and bottom cut), or stretched. --fov <70..150> [fov=, default 100,\n"
                     "the original]: wide's field of view (132ws3; the drawn view only, in % of the original's view tangent).\n"
-                    "--render-scale <0.25..4> [render_scale=, default 1]: the internal resolution over the window's client size.\n"
+                    "--render-scale <0.25..4> [render_scale=, default 1]: the internal scale in window-resolution mode.\n"
+                    "--gameplay-fps native|60 [gameplay_fps=, default native]: native 29.97 Hz gameplay or enhanced 60 Hz.\n"
+                    "--resolution native|window [resolution=, default native]: native 640x448 picture density or client-scaled.\n"
                     "--renderer d3d11|vulkan [renderer=, default d3d11] (132vk1): the PC renderer backend (Direct3D 11, the reference;\n"
                     "Vulkan 1.3 in builds with OMEGA_PC_VULKAN, falling back to Direct3D 11 without a usable device).\n"
                     "--frame-overlay [frame_overlay=0|1, default 0]: the frame-time overlay in play (sim / script / render /\n"
@@ -4696,6 +4703,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             if(aspect_flag)display.aspect=*aspect_flag;
             if(render_scale_flag)display.render_scale=*render_scale_flag;
+            if(gameplay_fps_flag)display.gameplay_fps=*gameplay_fps_flag;
+            if(resolution_flag)display.resolution=*resolution_flag;
             if(frame_overlay_flag)display.frame_overlay=true;
             if(render_thread_flag)display.render_thread=*render_thread_flag;
             if(worker_threads_flag)display.worker_threads=*worker_threads_flag;
@@ -4718,8 +4727,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             frame_movie_zoom_setting()=display.movie_zoom;
             frame_movie_fit_setting()=display.movie_fit;   // 132vt2a2
             frame_fov_setting()=display.fov;   // 132ws3
-            if(display.aspect!=FrameAspect::pillarbox||display.render_scale!=1.0F||display.frame_overlay)
+            if(display.aspect!=FrameAspect::pillarbox||display.render_scale!=1.0F||display.frame_overlay||
+               display.gameplay_fps!=GameplayFrameRate::native||display.resolution!=InternalResolution::native)
                 std::cout<<"Display (port-only): aspect "<<frame_aspect_name(display.aspect)<<", render scale "<<display.render_scale
+                    <<", gameplay "<<(display.gameplay_fps==GameplayFrameRate::native?"native 29.97 Hz":"enhanced 60 Hz")
+                    <<", resolution "<<(display.resolution==InternalResolution::native?"native":"window-scaled")
                     <<", frame overlay "<<(display.frame_overlay?"on":"off")
                     <<(display.aspect==FrameAspect::wide?", HUD margin "+std::to_string(display.hud_margin)+" %, movies "+frame_movie_fit_name(display.movie_fit)+", loading screens "+(display.movie_zoom?"zoom":"bars")
                         +(display.fov!=frame_fov_original?", FOV "+std::to_string(display.fov)+" %":std::string()):std::string())<<"\n";
@@ -4875,6 +4887,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const auto open_host_window=[&](const HostWindowOptions& o,bool shown){
             {
                 HostWindowOptions scaled=o;scaled.render_scale=display.render_scale;   // 132win10
+                scaled.native_resolution=display.resolution==InternalResolution::native;   // issue #4
                 scaled.dpi_scaled=shown&&!window_size;   // 132win14: the visible default size follows the monitor's DPI
                 // An invisible window (--hidden) presents with the blt model unless --swap-effect says otherwise: DWM
                 // holds a flip-model Present to a window it never composes for ~500 ms in about 0.5% of frames (the
@@ -4982,12 +4995,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 frame_movie_fit_setting()=display.movie_fit;   // 132vt2a2
                 frame_fov_setting()=display.fov;   // 132ws3
                 if(host_window)host_window->set_render_scale(display.render_scale);
+                if(host_window)host_window->set_native_resolution(display.resolution==InternalResolution::native);
                 vsync_on=s.vsync;
             }catch(const std::exception& e){std::cerr<<"Port Settings page (port-only): "<<e.what()<<"\n";}
         };
         PortSettingsPage settings_page(settings_store,page_hooks);
-#ifdef __vita__
-        settings_page.set_pc_rows(false);   // the Vita has no keyboard or mouse: no binding or mouse rows
+#if defined(__vita__) || defined(OMEGA_PS5)
+        settings_page.set_pc_rows(false);   // fixed-screen console builds have no desktop-only rows or key pages
 #endif
         if(mods_flag)settings_page.set_mods_folder(*mods_flag);   // 132md4: the MODS page lists --mods <folder>
         if(!port_settings_test_keys.empty()){
@@ -6243,7 +6257,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // 001b3460: +3260 from the player's skeleton slot (2 MALE.SKEL, 1 FEMALE.SKEL, else unchanged).
         config.gender_3260=actor_gender_3260(player_skeleton_name);
         config.fall_start_30a4=-std::numeric_limits<float>::max();   // the player's +30a4 at level start (emulator)
-        // The world dt (00133340): 1/60 unless --dt or --dt-trace gives the emulator's (EMULATOR_COMPARISON.md).
+        // Issue #4: native NTSC gameplay steps once per two fields (30000/1001 Hz). Enhanced 60 keeps the
+        // port's former behavior. --dt and --dt-trace remain explicit diagnostic overrides.
+        config.dt=display.gameplay_fps==GameplayFrameRate::native?1001.0F/30000.0F:1.0F/60.0F;
         std::vector<float> dt_trace;if(!dt_trace_path.empty())dt_trace=read_dt_trace(dt_trace_path);
         if(fixed_dt&&!dt_trace.empty())throw std::runtime_error("--dt and --dt-trace exclude each other");
         if(fixed_dt){if(!(*fixed_dt>0.0F)||!std::isfinite(*fixed_dt))throw std::runtime_error("--dt must be positive");config.dt=*fixed_dt;}

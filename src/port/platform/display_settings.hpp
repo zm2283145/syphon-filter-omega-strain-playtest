@@ -13,9 +13,9 @@
 //   movies=fill|bars|stretch       132vt2a2: under wide, the movies scaled to the window's width preserving the PS2
 //                                  display aspect (fill, the default), shown at native 4:3 with bars, or stretched
 //                                  over the window (frame_fit.hpp MovieFit)
-//   render_scale=<0.25..4>         the internal render scale: the swap chain's buffers are the window's client size
-//                                  times it (DXGI scales them to the window); default 1 (native). Below 1 renders
-//                                  fewer pixels (faster, softer), above 1 supersamples.
+//   render_scale=<0.25..4>         in window-resolution mode, the internal render scale: the swap chain's buffers
+//                                  are the window's client size times it (DXGI scales them to the window); default 1.
+//                                  Below 1 renders fewer pixels (faster, softer), above 1 supersamples.
 //                                  132vp4, the PS Vita: the display is fixed at 960 x 544, so only the 3D scene is
 //                                  scaled (vita_render_scale: 1, 0.75 or 0.5; the Port Settings page's 100 / 75 / 50 %),
 //                                  drawn at that size and upscaled before the HUD / GUI (research/VITA.md "Render scale")
@@ -30,7 +30,11 @@
 //                                  single-threaded path (the --worker-threads 0 flag too)
 //   renderer=d3d11|vulkan           132vk1, the PC: the renderer backend (gfx_pc_backend.hpp; default d3d11, the reference;
 //                                  vulkan when the build has it, else d3d11), read at start (--renderer too)
-// None of these changes the game's state or timing: they are the presentation of the frame only.
+//   gameplay_fps=native|60          issue #4: native NTSC gameplay at 30000/1001 Hz (default), or the port's
+//                                  enhanced 60 Hz gameplay; front-end/menu timing remains the native 60 Hz
+//   resolution=native|window        issue #4: native 640 x 448 picture density (default), or the window's client
+//                                  resolution times render_scale
+// Most are presentation-only. gameplay_fps intentionally selects the original gameplay step or the enhanced one.
 
 #include "frame_fit.hpp"
 
@@ -55,6 +59,8 @@ inline constexpr bool display_default_movie_zoom = false;
 #endif
 // 132vk1 (port-only, the PC): renderer=.
 enum class PcRenderer : std::uint8_t { d3d11, vulkan };
+enum class GameplayFrameRate : std::uint8_t { native, enhanced_60 };
+enum class InternalResolution : std::uint8_t { native, window };
 
 struct DisplaySettings {
     FrameAspect aspect = display_default_aspect;
@@ -68,6 +74,8 @@ struct DisplaySettings {
     bool render_thread = true;  // 132mt2
     int worker_threads = -1;    // 132mt3: -1 auto (WorkerPool::default_workers)
     PcRenderer renderer = PcRenderer::d3d11;  // 132vk1
+    GameplayFrameRate gameplay_fps = GameplayFrameRate::native;
+    InternalResolution resolution = InternalResolution::native;
 };
 
 // Throws on a malformed value (the message names the key).
@@ -89,5 +97,9 @@ float vita_render_scale(float render_scale);
 // 132vk1: "d3d11" (or "d3d", "dx11") / "vulkan" (or "vk") (renderer=, --renderer); nullopt otherwise.
 std::optional<PcRenderer> parse_pc_renderer(std::string_view text);
 const char* pc_renderer_name(PcRenderer renderer);
+std::optional<GameplayFrameRate> parse_gameplay_frame_rate(std::string_view text);
+const char* gameplay_frame_rate_name(GameplayFrameRate rate);
+std::optional<InternalResolution> parse_internal_resolution(std::string_view text);
+const char* internal_resolution_name(InternalResolution resolution);
 
 }  // namespace omega

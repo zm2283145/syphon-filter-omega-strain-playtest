@@ -30,6 +30,7 @@ struct HostWindowOptions {
     int width = 1280, height = 896;
     bool outer_size = false;
     float render_scale = 1.0F;
+    bool native_resolution = false;
     enum class SwapEffect : std::uint8_t { flip_discard, flip_sequential, discard };
     SwapEffect swap_effect = SwapEffect::flip_discard;
     unsigned frame_latency = 1;
@@ -116,6 +117,8 @@ public:
     std::array<unsigned, 2> client_size() const { return {width_, height_}; }
     void set_render_scale(float) {}  // the screen's buffers are its pixels
     float render_scale() const { return 1.0F; }
+    void set_native_resolution(bool) {}  // the fixed display has no resizable swap-chain buffer
+    bool native_resolution() const { return false; }
     std::array<unsigned, 2> buffer_size() const { return {width_, height_}; }
     void mask_bars() { mask_bars_ps5(); }
     const std::string& swap_description() const { return swap_description_; }

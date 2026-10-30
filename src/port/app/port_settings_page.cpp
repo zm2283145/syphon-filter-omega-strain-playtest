@@ -52,11 +52,13 @@ std::size_t erase_port_settings(PortSettings& s, const std::string& prefix) {
 namespace {
 constexpr std::int32_t rows_max = gui::PortSettingsScreen::rows;
 constexpr std::array<const char*, PortSettingsPage::page_count> page_names{
-    "DISPLAY", "INPUT", "PLAY KEYS 1", "PLAY KEYS 2", "PLAY KEYS 3", "PLAY KEYS 4", "MENU KEYS 1", "MENU KEYS 2", "MODS"};
+    "DISPLAY", "INPUT", "PLAY KEYS 1", "PLAY KEYS 2", "PLAY KEYS 3", "PLAY KEYS 4", "MENU KEYS 1", "MENU KEYS 2",
+    "PERFORMANCE", "MODS"};
 constexpr std::array<const char*, 8> display_rows{"FULLSCREEN",    "VSYNC",       "ASPECT",   "RENDER SCALE",
                                                  "FRAME OVERLAY", "OVERLAY KEY", "BG AUDIO", "HUD MARGIN"};
 constexpr std::array<const char*, 8> input_rows{"MOUSE LOOK", "SENSITIVITY", "INVERT Y", "PAD PROMPT", "RESET KEYS",
                                                 "FIELD OF VIEW", "MOVIES", "RENDERER"};  // 132ws3 / 132vt2a2 / 132vk1: the DISPLAY page is full
+constexpr std::array<const char*, 2> performance_rows{"GAMEPLAY FPS", "RESOLUTION"};
 constexpr std::array<MovieFit, 3> movie_fits{MovieFit::bars, MovieFit::fill, MovieFit::stretch};  // 132vt2a2: movies=
 constexpr std::array<float, 8> render_scales{0.5F, 0.75F, 1.0F, 1.25F, 1.5F, 2.0F, 3.0F, 4.0F};
 // 132vp4: the Vita's (the scene scale; press steps down: 100 -> 75 -> 50 -> 100 %)
@@ -166,6 +168,7 @@ namespace {
 // Port-only (Vita): the PC rows set_pc_rows(false) hides, by their place in the page's full row list.
 constexpr std::array<std::size_t, 1> display_pc_rows{5};           // OVERLAY KEY
 constexpr std::array<std::size_t, 5> input_pc_rows{0, 1, 2, 4, 7}; // MOUSE LOOK, SENSITIVITY, INVERT Y, RESET KEYS, RENDERER
+constexpr std::array<std::size_t, 1> performance_pc_rows{1};        // RESOLUTION
 }  // namespace
 
 std::int32_t PortSettingsPage::rows_on_page() const {
@@ -174,6 +177,8 @@ std::int32_t PortSettingsPage::rows_on_page() const {
         return 1 + static_cast<std::int32_t>(display_rows.size() - (pc_rows_ ? 0 : display_pc_rows.size()));
     case Page::input:
         return 1 + static_cast<std::int32_t>(input_rows.size() - (pc_rows_ ? 0 : input_pc_rows.size()));
+    case Page::performance:
+        return 1 + static_cast<std::int32_t>(performance_rows.size() - (pc_rows_ ? 0 : performance_pc_rows.size()));
     case Page::mods: return 2 + mod_rows();
     default: return 1 + static_cast<std::int32_t>(bindings_on(page_).size());
     }
@@ -202,6 +207,7 @@ std::size_t PortSettingsPage::row_id(std::size_t r) const {
     };
     if (page_ == static_cast<std::int32_t>(Page::display)) return skip(display_pc_rows);
     if (page_ == static_cast<std::int32_t>(Page::input)) return skip(input_pc_rows);
+    if (page_ == static_cast<std::int32_t>(Page::performance)) return skip(performance_pc_rows);
     return r;
 }
 
@@ -233,6 +239,7 @@ std::string PortSettingsPage::label(std::int32_t row) const {
     switch (static_cast<Page>(page_)) {
     case Page::display: return display_rows[r];
     case Page::input: return input_rows[r];
+    case Page::performance: return performance_rows[r];
     case Page::mods: {
         if (r == 0) return "ALL MODS";
         const auto& list = mod_list();
@@ -331,6 +338,11 @@ std::string PortSettingsPage::value(std::int32_t row) const {
             return v;
         }
         }
+    }
+    case Page::performance: {
+        const auto d = display_settings(s);
+        if (r == 0) return d.gameplay_fps == GameplayFrameRate::native ? "NATIVE 30" : "ENHANCED 60";
+        return d.resolution == InternalResolution::native ? "NATIVE 640X448" : "WINDOW SCALE";
     }
     case Page::mods: return mod_value(r);
     default: return binding_value(s, bindings_on(page_)[r]);
@@ -512,6 +524,21 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
             return true;
         }
         }
+    }
+    case Page::performance: {
+        const auto d = display_settings(s);
+        if (r == 0) {
+            const auto v =
+                d.gameplay_fps == GameplayFrameRate::native ? GameplayFrameRate::enhanced_60 : GameplayFrameRate::native;
+            set_port_setting(s, "gameplay_fps", gameplay_frame_rate_name(v));
+            commit(s, std::string("GAMEPLAY FPS ") + (v == GameplayFrameRate::native ? "NATIVE 30" : "ENHANCED 60") +
+                          " (next level)");
+            return true;
+        }
+        const auto v = d.resolution == InternalResolution::native ? InternalResolution::window : InternalResolution::native;
+        set_port_setting(s, "resolution", internal_resolution_name(v));
+        commit(s, std::string("RESOLUTION ") + (v == InternalResolution::native ? "NATIVE 640X448" : "WINDOW SCALE"));
+        return true;
     }
     case Page::mods: return mod_act(r, a);
     default: {

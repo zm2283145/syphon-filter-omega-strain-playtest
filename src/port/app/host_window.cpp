@@ -196,6 +196,7 @@ HostWindow::HostWindow(const HostWindowOptions& options) : title_(options.title)
         std::rethrow_exception(ui_failure_);
     }
     render_scale_ = options.render_scale;
+    native_resolution_ = options.native_resolution;
     swap_effect_ = options.swap_effect;
     frame_latency_ = std::clamp(options.frame_latency, 1u, 16u);
     waitable_ = options.waitable;
@@ -704,6 +705,10 @@ WindowRect HostWindow::rect() const {
 
 std::array<unsigned, 2> HostWindow::buffer_size() const {
     const auto [w, h] = client_size();
+    if (native_resolution_) {
+        const auto [nw, nh] = native_buffer_size(w, h);
+        return {nw, nh};
+    }
     return {scaled_extent(w, render_scale_), scaled_extent(h, render_scale_)};
 }
 

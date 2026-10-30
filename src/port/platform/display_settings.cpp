@@ -76,6 +76,26 @@ std::optional<PcRenderer> parse_pc_renderer(std::string_view text) {
 
 const char* pc_renderer_name(PcRenderer renderer) { return renderer == PcRenderer::vulkan ? "vulkan" : "d3d11"; }
 
+std::optional<GameplayFrameRate> parse_gameplay_frame_rate(std::string_view text) {
+    if (text == "native" || text == "30") return GameplayFrameRate::native;
+    if (text == "60" || text == "enhanced") return GameplayFrameRate::enhanced_60;
+    return std::nullopt;
+}
+
+const char* gameplay_frame_rate_name(GameplayFrameRate rate) {
+    return rate == GameplayFrameRate::native ? "native" : "60";
+}
+
+std::optional<InternalResolution> parse_internal_resolution(std::string_view text) {
+    if (text == "native" || text == "640x448") return InternalResolution::native;
+    if (text == "window" || text == "scaled") return InternalResolution::window;
+    return std::nullopt;
+}
+
+const char* internal_resolution_name(InternalResolution resolution) {
+    return resolution == InternalResolution::native ? "native" : "window";
+}
+
 DisplaySettings display_settings(const PortSettings& settings) {
     DisplaySettings s;
     for (const auto& [key, value] : settings.other) {
@@ -119,6 +139,14 @@ DisplaySettings display_settings(const PortSettings& settings) {
             const auto v = parse_pc_renderer(value);
             if (!v) throw std::runtime_error("port settings: renderer must be d3d11 or vulkan");
             s.renderer = *v;
+        } else if (key == "gameplay_fps") {
+            const auto v = parse_gameplay_frame_rate(value);
+            if (!v) throw std::runtime_error("port settings: gameplay_fps must be native or 60");
+            s.gameplay_fps = *v;
+        } else if (key == "resolution") {
+            const auto v = parse_internal_resolution(value);
+            if (!v) throw std::runtime_error("port settings: resolution must be native or window");
+            s.resolution = *v;
         } else if (key == "frame_overlay_key") {
             if (value == "none") {
                 s.frame_overlay_key.reset();

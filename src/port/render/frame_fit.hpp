@@ -5,8 +5,10 @@
 // right) in a wider window, letterboxed (bars top and bottom) in a taller one, never stretched. The bars are
 // the cleared black of the back buffer. Used by the GUI renderer's frame fit (gui_renderer.hpp): the front
 // end, its movies, the loading screen and the play HUD (research/PLAY_SANDBOX.md "Host window and fullscreen").
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace omega {
 
@@ -228,6 +230,22 @@ inline unsigned scaled_extent(unsigned client, float scale) {
     if (client == 0) return 0;
     const double v = std::floor(double(client) * double(scale) + 0.5);
     return v < 1.0 ? 1U : v > double(render_buffer_limit) ? render_buffer_limit : static_cast<unsigned>(v);
+}
+
+// Issue #4: a native-resolution target keeps the original 640 x 448 buffer's 4:3 picture density while matching
+// the client aspect so the swap chain's final stretch does not distort it. The native 640 x 448 target contains a
+// 597 x 448 fitted 4:3 picture. Wider clients keep 448 rows and add side pixels; narrower clients keep 597 columns
+// and add top/bottom pixels. Thus fit_frame() is always the same native 597 x 448 picture.
+inline std::pair<unsigned, unsigned> native_buffer_size(unsigned client_width, unsigned client_height) {
+    if (client_width == 0 || client_height == 0) return {client_width, client_height};
+    constexpr unsigned picture_width = 597, picture_height = 448;
+    const std::uint64_t w = client_width, h = client_height;
+    if (w * frame_aspect_height >= h * frame_aspect_width) {
+        const std::uint64_t native_width = (std::uint64_t(picture_height) * w + h / 2) / h;
+        return {static_cast<unsigned>(std::min<std::uint64_t>(native_width, render_buffer_limit)), picture_height};
+    }
+    const std::uint64_t native_height = (std::uint64_t(picture_width) * h + w / 2) / w;
+    return {picture_width, static_cast<unsigned>(std::min<std::uint64_t>(native_height, render_buffer_limit))};
 }
 
 }  // namespace omega

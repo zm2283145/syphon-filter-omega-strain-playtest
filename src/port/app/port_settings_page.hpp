@@ -12,6 +12,8 @@
 //              FIELD OF VIEW, 70..150%, the wide view's; here because DISPLAY's eight rows fill the screen), movies
 //              (132vt2a2: MOVIES, FILL / BARS / STRETCH, the wide movies' fit), renderer (132vk1, the PC: RENDERER,
 //              DIRECT3D 11 / VULKAN, from the next start; research/VULKAN.md)
+//   PERFORMANCE issue #4: GAMEPLAY FPS (native 29.97 Hz or enhanced 60 Hz, applied at the next level) and
+//              RESOLUTION (native 640 x 448 picture density or the window resolution times render_scale)
 //   PLAY KEYS  bind.play.<button> (16), bind.play.stick_left / stick_right.<dir> (8), walk, menu_dpad.<dir> (4)
 //   MENU KEYS  bind.menu.<button> (16)
 //   MODS       (checkpoint 132md4) mods (ALL MODS) and one row per mod folder of the mods folder (mod.<folder>=0|1,
@@ -81,8 +83,19 @@ struct PortSettingsHooks {
 
 class PortSettingsPage final : public gui::PortSettingsScreen {
 public:
-    enum class Page { display, input, play_keys_1, play_keys_2, play_keys_3, play_keys_4, menu_keys_1, menu_keys_2, mods };
-    static constexpr std::int32_t page_count = 9;
+    enum class Page {
+        display,
+        input,
+        play_keys_1,
+        play_keys_2,
+        play_keys_3,
+        play_keys_4,
+        menu_keys_1,
+        menu_keys_2,
+        performance,
+        mods
+    };
+    static constexpr std::int32_t page_count = 10;
 
     PortSettingsPage(std::shared_ptr<PortSettingsStore> store, PortSettingsHooks hooks);
 

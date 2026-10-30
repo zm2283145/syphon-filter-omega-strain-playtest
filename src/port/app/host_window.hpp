@@ -73,6 +73,7 @@ struct HostWindowOptions {
     int width = 1280, height = 896;  // the client size, or the outer size when outer_size
     bool outer_size = false;
     float render_scale = 1.0F;  // checkpoint 132win10: the swap chain's buffers over the client size (set_render_scale)
+    bool native_resolution = false;  // issue #4: native_buffer_size instead of client size x render_scale
     // Checkpoint 132win10 port-only diagnostics (the present-stall study; play's --swap-effect / --frame-latency /
     // --waitable-swap): the swap effect (flip discard by default, the legacy blt discard as the fallback), the
     // device's maximum frame latency (1 by default) and the frame-latency waitable object (off by default).
@@ -217,6 +218,8 @@ public:
     // area). 1 by default (the buffers are the client size). Takes effect at the next sync_buffers / device.
     void set_render_scale(float scale) { render_scale_ = scale; }
     float render_scale() const { return render_scale_; }
+    void set_native_resolution(bool native) { native_resolution_ = native; }
+    bool native_resolution() const { return native_resolution_; }
     // The buffer size for the current client area (client_size scaled; 0 x 0 for an empty client area).
     std::array<unsigned, 2> buffer_size() const;
     // Port-only (checkpoint 132win10): under the 4:3 aspect setting (frame_fit.hpp frame_masked) paints the bars
@@ -259,6 +262,8 @@ public:
 private:
     void create_device();
     void apply_fullscreen(bool on);  // UI thread
+    void apply_application_pause(bool paused);  // UI thread
+    void refresh_title();  // UI thread
     void update_mouse_capture();     // UI thread
     void on_ui(const std::function<void()>& f) const;
     unsigned long release_device();  // the device's references left
@@ -278,6 +283,7 @@ private:
     std::string backend_;
     unsigned width_ = 0, height_ = 0;
     float render_scale_ = 1.0F;
+    bool native_resolution_ = false;
     bool vulkan_ = false;   // 132vk1 (port-only): gfx_ / gfx_swap_ are the Vulkan backend's (device_ / context_ / swap_ null)
     HostWindowOptions::SwapEffect swap_effect_ = HostWindowOptions::SwapEffect::flip_discard;
     unsigned frame_latency_ = 1;
@@ -299,6 +305,7 @@ private:
     std::vector<HostEvent> events_;
     std::function<void(bool)> fullscreen_changed_;
     WINDOWPLACEMENT windowed_{sizeof(WINDOWPLACEMENT)};
+    std::wstring title_ = game_window_title;
 };
 
 // The process's working set and private bytes, for the hand-off lines.
