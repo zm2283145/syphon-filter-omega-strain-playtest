@@ -7707,6 +7707,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // copies 003c9420(msg, gen, 0) queues (003c9950 -> 003ca0e0, list 005435c0) for the next frame's pump.
         struct SpawnedNpc{std::size_t figure{};std::uint32_t generator{};std::uint32_t id{};std::uint32_t c{};bool flushed{};bool id_reused{};};
         std::map<std::uint32_t,SpawnedNpc> spawned_npcs;std::vector<std::pair<std::uint32_t,std::uint32_t>> spawned_npc_msgs;
+        // 132ln5h15: authored/scripted NPCs keep their level object ID as the
+        // stable LAN key. The value is their figure index; unlike generator
+        // spawns, both peers already constructed the same actor.
+        std::map<std::size_t,std::size_t> lan_named_npcs;
         // Checkpoint 132fx1: the DespawnedNPCMsgs 00220bb0 sends its generator (transport 0), delivered with the SpawnedNPCMsgs.
         std::vector<std::pair<std::uint32_t,std::uint32_t>> despawned_npc_msgs;
         // The type-1/6/7 boxes' EnableMsg / DisableMsg (transport 0) to generators, queued (005435c0) for the next pump.
@@ -8299,6 +8303,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         std::uint32_t actor=0;bool found=false;
                         if(h.local_player){actor=0;found=true;}
                         for(const auto& [k,sp]:spawned_npcs)if(!found&&sp.c==h.key&&!actors.destroyed(k)&&actors.traversed(k)){actor=k;found=true;}
+                        for(const auto& [k,figure]:lan_named_npcs)
+                            if(!found&&npcs.at(figure).actor_id==h.key&&!actors.destroyed(k)&&actors.traversed(k)){actor=static_cast<std::uint32_t>(k);found=true;}
                         for(const auto& r:lan_remotes)if(!found&&!r.gone&&r.figure&&r.key==h.key){actor=static_cast<std::uint32_t>(r.figure->actor);found=true;}
                         if(found)actors.actor(actor).set_health_40(static_cast<float>(h.hp));
                         std::cout<<"LAN (132ln5h14c): health message 0x004e0ee0 received for +c 0x"<<std::hex<<h.key<<std::dec
@@ -12246,6 +12252,42 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto& remote=actors.actor(r.figure->actor);
                 lan_net->set_remote_state(r.key,remote.health().health_40,remote.health().killed_33a5);
             }
+            if(lan_net->host_console())for(std::size_t figure=0;figure<npcs.size();++figure){
+                auto& npc=npcs[figure];
+                if(!npc.ai||npc.record>=population.npcs.size()||lan_remote_slot_of(npc.record)||coop_partner_index_of(npc.record))continue;
+                auto& actor=actors.actor(npc.actor);
+                const bool active=actor.eligible();
+                const bool first=lan_named_npcs.emplace(npc.actor,figure).second;
+                if(first){
+                    auto* net=lan_net;
+                    const auto key=npc.actor_id;
+                    npc.ai->set_network_hooks({
+                        [net,key](std::uint8_t contact,const RootVector& p){net->npc_contact_0014c510(key,contact,{p[0],p[1],p[2]});},
+                        [net,key](float speed){net->npc_speed_0014c6e0(key,speed);},
+                        [net,key](float yaw){net->npc_heading_001a99a4(key,yaw);}});
+                    std::cout<<"LAN (132ln5h15): authored "<<npc.label<<" uses stable key 0x"<<std::hex<<key<<std::dec
+                             <<" on actor "<<npc.actor<<"\n";
+                }
+                lan::LanNetCore::NamedNpcSnapshot snapshot;
+                snapshot.key=npc.actor_id;snapshot.active=active;snapshot.state=0;
+                const auto matrix=root_placement_matrix(actor.floor_root_placement());
+                for(std::size_t r=0;r<4;++r)for(std::size_t c=0;c<4;++c)snapshot.matrix[r][c]=matrix[r*4+c];
+                const NpcRosterEntry* record=nullptr;
+                for(const auto& entry:roster)if(entry.record==npc.record){record=&entry;break;}
+                if(!record)throw std::runtime_error("LAN named NPC: no roster entry for population record "+std::to_string(npc.record));
+                snapshot.name=record->script_name;
+                snapshot.health=static_cast<std::int16_t>(static_cast<std::int32_t>(actor.health().health_40));
+                if(combat_session){
+                    const auto& inv=combat_session->combat().inventory(npc.actor);
+                    std::size_t out=0;
+                    if(inv.current_84<6&&inv.slots[inv.current_84].item>=0)
+                        snapshot.weapons[out++]=static_cast<std::int16_t>(inv.slots[inv.current_84].item);
+                    for(std::size_t k=0;k<6&&out<6;++k)
+                        if(k!=inv.current_84&&inv.slots[k].item>=0)
+                            snapshot.weapons[out++]=static_cast<std::int16_t>(inv.slots[k].item);
+                }
+                lan_net->mirror_named_npc(snapshot);
+            }
         };
         // Checkpoint 132ln5h6: the remote human's agent. 002c6b70 expands the message's compact appearance (00406ec0) into
         // the descriptor 001b8130 builds the role-3 human from; its model +40 is that packing, which 0038db30 resolves as the
@@ -12539,18 +12581,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                          <<" from client "<<m.origin<<" at frame "<<frame<<"\n";
             }
         };
-        // Checkpoint 132ln5h14b (research/NET_INLEVEL.md 4.25): each traversed spawned NPC's update 001b1710 runs its
-        // network section on the NPC's block (LanNetCore::npc_section_001b1710; PORT-ONLY caller: the play's traversal).
+        // Checkpoint 132ln5h14b / 132ln5h15 (research/NET_INLEVEL.md 4.25):
+        // each traversed spawned or authored network NPC's update 001b1710
+        // runs its network section on the NPC's block
+        // (LanNetCore::npc_section_001b1710; PORT-ONLY caller: the play's traversal).
         // The owner's NPC writes its cNetHuman (the health, the killed byte, the held item, the animation fields) and
         // claims it (002d1d80); a non-owner's takes them back to its actor as a remote human's (above) and releases a
         // claimed cNetHuman (002d2110).
         struct NpcSectionSeen{std::uint32_t bits=0;std::int32_t health=0;std::int32_t item=-2;bool held=false;bool owner=false;bool seen=false;};
         std::map<std::uint32_t,NpcSectionSeen> lan_npc_seen;
         const auto lan_npc_sections=[&](unsigned frame){
-            for(const auto& [actor,sp]:spawned_npcs){
-                if(actors.destroyed(actor)||!actors.traversed(actor)||!lan_net->has_npc(sp.c))continue;
+            const auto run=[&](std::size_t actor,std::size_t figure,std::uint32_t key){
+                if(actors.destroyed(actor)||!actors.traversed(actor)||!lan_net->has_npc(key))return;
                 auto& a=actors.actor(actor);
-                auto& ai=*npcs.at(sp.figure).ai;
+                auto& ai=*npcs.at(figure).ai;
                 lan::LanNetCore::NpcSectionIn in;
                 in.health_40=a.health().health_40;
                 in.killed_33a5=a.health().killed_33a5;
@@ -12561,9 +12605,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 in.accumulate_31b4=a.controls().accumulate_31b4;
                 in.byte_31b5=a.byte_31b5();
                 in.physical_12=a.physical().response.physical.enabled_12;
-                const auto out=lan_net->npc_section_001b1710(sp.c,in);
-                auto& seen=lan_npc_seen[sp.c];
-                const auto who=[&]{std::ostringstream o;o<<"NPC +c 0x"<<std::hex<<sp.c<<std::dec<<" (actor "<<actor<<")";return o.str();};
+                const auto out=lan_net->npc_section_001b1710(key,in);
+                auto& seen=lan_npc_seen[key];
+                const auto who=[&]{std::ostringstream o;o<<"NPC +c 0x"<<std::hex<<key<<std::dec<<" (actor "<<actor<<")";return o.str();};
                 if(!seen.seen||seen.owner!=out.owner)
                     std::cout<<"LAN (132ln5h14b): 001b1710: "<<who()<<" network section at frame "<<frame<<": "
                         <<(out.owner?"the owner's (+14 set): its cNetHuman written from the actor":"another console's (+14 clear): the actor follows its cNetHuman")
@@ -12574,7 +12618,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(out.owner!=(a.byte_14()!=0))a.set_byte_14(out.owner?1:0);
                 if(out.claimed)std::cout<<"LAN (132ln5h14b): 001b1710: "<<who()<<" claims its cNetHuman (002d1d80: +28 set) at frame "<<frame<<"\n";
                 if(out.released)std::cout<<"LAN (132ln5h14b): 001b1710: "<<who()<<" releases its cNetHuman (002d2110: +28 clear) at frame "<<frame<<"\n";
-                if(out.owner||!out.linked)continue;
+                if(out.owner||!out.linked)return;
                 constexpr std::uint32_t kNetBits=0xc0000003U;
                 auto& words=a.item_actions();
                 words.flags_3248=(words.flags_3248&~kNetBits)|(out.flags_3248&kNetBits);
@@ -12605,22 +12649,84 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     seen.bits=bits;
                     if(out.health)seen.health=*out.health;
                 }
-            }
+            };
+            for(const auto& [actor,sp]:spawned_npcs)run(actor,sp.figure,sp.c);
+            for(const auto& [actor,figure]:lan_named_npcs)run(actor,figure,npcs.at(figure).actor_id);
         };
-        // 132ln5h14c (research/NET_INLEVEL.md 4.27): the LAN key of a play actor (the local player's, a spawned NPC's +c,
-        // another console's human); 0 when it has none (PORT-ONLY: the level's script NPCs are not networked).
+        // 132ln5h14c / 132ln5h15: the LAN key of a play actor (the local
+        // player's, a spawned NPC's +c, an authored NPC's stable object ID,
+        // or another console's human); 0 when it has none.
         const auto lan_actor_key=[&](std::size_t actor)->std::uint32_t{
             if(actor==0)return lan_net->local_player_key();
             if(const auto sp=spawned_npcs.find(static_cast<std::uint32_t>(actor));sp!=spawned_npcs.end())return sp->second.c;
+            if(const auto named=lan_named_npcs.find(actor);named!=lan_named_npcs.end())return npcs.at(named->second).actor_id;
             for(const auto& r:lan_remotes)if(!r.gone&&r.figure&&r.figure->actor==actor)return r.key;
             return 0;
         };
         const auto lan_actor_of_key=[&](std::uint32_t key,bool local_player)->std::optional<std::size_t>{
             if(local_player||key==lan_net->local_player_key())return std::size_t{0};
             for(const auto& [k,sp]:spawned_npcs)if(sp.c==key&&!actors.destroyed(k)&&actors.traversed(k))return std::size_t{k};
+            for(const auto& [actor,figure]:lan_named_npcs)
+                if(npcs.at(figure).actor_id==key&&!actors.destroyed(actor)&&actors.traversed(actor))return actor;
             for(const auto& r:lan_remotes)if(!r.gone&&r.figure&&r.key==key)return r.figure->actor;
             return std::nullopt;
         };
+        if(lan_net)lan_net->set_named_npc_receiver([&](const lan::LanNetCore::RemoteNamedNpc& msg){
+            const auto found=std::find_if(npcs.begin(),npcs.end(),[&](const NpcFigure& f){
+                return f.ai&&f.record<population.npcs.size()&&!lan_remote_slot_of(f.record)&&!coop_partner_index_of(f.record)&&f.actor_id==msg.key;});
+            if(found==npcs.end()){
+                std::cout<<"LAN (132ln5h15): NetCreateNamedCharacterMsg key 0x"<<std::hex<<msg.key<<std::dec
+                         <<" from client "<<msg.origin<<" has no authored GOBJ here; cNetObj_AddSystem keeps a null object\n";
+                return false;
+            }
+            const auto figure=static_cast<std::size_t>(found-npcs.begin());
+            auto& npc=*found;auto& actor=actors.actor(npc.actor);
+            lan_named_npcs[npc.actor]=figure;
+            npc.ai->set_remote(actor);
+            actor.set_health_40(static_cast<float>(msg.health));
+            if(msg.state)actor.queue_network_death(msg.state);
+            if(msg.active&&!actor.eligible()){
+                if(script_npcs_host)script_npcs_host->activate(npc.actor_id);
+                else actors.activate(npc.actor);
+            }
+            const float x=msg.angles[0],y=msg.angles[1],z=msg.angles[2];
+            const float cy=std::cos(y),sy=std::sin(y),cx=std::cos(x),sx=std::sin(x),cz=std::cos(z),sz=std::sin(z);
+            const ActorTeleportMatrix matrix{
+                RootVector{cz*cy-sz*sy*sx,sz*cy+cz*sy*sx,-cx*sy,0},
+                RootVector{-sz*cx,cz*cx,sx,0},
+                RootVector{cz*sy+sz*cy*sx,sz*sy-cz*cy*sx,cx*cy,0},
+                RootVector{msg.position[0],msg.position[1],msg.position[2],1}};
+            const auto placed=actor.teleport(ActorTeleportMode::place,matrix);
+            actor.set_byte_14(0);
+            NpcRemoteLink link;
+            auto* net=lan_net;const auto key=msg.key;
+            link.link=[net,key]()->std::optional<NpcRemoteAim>{
+                const auto l=net->npc_net_link(key);if(!l)return std::nullopt;
+                NpcRemoteAim a;a.aiming_20=l->aiming_20;a.firing_21=l->firing_21;a.point_valid_0=l->point_valid_0;
+                a.target_8=l->target_8;a.subtarget_c=l->subtarget_c;a.point_10={l->point_10[0],l->point_10[1],l->point_10[2],1.F};return a;};
+            link.fire_gate=[net,key]{return net->npc_fire_gate_002c4f20(key);};
+            link.motion=[net,key]()->std::optional<NpcRemoteMotion>{
+                const auto n=net->npc_net_motion(key);if(!n)return std::nullopt;
+                NpcRemoteMotion r;r.speed_3c=n->speed_3c;r.heading_40=n->heading_40;
+                r.position_44={n->position_44[0],n->position_44[1],n->position_44[2],1.F};return r;};
+            link.write_position=[net,key](const RootVector& p){net->npc_net_write_position(key,{p[0],p[1],p[2]});};
+            link.word_150=[net,key]{return net->npc_controller_150(key);};
+            link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
+            link.generator_message=[](std::uint32_t){};
+            link.object_by_key=[&,net](std::uint32_t target)->std::uint64_t{
+                if(target==0||target==0xffffffffU)return 0;
+                if(target==net->local_player_key())return actors.actor(0).handle();
+                if(const auto actor=lan_actor_of_key(target,false))return actors.actor(*actor).handle();
+                std::ostringstream o;o<<"LAN: 0040c540 of the remote named NPC's target key 0x"<<std::hex<<target<<": no object of this console";
+                throw std::runtime_error(o.str());};
+            npc.ai->set_remote_link(std::move(link));
+            npc.active=actor.eligible();
+            std::cout<<"LAN (132ln5h15): 002c6690 attached remote controller to existing "<<npc.label<<" (actor "<<npc.actor
+                     <<", key 0x"<<std::hex<<msg.key<<std::dec<<"), health "<<msg.health<<", "
+                     <<(msg.active?"activated":"left inactive")<<", teleport "<<(placed.applied?"applied":"not applied")
+                     <<" from client "<<msg.origin<<"\n";
+            return true;
+        });
         std::set<std::size_t> lan_damage_unkeyed;
         std::vector<std::size_t> lan_deaths_queued;   // logged once delivered (the actor's next pump)
         unsigned lan_hook_frame=0;
@@ -12635,7 +12741,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(e.kind==ActorDamageEvent::Kind::death_message){   // the kill's death action (research/NET_INLEVEL.md 4.28)
                         if(!victim_key){
                             if(lan_damage_unkeyed.insert(i).second)
-                                std::cout<<"LAN (PORT-ONLY, 132ln5h14c): actor "<<i<<" has no LAN key (a script NPC, not networked):"
+                                std::cout<<"LAN (PORT-ONLY, 132ln5h14c): actor "<<i<<" has no LAN key:"
                                     " its death action 0x004e01e0 stays on this console\n";
                             return false;
                         }
@@ -12646,7 +12752,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                     if(!victim_key){
                         if(lan_damage_unkeyed.insert(i).second)
-                            std::cout<<"LAN (PORT-ONLY, 132ln5h14c): actor "<<i<<" has no LAN key (a script NPC, not networked):"
+                            std::cout<<"LAN (PORT-ONLY, 132ln5h14c): actor "<<i<<" has no LAN key:"
                                 " its DamageMsg 0x004e08a0 (+20 "<<int(e.flags_20)<<") stays on this console\n";
                         return true;
                     }

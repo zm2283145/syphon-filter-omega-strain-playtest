@@ -1047,6 +1047,59 @@ void LanNetCore::register_npc(std::uint32_t c, std::uint32_t generator) {
     npc_generators_[c] = generator;
 }
 
+void LanNetCore::mirror_named_npc(const NamedNpcSnapshot& npc) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN named NPC access during background load pump; defer until stop_load_pump");
+    if (!npc.key) throw std::runtime_error("LAN named NPC: zero object ID");
+    if (npc.name.size() > 31) throw std::runtime_error("LAN named NPC: name exceeds the retail 32-byte field");
+    if (!npc_blocks_.contains(npc.key)) register_npc(npc.key, 0);
+    auto& m = memory_;
+    const auto block = npc_block(npc.key);
+    constexpr std::uint32_t kTransform = 0x3a40;
+    const auto component = block + kTransform;
+    m.write(block + 0x2c, 1, 1);
+    m.write(block + 0x2d, 1, npc.active ? 1U : 0U);
+    m.write(block + 0x2e, 1, 0);
+    m.write(block + 0x50, 4, component);
+    m.write(component + 0x50, 1, 0);
+    for (std::uint32_t r = 0; r < 4; ++r)
+        for (std::uint32_t c = 0; c < 4; ++c)
+            m.write(component + 0x10 + r * 16 + c * 4, 4, std::bit_cast<std::uint32_t>(npc.matrix[r][c]));
+    for (std::uint32_t k = 0; k < 0x20; ++k) m.write(block + 0x3318 + k, 1, 0);
+    for (std::uint32_t k = 0; k < npc.name.size(); ++k)
+        m.write(block + 0x3318 + k, 1, static_cast<std::uint8_t>(npc.name[k]));
+    m.write(block + 0x40, 4, std::bit_cast<std::uint32_t>(static_cast<float>(npc.health)));
+    m.write(block + 0x3590, 1, npc.state);
+    for (std::uint32_t k = 0; k < 6; ++k)
+        m.write(block + kNpcInventory + k * 16 + 8, 4, static_cast<std::uint32_t>(static_cast<std::int32_t>(npc.weapons[k])));
+    m.write(block + kNpcInventory + 0x84, 1, npc.weapons[0] < 0 ? 6U : 0U);
+    if (!m.read(dme::kInLevel, 1)) return;
+    if (named_npc_registered_.insert(npc.key).second) npc_network_register(npc.key);
+    if (!m.read(block + 0x14, 1)) npc_activate_001b53d0(npc.key);
+    const bool was_active = named_npc_active_[npc.key];
+    named_npc_active_[npc.key] = npc.active;
+    if (npc.active && !was_active) {
+        const auto local = dme_->local_index();
+        for (std::uint32_t client = 0; client < 4; ++client)
+            if (client != local && m.read(0x55c780 + client, 1) == 2)
+                call(m, 0x185a30, {block, client});
+    }
+}
+
+void LanNetCore::bind_remote_named_npc(std::uint32_t key, std::uint16_t client, bool found) {
+    auto& m = memory_;
+    if (!found) {
+        call(m, 0x3fb650, {key, client, 0});
+        return;
+    }
+    if (!npc_blocks_.contains(key)) register_npc(key, 0);
+    const auto block = npc_block(key);
+    call(m, 0x185940, {block, key});
+    install_remote_npc_controller(block);
+    call(m, 0x3fb650, {key, client, block});
+    if (const auto object = call(m, 0x3fbb10, {key})) call(m, 0x185970, {block, object});
+}
+
 // 132ln5h13 (the header): 001b53d0's network tail on the NPC's block. Frame 0x40.
 void LanNetCore::npc_activate_001b53d0(std::uint32_t c) {
     auto& m = memory_;
@@ -1951,8 +2004,35 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         remote_client_ = prior;
         return 0;
     }
-    case 0x2c6690:  // NetCreateNamedCharacterMsg.cc: a remote named character (an NPC); not ported
-        unhosted(address, "a remote named character 002c6690 (NetCreateNamedCharacterMsg) is not ported");
+    case 0x2c6690: {
+        const auto msg = arg(0);
+        RemoteNamedNpc npc;
+        npc.origin = static_cast<std::uint16_t>(arg(1));
+        npc.key = m.read(msg + 4);
+        for (std::uint32_t k = 0; k < 3; ++k) {
+            npc.angles[k] = std::bit_cast<float>(m.read(msg + 8 + k * 4));
+            npc.position[k] = std::bit_cast<float>(m.read(msg + 0x14 + k * 4));
+        }
+        for (std::uint32_t k = 0; k < 6; ++k)
+            npc.weapons[k] = static_cast<std::int16_t>(m.read(msg + 0x20 + k * 2, 2));
+        bool terminated = false;
+        for (std::uint32_t k = 0; k < 0x20; ++k) {
+            const auto ch = static_cast<char>(m.read(msg + 0x2c + k, 1));
+            if (!ch) {
+                terminated = true;
+                break;
+            }
+            npc.name.push_back(ch);
+        }
+        if (!terminated) unhosted(address, "a NetCreateNamedCharacterMsg with an unterminated 32-byte name");
+        npc.active = m.read(msg + 0x4c, 1) != 0;
+        npc.state = static_cast<std::uint8_t>(m.read(msg + 0x4d, 1));
+        npc.health = static_cast<std::int16_t>(m.read(msg + 0x4e, 2));
+        const bool found = named_npc_receiver_ && named_npc_receiver_(npc);
+        bind_remote_named_npc(npc.key, npc.origin, found);
+        ++named_npcs_received_;
+        return 0;
+    }
     case 0x185940: human_set_key_00185940(m, arg(0), arg(1)); return 0;
     case 0x185970: { Frame f(sp_); human_set_net_entry_00185970(m, *this, arg(0), arg(1)); return 0; }
     case 0x2de398:  // the DME send under 002de880 (the native library's game messages)
@@ -2521,6 +2601,7 @@ std::uint32_t LanNetCore::call_framed(LevelLoadMemory& m, std::uint32_t address,
         const auto caller = sp_;
         sp_ = sp - 0x1000;  // the function's frame (0xf0) and its callees go below the caller's $sp
         const auto r = send_named_character_002c7110(m, *this, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], sp);
+        if (r) ++named_npcs_sent_;
         sp_ = caller;
         return r;
     }
@@ -2573,6 +2654,9 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     generator_blocks_.clear();
     npc_blocks_.clear();
     npc_generators_.clear();
+    named_npc_registered_.clear();
+    named_npc_active_.clear();
+    named_npc_receiver_ = {};
     free_npc_blocks_.clear();
     remote_spawns_.clear();
     npc_controls_.clear();

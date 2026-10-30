@@ -73,6 +73,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -289,6 +290,36 @@ public:
     std::uint32_t clients_left() const { return dme_->left_callbacks(); }
     static constexpr std::uint32_t kLocalPlayer = 0x1d40000, kLocalPlayerId = 1;
     std::uint32_t local_player_key() const;
+    // 002c7110 / 002c7630 / 002c6690: an authored NPC already exists in both
+    // level worlds. The owner mirrors its native actor fields into a network
+    // block so 003fa940 sends the exact 0x50-byte NetCreateNamedCharacterMsg
+    // to a newly loaded client. The receiver resolves the stable object ID in
+    // the live world; it never constructs a substitute actor.
+    struct NamedNpcSnapshot {
+        std::uint32_t key{};
+        std::array<std::array<float, 4>, 4> matrix{};
+        std::array<std::int16_t, 6> weapons{-1, -1, -1, -1, -1, -1};
+        std::string name;
+        std::int16_t health{};
+        std::uint8_t state{};
+        bool active{};
+    };
+    struct RemoteNamedNpc {
+        std::uint16_t origin{};
+        std::uint32_t key{};
+        std::array<float, 3> angles{};
+        std::array<float, 3> position{};
+        std::array<std::int16_t, 6> weapons{};
+        std::string name;
+        std::int16_t health{};
+        std::uint8_t state{};
+        bool active{};
+    };
+    using NamedNpcReceiver = std::function<bool(const RemoteNamedNpc&)>;
+    void mirror_named_npc(const NamedNpcSnapshot& npc);
+    void set_named_npc_receiver(NamedNpcReceiver receiver) { named_npc_receiver_ = std::move(receiver); }
+    std::uint32_t named_npcs_sent() const { return named_npcs_sent_; }
+    std::uint32_t named_npcs_received() const { return named_npcs_received_; }
 
     // 132fx5: cNetBackpackMsg's observable payload and NetMap binding. LanDme replaces only the generic message
     // table/routing layer; CombatPlay still produces and applies the native message types.
@@ -783,8 +814,13 @@ private:
     static constexpr std::uint32_t kNpcBlocks = 0x1d50000, kNpcBlockSize = 0x4000, kNpcBlockCount = 0x60;
     static constexpr std::uint32_t kNpcController = 0x3800, kNpcInventory = 0x3c00;   // 132ln5h14b: +0x3524's
     std::map<std::uint32_t, std::uint32_t> npc_blocks_, npc_generators_;
+    std::set<std::uint32_t> named_npc_registered_;
+    std::map<std::uint32_t, bool> named_npc_active_;
+    NamedNpcReceiver named_npc_receiver_;
+    std::uint32_t named_npcs_sent_ = 0, named_npcs_received_ = 0;
     std::vector<std::uint32_t> free_npc_blocks_;
     void install_remote_npc_controller(std::uint32_t block);
+    void bind_remote_named_npc(std::uint32_t key, std::uint16_t client, bool found);
     std::uint32_t next_npc_block_ = kNpcBlocks;
     std::uint32_t npc_block(std::uint32_t c) const;
     std::vector<RemoteSpawn> remote_spawns_;
