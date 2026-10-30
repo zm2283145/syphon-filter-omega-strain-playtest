@@ -407,6 +407,11 @@ struct CombatPlayInput {
     // D-pad Right's action value 2 (sp+f88: its pressure / 255; 1.0 from a
     // key), read by the flashlight block 0024c980..0024ca44.
     float dpad_right{};
+    // D-pad Down's gated pressure at sp+f8c; opens the original carried-item
+    // drop menu at 0x0024c884 when the player holds a weapon.
+    float dpad_down{};
+    bool choose_menu_1c0{};     // the lift chooser suppresses the drop path
+    bool hud_6a8{},hud_6a9{};   // start menu / HUD focus (s6 / s7)
     // Select (sp+f80, 0055a44c & 0x100) after the input gates, read by the
     // weapon switch 0x0024ca48..0x0024cd30.
     float select{};

@@ -59,6 +59,14 @@
 namespace omega {
 class ActorMovementWorldHost;   // actor_movement_scheduler.hpp
 
+// Live level-end services supplied by the play host. The message callback
+// observes the original routing flags; flag 1 remains local to a client.
+struct SoloLevelEndNetworkServices {
+    LevelEndNetworkHost message;
+    std::function<bool()> remote_players_ready;
+    std::function<void()> host_left_game; // MSGGAME_ENDLEVEL +0xc == 1
+};
+
 // Static COL5 resources. Resource i has geometry handle i+1 and is its own
 // owner object i+1. Terrain is already in world space (no owner matrix);
 // placed objects carry a column-major owner matrix. Gathering visits resources
@@ -1391,6 +1399,12 @@ void fire_ignite();
     // its frame-end teardown (001690f0; the teardown itself is not hosted).
     // The RespawnTimer acts only in state 15.
     LevelEndRequestResult request_level_end(std::uint8_t kind);
+    void set_level_end_network(SoloLevelEndNetworkServices services);
+    void clear_level_end_network();
+    // 0020e350: the transport delivers a bounded ENDLEVEL payload here.
+    // in_level mirrors D_005721D0; only states 0x0f and 0x12 receive it.
+    LevelEndRequestResult receive_level_end_message(std::uint8_t kind,std::uint32_t quit,bool in_level);
+    bool received_host_left_game() const;
     bool level_end_fade_check();
     std::optional<std::uint8_t> level_end_teardown();
     const GameEndState& game_end() const;

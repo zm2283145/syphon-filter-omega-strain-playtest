@@ -282,7 +282,8 @@ std::uint32_t backpack_object_construct(const BackpackObjectCreate& create,const
     if(actor.address==0)fail("00257640 without an actor (the identity placement 00257820) is not ported");
     const auto m=backpack_drop_matrix(actor);
     backpack_object_place(bp,create.address,t,m,host,events);
-    backpack_object_set_owner(bp,create.address,actor.address,actor.view,host,events);
+    backpack_object_set_owner(bp,create.address,create.keep_owner?actor.address:0,
+        create.keep_owner?std::optional<WeaponBackpackOwner>{actor.view}:std::nullopt,host,events);
     if(host.multiplayer){
         // 00257878..002579ac (132fx5): +308 = the local client, +10 = +c, +14 = 0 unless this console is the
         // session host (*005721c0), then NetMap_BindReceiver(+10, the owner: the local client on the session

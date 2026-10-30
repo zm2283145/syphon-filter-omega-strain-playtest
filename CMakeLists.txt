@@ -133,6 +133,7 @@ add_library(omega_core
     src/main/humanCollision/actor_response_placement.cpp
     src/main/human/actor_fader.cpp
     src/main/game/game_end_state.cpp
+    src/main/game/agent_update_timer.cpp
     src/main/machine/game_flow.cpp
     src/main/machine/level_load.cpp
     src/main/machine/level_load_state.cpp
@@ -560,6 +561,7 @@ target_sources(omega_core_tests PRIVATE tests/material_properties_tests.cpp test
     target_sources(omega_core_tests PRIVATE tests/objective_registration_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/string_pool_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/frontend_flow_tests.cpp)
+    target_sources(omega_core_tests PRIVATE tests/frontend_agent_slots_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/script_string_tests.cpp tests/script_opcode_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/script_context_tests.cpp tests/engine_variables_tests.cpp tests/mission_script_host_tests.cpp tests/mission_script_npc_tests.cpp tests/npc_generator_tests.cpp tests/npc_remote_tests.cpp tests/generator_tick_tests.cpp tests/generator_network_tests.cpp tests/generator_spawn_actor_tests.cpp tests/object_dynamic_id_tests.cpp tests/get_npc_tests.cpp tests/generator_link_receive_tests.cpp tests/weapon_reload_tests.cpp tests/reload_action_tests.cpp tests/equip_goggles_tests.cpp tests/script_ai_native_tests.cpp tests/goggles_vision_tests.cpp tests/request_facial_tests.cpp tests/script_look_at_tests.cpp tests/generator_spawn_view_tests.cpp tests/spawned_actor_ctor_tests.cpp tests/spawned_actor_ai_tests.cpp tests/spawned_actor_ai_base_tests.cpp tests/spawned_actor_ai_attach_tests.cpp tests/ai_runtime_init_tests.cpp tests/ai_component_bind_tests.cpp tests/spawned_npc_body_tests.cpp tests/inventory_services_tests.cpp tests/mission_script_world_tests.cpp tests/zone_activation_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/actor_component_attach_tests.cpp)
@@ -606,6 +608,8 @@ target_sources(omega_core_tests PRIVATE tests/material_properties_tests.cpp test
     target_sources(omega_core_tests PRIVATE tests/moving_collision_slide_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/actor_fader_tests.cpp tests/game_end_state_tests.cpp tests/game_flow_tests.cpp tests/level_load_tests.cpp tests/level_load_state_tests.cpp tests/team_setup_tests.cpp tests/level_selector_tests.cpp tests/loadout_state_tests.cpp tests/app_teardown_tests.cpp tests/card_wait_poll_tests.cpp tests/teardown_state_tests.cpp tests/world_teardown_tests.cpp tests/level_teardown_callees_tests.cpp tests/play_level_teardown_tests.cpp tests/lobby_state_tests.cpp tests/gameplay_state_tests.cpp tests/play_native_flow_tests.cpp tests/video_frame_tests.cpp tests/renderer_init_tests.cpp tests/remote_ready_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/actor_checkpoint_tests.cpp)
+    target_sources(omega_core_tests PRIVATE tests/solo_level_end_network_tests.cpp)
+    target_sources(omega_core_tests PRIVATE tests/agent_update_timer_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/actor_teleport_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/water_effects_tests.cpp tests/actor_movement_scheduler_tests.cpp tests/actor_movement_pass_tests.cpp tests/actor_response_probes_tests.cpp tests/actor_response_setup_tests.cpp tests/actor_physical_response_tests.cpp tests/actor_gather_bounds_tests.cpp tests/actor_water_support_tests.cpp tests/actor_physical_frame_tests.cpp tests/actor_edge_presets_tests.cpp tests/player_pad_control_tests.cpp tests/float_environment_tests.cpp tests/camera_tests.cpp tests/actor_edge_detection_tests.cpp tests/actor_quick_turn_tests.cpp tests/actor_flashbang_hide_tests.cpp tests/actor_roll_action_tests.cpp tests/solo_roll_tests.cpp tests/actor_ledge_input_tests.cpp tests/actor_ledge_action_tests.cpp tests/actor_body_carry_tests.cpp tests/actor_object_action_tests.cpp tests/solo_ledge_tests.cpp tests/actor_ledge_resolve_tests.cpp tests/actor_hanging_tests.cpp tests/game_libm_tests.cpp tests/solo_hang_tests.cpp tests/actor_ladder_detection_tests.cpp tests/actor_ladder_mount_tests.cpp tests/actor_ladder_body_tests.cpp tests/actor_ladder_exit_tests.cpp tests/actor_ladder_token_tests.cpp tests/solo_ladder_tests.cpp tests/character_shadows_tests.cpp tests/level_lights_tests.cpp tests/shadow_scene_tests.cpp tests/caster_bounds_tests.cpp tests/actor_model_defaults_tests.cpp tests/hotbox_tests.cpp tests/solo_hotbox_tests.cpp tests/running_jump_tests.cpp tests/actor_damage_tests.cpp tests/actor_death_tests.cpp tests/actor_choke_tests.cpp tests/solo_fall_tests.cpp)
     target_sources(omega_core_tests PRIVATE tests/actor_ladder_tests.cpp tests/actor_model_slots_tests.cpp)

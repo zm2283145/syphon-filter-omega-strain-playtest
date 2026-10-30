@@ -315,6 +315,22 @@ public:
     std::span<const std::uint8_t, agent_record_size> agent() const { return agent_; }
     FolderAgentCard& card() { return card_; }
 
+    // 00136710 constructs four AgentData records once, then swaps the
+    // existing local record into the current network client's slot. The
+    // selected local record remains agent(); other slots retain their own
+    // records and AgentLoadState across a change of local client index.
+    void set_local_agent_client_index(std::uint8_t client);
+    std::uint8_t local_agent_client_index() const { return local_agent_client_index_; }
+    std::optional<std::span<const std::uint8_t, agent_record_size>> agent_for_client(std::uint8_t client) const;
+    std::vector<std::uint8_t> encode_local_agent_update(std::uint8_t stats_only, std::uint8_t awards) const;
+    // 0012f0d0: the callback asks the caller to find a present player and
+    // refresh its HUD name after a full update. Stats-only skips it. A full
+    // update from client 0 also copies its +d4 mission-time bits to agent().
+    void receive_agent_update(std::span<const std::uint8_t> bytes,
+                              const std::function<void(std::uint8_t)>& refresh_full_agent = {});
+    void clear_other_agent_readiness();  // 0012ee30: all existing nonlocal records
+    bool all_remote_agent_data_received(const std::array<bool, 4>& present_players) const;  // 0012ed60
+
     // PORT-ONLY unlock helpers (port_cheats.hpp), used by --unlock-all and tests. The visible cheat controls live
     // only in the in-game pause menu. Each helper applies its unlocks to the agent now and stays on for the session:
     // the refill
@@ -649,6 +665,14 @@ private:
     FolderAgentCard card_;
     std::array<std::uint8_t, agent_record_size> agent_{};
     AgentLoadState agent_state_;
+    struct OtherAgent {
+        std::array<std::uint8_t, agent_record_size> record{};
+        AgentLoadState state;
+    };
+    // A null entry marks agent_ at local_agent_client_index_. Other objects
+    // keep stable addresses while 00136710 swaps the slot mapping.
+    std::array<std::unique_ptr<OtherAgent>, 4> other_agents_{};
+    std::uint8_t local_agent_client_index_ = 0;
     PortAgentPatch port_agent_patch_;
     AgentRefillHost refill_host() const;
     std::unique_ptr<AgentSaveBuffer> save_buffer_;

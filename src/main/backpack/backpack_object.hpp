@@ -157,6 +157,9 @@ struct BackpackObjectCreate {
     // network ID and authority rather than allocating this console's prefix.
     std::optional<std::uint32_t> network_id;
     std::optional<std::uint32_t> network_owner;
+    // 00257640's a1: zero for the player's D-pad Down drop menu. The actor
+    // still supplies the placement matrix, but is not kept as the owner.
+    bool keep_owner{true};
 };
 
 // 00257a40: the count of list entries with +60 == 0, +30c >= 2 and no valid

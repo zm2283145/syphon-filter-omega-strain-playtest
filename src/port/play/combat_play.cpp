@@ -405,7 +405,7 @@ struct CombatPlaySession::Impl {
     // (001a3520): the backpack is appended to the session first so the hosts
     // find it by address; the drop matrix is the actor's virtual +f4
     // (00132280, the floor root placement as elsewhere in the play).
-    std::uint64_t construct_backpack(std::size_t a){
+    std::uint64_t construct_backpack(std::size_t a,bool keep_owner=true){
         const auto& w=*config.backpack_world;
         if(!w.allocate_id)fail("00257640: the object ID allocator 0040c240 is not supplied");
         const auto n=backpacks.size();
@@ -418,11 +418,14 @@ struct CombatPlaySession::Impl {
         c.transform_address=0xb8000000U+static_cast<std::uint32_t>(n);
         c.id_40c240=w.allocate_id(0xf5);
         c.clock_4f7f70=backpack_clock;
+        c.keep_owner=keep_owner;
         BackpackDropActor d=drop_actor(a);
         backpack_object_construct(c,d,backpack_list,object_host(),b.object_events,db);
-        owner_cleared_3464[a]=false;
+        if(keep_owner)owner_cleared_3464[a]=false;
         apply_object_events(b,0);
-        if(config.net_backpack_send){
+        // The death path 001a3520 sends cNetBackpackMsg type 0 after
+        // 00257640. D-pad Down calls 00257640 directly and has no such send.
+        if(keep_owner&&config.net_backpack_send){
             if(!config.net_local_index||!config.net_actor_key)fail("001a3520: the LAN backpack identity bridge is not supplied");
             config.net_backpack_send(0,static_cast<std::uint8_t>(config.net_local_index()),b.object.word(0xc),
                 config.net_actor_key(a),0xffff);
@@ -1029,7 +1032,8 @@ struct CombatPlaySession::Impl {
     // 0x27a) and 00253070(menu, *(*004ffc2c + 0x54), bp, comp + 30,
     // owner_check, 0) on the HUD screen (node handle 1, the root); the
     // returned token is the component's +178.
-    std::uint32_t open_pickup_menu(std::uint32_t address,WeaponInventoryOps& inventory,std::uint32_t owner_check){
+    std::uint32_t open_pickup_menu(std::uint32_t address,WeaponInventoryOps& inventory,std::uint32_t owner_check,
+                                   bool drop=false){
         if(pickup_menu)fail("001762c0: a pickup menu while +178 is set");
         if(!config.pickup_menu_screen)
             fail("001762c0 creates the Triangle confirm menu 00253070 (HUD *004ffc2c screen +54) and the session has no HUD screen");
@@ -1054,7 +1058,7 @@ struct CombatPlaySession::Impl {
         if(v.owner_300!=0&&config.item_list&&!world.destroyed(actor_at(v.owner_300)))
             for(const auto& st:config.item_list(config.object_ids.at(actor_at(v.owner_300))).stacks())
                 v.owner_pairs.emplace_back(static_cast<std::uint32_t>(st.index),static_cast<std::uint32_t>(st.count));
-        pickup_menu_build(m.menu,pickup_panels,h,1,v,1,owner_check,0);
+        pickup_menu_build(m.menu,pickup_panels,h,1,v,1,owner_check,drop?1U:0U);
         if(!messages.empty())fail("00253070 sent a HUD message");
         pickup_menu=std::move(m);
         return token;
@@ -1566,6 +1570,7 @@ struct CombatPlaySession::Impl {
         const auto a=config.player;
         actors->collect_inventory_view(a,*combat);
         load_fields(f);
+        drop_menu_stage(f);                                                                                // 0x0024c848..0x0024c980
         flashlight_pad_stage(f);                                                                            // 0024c980..0024ca44
         weapon_switch_stage(f);                                                                             // 0x0024ca48..0x0024cd30
         manual_reload_stage();                                                                              // 0x0024cdb0..0x0024cde4
@@ -1848,6 +1853,30 @@ struct CombatPlaySession::Impl {
     // 0024c980..0024ca44 of the pad producer: the HUD bytes *004ffc2c +6a8 /
     // +6a9 / +6aa are 0 in play (no HUD menu is open) and 00250350(input +38,
     // 7) is bit 7 of the current priority set +3c.
+    void drop_menu_stage(const PadCombatFields& f){
+        // 00250350(input +38, 1 / 7), sp+1c0, input +128, sp+f8c,
+        // input +a7, HUD +6a8 / +6a9. +a7 has no writer in the original
+        // player input and remains its constructor zero in this session.
+        if((f.bits_3c&((1U<<1)|(1U<<7)))!=0||input.choose_menu_1c0||pickup_menu||
+           input.dpad_down==0.0F||input.hud_6a8||input.hud_6a9)return;
+        const auto a=config.player;
+        const auto& inv=combat->inventory(a);
+        const auto held=inv.current_84;
+        if(held>=6||held>=inv.slots.size())return;
+        const auto item=inv.slots[held].item;
+        if(item<0)return;
+        // 00257640(actor, 0, 0) uses the actor for placement but sets no
+        // owner; 00255cf0 marks its held slot for the drop-mode list.
+        if(!config.backpack_world)fail("0024c904: the player's backpack 00257640 is not hosted");
+        const auto handle=construct_backpack(a,false);
+        add_backpack_contents(handle,[item](WeaponBackpackOps& bp){bp.mark_slot(item);});
+        auto& b=backpack(handle);
+        std::vector<WeaponInventoryEvent> events;
+        auto ops=combat->inventory_ops(a,*config.increased_ammo,events);
+        (void)open_pickup_menu(b.address,ops,0,true);   // 00253070(..., actor, 0, 1)
+        frame.notes.push_back("player drop menu (0x0024c884): held item "+std::to_string(item)+
+            " in backpack "+std::to_string(b.object.word(0xc)));
+    }
     void flashlight_pad_stage(const PadCombatFields& f){
         FlashlightPadGates g;
         g.priority_bit7=((f.bits_3c>>7)&1U)!=0;

@@ -489,6 +489,8 @@ struct SoloActorSimulation::Impl {
     ActorCheckpoint checkpoint;
     ActorFader fader;
     GameEndState game_end;                                 // G 004ffb50: +50 state, +1c4..+1c7
+    std::optional<SoloLevelEndNetworkServices> level_end_network;
+    bool received_host_left_game{};
     ActorRespawnPoll respawn_poll;
     ActorRespawnTimer respawn_timer;                       // 001ba130 event (vtable 004da970)
     std::uint8_t byte_3269{};                              // +3269: 001b1710 returns at once while set
@@ -3936,9 +3938,35 @@ const ActorFader& SoloActorSimulation::fader() const{return impl_->fader;}
 void SoloActorSimulation::set_fader_paused(bool paused){impl_->fader.paused_0c=paused;}
 void SoloActorSimulation::start_level_fade_in(){start_actor_fade(impl_->fader,1,2.0F);}
 LevelEndRequestResult SoloActorSimulation::request_level_end(std::uint8_t kind){
-    return omega::request_level_end(impl_->game_end,kind,impl_->fader,false);
+    const auto* network=impl_->level_end_network?&impl_->level_end_network->message:nullptr;
+    return omega::request_level_end(impl_->game_end,kind,impl_->fader,network!=nullptr,network);
 }
-bool SoloActorSimulation::level_end_fade_check(){return omega::level_end_fade_check(impl_->game_end,impl_->fader,true);}
+void SoloActorSimulation::set_level_end_network(SoloLevelEndNetworkServices services){
+    if(!services.message.send_agent_data||!services.message.continue_message||!services.remote_players_ready)
+        throw std::invalid_argument("Level end: multiplayer services are incomplete");
+    impl_->level_end_network=std::move(services);
+    impl_->received_host_left_game=false;
+}
+void SoloActorSimulation::clear_level_end_network(){
+    impl_->level_end_network.reset();
+    impl_->received_host_left_game=false;
+}
+LevelEndRequestResult SoloActorSimulation::receive_level_end_message(std::uint8_t kind,std::uint32_t quit,bool in_level){
+    if(!in_level||(impl_->game_end.state_50!=0x0f&&impl_->game_end.state_50!=0x12))return {};
+    if(!impl_->level_end_network)throw std::runtime_error("Level end: incoming multiplayer message without services");
+    if(quit==1){
+        impl_->received_host_left_game=true;
+        if(impl_->level_end_network->host_left_game)impl_->level_end_network->host_left_game();
+    }
+    return request_level_end(kind); // cGameSystem_Restart -> 0012fa60; host forwards, client is local-only.
+}
+bool SoloActorSimulation::received_host_left_game() const{return impl_->received_host_left_game;}
+bool SoloActorSimulation::level_end_fade_check(){
+    bool ready=true;
+    if(impl_->level_end_network&&impl_->game_end.state_50==0x13&&impl_->fader.duration_04==0.0F)
+        ready=impl_->level_end_network->remote_players_ready();
+    return omega::level_end_fade_check(impl_->game_end,impl_->fader,ready);
+}
 std::optional<std::uint8_t> SoloActorSimulation::level_end_teardown(){return omega::level_end_teardown(impl_->game_end);}
 const GameEndState& SoloActorSimulation::game_end() const{return impl_->game_end;}
 void SoloActorSimulation::set_end_agent(std::function<void(bool)> end_agent){impl_->game_end.end_agent=std::move(end_agent);}

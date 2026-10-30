@@ -12,6 +12,8 @@
 #include "actor_edge_detection.hpp"
 #include "actor_object_action.hpp"
 #include "agent_perks.hpp"
+#include "agent_update_timer.hpp"
+#include "hud_callouts.hpp"
 #include "agent_profile_view.hpp"
 #include "port_cheats.hpp"
 #include "animated_character.hpp"
@@ -2010,6 +2012,7 @@ struct PlayGuiHost final:GuiStaticHost{
     std::function<bool()> dual_wield;
     std::function<std::optional<std::string>()> agent_rank;
     std::function<void()> loadout_start;
+    std::function<void()> loadout_network_resume;
     // Checkpoint 132pw1 (port-only): the Accept's selection, for the CPU partner's partner_loadout=copy.
     std::function<void(const EquipmentLoadoutSelection&)> loadout_accepted;
     bool byte_51ee38=false;   // PORT-ONLY --loadout-all-records (Checkpoint 132wp1)
@@ -2075,7 +2078,10 @@ struct PlayGuiHost final:GuiStaticHost{
         log.push_back("004ffc29 = 0; 0036a0f0(0055a300)");
     }
     void eqm_resume() override{   // 0012eee0(G, 0, 0): returns at once in solo (005721c8 clear, 0x0012ef0c)
-        log.push_back("0012eee0(G, 0, 0): solo, returns");
+        if(loadout_network_resume){
+            loadout_network_resume();
+            log.push_back("0012eee0(G, 0, 0): full LAN AgentData sent after loadout Accept");
+        }else log.push_back("0012eee0(G, 0, 0): solo, returns");
     }
     // Checkpoint 132f11: the debrief 00134110's services. The agent record 001314f0(G, -1) is the front end's
     // (FrontendSession's profile, which play's statistics were synced into before 00335830); ZEUS.HOG is the
@@ -5157,6 +5163,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // TIM0 events keep waking the DME thread on a background pump (LanNetCore::start_load_pump).
             if(auto* lan=frontend_app->lan_core()){
                 lan_net=lan;
+                frontend_app->session().set_local_agent_client_index(static_cast<std::uint8_t>(lan->local_client_index()));
                 lan_net->start_load_pump();
                 std::cout<<"LAN (port-only, 132ln5e): the network level load's 001350e0 is the play's level setup; the DME "
                            "thread's timer events are pumped meanwhile\n";
@@ -12732,24 +12739,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::uint64_t window_size_serial=window.size_serial();
         window.log_handoff("level "+mission+" play");
         if(!hidden)std::cout<<"Renderer: "<<state.renderer->backend()<<"\n";
+        float lan_agent_timer_1f0=0.0F;
+        const auto sync_agent_statistics=[&]{
+            if(!frontend_app||!combat_session||!combat_session->agent_statistics())return;
+            AgentStatistics play=*combat_session->agent_statistics();
+            if(mission_host){
+                const auto& bits=mission_host->objectives().progression_bits();
+                for(std::size_t i=0;i<8;++i){
+                    play.words_84[i]|=static_cast<std::int32_t>(bits.persistent()[i]);
+                    play.words_a4[i]|=static_cast<std::int32_t>(bits.mission()[i]);
+                }
+            }
+            frontend_app->session().sync_play_statistics(play);
+        };
         if(frontend_app){
             // 0012fa60's 001314f0(G, -1) -> 00335830(agent, completed) on the front end's agent: the mission clock
             // 00245890 (solo: the HUD's +6dc) and the MANTEX.HOG member names (0036d200) its parts tail reads.
             const auto mantex_members=disc.archive_member_names({"GAMEDATA","COMMON","MANTEX.HOG"});
-            sim.set_end_agent([&frontend_app,&mission_clock_6dc,mantex_members,&combat_session,&mission_host](bool completed){
+            sim.set_end_agent([&frontend_app,&mission_clock_6dc,mantex_members,&sync_agent_statistics](bool completed){
                 // Checkpoint 132f11: the original's play adds to the agent record in place (00333f10, AddObjective's
                 // bits); the port's play keeps them in the combat session and the mission scripts, synced here.
-                if(combat_session&&combat_session->agent_statistics()){
-                    AgentStatistics play=*combat_session->agent_statistics();
-                    if(mission_host){
-                        const auto& bits=mission_host->objectives().progression_bits();
-                        for(std::size_t i=0;i<8;++i){
-                            play.words_84[i]|=static_cast<std::int32_t>(bits.persistent()[i]);
-                            play.words_a4[i]|=static_cast<std::int32_t>(bits.mission()[i]);
-                        }
-                    }
-                    frontend_app->session().sync_play_statistics(play);
-                }
+                sync_agent_statistics();
                 frontend_app->session().end_agent_level(completed?1U:0U,[&mission_clock_6dc]{return mission_clock_6dc;},mantex_members);
                 for(const auto& line:frontend_app->session().take_log())std::cout<<"Front end: recorded "<<line<<"\n";
             });
@@ -12947,6 +12957,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"PORT-ONLY --loadout-all-records: 0051ee38 = 1 (002bf090 lists every weapon record of each category)\n";
             }
             o.host.loadout_start=[&o]{o.loadout_pending=false;o.loadout_done_pending=true;o.driver.poll();};
+            if(lan_net)o.host.loadout_network_resume=[&]{
+                sync_agent_statistics();
+                lan_net->send_agent_update(frontend_app->session().encode_local_agent_update(0,0));
+            };
             // Checkpoint 132ws6: 002c0380's 00373670 in the GUI's orthographic record under the canvas top (level_lights.hpp
             // loadout_light_camera): the last loadout frame's table is the one the level's first world update reads.
             o.loadout_light_rebuild=[&](std::optional<float> theta){
@@ -13760,6 +13774,37 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
+                    for(const auto& update:lan_net->take_agent_updates()){
+                        auto& session=frontend_app->session();
+                        session.receive_agent_update(update.inner,[&](std::uint8_t client){
+                            // 0012f0d0: a full update refreshes the present human's
+                            // name callout. Client labels are localized PlayerNameN,
+                            // not the transport's lobby names (00135148 / 0012f5d0).
+                            if(!hud_object||!gui_overlay_draw)return;
+                            std::optional<std::int32_t> id;
+                            if(client==lan_net->local_client_index()){
+                                if(gui_overlay_draw->host.player_id)
+                                    id=static_cast<std::int32_t>(*gui_overlay_draw->host.player_id);
+                            }else for(const auto& remote:lan_remotes)
+                                if(remote.peer==client&&remote.key&&!remote.gone&&remote.figure)
+                                    id=static_cast<std::int32_t>(remote.figure->actor_id);
+                            if(!id)return;
+                            const auto agent=session.agent_for_client(client);
+                            std::optional<std::string> name;
+                            if(agent&&(*agent)[0xb70]){
+                                const auto first=agent->begin()+0x8ac;
+                                name=std::string(first,std::find(first,first+16,std::uint8_t{0}));
+                            }
+                            const auto slot=gui_overlay_draw->strings.resolve("PlayerName"+std::to_string(client));
+                            if(!slot)throw std::runtime_error("00135178: missing localized LAN player name slot");
+                            const auto text=hud_player_callout_name(name,*slot,true);
+                            hud_object->callout_set(*id,text,0,false,false,-1.0F,0.0F);
+                            std::cout<<"LAN AgentData full name refreshed for client "<<int(client)<<" actor "<<*id<<"\n";
+                        });
+                        std::cout<<"LAN AgentData "<<(update.inner[1]?"stats":"full")<<" from client "<<int(update.client)
+                            <<" (origin "<<update.origin<<", "<<update.inner.size()<<" bytes) applied at frame "<<frame
+                            <<" (received, no echo; ready "<<int((*session.agent_for_client(update.client))[0xb70])<<")\n";
+                    }
                     lan_backpacks(frame);
                     lan_npc_sections(frame);
                     lan_damages(frame);
@@ -14788,9 +14833,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             script_printed.calls=mission_host->calls().size();
                             print_script_presentation(*mission_host,script_printed,"the loadout done path");
                         }
-                        // 0012ee30(G): +b70 = 0 on the agent records *(G+1c8+4i) of the slots other than the local one;
-                        // solo has none (001314f0 returns 0 for slots 1..3).
-                        std::cout<<"Loadout done path (00168bb8): 0012ee30 cleared +b70 of 0 other agent records (solo)\n";
+                        // 0012ee30(G) follows StartLevel: clear every nonlocal
+                        // AgentData +b70, including an update received in loadout.
+                        if(frontend_app)frontend_app->session().clear_other_agent_readiness();
+                        std::cout<<"Loadout done path (00168bb8): 0012ee30 cleared nonlocal AgentData readiness\n";
                         if(combat_session){
                             const auto& snaps=combat_session->snapshot_crates();
                             std::cout<<"Loadout done path (00168bc0): 00256b40 crate snapshot list 004f7f48: "<<snaps.size()<<" INV: crate record(s)\n";
@@ -15600,7 +15646,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     gated.left_f70=pin.pad->left;gated.right_f60=pin.right_stick;
                     gated.r2_fa8=pin.pad->pressure_10;gated.l2_fac=pin.pad->pressure_11;
                     gated.cross_fa0=cross;gated.triangle_fa4=triangle;gated.square_f9c=square;gated.circle_f98=circle;
-                    gated.r1_f90=r1;gated.l1_f94=l1;gated.right_f88=dpad_right;gated.select_f80=select;gated.left_f84=dpad_left;gated.r3_fd8=r3;
+                    gated.r1_f90=r1;gated.l1_f94=l1;gated.right_f88=dpad_right;gated.down_f8c=dpad[1];gated.select_f80=select;gated.left_f84=dpad_left;gated.r3_fd8=r3;
                     PlayerPadGateBytes gb;
                     gb.input_00=0;                       // input +0: the constructor's 0 (0x00250500); no other store is known
                     gb.loadout_pending_4ffc29=gui_overlay_draw&&gui_overlay_draw->loadout_pending;   // 004ffc29 (--loadout-screen)
@@ -15646,6 +15692,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     combat_input.l1=gated.l1_f94!=0.0F;combat_input.dt=step_dt;
                     combat_input.now_ms=static_cast<std::uint32_t>(std::floor(elapsed*1000.0));
                     combat_input.dpad_right=gated.right_f88;
+                    combat_input.dpad_down=gated.down_f8c;
+                    combat_input.choose_menu_1c0=world_inputs[0].choose_menu_1c0;
+                    combat_input.hud_6a8=world_inputs[0].hud_6a8;
+                    combat_input.hud_6a9=world_inputs[0].hud_6a9;
                     combat_input.select=gated.select_f80;
                     combat_input.r3=gated.r3_fd8;
                     if(gui_overlay_draw){   // 0024b5d0's GuiGameScreen +d4 and the 200 ms hold's 0045ca20(1) (132hud)
@@ -19028,6 +19078,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(tf.rumble_large)std::cout<<", rumble large "<<*tf.rumble_large<<" (0026bde0)";
                     std::cout<<"\n";
                     }
+                }
+                // 00133420 tail: only an unpaused world update accumulates
+                // G+1f0; strictly over three seconds sends statistics once.
+                if(!(gui_overlay_draw&&gui_overlay_draw->world_paused())&&
+                   agent_update_timer_step(lan_agent_timer_1f0,step_dt,lan_net!=nullptr)){
+                    sync_agent_statistics();
+                    lan_net->send_agent_update(frontend_app->session().encode_local_agent_update(1,0));
+                    std::cout<<"LAN AgentData stats sent for client "<<lan_net->local_client_index()<<" at frame "<<frame<<"\n";
                 }
                 if(gui_overlay_draw)gui_overlay_draw->gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
                 material_animations.update(step_dt);

@@ -68,6 +68,7 @@
 #include <atomic>
 #include <cstdint>
 #include <exception>
+#include <span>
 #include <functional>
 #include <map>
 #include <memory>
@@ -306,6 +307,38 @@ public:
     std::vector<RemoteObjectiveActive> take_objective_actives();
     std::uint32_t objective_actives_sent() const { return objective_active_sent_; }
     std::uint32_t objective_actives_received() const { return objective_active_received_; }
+
+    // 0012eee0 / 002823e0: cNetAgentUpdateMsg's inner stream rides in the
+    // generic cNetMsg category-2 envelope. The caller owns the AgentData
+    // record, its AWARDS state, and the inner codec. A forwarded packet's
+    // declared client can differ from its immediate transport origin.
+    struct RemoteAgentUpdate {
+        std::uint16_t origin{};
+        std::uint8_t client{};
+        std::uint32_t timestamp{};
+        std::uint32_t target_key{};
+        std::vector<std::uint8_t> inner;
+    };
+    void send_agent_update(std::span<const std::uint8_t> inner);
+    std::vector<RemoteAgentUpdate> take_agent_updates();
+    std::uint32_t agent_updates_sent() const { return agent_updates_sent_; }
+    std::uint32_t agent_updates_received() const { return agent_updates_received_; }
+
+    // 0012fa60 / 0020e4c0: cEndLevelMsg is a direct category-2 DME packet.
+    // The native client message has flags 1 and is delivered locally only;
+    // the host's flags 5 broadcast it. Gameplay applies a received event
+    // after checking its own GameState (0020e350 permits 0x0f or 0x12).
+    struct RemoteEndLevel {
+        std::uint16_t origin{};
+        std::int8_t kind{};
+        std::uint32_t quit{};
+        std::uint32_t timestamp{};
+        std::uint32_t target_key{};
+    };
+    void send_end_level(std::uint8_t kind, bool quit);
+    std::vector<RemoteEndLevel> take_end_levels();
+    std::uint32_t end_levels_sent() const { return end_levels_sent_; }
+    std::uint32_t end_levels_received() const { return end_levels_received_; }
 
     // 132ln5h11 (research/NET_INLEVEL.md 4.21): the level's generators (cGenerator 004db680) in the network game.
     // register_generator gives a generator (its population id: the block's +0xc and +0x10, the key everywhere) a
@@ -713,6 +746,12 @@ private:
     std::vector<RemoteObjectiveActive> objective_actives_;
     std::uint32_t objective_active_sent_ = 0, objective_active_received_ = 0;
     std::uint32_t receive_objective_active(std::uint32_t data, bool active);
+    std::vector<RemoteAgentUpdate> agent_updates_;
+    std::uint32_t agent_updates_sent_ = 0, agent_updates_received_ = 0;
+    std::uint32_t receive_agent_update(std::uint32_t origin, std::uint32_t data);
+    std::vector<RemoteEndLevel> end_levels_;
+    std::uint32_t end_levels_sent_ = 0, end_levels_received_ = 0;
+    std::uint32_t receive_end_level(std::uint32_t origin, std::uint32_t data);
 };
 
 }  // namespace omega::lan

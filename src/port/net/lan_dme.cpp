@@ -388,7 +388,16 @@ void LanDme::game_message(LevelLoadMemory& m, std::uint16_t origin, const std::v
         const auto buffer = m.read(kRegBuffer);
         for (std::uint32_t k = pos; k < size; ++k) m.write(buffer + (k - pos), 1, bytes[2 + k]);
         ++messages_received_;
-        const auto consumed = library_(m, callback, {0, world_id, origin, buffer});
+        const auto previous_remaining = incoming_message_remaining_;
+        incoming_message_remaining_ = size - pos;
+        std::uint32_t consumed;
+        try {
+            consumed = library_(m, callback, {0, world_id, origin, buffer});
+        } catch (...) {
+            incoming_message_remaining_ = previous_remaining;
+            throw;
+        }
+        incoming_message_remaining_ = previous_remaining;
         if (static_cast<std::int32_t>(consumed) < 0) {
             // 00305a48 returns 7 for a refused message and the rest of it is dropped; 002def08 keeps that in
             // 0x005227e0[0], which 002e47b0 clears before it reads (world 0 never reports it). Such as an

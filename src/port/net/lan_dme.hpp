@@ -132,6 +132,10 @@ public:
     std::uint32_t refused_messages() const { return refused_; }
     std::uint32_t last_refused() const { return last_refused_; }
     std::uint16_t last_refused_origin() const { return last_refused_origin_; }
+    // Only while a registered game-message callback runs: bytes remaining
+    // after its category/type pair in the current DME frame. A standalone
+    // direct callback has no frame bound (0xffffffff).
+    std::uint32_t incoming_message_remaining() const { return incoming_message_remaining_; }
 
     // PORT-ONLY transport for cNetBackpackMsg's exact observable six-byte payload, plus the target's LAN key.
     // The native message class is still applied by CombatPlay; this channel replaces only NetMap routing and the
@@ -209,6 +213,7 @@ private:
     std::uint32_t refused_ = 0, last_refused_ = 0;
     std::uint16_t last_refused_origin_ = 0;
     std::vector<BackpackMessage> backpacks_;
+    std::uint32_t incoming_message_remaining_ = 0xffffffffU;
 };
 
 }  // namespace omega::lan

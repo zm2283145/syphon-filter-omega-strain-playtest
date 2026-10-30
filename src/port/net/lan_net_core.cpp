@@ -97,6 +97,11 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     net_registry_image(m);
     call(m, 0x165bc0, {});
     if (!m.read(dme::kMessagesReady, 1)) throw std::runtime_error("LanNetCore: 00165bc0 did not register the network messages");
+    // 004c3700's static constructor registered cNetAgentUpdateMsg in the
+    // generic cNetMsg callback vector. The verified boot image has ID 32 and
+    // the next ID 33; that static constructor is outside this network core.
+    m.write(0x4ea0a0, 4, 32);
+    m.write(0x5061d8, 4, 33);
     m.write(dme::kState, 1, 6);
     // 00227ed0: the objective manager constructor consumes category 0xF6's first key.
     // Its NetObj registration precedes every objective constructor on each console.
@@ -453,6 +458,158 @@ std::vector<LanNetCore::RemoteObjectiveActive> LanNetCore::take_objective_active
     require_objective_main_thread();
     std::vector<RemoteObjectiveActive> out;
     out.swap(objective_actives_);
+    return out;
+}
+
+void LanNetCore::send_agent_update(std::span<const std::uint8_t> inner) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN agent update during background load pump; defer until stop_load_pump");
+    if (inner.size() < 3 || inner.size() > 0x100 || inner[0] != transport_.local_index())
+        throw std::runtime_error("LAN agent update: invalid local AgentData stream");
+    auto& m = memory_;
+    const auto type = m.read(0x5061c8);  // 002824d0's DME registration, category 2
+    const auto id = m.read(0x4ea0a0);    // 004c3700's generic inner registration
+    if (!type || id != 32 || m.read(0x5061d8) != 33)
+        unhosted(0x12eee0, "the AgentUpdate message registrations are unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x200;
+    const auto packet = sp_ + 0x20;
+    try {
+        // 0012eee0 chooses NetObj key 0, flags 4 (all peers). 002823e0
+        // writes Event_PackHeader, a 16-bit body length and the registered
+        // inner ID, then 00138820 writes the already encoded inner stream.
+        // Synthetic bytes are fully defined; the original stack message has
+        // uninitialised fields that are not serialized by this path.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);  // transport +0x18 = 0
+        m.write(packet + 4, 4, 0);
+        m.write(packet + 8, 2, static_cast<std::uint32_t>(inner.size()));
+        m.write(packet + 0xa, 2, id);
+        for (std::size_t i = 0; i < inner.size(); ++i) m.write(packet + 0xc + static_cast<std::uint32_t>(i), 1, inner[i]);
+        // Full updates set +0x1c=0x40 (ordered). A stats-only message leaves
+        // that ctor field zero; 003fad50 still uses the native send path.
+        if (call(m, 0x3fad50, {type, static_cast<std::uint32_t>(inner.size() + 0xc), packet,
+                               0xffffffffU, inner[1] ? 0U : 0x40U})) ++agent_updates_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::uint32_t LanNetCore::receive_agent_update(std::uint32_t origin, std::uint32_t data) {
+    auto& m = memory_;
+    const auto available = dme_->incoming_message_remaining();
+    if (available != 0xffffffffU && available < 0xc)
+        unhosted(0x2822f0, "a truncated generic cNetMsg header");
+    const auto len = m.read(data + 8, 2);
+    if (len > 0x100) unhosted(0x2822f0, "an oversized generic cNetMsg body");
+    const auto consumed = len + 0xc;
+    if (available != 0xffffffffU && consumed > available)
+        unhosted(0x2822f0, "a truncated generic cNetMsg body");
+    // 002822f0's guard runs on every callback; before in-level it consumes
+    // the packet but does not dispatch the registered inner receiver.
+    m.write(dme::kBusy, 1, 1);
+    try {
+        if (m.read(dme::kInLevel, 1)) {
+            const auto id = static_cast<std::int16_t>(m.read(data + 0xa, 2));
+            if (id != static_cast<std::int32_t>(m.read(0x4ea0a0)) || id < 0 ||
+                static_cast<std::uint32_t>(id) >= m.read(0x5061d8))
+                unhosted(0x2822f0, "a generic cNetMsg inner ID other than AgentUpdate");
+            if (len < 3 || origin >= 4) unhosted(0x12f0d0, "an invalid AgentUpdate stream or origin");
+            RemoteAgentUpdate update;
+            update.origin = static_cast<std::uint16_t>(origin);
+            update.timestamp = m.read(data) >> 2;
+            update.target_key = m.read(data + 4);
+            update.inner.reserve(len);
+            for (std::uint32_t i = 0; i < len; ++i)
+                update.inner.push_back(static_cast<std::uint8_t>(m.read(data + 0xc + i, 1)));
+            update.client = update.inner[0];
+            if (update.client >= 4) unhosted(0x12f0d0, "an AgentUpdate client outside four slots");
+            // 0012f0d0 indexes G+0x1c8 with the declared client byte. It does
+            // not require that byte to equal the immediate DME origin, since
+            // a host may forward a client's update.
+            agent_updates_.push_back(std::move(update));
+            ++agent_updates_received_;
+        }
+    } catch (...) {
+        m.write(dme::kBusy, 1, 0);
+        throw;
+    }
+    m.write(dme::kBusy, 1, 0);
+    return consumed;
+}
+
+std::vector<LanNetCore::RemoteAgentUpdate> LanNetCore::take_agent_updates() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN agent update access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteAgentUpdate> out;
+    out.swap(agent_updates_);
+    return out;
+}
+
+void LanNetCore::send_end_level(std::uint8_t kind, bool quit) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN ENDLEVEL send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    // 0012fa60 gives clients flags 1 (local delivery only) and hosts the
+    // constructor's flags 5 (local delivery plus broadcast). The gameplay
+    // owner has already applied the local delivery before this transport call.
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1) || !transport_.is_host()) return;
+    const auto type = m.read(0x4f53a0);  // 002e9e50's category-2 registration
+    if (!type) unhosted(0x12fa60, "the ENDLEVEL DME registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto msg = sp_ + 0x20, type_out = sp_ + 0x60, packet = sp_ + 0x70;
+    try {
+        call(m, 0x3c9e30, {msg, 0x4f5398});
+        m.write(msg, 4, 0x4dadb0);
+        m.write(msg + 0x24, 1, kind);
+        m.write(msg + 0x28, 4, quit ? 1U : 0U);
+        // The native +9..+11 stack bytes are unspecified and ignored by
+        // 0020e350. Give synthetic packets deterministic zero padding.
+        m.write(packet + 9, 1, 0);
+        m.write(packet + 0xa, 2, 0);
+        if (call(m, 0x20e4c0, {msg, 0, type_out, 0, 0, 16, packet}) != 16 || m.read(type_out) != type)
+            unhosted(0x20e4c0, "ENDLEVEL packet packing or registration failed");
+        if (call(m, 0x3fad50, {type, 16, packet, 0xffffffffU, m.read(msg + 0x1c)})) ++end_levels_sent_;
+        m.write(msg, 4, 0x4dadb0);
+        call(m, 0x3c9d60, {msg, 0});
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::uint32_t LanNetCore::receive_end_level(std::uint32_t origin, std::uint32_t data) {
+    auto& m = memory_;
+    const auto available = dme_->incoming_message_remaining();
+    if (available != 0xffffffffU && available < 16)
+        unhosted(0x20e350, "a truncated ENDLEVEL packet");
+    m.write(dme::kBusy, 1, 1);
+    try {
+        // 0020e350 itself also checks GameState 0x0f/0x12 before calling
+        // cGameSystem_Restart. The simulation owns that state and applies
+        // the gate when draining; the transport never echoes on receive.
+        if (m.read(dme::kInLevel, 1)) {
+            end_levels_.push_back({static_cast<std::uint16_t>(origin),
+                                   static_cast<std::int8_t>(m.read(data + 8, 1)),
+                                   m.read(data + 0xc), m.read(data) >> 2, m.read(data + 4)});
+            ++end_levels_received_;
+        }
+    } catch (...) {
+        m.write(dme::kBusy, 1, 0);
+        throw;
+    }
+    m.write(dme::kBusy, 1, 0);
+    return 16;
+}
+
+std::vector<LanNetCore::RemoteEndLevel> LanNetCore::take_end_levels() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN ENDLEVEL access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteEndLevel> out;
+    out.swap(end_levels_);
     return out;
 }
 
@@ -1629,6 +1786,17 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         m.write(arg(2), 4, m.read(0x5721a0));
         return 8;
     }
+    case 0x20e4c0: {  // cEndLevelMsg_Pack: direct 16-byte category-2 packet
+        if (arg(5) < 16 || !arg(6)) return 0xffffffffU;
+        const auto transport = static_cast<std::int32_t>(m.read(arg(0) + 0x18));
+        m.write(arg(6), 4, call(m, 0x42b1a0, {0}) << 2 |
+                                 (transport < 4 ? static_cast<std::uint32_t>(transport) & 3U : 3U));
+        m.write(arg(6) + 4, 4, arg(1));
+        m.write(arg(6) + 8, 1, m.read(arg(0) + 0x24, 1));
+        m.write(arg(6) + 0xc, 4, m.read(arg(0) + 0x28));
+        if (arg(2)) m.write(arg(2), 4, m.read(0x4f53a0));
+        return arg(2) ? 16U : 0xffffffffU;
+    }
     case 0x2d7580: {  // cNetObjectiveMsg_Pack: header, action, stage/value, and 16-byte name
         if (arg(5) < 0x24 || !arg(6)) return 0xffffffffU;
         // Event_PackHeader (003c9ca0): clock/transport word and target NetObj key.
@@ -1656,6 +1824,8 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         return move_message_receive_003e4430(m, *this, arg(3), f.caller);
     }
     case 0x2d7620: return receive_objective_message(arg(3));
+    case 0x2822f0: return receive_agent_update(arg(2), arg(3));
+    case 0x20e350: return receive_end_level(arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);
     case 0x429190: return receive_objective_active(arg(3), false);

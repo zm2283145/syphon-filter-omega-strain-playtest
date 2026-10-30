@@ -1,5 +1,6 @@
 #include "frontend_session.hpp"
 
+#include "agent_network_receive.hpp"
 #include "agent_parts.hpp"
 #include "appearance_parts.hpp"
 #include "movie_subtitle_overlay.hpp"
@@ -31,6 +32,11 @@ bool iequal(std::string_view a, std::string_view b) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
                return std::toupper(static_cast<unsigned char>(x)) == std::toupper(static_cast<unsigned char>(y));
            });
+}
+
+std::uint32_t agent_word(std::span<const std::uint8_t, agent_record_size> agent, std::size_t at) {
+    return std::uint32_t(agent[at]) | std::uint32_t(agent[at + 1]) << 8 |
+           std::uint32_t(agent[at + 2]) << 16 | std::uint32_t(agent[at + 3]) << 24;
 }
 
 // 0048c148: the front-end music names 002c9af0 sends (entries 3.. are null).
@@ -351,11 +357,81 @@ bool FrontendSession::fn_2c7cb0() { return loading_ready(); }
 
 void FrontendSession::fn_136710() {
     // 00136710: once (byte 004e9ff0): 00147400, 0040e4c0, the AWARDS script
-    // 003e1b60 and 00336700 for the agent.
+    // 003e1b60 and 00336700 for all four AgentData records. A later call
+    // only changes the local pointer's slot; set_local_agent_client_index
+    // performs that swap when the network supplies a different client id.
     if (constructed_) return;
-    constructed_ = true;
     record("00147400 / 0040e4c0 / 003e1b60 boot init (the award registries are loaded by the host)");
     construct_agent(AgentRecord(agent_), agent_state_, services_.awards->registries);
+    for (std::size_t i = 0; i < other_agents_.size(); ++i) {
+        if (i == local_agent_client_index_) continue;
+        auto other = std::make_unique<OtherAgent>();
+        construct_agent(AgentRecord(other->record), other->state, services_.awards->registries);
+        other_agents_[i] = std::move(other);
+    }
+    constructed_ = true;
+}
+
+void FrontendSession::set_local_agent_client_index(std::uint8_t client) {
+    if (client >= other_agents_.size()) throw std::runtime_error("Front end: local AgentData client outside four slots");
+    if (client == local_agent_client_index_) return;
+    if (constructed_) {
+        if (other_agents_[local_agent_client_index_] || !other_agents_[client])
+            throw std::runtime_error("Front end: AgentData slot mapping is incomplete");
+        std::swap(other_agents_[local_agent_client_index_], other_agents_[client]);
+    }
+    local_agent_client_index_ = client;
+}
+
+std::optional<std::span<const std::uint8_t, agent_record_size>>
+FrontendSession::agent_for_client(std::uint8_t client) const {
+    if (client >= other_agents_.size()) throw std::runtime_error("Front end: AgentData client outside four slots");
+    if (!constructed_) return std::nullopt;
+    if (client == local_agent_client_index_) return std::span<const std::uint8_t, agent_record_size>(agent_);
+    if (!other_agents_[client]) return std::nullopt;
+    return std::span<const std::uint8_t, agent_record_size>(other_agents_[client]->record);
+}
+
+std::vector<std::uint8_t> FrontendSession::encode_local_agent_update(std::uint8_t stats_only,
+                                                                       std::uint8_t awards) const {
+    if (!constructed_) throw std::runtime_error("Front end: AgentData not constructed before network encode");
+    return encode_agent_network_update(local_agent_client_index_, stats_only, awards, agent_, agent_state_);
+}
+
+void FrontendSession::receive_agent_update(std::span<const std::uint8_t> bytes,
+                                           const std::function<void(std::uint8_t)>& refresh_full_agent) {
+    if (!constructed_) throw std::runtime_error("Front end: AgentData not constructed before network receive");
+    if (bytes.empty() || bytes[0] >= other_agents_.size())
+        throw std::runtime_error("Front end: network AgentData client outside four slots");
+    const std::uint8_t client = bytes[0];
+    if (client != local_agent_client_index_ && !other_agents_[client])
+        throw std::runtime_error("Front end: network AgentData slot is unavailable");
+    auto& record = client == local_agent_client_index_ ? agent_ : other_agents_[client]->record;
+    auto& state = client == local_agent_client_index_ ? agent_state_ : other_agents_[client]->state;
+    const auto update = decode_agent_network_update(bytes, agent_word(record, 0xc8));
+    const auto host = profile_refill_host(*services_.awards, rank_value);
+    apply_agent_network_update(update, AgentRecord(record), state, services_.awards->tables, host);
+    if (!update.stats_only) {
+        if (refresh_full_agent) refresh_full_agent(client);
+        // 0012f0d0 calls 0012f290(source) then 0012f280(local) for id 0.
+        // Both are raw +d4 loads/stores; preserve NaN and negative-zero bits.
+        if (client == 0 && local_agent_client_index_ != 0)
+            std::copy_n(record.begin() + 0xd4, 4, agent_.begin() + 0xd4);
+    }
+}
+
+void FrontendSession::clear_other_agent_readiness() {
+    if (!constructed_) return;
+    for (std::size_t i = 0; i < other_agents_.size(); ++i)
+        if (i != local_agent_client_index_ && other_agents_[i]) other_agents_[i]->record[0xb70] = 0;
+}
+
+bool FrontendSession::all_remote_agent_data_received(const std::array<bool, 4>& present_players) const {
+    if (!constructed_) return true;
+    for (std::size_t i = 0; i < other_agents_.size(); ++i)
+        if (i != local_agent_client_index_ && present_players[i] && other_agents_[i] &&
+            other_agents_[i]->record[0xb70] == 0) return false;
+    return true;
 }
 
 void FrontendSession::fn_2cb8c0(std::uint32_t a1) {
@@ -939,12 +1015,12 @@ void FrontendSession::app_2c81d0() {
 // FolderAgentCard) runs every command to completion inside its call, so none is pending here.
 void FrontendSession::card_sync() { record("0040d5d0 card sync (no card command pending)"); }
 
-// 0012ee30(004ffb50): for player slots 0..3 other than the local one (0 unless byte 005721c8, a network game,
-// is set), 001314f0(G, i) and, for a profile, +b70 = 0. The front end has one agent, in slot 0 (static inference:
-// the slots 1..3 are filled only by a network game's players), so no byte changes.
+// 0012ee30(004ffb50): clear +b70 on all existing nonlocal AgentData records,
+// including slots whose player is absent. The local slot is selected from
+// 00136710's pointer swap; this does not change the GUI multiplayer byte.
 void FrontendSession::profiles_clear_b70() {
-    if (rt_.g.b_21c8) unreachable(0x12ee5c, "0012ee30 in a network game (the local slot 00494178)");
-    record("0012ee30 other players' +b70: no other profile");
+    clear_other_agent_readiness();
+    record("0012ee30 other players' +b70 cleared");
 }
 
 void FrontendSession::level_progress(std::int32_t profile, std::int32_t level, std::int32_t a, std::int32_t b) {

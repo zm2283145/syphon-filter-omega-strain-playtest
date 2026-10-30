@@ -252,7 +252,23 @@ bool WeaponBackpackOps::pickup_ammunition(WeaponInventoryOps& inventory){
     std::optional<std::int32_t> total;   // the stack word 0x154(sp) of 00255290
     for(const std::int32_t item:list(inventory.inventory())){
         if(const auto a=ammunition(item))total=a->total;
-        else if(!total)fail("00255290 reads an uninitialised total (no backpack entry for a listed item)");
+        else if(bp_.byte(0x2f1)!=0&&bp_.byte(0x134)!=0&&
+                bp_.byte(0x64)==static_cast<std::uint8_t>(slot_of(item))&&
+                bp_.byte(0x64)<inventory.inventory().slots.size()&&
+                inventory.inventory().current_84==bp_.byte(0x64)&&
+                bp_.word(WeaponBackpack::slot(0)+0xcc)==0&&
+                bp_.word(WeaponBackpack::slot(1)+0xcc)==0&&
+                bp_.word(WeaponBackpack::slot(2)+0xcc)==0&&
+                inventory.inventory().slots[bp_.byte(0x64)].item==item){
+            // 00255cf0's held-slot marker is listed by 002553e0 before
+            // Cross puts a weapon in the backpack. 00255500 writes no ammo
+            // total for it; 00255290 would read an unwritten stack word.
+            // Only the fresh drop menu's currently held item is safe to
+            // ignore. The retail routine still has an undefined read here;
+            // its synthetic rows with another held slot or real bag contents
+            // stay undefined rather than being treated as an empty drop.
+            continue;
+        }else if(!total)fail("00255290 reads an uninitialised total (no backpack entry for a listed item)");
         const std::int32_t added=inventory.add_ammunition(item,*total);
         if(added==0)continue;
         event({WeaponBackpackEvent::Kind::display_name,static_cast<std::uint32_t>(db_.index(item))});
