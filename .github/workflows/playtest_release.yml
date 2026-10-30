@@ -1,0 +1,120 @@
+# Copied to the play-test repository by publish_playtest.ps1. The Build workflow
+# remains read-only; this separate workflow receives write access only after
+# all four build jobs succeed on this repository's main branch.
+name: Publish playtest prerelease
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == 'main' &&
+          (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: playtest-release-${{ github.event.workflow_run.id }}
+      cancel-in-progress: false
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id }}
+      SOURCE_NUMBER: ${{ github.event.workflow_run.run_number }}
+      SOURCE_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # Exact names and run ID bind every payload to the successful Build.
+      # Do not check out or execute anything from a downloaded artifact.
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: OmegaStrain-windows-${{ github.event.workflow_run.head_sha }}
+          path: ${{ runner.temp }}/playtest-artifacts/windows
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Download Vita GXM package
+        uses: actions/download-artifact@v4
+        with:
+          name: omega_vita_gxm-${{ github.event.workflow_run.head_sha }}
+          path: ${{ runner.temp }}/playtest-artifacts/vita-gxm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Download PS5 folder title
+        uses: actions/download-artifact@v4
+        with:
+          name: omega_ps5-PPSA99720-${{ github.event.workflow_run.head_sha }}
+          path: ${{ runner.temp }}/playtest-artifacts/ps5
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - name: Package exactly three release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACTS="$RUNNER_TEMP/playtest-artifacts"
+          RELEASE_DIR="$RUNNER_TEMP/playtest-release"
+          test -s "$ARTIFACTS/windows/OmegaStrain.exe"
+          test -s "$ARTIFACTS/vita-gxm/omega_vita.vpk"
+          test -s "$ARTIFACTS/ps5/eboot.bin"
+          test -s "$ARTIFACTS/ps5/sce_module/libc.prx"
+          mkdir -p "$RELEASE_DIR/OmegaStrain" "$RELEASE_DIR/PPSA99720"
+          cp -a "$ARTIFACTS/windows/." "$RELEASE_DIR/OmegaStrain/"
+          cp -a "$ARTIFACTS/ps5/." "$RELEASE_DIR/PPSA99720/"
+          cp "$ARTIFACTS/vita-gxm/omega_vita.vpk" "$RELEASE_DIR/OmegaStrain-vita-GXM.vpk"
+          (cd "$RELEASE_DIR" && zip -q -r OmegaStrain-windows.zip OmegaStrain)
+          (cd "$RELEASE_DIR" && zip -q -r OmegaStrain-ps5-PPSA99720.zip PPSA99720)
+          test -s "$RELEASE_DIR/OmegaStrain-windows.zip"
+          test -s "$RELEASE_DIR/OmegaStrain-vita-GXM.vpk"
+          test -s "$RELEASE_DIR/OmegaStrain-ps5-PPSA99720.zip"
+      - name: Create, upload, then publish prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/playtest-release"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          [[ "$SOURCE_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          short="${SOURCE_SHA:0:8}"
+          tag="playtest-${SOURCE_NUMBER}-${short}"
+          ref=$(gh api "repos/$SOURCE_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)
+          if [[ -n "$ref" && "$ref" != "$SOURCE_SHA" ]]; then
+            echo "Tag $tag points to a different source commit" >&2
+            exit 1
+          fi
+          release=$(gh api "repos/$SOURCE_REPO/releases/tags/$tag" 2>/dev/null || true)
+          if [[ -n "$release" ]]; then
+            target=$(jq -r '.target_commitish' <<< "$release")
+            draft=$(jq -r '.draft' <<< "$release")
+            [[ "$target" == "$SOURCE_SHA" ]] || { echo "Release $tag targets another commit" >&2; exit 1; }
+            if [[ "$draft" == false ]]; then
+              echo "Published release $tag already exists; leaving it untouched"
+              exit 0
+            fi
+          else
+            cat > "$RELEASE_DIR/notes.md" <<EOF
+          Playtest build from source commit [\`$SOURCE_SHA\`](https://github.com/$SOURCE_REPO/commit/$SOURCE_SHA), after successful [Build #$SOURCE_NUMBER](https://github.com/$SOURCE_REPO/actions/runs/$SOURCE_RUN).
+
+          You need your own 1:1 image of the USA disc (SCUS-97264). No game data or extracted game assets are included.
+
+          Downloads: Windows folder zip, PS Vita GXM VPK (SFOS00004), and PS5 folder title zip (PPSA99720). The Vita vitaGL build is checked by CI but is not published in this prerelease.
+          EOF
+            gh release create "$tag" --repo "$SOURCE_REPO" --target "$SOURCE_SHA" \
+              --title "Playtest #$SOURCE_NUMBER ($short)" --notes-file "$RELEASE_DIR/notes.md" \
+              --draft --prerelease --latest=false
+          fi
+          # A failed upload leaves only a draft. Reruns may repair that draft;
+          # a published release is never overwritten.
+          gh release upload "$tag" --repo "$SOURCE_REPO" --clobber \
+            "$RELEASE_DIR/OmegaStrain-windows.zip" \
+            "$RELEASE_DIR/OmegaStrain-vita-GXM.vpk" \
+            "$RELEASE_DIR/OmegaStrain-ps5-PPSA99720.zip"
+          gh release edit "$tag" --repo "$SOURCE_REPO" --draft=false --prerelease --latest=false

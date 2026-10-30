@@ -10,6 +10,20 @@ time and never modifies it. The required size and SHA-256 are in [docs/REQUIRED_
 This repository is the play-test snapshot of the port's source, updated from the development repository as work
 lands. Each update's commit message names the development commit it was taken from.
 
+## Downloading a playtest build
+
+After a successful build of `main`, download the newest **prerelease** from this repository's
+[Releases page](https://github.com/zm2283145/syphon-filter-omega-strain-playtest/releases). It contains exactly three files:
+
+| File | Use |
+| --- | --- |
+| `OmegaStrain-windows.zip` | Extract the `OmegaStrain` folder, then start `OmegaStrain.exe` inside it. |
+| `OmegaStrain-vita-GXM.vpk` | Install the GXM renderer build (title SFOS00004) with VitaShell. |
+| `OmegaStrain-ps5-PPSA99720.zip` | Extract the `PPSA99720` folder title for PS5 homebrew. |
+
+The Vita vitaGL build still has to pass CI but is not a prerelease download. Each prerelease links its source commit
+and successful Build run. Bring your own 1:1 USA disc image (SCUS-97264); no game data is included.
+
 ## What works
 
 | Area | State |
@@ -41,11 +55,11 @@ lands. Each update's commit message names the development commit it was taken fr
 
 You need 64-bit Windows 10 or 11, a Direct3D 11 GPU and your disc image.
 
-1. Build the game (below), then make a play folder:
+1. Download and extract `OmegaStrain-windows.zip` from a prerelease, or build the game (below) and make a play folder:
    ```powershell
    .\tools\package_release.ps1 -Out C:\Games\OmegaStrain
    ```
-2. Start `C:\Games\OmegaStrain\OmegaStrain.exe`. It finds your disc image (or asks for it), verifies it once,
+2. Start `OmegaStrain.exe` in your extracted or packaged play folder. It finds your disc image (or asks for it), verifies it once,
    derives a few tables from it and starts the game.
 
 Controls, settings (`local\port_settings.txt`), cheats, CPU partners, mods, saves and online hosting are in the player
@@ -62,7 +76,7 @@ You need a Vita (or PS TV) with HENkaku / Enso, VitaShell, and `libshacccg.suprx
 shader compiler: extract it from your own firmware, for example with the ShaRKBR33D homebrew (other vitaGL homebrew
 needs it too).
 
-1. Build `omega_vita.vpk` (below) and install it with VitaShell.
+1. Download `OmegaStrain-vita-GXM.vpk` from a prerelease, or build `omega_vita.vpk` (below), and install it with VitaShell.
 2. Copy your disc image to `ux0:data/omega_strain/omega_strain.iso`.
 3. Start **Omega Strain**. The first start compiles the shaders (with a progress bar) and prepares data from the
    disc, which can take a minute or more on black screens. Later starts are quicker.
@@ -125,7 +139,9 @@ or on Linux `bash tools/ps5/fetch_toolchain.sh`, `cmake -S . -B local/build-ps5 
 ### Automatic builds
 
 Every push builds the Windows package, both Vita packages and the PS5 folder title (with the pinned toolchain above)
-on GitHub Actions (`.github/workflows/build.yml`; the files are under each run's **Artifacts**).
+on GitHub Actions (`.github/workflows/build.yml`). A successful build of `main` publishes a prerelease with the
+Windows zip, Vita GXM VPK and PS5 zip. All four build artifacts remain available under the run's **Artifacts** for
+30 days; vitaGL is available there, but not in the prerelease.
 
 ## Reporting problems
 
