@@ -32,6 +32,14 @@ Value Host::create_group(const std::vector<Value>&) {
     throw std::runtime_error("Script groups are not hosted");
 }
 
+Word Host::group_size(const Value&) {
+    throw std::runtime_error("Script groups are not hosted");
+}
+
+Value Host::group_entry(const Value&, std::int32_t) {
+    throw std::runtime_error("Script groups are not hosted");
+}
+
 RuntimeObjectHandle Host::create_world_object(Word) {
     throw std::runtime_error("World object creation (0040c240) is not hosted");
 }
@@ -791,6 +799,34 @@ std::optional<Value> Vm::execute(const Function& function, const std::vector<Val
                 std::vector<Value> members;
                 for (std::int32_t i = 0; i < count; ++i) members.push_back(pop(stack));
                 stack.push_back(host_.create_group(members));
+                break;
+            }
+            case 64: {
+                // 003de1d0 (checkpoint 132ms3c): the function (003df3f0), then pop the
+                // group's slot address and read the group through it, then the
+                // argument count and that many arguments, top first. The size (+4)
+                // is read once; per index, entry 003d9990(group, i) goes first and
+                // 003e0ab0 runs the function (its native null skip is the host's,
+                // as for opcode 18). Nothing is pushed.
+                const auto index = indexed(immediate, script_.functions.size());
+                const auto slot = pop(stack);
+                const auto* reference = std::get_if<Address>(&slot);
+                if (!reference) throw std::runtime_error("Group call requires the group's address");
+                const Value group = dereference(*reference);
+                const auto count = word_signed(number(pop(stack)));
+                std::vector<Value> values{Word{0}};
+                for (std::int32_t i = 0; i < count; ++i) values.push_back(pop(stack));
+                const auto size = word_signed(host_.group_size(group));
+                struct CallSiteScope {
+                    std::optional<CallSite>& site;
+                    std::optional<CallSite> saved;
+                    ~CallSiteScope() { site = saved; }
+                } call_site_scope{call_site_, call_site_};
+                call_site_ = CallSite{&function, instruction};
+                for (std::int32_t i = 0; i < size; ++i) {
+                    values[0] = host_.group_entry(group, i);
+                    invoke_index(index, values);
+                }
                 break;
             }
             case 43: case 44: {

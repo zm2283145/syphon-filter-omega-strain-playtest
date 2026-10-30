@@ -613,7 +613,7 @@ std::vector<ScriptStep> read_script(const fs::path& path){
 //                                       raised the headshot popup (00249c78: category 2, live object)
 //   seek X Y MASK [N]                   walk toward (X, Y) until the found-ledge prompt has a bit of
 //                                       MASK (decimal), then Triangle for N frames (default 1)
-//   hold N x y p10 p11 rx ry cross triangle square r1 l1 [circle [up down left right [select]]]   raw input for N frames
+//   hold N x y p10 p11 rx ry cross triangle square r1 l1 [circle [up down left right [select [r3]]]]   raw input for N frames
 //   wait N                              no input for N frames
 //   waitcommand N                       (checkpoint 132pc1) no input until the CPU partner's command (coop_partner.hpp
 //                                       CoopCommandRule) reports its action over, at most N frames
@@ -685,6 +685,7 @@ std::vector<ScriptStep> read_script(const fs::path& path){
 //                                       laser's free end) comes within R of (X, Y) horizontally while approaching it
 //                                       (closer than the previous frame); the run stops after N frames
 //   hold's optional 18th value presses Select (checkpoint 132uk6).
+//   Its optional 19th value presses R3 (manual reload through the normal pad path).
 //   npcwatch R PERIOD                   (checkpoint 132ms8d) from now on, every PERIOD frames (0: off), print each
 //                                       present --combat actor within R (horizontal) with its position, floor-root heading
 //                                       (degrees, as the player's) and life state (takes no frame)
@@ -753,7 +754,7 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
         if((!c.generators.empty()||c.cover||c.up!=0||c.spacing||c.kill_hold!=300||c.ids_done||c.lock_only||c.level_only||c.anchor||c.generator_range>0||c.until_active>0||c.near_first>0)&&c.op!="aim"&&c.op!="hunt")throw std::runtime_error("Pilot command arguments: "+line);
         if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch"&&c.op!="strike"&&c.op!="waitbeam"&&c.op!="waitbeamrise"&&c.op!="waitbeamoff"&&c.op!="waitbeamend")throw std::runtime_error("Unknown pilot command: "+line);
         if(c.op=="clear"){c.cover=20;if(c.args.size()<4||std::any_of(c.args.begin()+4,c.args.end(),[](float v){return v>=0;}))throw std::runtime_error("Pilot command arguments: "+line);}
-        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
+        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18&&c.args.size()!=19)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
             (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6)||(c.op=="npcwatch"&&(c.args.size()!=2||c.args[1]<0))||(c.op=="strike"&&c.args.size()!=3&&c.args.size()!=4))
             throw std::runtime_error("Pilot command arguments: "+line);
         out.push_back(std::move(c));
@@ -764,18 +765,19 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
 float pilot_quantize(float v){char buffer[32];std::snprintf(buffer,sizeof buffer,"%.2f",double(v));std::istringstream in(buffer);float out=0;in>>out;return out;}
 struct PilotRecorder{
     std::ofstream out;std::string row;unsigned count=0;
-    void add(const std::array<float,18>& v){
+    void add(const std::array<float,19>& v){
         char buffer[200];std::snprintf(buffer,sizeof buffer,"%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
             double(v[1]),double(v[2]),double(v[3]),double(v[4]),double(v[5]),double(v[6]),double(v[7]),double(v[8]),double(v[9]),double(v[10]),double(v[11]));
         // Circle as a 13th column only when it or the D-pad is pressed, the D-pad (14th..17th) only when
         // pressed, so recordings without them are unchanged. (Checkpoint 132ms4) Select as the script's PAD
-        // column 0x100 (18th), with Circle and the D-pad written before it.
-        const bool select=v[17]!=0.0F;
-        const bool dpad=v[13]!=0.0F||v[14]!=0.0F||v[15]!=0.0F||v[16]!=0.0F||select;
+        // column (18th), with Circle and the D-pad written before it. Preserve
+        // R3 too, so a pilot's manual reload survives a recorded-input replay.
+        const auto pad=(v[17]!=0.0F?ds2::select:0U)|(v[18]!=0.0F?ds2::r3:0U);
+        const bool dpad=v[13]!=0.0F||v[14]!=0.0F||v[15]!=0.0F||v[16]!=0.0F||pad!=0;
         if(v[12]!=0.0F||dpad){const auto n=std::strlen(buffer);std::snprintf(buffer+n,sizeof buffer-n," %.2f",double(v[12]));}
         if(dpad){const auto n=std::strlen(buffer);
             std::snprintf(buffer+n,sizeof buffer-n," %.2f %.2f %.2f %.2f",double(v[13]),double(v[14]),double(v[15]),double(v[16]));}
-        if(select){const auto n=std::strlen(buffer);std::snprintf(buffer+n,sizeof buffer-n," 0x100");}
+        if(pad){const auto n=std::strlen(buffer);std::snprintf(buffer+n,sizeof buffer-n," 0x%x",static_cast<unsigned>(pad));}
         if(count&&row==buffer){++count;return;}
         flush();row=buffer;count=1;
     }
@@ -14214,7 +14216,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                     cross=c.args[7];triangle=c.args[8];square=c.args[9];r1=c.args[10];l1=c.args[11];
                                     circle=c.args.size()>12?c.args[12]:0.0F;
                                     if(c.args.size()>13)dpad={c.args[13],c.args[14],c.args[15],c.args[16]};
-                                    if(c.args.size()>17&&c.args[17]!=0)select=1;}
+                                    if(c.args.size()>17&&c.args[17]!=0)select=1;
+                                    if(c.args.size()>18&&c.args[18]!=0)r3=1;}
                                 ++pilot_frames;done=true;
                             }else if(c.op=="face"){
                                 // A sideways stick while still walking curves the walk; settle first.
@@ -14608,7 +14611,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         if(pilot_index>=pilot.size()&&!done){std::cout<<"Pilot: commands finished at frame "<<frame<<"\n";running=false;break;}
                         x=pilot_quantize(x);y=pilot_quantize(y);
                     }
-                    if(recorder.out.is_open())recorder.add({0,x,y,p10,p11,rx,ry,cross,triangle,square,r1,l1,circle,dpad[0],dpad[1],dpad[2],dpad[3],select});
+                    if(recorder.out.is_open())recorder.add({0,x,y,p10,p11,rx,ry,cross,triangle,square,r1,l1,circle,dpad[0],dpad[1],dpad[2],dpad[3],select,r3});
                 }else{
                     // Checkpoint 132win6: the play bindings (input_bindings.hpp; the defaults are the earlier keys: W A S D /
                     // arrows the left stick, Shift walk, T F G H the right stick, Space Cross, R Triangle, J Square, K Circle,

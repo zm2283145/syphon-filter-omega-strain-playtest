@@ -224,6 +224,8 @@ private:
     std::optional<Address> link_variable(const Script& script, const Variable& variable) override;
     bool provides(const Script& script, const Function& function) override;
     Value create_group(const std::vector<Value>& members) override;
+    Word group_size(const Value& group) override;
+    Value group_entry(const Value& group, std::int32_t index) override;
     ScheduleCapture schedule_capture(const Script& script, Word type) override;
     std::optional<Address> external_member(const ScriptType& type, Word member, const Value& object) override;
     bool script_cast(const ScriptType& type, const Value& object) override;

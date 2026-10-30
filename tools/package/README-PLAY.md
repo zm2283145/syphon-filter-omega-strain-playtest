@@ -96,13 +96,23 @@ is drawn at the display's real resolution (no blur); its default size grows with
 with another scale resizes it. **F3** (in the menus or a level) shows or hides the frame-time
 overlay (`frame_overlay_key`; a key bound to a button with `bind.*` would do both).
 
+In windowed mode, the title bar has the standard Windows **Minimize**, **Maximize / Restore** and **Close** buttons.
+You can also resize the window by dragging its borders. Minimize, maximize, Win+D and switching to another window
+do not pause the application.
+
+**Pause the application:** press **Pause/Break** to freeze it, then press it again to resume. You can also open the
+window menu with **Alt+Space** or by right-clicking the title bar and choose **Pause application / Resume application**.
+The title shows **[PAUSED]** while this pause is active. This stops the application, including game advancement and
+audio, independently of the game's **P / Start** menu. Restoring focus or the window does not cancel your pause.
+
 **Mouse look** (port-only): while a level is playing in the focused window, the cursor is hidden and kept inside the
 window, and moving the mouse moves the right stick. The cursor is released in menus, while paused, at the level end
 and when the window loses focus.
 
 **In the background** (port-only): the PS2 game has no pause on focus loss, so the game keeps running while you use
 another window, but its sound is silenced (`background_audio=1` keeps it) and the keyboard, mouse and controller are
-ignored until you click back in. Pause first (P / Start) if you step away.
+ignored until you click back in. Use **Pause/Break** or **Pause application** first if you want the whole application
+to stop while you step away.
 
 **Controllers** (port-only): XInput pads, DualShock 4 and DualSense (USB or Bluetooth) can be plugged in or out at any
 time, in the menus or a level. When the pad in use goes and no other is left, the game shows its own "controller not

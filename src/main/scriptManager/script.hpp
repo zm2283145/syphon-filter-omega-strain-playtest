@@ -160,6 +160,10 @@ public:
     // 003de280 (opcode 63): a new group holding `members` in pop order (the
     // last pushed first). The default host has no groups and throws.
     virtual Value create_group(const std::vector<Value>& members);
+    // 003de1d0 (opcode 64): a group's size (+4) and its entry `index` through
+    // 003d9990 (out of range gives null). The default host has no groups and throws.
+    virtual Word group_size(const Value& group);
+    virtual Value group_entry(const Value& group, std::int32_t index);
     // 0040c240 + 003cf0e0 + 0040c9d0: a new engine object's ID in this
     // category (the category's counter, skipping IDs already visible), registered
     // as a plain world object. The default host has no registry and throws.

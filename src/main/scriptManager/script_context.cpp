@@ -605,6 +605,14 @@ Value ScriptContext::create_group(const std::vector<Value>& members) {
     return handle;
 }
 
+Word ScriptContext::group_size(const Value& value) {
+    return Word(group(value).size());
+}
+
+Value ScriptContext::group_entry(const Value& value, std::int32_t index) {
+    return *group_method("Get", group(value), {value, static_cast<Word>(index)});
+}
+
 Word ScriptContext::enum_value(const std::string& name, Word member) {
     // Engine registrations first, then a loaded module that declares the enum
     // locally (OBJECTIVES imports VOICE's SFX_ACTION by name); otherwise the host.
