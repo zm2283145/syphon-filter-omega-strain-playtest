@@ -47,6 +47,7 @@ target_link_libraries(omega_gfx_gl46 PUBLIC omega_core omega_ps5_platform)
 # platform layer and the GL backend replace.
 add_library(omega_ps5_app STATIC src/port/ps5/ps5_main.cpp
     src/port/app/play_main.cpp src/port/app/launcher.cpp src/port/app/frontend_app.cpp src/port/app/frontend_disc.cpp
+    src/port/app/movie_audio_stage.cpp
     src/port/app/agent_preview.cpp src/port/app/loading_screen_host.cpp src/port/render/scene_renderer.cpp
     src/port/render/gui_renderer.cpp src/port/render/particle_renderer.cpp src/port/render/corona_renderer.cpp
     src/port/render/frame_overlay.cpp src/port/platform/crash_report.cpp src/port/platform/gamepad_simulation.cpp
@@ -178,6 +179,7 @@ add_custom_command(OUTPUT "${OMEGA_PS5_OUT}/libc.prx"
     DEPENDS "${PS5_HOST_TOOLS}/libc-prx-builder" "${OMEGA_PS5_TOOL}"
     VERBATIM)
 
+set(OMEGA_PS5_SHELL_MEDIA "${CMAKE_CURRENT_SOURCE_DIR}/config/ps5/sce_sys")
 add_custom_target(omega_ps5_package ALL
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${OMEGA_PS5_APP_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${OMEGA_PS5_APP_DIR}/sce_module" "${OMEGA_PS5_APP_DIR}/sce_sys"
@@ -186,12 +188,21 @@ add_custom_target(omega_ps5_package ALL
     COMMAND ${CMAKE_COMMAND} -E copy "${OMEGA_PS5_OUT}/libc.prx" "${OMEGA_PS5_APP_DIR}/sce_module/libc.prx"
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps5/param.json"
         "${OMEGA_PS5_APP_DIR}/sce_sys/param.json"
-    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/ps5/make_icon.py" "${OMEGA_PS5_APP_DIR}/sce_sys/icon0.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${OMEGA_PS5_SHELL_MEDIA}/icon0.png"
+        "${OMEGA_PS5_APP_DIR}/sce_sys/icon0.png"
+    COMMAND ${CMAKE_COMMAND} -E copy "${OMEGA_PS5_SHELL_MEDIA}/pic0.dds"
+        "${OMEGA_PS5_APP_DIR}/sce_sys/pic0.dds"
+    COMMAND ${CMAKE_COMMAND} -E copy "${OMEGA_PS5_SHELL_MEDIA}/pic1.dds"
+        "${OMEGA_PS5_APP_DIR}/sce_sys/pic1.dds"
+    COMMAND ${CMAKE_COMMAND} -E copy "${OMEGA_PS5_SHELL_MEDIA}/snd0.at9"
+        "${OMEGA_PS5_APP_DIR}/sce_sys/snd0.at9"
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/config/disc_us.json"
         "${OMEGA_PS5_APP_DIR}/assets/config/disc_us.json"
     COMMAND ${CMAKE_COMMAND} -E echo "PS5 folder title: ${OMEGA_PS5_APP_DIR}"
     DEPENDS "${OMEGA_PS5_OUT}/eboot.bin" "${OMEGA_PS5_OUT}/libc.prx" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps5/param.json"
-        "${CMAKE_CURRENT_SOURCE_DIR}/config/disc_us.json" "${CMAKE_CURRENT_SOURCE_DIR}/tools/ps5/make_icon.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/disc_us.json"
+        "${OMEGA_PS5_SHELL_MEDIA}/icon0.png" "${OMEGA_PS5_SHELL_MEDIA}/pic0.dds"
+        "${OMEGA_PS5_SHELL_MEDIA}/pic1.dds" "${OMEGA_PS5_SHELL_MEDIA}/snd0.at9"
     COMMENT "Packaging the PS5 folder title PPSA99720"
     VERBATIM)
 

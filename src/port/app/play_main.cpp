@@ -1358,7 +1358,7 @@ struct PlayGuiHost final:GuiStaticHost{
     // Port-only (checkpoint 132f5): the Cheats screen's rows (port_cheats.hpp).
     bool port_cheat_menu() override{return port_cheat_menu_enabled();}
     std::int32_t port_cheat_count() override{return static_cast<std::int32_t>(omega::port_cheat_count);}
-    bool port_cheat_action(std::int32_t i) override{return i==static_cast<std::int32_t>(PortCheat::end_level);}
+    bool port_cheat_action(std::int32_t i) override{return i>=0&&i<static_cast<std::int32_t>(omega::port_cheat_count)&&port_cheat_is_action(static_cast<PortCheat>(i));}
     bool port_cheat_on(std::int32_t i) override{
         if(i<0||i>=static_cast<std::int32_t>(omega::port_cheat_count))throw std::runtime_error("port-only Cheats: row out of range");
         return port_cheat(static_cast<PortCheat>(i));
@@ -1371,6 +1371,11 @@ struct PlayGuiHost final:GuiStaticHost{
             log.push_back("port-only cheat End Level selected");
             if(!port_cheat(c))port_set_cheat(c,true);
             return true;
+        }
+        if(port_cheat_is_action(c)){
+            log.push_back(std::string("port-only cheat ")+port_cheat_names[static_cast<std::size_t>(i)]+" selected");
+            port_activate_cheat(c);
+            return false;
         }
         const bool on=!port_cheat(c);
         log.push_back(std::string("port-only cheat ")+port_cheat_names[static_cast<std::size_t>(i)]+(on?" On":" Off"));
@@ -4419,7 +4424,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "second player: its blue radar / map marker (0022c210, 00274260), its map callout (0026d940, 0026c8d0) and the\n"
                     "player's codename (0045dfd0's value_codename). --no-coop-hud keeps the single-player HUD.\n"
                     "The in-game start menu (--gui-overlay --mission-scripts) has a port-only 8th entry, Cheats (port_cheats.hpp):\n"
-                    "Infinite Health / Armour / Ammo, Super Agent, NPCs Ignore You and Unlock All, each toggled On / Off; End Level, selected once to complete the level.\n"
+                    "Infinite Health / Armour / Ammo, Super Agent and NPCs Ignore You toggle On / Off; End Level and the four unlock/rank entries are one-click actions.\n"
                     "--no-cheat-menu hides it (the original's seven entries).\n"
                     "--port-settings <local file> (port-only) is the settings file of the front end's Options > Control \"CPU PARTNER\" row:\n"
                     "coop_partner=1 turns the partner on when no --coop-partner / --no-coop-partner is given (an interactive --frontend\n"
@@ -4506,7 +4511,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "the width, default 0]: wide's HUD inset; --movie-fill bars|zoom [movie_fill=, default bars]: wide's loading\n"
                     "screens keep 4:3 with bars or zoom to the window's width; --movies fill|bars|stretch [movies=, default fill]:\n"
                     "wide's story/intro cutscenes shown in native 4:3, scaled to the window's width (top and bottom cut), or stretched;\n"
-                    "DEMOnn attract trailers always retain native 4:3 bars. --fov <70..150> [fov=, default 100,\n"
+                    "Attract demo videos follow the same movie fit setting. --fov <70..150> [fov=, default 100,\n"
                     "the original]: wide's field of view (132ws3; the drawn view only, in % of the original's view tangent).\n"
                     "--render-scale <0.25..4> [render_scale=, default 1]: the internal scale in window-resolution mode.\n"
                     "--gameplay-fps native|60 [gameplay_fps=, default native]: native 29.97 Hz gameplay or enhanced 60 Hz.\n"
@@ -12942,15 +12947,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 const auto r=sim.request_level_end(0);
                 std::cout<<"Cheat "<<name<<": 0012fa60(G, 0) "<<(r.handled?(r.fade_started?"state 0x13 (1 s fade)":"state 0x14"):"ignored (already ending)")<<"\n";
                 break;}
-            case PortCheat::unlock_all:
-                if(!frontend_app){std::cout<<"Cheat "<<name<<(on?" On":" Off")<<": no agent record (play without --frontend)\n";break;}
-                if(on)frontend_app->session().set_port_agent_patch([](std::span<std::uint8_t,agent_record_size> agent,AgentLoadState& state,const ProfileAwards& awards){
-                    const auto r=port_unlock_all(agent,state,awards.tables,awards.parts);
-                    std::cout<<"Cheat Unlock All: "<<r.weapon_bits<<" weapon unlock bits and "<<r.parts<<" parts set\n";});
-                else frontend_app->session().set_port_agent_patch(nullptr);
-                frontend_app->session().port_refill_agent();
+            case PortCheat::unlock_weapons:
+            case PortCheat::unlock_levels:
+            case PortCheat::max_rank:
+            case PortCheat::unlock_rank_rewards:
+                if(!on)break;
+                if(!frontend_app){std::cout<<"Cheat "<<name<<": no agent record (play without --frontend)\n";break;}
+                switch(c){
+                case PortCheat::unlock_weapons: frontend_app->session().port_unlock_all_weapons(); break;
+                case PortCheat::unlock_levels: frontend_app->session().port_unlock_all_levels(); break;
+                case PortCheat::max_rank: frontend_app->session().port_max_rank(); break;
+                case PortCheat::unlock_rank_rewards: frontend_app->session().port_unlock_all_rank_rewards(); break;
+                default: break;
+                }
                 for(const auto& line:frontend_app->session().take_log())std::cout<<"Front end: recorded "<<line<<"\n";
-                std::cout<<"Cheat "<<name<<(on?" On":" Off")<<": agent record refilled\n";
+                std::cout<<"Cheat "<<name<<": applied\n";
                 break;
             default:
                 std::cout<<"Cheat "<<name<<(on?" On":" Off")<<"\n";
@@ -14938,6 +14949,221 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             sound_underruns_shown=s.underruns;}}
                     for(const auto& line:sound_host->take_log())std::cout<<"Sound at frame "<<frame<<": "<<line<<"\n";
                 };
+                // The GUI can request ENDLEVEL directly while the state-0x12 loadout still owns input.
+                // Share 001690f0 with the usual end path so no world or script step runs after that request.
+                const auto finish_level_end=[&]() -> bool {
+                    // 001690f0 after the gameplay block: the level-end teardown and the next game state (with
+                    // --native-flow, run_play_native_flow above owns it). Checkpoint 132zf4: the state-0x14 block
+                    // (003e7cd0 inlined, 00166190, World_Teardown 00134640, 0036c960, 003f9470, 0037e320, 0036b250 x2)
+                    // runs natively on an EE mirror of the level's end (play_level_teardown.hpp); World_Teardown's
+                    // rumble, tremor and vision services run the port's counterparts at their call sites.
+                    const std::optional<GameEndState> ending=(!native_flow&&sim.game_end().state_50==0x14)
+                        ?std::optional<GameEndState>{sim.game_end()}:std::nullopt;
+                    if(const auto next=native_flow?std::optional<std::uint8_t>{}:sim.level_end_teardown()){
+                        if(!ending)throw std::runtime_error("001690f0: a level end without G+50 = 0x14");
+                        std::cout<<"Level end at frame "<<frame<<": next state 0x"<<std::hex<<std::setw(2)<<std::setfill('0')<<int(*next)<<std::dec<<std::setfill(' ')
+                            <<(frontend_app?" (the teardown runs natively; the front end resumes)\n"
+                                           :" (the teardown runs natively; the front end is not hosted)\n");
+                        std::array<PadActuatorWrite,2> writes{};
+                        std::size_t tremor_records=0;
+                        PlayTeardownActions actions;
+                        actions.stop_pad_vibration=[&]{stop_pad_vibration(pad_vibration,&writes);};
+                        actions.enable_pad_vibration=[&](std::uint32_t on){
+                            enable_pad_vibration(pad_vibration,static_cast<std::uint8_t>(on));
+                            if(session_gamepad)session_gamepad->set_vibration(false,0);
+                        };
+                        actions.free_tremors=[&]{tremor_records=tremors.records.size();tremors.records.clear();};
+                        actions.vision_mode=[&](std::uint32_t mode,std::uint32_t flag){vision_fx_set_mode(vision_fx,static_cast<std::int32_t>(mode),flag!=0);};
+                        actions.vision_flair=[&](const std::array<float,4>& f){vision_fx_set_flair(vision_fx,0,f[0],f[1],f[2],f[3]);};
+                        actions.vision_prepare=[&]{vision_fx_prepare(vision_fx);vision_draw.reset();};
+                        // Checkpoint 132f11: the mission debrief 00134110(G, a1) (G+1c5 clear: a success or the start menu's
+                        // Quit), its own GUI loop over the play's canvas (LEVEL_END.md section 6g).
+                        unsigned debrief_frames=0;
+                        bool window_closed_during_teardown=false;
+                        const bool network_debrief=lan_end_results&&lan_net;
+                        const auto end_notice=network_debrief?lan_net->quit_notice():lan::LanNetCore::QuitNotice{};
+                        actions.debrief=[&](std::uint32_t,std::uint32_t a1){
+                            if(!gui_overlay_draw||!gui_overlay_draw->menu||!frontend_app||!gui_overlay_draw->host.card){
+                                std::cout<<"Debrief (00134110) at frame "<<frame<<": skipped (port-only: it needs the front end's agent record "
+                                           "and the GUI canvas, --frontend with --gui-overlay)\n";
+                                return;
+                            }
+                            auto& o=*gui_overlay_draw;
+                            auto& rt=o.rt;
+                            o.host.debrief=true;
+                            rt.g.b_21c8=network_debrief?1:0;
+                            if(network_debrief){
+                                for(auto& figure:o.stats_figures)figure.reset();
+                                o.stats_figure_logged=false;
+                                std::cout<<"LAN debrief screen: SCORES (local client "<<o.host.network_local_slot<<")\n";
+                            }
+                            o.zeus=&frontend_app->zeus_images();
+                            // 003c8c70: the pending messages are dropped (the port queues none here).
+                            unsigned popped=0;
+                            while(gui::Widget* t=rt.top()){rt.pop(t);++popped;}   // 4147a0()+0x28: the canvas children, vt +68
+                            unsigned closed=0;
+                            while(rt.popup_close(-1)!=0)++closed;   // 002cac80(*004ffc04, -1)
+                            std::cout<<"Debrief (00134110) at frame "<<frame<<": a1 "<<a1<<", "<<popped<<" canvas screen(s) popped, "
+                                     <<closed<<" popup(s) closed\n";
+                            // Port: a fixed GUI dt of 1/60 s (the original's T-clock delta / 100000) for the loop's frames.
+                            constexpr float debrief_dt=1.0F/60.0F;
+                            const bool auto_advance=!script.empty()||hidden;
+                            const gui::Widget* page_widget=nullptr;
+                            // One pass of the loop's tail: 0037a9f0's flip of the frame (cleared; the canvas +5c when
+                            // `canvas`), the brightness quad +1d0 and the fade quad +1d4 = `alpha` (0025e5b0's last store).
+                            const auto debrief_frame=[&](bool canvas,std::uint8_t alpha){
+                                if(debrief_frames>=20000)throw std::runtime_error("00134110: the debrief did not end in 20000 frames");
+                                if(debrief_test_minimize&&std::int64_t(debrief_frames)==(*debrief_test_minimize)[0])
+                                    window.simulate_minimized(true);
+                                if(debrief_test_minimize&&std::int64_t(debrief_frames)==(*debrief_test_minimize)[0]+(*debrief_test_minimize)[1])
+                                    window.simulate_minimized(false);
+                                if(debrief_test_close>=0&&std::int64_t(debrief_frames)==debrief_test_close){
+                                    std::cout<<"Host window (port-only): --debrief-test-close posts Alt+F4 at debrief frame "
+                                        <<debrief_frames<<"\n";
+                                    PostMessageW(window.handle(),WM_SYSKEYDOWN,VK_F4,LPARAM(1)|(LPARAM(1)<<29));
+                                }
+                                bool quit=false;
+                                if(!hidden){
+                                    MSG message{};
+                                    while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){
+                                        if(message.message==WM_QUIT){quit=true;continue;}
+                                        TranslateMessage(&message);DispatchMessageW(&message);
+                                    }
+                                    (void)window.take_events();
+                                    state.focused=window.focused();
+                                }
+                                if(window.focus_simulated())state.focused=window.focused();
+                                if(state.focused!=focus_shown)focus_change(frame);
+                                if(quit||window.close_requested()){
+                                    window_closed_during_teardown=true;
+                                    running=false;
+                                    std::cout<<"Host window (port-only): the game window's close (Alt+F4 / the close button) during the debrief"
+                                        <<" at debrief frame "<<debrief_frames<<": the session ends\n";
+                                    return false;
+                                }
+                                if(!wait_application_pause("during the debrief at debrief frame "+std::to_string(debrief_frames))){
+                                    window_closed_during_teardown=true;
+                                    running=false;
+                                    std::cout<<"Host window (port-only): the game window closed while the application was paused during"
+                                        <<" the debrief at debrief frame "<<debrief_frames<<": the session ends\n";
+                                    return false;
+                                }
+                                if(window.minimized()!=state.minimized){
+                                    state.minimized=window.minimized();
+                                    if(pacing)pacing->set_refresh(state.minimized?0.0:
+                                        pacing_refresh_override>0?pacing_refresh_override:display_refresh_hz(window.handle()));
+                                    std::cout<<"Host window (port-only): "<<(state.minimized?"minimised":"restored")
+                                        <<" during the debrief at debrief frame "<<debrief_frames
+                                        <<" (the game keeps running"<<(state.minimized?", presents skipped":"")<<")\n";
+                                }
+                                if(!hidden&&!state.minimized&&(window.size_serial()!=window_size_serial||render_scale_changed)){
+                                    window_size_serial=window.size_serial();render_scale_changed=false;
+                                    const auto client=window.buffer_size();state.renderer->resize(client[0],client[1]);
+                                    if(pacing)pacing->set_refresh(pacing_refresh_override>0?pacing_refresh_override:display_refresh_hz(window.handle()));
+                                }
+                                const float black[4]{0.0F,0.0F,0.0F,1.0F};
+                                gfx::clear_target(*state.renderer->device(),state.renderer->render_target(),black);
+                                if(canvas){
+                                    o.draw(*state.renderer,static_cast<std::int32_t>(std::floor(gui_elapsed*1000.0)),debrief_dt,nullptr,nullptr,frame,nullptr,
+                                        PlayGunPreview{weapon_library.get(),gun_images_built?&gun_images:nullptr,actors.frame_counter(),{},mission});
+                                    const gui::Widget* t=rt.top();
+                                    if(t!=page_widget){
+                                        std::cout<<"Debrief page at debrief frame "<<debrief_frames<<": "
+                                                 <<(!t?std::string("(canvas empty)"):!t->name.empty()?t->name:"(unnamed class "+std::to_string(int(t->cls))+")")
+                                                 <<", "<<rt.canvas().children.size()<<" canvas screen(s)\n";
+                                        page_widget=t;
+                                    }
+                                }
+                                const auto brightness=static_cast<std::uint8_t>(rt.g.gamma_word&0xff);
+                                if(brightness)o.renderer.draw_brightness(state.renderer->render_target(),state.renderer->width(),state.renderer->height(),brightness);
+                                if(alpha)o.renderer.draw_fade(state.renderer->render_target(),state.renderer->width(),state.renderer->height(),alpha);
+                                if(debrief_captures.count(debrief_frames)){
+                                    std::ostringstream name;name<<"debrief_"<<std::setw(5)<<std::setfill('0')<<debrief_frames<<".bmp";
+                                    state.renderer->capture(output/name.str());
+                                }
+                                if(!hidden&&!state.minimized&&!state.renderer->present(pacing?pacing->sync_interval():1u,!pacing))
+                                    recover_display("display device lost at present (the debrief)");
+                                render_thread.end_frame(frame);   // 132mt2: the debrief frame to the render thread
+                                gui_elapsed+=double(debrief_dt);
+                                ++debrief_frames;
+                                return true;
+                            };
+                            // 0025e6e0(*004ffc38, 1, 1.0) and its loop: 0025e660(fader, 0.05), 0025e5b0, 0037a9f0 while +4 != 0
+                            // (on a copy of the world fader G+e8: the level's end left it at 255).
+                            ActorFader fader=sim.fader();
+                            const auto fade=[&](std::uint8_t mode,const char* what){
+                                start_actor_fade(fader,mode,1.0F);
+                                unsigned n=0;
+                                while(fader.duration_04!=0.0F){
+                                    update_actor_fader(fader,0.05F);
+                                    if(!debrief_frame(false,actor_fader_alpha(fader)))return false;
+                                    sound_step();++n;
+                                }
+                                std::cout<<"Debrief (00134110): "<<what<<" (0025e6e0 mode "<<int(mode)<<", 1.0 s at 0.05 per frame): "<<n
+                                         <<" frames, alpha "<<int(actor_fader_alpha(fader))<<"\n";
+                                return true;
+                            };
+                            if(!fade(1,"fade-in")){o.host.debrief=false;return;}
+                            rt.debrief_session_end_popup(a1,end_notice.key,end_notice.message);
+                            gui::Widget* summary=rt.factory("GuiEndGameObjectives",std::string("SUMMARY"));
+                            if(!summary)throw std::runtime_error("00134110: 00418a80 GuiEndGameObjectives \"SUMMARY\" failed");
+                            rt.push(summary,0);
+                            // The loop while the canvas has children: 0036a0f0 (the pad read), 00419260 (flush), 0040f3e0,
+                            // 00415870 (the pad translation), the canvas +60 / +5c, 001698c0 (the network poll: offline),
+                            // 0037a9f0, then the sound's frame message 003c9420(.., 004f2cc0).
+                            const auto loop_begin=debrief_frames;
+                            while(rt.top()){
+                                std::uint32_t held=0;
+                                if(auto_advance){
+                                    // Port-only test input: Cross for one frame every --debrief-advance frames.
+                                    if((debrief_frames-loop_begin)%debrief_advance==debrief_advance-1)held|=ds2::cross;
+                                }else{
+                                    KeyboardState k{};
+                                    if(state.focused)k=host_keyboard_state();
+                                    held|=bound_menu_buttons(bindings.play,k);
+                                    if(state.focused)if(const auto p=session_gamepad->read())held|=p->pad.held;
+                                }
+                                o.driver.read(held);
+                                o.gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
+                                if(!debrief_frame(true,0))break;
+                                sound_step();
+                            }
+                            if(window_closed_during_teardown){o.host.debrief=false;return;}
+                            std::cout<<"Debrief (00134110): the canvas emptied after "<<debrief_frames-loop_begin<<" frames\n";
+                            if(!fade(2,"fade-out")){o.host.debrief=false;return;}
+                            o.host.debrief=false;
+                            std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames\n";
+                        };
+                        const auto teardown=network_debrief?run_lan_play_level_teardown(*lan_net,*ending,actions)
+                            :run_play_level_teardown(*ending,actions);
+                        if(network_debrief){
+                            std::cout<<"LAN native teardown: live services";
+                            for(const auto& call:teardown.calls)if(call.kind=="network")std::cout<<" "<<hex_word(call.address);
+                            std::cout<<"; MP "<<int(teardown.multiplayer_after)<<", quit latch "<<int(teardown.quit_latch_after)<<"\n";
+                        }
+                        if(teardown.state_50!=*next||teardown.previous_51!=sim.game_end().previous_51)
+                            throw std::runtime_error("001690f0: the native teardown's next state differs from the play's");
+                        std::cout<<"World_Teardown at frame "<<frame<<": pad vibration stopped (0026bd60; port 0 bytes "<<int(writes[0].bytes[0])
+                            <<" "<<int(writes[0].bytes[1])<<", port 1 bytes "<<int(writes[1].bytes[0])<<" "<<int(writes[1].bytes[1])
+                            <<") and disabled (0026be70(0)), "<<tremor_records<<" tremor records freed (00272920), vision mode "<<vision_fx.mode_00
+                            <<" flair "<<int(vision_fx.flair_08)<<" +24 "<<vision_fx.level_24<<" +28 "<<vision_fx.level_28<<" (002609e0 / 00260990 / 0025fbb0)\n";
+                        std::cout<<"Level teardown (001690f0) at frame "<<frame<<": "<<teardown.calls.size()<<" calls ("
+                            <<teardown.count("native")<<" native, "<<teardown.count("port")<<" port, "<<teardown.count("pass")<<" level pass, "
+                            <<teardown.count("renderer")<<" renderer, "<<teardown.count("ps2")<<" PS2, "<<teardown.count("mirror")<<" mirror), renderer allocations freed "
+                            <<teardown.renderer_frees<<"/"<<teardown.renderer_allocations<<(teardown.renderer_balanced?" balanced":" UNBALANCED")
+                            <<", World_Teardown frees "<<teardown.world_frees<<", next state 0x"<<std::hex<<std::setw(2)<<std::setfill('0')
+                            <<int(teardown.state_50)<<" (previous 0x"<<std::setw(2)<<int(teardown.previous_51)<<")"<<std::dec<<std::setfill(' ')<<"\n";
+                        if(!teardown.renderer_balanced)throw std::runtime_error("0037e320: the level's renderer allocations are not all freed");
+                        // Port-only (132on2d, ONLINE.md §3.6): World_Teardown's network branch 0013493c (with 004294c0
+                        // set: 0044e340, the record's upload, then 0042b1f0, the game left), which the teardown mirror
+                        // answers as solo: an online game's lobby side runs here, after the teardown.
+                        if(frontend_app)frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,ending->agent_b74!=0);
+                        if(window_closed_during_teardown){++frame;running=false;return true;}
+                        level_end_next=next;
+                        ++frame;running=false;return true;
+                    }
+                    return false;
+                };
                 if(gui_overlay_draw&&gui_overlay_draw->menu){
                     // Checkpoint 132f: pad 0's held buttons in the report's bit order (0055a44c), read by the pad
                     // driver 00369c50 at the frame start: the play input's buttons, P (Start) and the arrows
@@ -14970,6 +15196,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     for(const auto& line:settings_page.take_log())std::cout<<line<<" at frame "<<frame<<"\n";
                     if(settings_page.holds_input(held!=0||std::any_of(keys.begin(),keys.end(),[](bool d){return d;})))held=0;
                     gui_overlay_draw->driver.read(held);
+                    if(sim.game_end().state_50==0x14&&!native_flow&&finish_level_end())break;
+
                     if(gui_overlay_draw->loadout_done_pending){
                         // Checkpoint 132f6/132f7: 00168550's done path (00168ae8..00168bc8) in the frame after the Accept,
                         // in the original's order. 00224e00 on 0013d770(0013d9f0(), *(*004ffc0c + 30)) +8 (the local
@@ -15032,6 +15260,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             hud_object->update_screen(step_dt);
                         }
                         gui_overlay_draw->gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
+                        if(sim.game_end().state_50==0x14&&!native_flow&&finish_level_end())break;
                         sound_step();
                         ++frame;hud_frame=frame;gui_elapsed+=double(step_dt);
                         if(max_frames&&frame>=max_frames&&frames_hold_released(frame))running=false;
@@ -18591,216 +18820,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                     trace<<'}';
                 }
-                // 001690f0 after the gameplay block: the level-end teardown and the next game state (with
-                // --native-flow, run_play_native_flow above owns it). Checkpoint 132zf4: the state-0x14 block
-                // (003e7cd0 inlined, 00166190, World_Teardown 00134640, 0036c960, 003f9470, 0037e320, 0036b250 x2)
-                // runs natively on an EE mirror of the level's end (play_level_teardown.hpp); World_Teardown's
-                // rumble, tremor and vision services run the port's counterparts at their call sites.
-                const std::optional<GameEndState> ending=(!native_flow&&sim.game_end().state_50==0x14)
-                    ?std::optional<GameEndState>{sim.game_end()}:std::nullopt;
-                if(const auto next=native_flow?std::optional<std::uint8_t>{}:sim.level_end_teardown()){
-                    if(!ending)throw std::runtime_error("001690f0: a level end without G+50 = 0x14");
-                    std::cout<<"Level end at frame "<<frame<<": next state 0x"<<std::hex<<std::setw(2)<<std::setfill('0')<<int(*next)<<std::dec<<std::setfill(' ')
-                        <<(frontend_app?" (the teardown runs natively; the front end resumes)\n"
-                                       :" (the teardown runs natively; the front end is not hosted)\n");
-                    std::array<PadActuatorWrite,2> writes{};
-                    std::size_t tremor_records=0;
-                    PlayTeardownActions actions;
-                    actions.stop_pad_vibration=[&]{stop_pad_vibration(pad_vibration,&writes);};
-                    actions.enable_pad_vibration=[&](std::uint32_t on){
-                        enable_pad_vibration(pad_vibration,static_cast<std::uint8_t>(on));
-                        if(session_gamepad)session_gamepad->set_vibration(false,0);
-                    };
-                    actions.free_tremors=[&]{tremor_records=tremors.records.size();tremors.records.clear();};
-                    actions.vision_mode=[&](std::uint32_t mode,std::uint32_t flag){vision_fx_set_mode(vision_fx,static_cast<std::int32_t>(mode),flag!=0);};
-                    actions.vision_flair=[&](const std::array<float,4>& f){vision_fx_set_flair(vision_fx,0,f[0],f[1],f[2],f[3]);};
-                    actions.vision_prepare=[&]{vision_fx_prepare(vision_fx);vision_draw.reset();};
-                    // Checkpoint 132f11: the mission debrief 00134110(G, a1) (G+1c5 clear: a success or the start menu's
-                    // Quit), its own GUI loop over the play's canvas (LEVEL_END.md section 6g).
-                    unsigned debrief_frames=0;
-                    bool window_closed_during_teardown=false;
-                    const bool network_debrief=lan_end_results&&lan_net;
-                    const auto end_notice=network_debrief?lan_net->quit_notice():lan::LanNetCore::QuitNotice{};
-                    actions.debrief=[&](std::uint32_t,std::uint32_t a1){
-                        if(!gui_overlay_draw||!gui_overlay_draw->menu||!frontend_app||!gui_overlay_draw->host.card){
-                            std::cout<<"Debrief (00134110) at frame "<<frame<<": skipped (port-only: it needs the front end's agent record "
-                                       "and the GUI canvas, --frontend with --gui-overlay)\n";
-                            return;
-                        }
-                        auto& o=*gui_overlay_draw;
-                        auto& rt=o.rt;
-                        o.host.debrief=true;
-                        rt.g.b_21c8=network_debrief?1:0;
-                        if(network_debrief){
-                            for(auto& figure:o.stats_figures)figure.reset();
-                            o.stats_figure_logged=false;
-                            std::cout<<"LAN debrief screen: SCORES (local client "<<o.host.network_local_slot<<")\n";
-                        }
-                        o.zeus=&frontend_app->zeus_images();
-                        // 003c8c70: the pending messages are dropped (the port queues none here).
-                        unsigned popped=0;
-                        while(gui::Widget* t=rt.top()){rt.pop(t);++popped;}   // 4147a0()+0x28: the canvas children, vt +68
-                        unsigned closed=0;
-                        while(rt.popup_close(-1)!=0)++closed;   // 002cac80(*004ffc04, -1)
-                        std::cout<<"Debrief (00134110) at frame "<<frame<<": a1 "<<a1<<", "<<popped<<" canvas screen(s) popped, "
-                                 <<closed<<" popup(s) closed\n";
-                        // Port: a fixed GUI dt of 1/60 s (the original's T-clock delta / 100000) for the loop's frames.
-                        constexpr float debrief_dt=1.0F/60.0F;
-                        const bool auto_advance=!script.empty()||hidden;
-                        const gui::Widget* page_widget=nullptr;
-                        // One pass of the loop's tail: 0037a9f0's flip of the frame (cleared; the canvas +5c when
-                        // `canvas`), the brightness quad +1d0 and the fade quad +1d4 = `alpha` (0025e5b0's last store).
-                        const auto debrief_frame=[&](bool canvas,std::uint8_t alpha){
-                            if(debrief_frames>=20000)throw std::runtime_error("00134110: the debrief did not end in 20000 frames");
-                            if(debrief_test_minimize&&std::int64_t(debrief_frames)==(*debrief_test_minimize)[0])
-                                window.simulate_minimized(true);
-                            if(debrief_test_minimize&&std::int64_t(debrief_frames)==(*debrief_test_minimize)[0]+(*debrief_test_minimize)[1])
-                                window.simulate_minimized(false);
-                            if(debrief_test_close>=0&&std::int64_t(debrief_frames)==debrief_test_close){
-                                std::cout<<"Host window (port-only): --debrief-test-close posts Alt+F4 at debrief frame "
-                                    <<debrief_frames<<"\n";
-                                PostMessageW(window.handle(),WM_SYSKEYDOWN,VK_F4,LPARAM(1)|(LPARAM(1)<<29));
-                            }
-                            bool quit=false;
-                            if(!hidden){
-                                MSG message{};
-                                while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){
-                                    if(message.message==WM_QUIT){quit=true;continue;}
-                                    TranslateMessage(&message);DispatchMessageW(&message);
-                                }
-                                (void)window.take_events();
-                                state.focused=window.focused();
-                            }
-                            if(window.focus_simulated())state.focused=window.focused();
-                            if(state.focused!=focus_shown)focus_change(frame);
-                            if(quit||window.close_requested()){
-                                window_closed_during_teardown=true;
-                                running=false;
-                                std::cout<<"Host window (port-only): the game window's close (Alt+F4 / the close button) during the debrief"
-                                    <<" at debrief frame "<<debrief_frames<<": the session ends\n";
-                                return false;
-                            }
-                            if(!wait_application_pause("during the debrief at debrief frame "+std::to_string(debrief_frames))){
-                                window_closed_during_teardown=true;
-                                running=false;
-                                std::cout<<"Host window (port-only): the game window closed while the application was paused during"
-                                    <<" the debrief at debrief frame "<<debrief_frames<<": the session ends\n";
-                                return false;
-                            }
-                            if(window.minimized()!=state.minimized){
-                                state.minimized=window.minimized();
-                                if(pacing)pacing->set_refresh(state.minimized?0.0:
-                                    pacing_refresh_override>0?pacing_refresh_override:display_refresh_hz(window.handle()));
-                                std::cout<<"Host window (port-only): "<<(state.minimized?"minimised":"restored")
-                                    <<" during the debrief at debrief frame "<<debrief_frames
-                                    <<" (the game keeps running"<<(state.minimized?", presents skipped":"")<<")\n";
-                            }
-                            if(!hidden&&!state.minimized&&(window.size_serial()!=window_size_serial||render_scale_changed)){
-                                window_size_serial=window.size_serial();render_scale_changed=false;
-                                const auto client=window.buffer_size();state.renderer->resize(client[0],client[1]);
-                                if(pacing)pacing->set_refresh(pacing_refresh_override>0?pacing_refresh_override:display_refresh_hz(window.handle()));
-                            }
-                            const float black[4]{0.0F,0.0F,0.0F,1.0F};
-                            gfx::clear_target(*state.renderer->device(),state.renderer->render_target(),black);
-                            if(canvas){
-                                o.draw(*state.renderer,static_cast<std::int32_t>(std::floor(gui_elapsed*1000.0)),debrief_dt,nullptr,nullptr,frame,nullptr,
-                                    PlayGunPreview{weapon_library.get(),gun_images_built?&gun_images:nullptr,actors.frame_counter(),{},mission});
-                                const gui::Widget* t=rt.top();
-                                if(t!=page_widget){
-                                    std::cout<<"Debrief page at debrief frame "<<debrief_frames<<": "
-                                             <<(!t?std::string("(canvas empty)"):!t->name.empty()?t->name:"(unnamed class "+std::to_string(int(t->cls))+")")
-                                             <<", "<<rt.canvas().children.size()<<" canvas screen(s)\n";
-                                    page_widget=t;
-                                }
-                            }
-                            const auto brightness=static_cast<std::uint8_t>(rt.g.gamma_word&0xff);
-                            if(brightness)o.renderer.draw_brightness(state.renderer->render_target(),state.renderer->width(),state.renderer->height(),brightness);
-                            if(alpha)o.renderer.draw_fade(state.renderer->render_target(),state.renderer->width(),state.renderer->height(),alpha);
-                            if(debrief_captures.count(debrief_frames)){
-                                std::ostringstream name;name<<"debrief_"<<std::setw(5)<<std::setfill('0')<<debrief_frames<<".bmp";
-                                state.renderer->capture(output/name.str());
-                            }
-                            if(!hidden&&!state.minimized&&!state.renderer->present(pacing?pacing->sync_interval():1u,!pacing))
-                                recover_display("display device lost at present (the debrief)");
-                            render_thread.end_frame(frame);   // 132mt2: the debrief frame to the render thread
-                            gui_elapsed+=double(debrief_dt);
-                            ++debrief_frames;
-                            return true;
-                        };
-                        // 0025e6e0(*004ffc38, 1, 1.0) and its loop: 0025e660(fader, 0.05), 0025e5b0, 0037a9f0 while +4 != 0
-                        // (on a copy of the world fader G+e8: the level's end left it at 255).
-                        ActorFader fader=sim.fader();
-                        const auto fade=[&](std::uint8_t mode,const char* what){
-                            start_actor_fade(fader,mode,1.0F);
-                            unsigned n=0;
-                            while(fader.duration_04!=0.0F){
-                                update_actor_fader(fader,0.05F);
-                                if(!debrief_frame(false,actor_fader_alpha(fader)))return false;
-                                sound_step();++n;
-                            }
-                            std::cout<<"Debrief (00134110): "<<what<<" (0025e6e0 mode "<<int(mode)<<", 1.0 s at 0.05 per frame): "<<n
-                                     <<" frames, alpha "<<int(actor_fader_alpha(fader))<<"\n";
-                            return true;
-                        };
-                        if(!fade(1,"fade-in")){o.host.debrief=false;return;}
-                        rt.debrief_session_end_popup(a1,end_notice.key,end_notice.message);
-                        gui::Widget* summary=rt.factory("GuiEndGameObjectives",std::string("SUMMARY"));
-                        if(!summary)throw std::runtime_error("00134110: 00418a80 GuiEndGameObjectives \"SUMMARY\" failed");
-                        rt.push(summary,0);
-                        // The loop while the canvas has children: 0036a0f0 (the pad read), 00419260 (flush), 0040f3e0,
-                        // 00415870 (the pad translation), the canvas +60 / +5c, 001698c0 (the network poll: offline),
-                        // 0037a9f0, then the sound's frame message 003c9420(.., 004f2cc0).
-                        const auto loop_begin=debrief_frames;
-                        while(rt.top()){
-                            std::uint32_t held=0;
-                            if(auto_advance){
-                                // Port-only test input: Cross for one frame every --debrief-advance frames.
-                                if((debrief_frames-loop_begin)%debrief_advance==debrief_advance-1)held|=ds2::cross;
-                            }else{
-                                KeyboardState k{};
-                                if(state.focused)k=host_keyboard_state();
-                                held|=bound_menu_buttons(bindings.play,k);
-                                if(state.focused)if(const auto p=session_gamepad->read())held|=p->pad.held;
-                            }
-                            o.driver.read(held);
-                            o.gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
-                            if(!debrief_frame(true,0))break;
-                            sound_step();
-                        }
-                        if(window_closed_during_teardown){o.host.debrief=false;return;}
-                        std::cout<<"Debrief (00134110): the canvas emptied after "<<debrief_frames-loop_begin<<" frames\n";
-                        if(!fade(2,"fade-out")){o.host.debrief=false;return;}
-                        o.host.debrief=false;
-                        std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames\n";
-                    };
-                    const auto teardown=network_debrief?run_lan_play_level_teardown(*lan_net,*ending,actions)
-                        :run_play_level_teardown(*ending,actions);
-                    if(network_debrief){
-                        std::cout<<"LAN native teardown: live services";
-                        for(const auto& call:teardown.calls)if(call.kind=="network")std::cout<<" "<<hex_word(call.address);
-                        std::cout<<"; MP "<<int(teardown.multiplayer_after)<<", quit latch "<<int(teardown.quit_latch_after)<<"\n";
-                    }
-                    if(teardown.state_50!=*next||teardown.previous_51!=sim.game_end().previous_51)
-                        throw std::runtime_error("001690f0: the native teardown's next state differs from the play's");
-                    std::cout<<"World_Teardown at frame "<<frame<<": pad vibration stopped (0026bd60; port 0 bytes "<<int(writes[0].bytes[0])
-                        <<" "<<int(writes[0].bytes[1])<<", port 1 bytes "<<int(writes[1].bytes[0])<<" "<<int(writes[1].bytes[1])
-                        <<") and disabled (0026be70(0)), "<<tremor_records<<" tremor records freed (00272920), vision mode "<<vision_fx.mode_00
-                        <<" flair "<<int(vision_fx.flair_08)<<" +24 "<<vision_fx.level_24<<" +28 "<<vision_fx.level_28<<" (002609e0 / 00260990 / 0025fbb0)\n";
-                    std::cout<<"Level teardown (001690f0) at frame "<<frame<<": "<<teardown.calls.size()<<" calls ("
-                        <<teardown.count("native")<<" native, "<<teardown.count("port")<<" port, "<<teardown.count("pass")<<" level pass, "
-                        <<teardown.count("renderer")<<" renderer, "<<teardown.count("ps2")<<" PS2, "<<teardown.count("mirror")<<" mirror), renderer allocations freed "
-                        <<teardown.renderer_frees<<"/"<<teardown.renderer_allocations<<(teardown.renderer_balanced?" balanced":" UNBALANCED")
-                        <<", World_Teardown frees "<<teardown.world_frees<<", next state 0x"<<std::hex<<std::setw(2)<<std::setfill('0')
-                        <<int(teardown.state_50)<<" (previous 0x"<<std::setw(2)<<int(teardown.previous_51)<<")"<<std::dec<<std::setfill(' ')<<"\n";
-                    if(!teardown.renderer_balanced)throw std::runtime_error("0037e320: the level's renderer allocations are not all freed");
-                    // Port-only (132on2d, ONLINE.md §3.6): World_Teardown's network branch 0013493c (with 004294c0
-                    // set: 0044e340, the record's upload, then 0042b1f0, the game left), which the teardown mirror
-                    // answers as solo: an online game's lobby side runs here, after the teardown.
-                    if(frontend_app)frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,ending->agent_b74!=0);
-                    if(window_closed_during_teardown){++frame;running=false;break;}
-                    level_end_next=next;
-                    ++frame;running=false;break;
-                }
+                if(finish_level_end())break;
                 // The render pass 00132e50 runs the zone tracker (0013d8a0) after the frame's update.
                 if(zone_tracker){
                     auto zone_requests=zone_tracker->update(actor_position_e0(sim),sim.component());

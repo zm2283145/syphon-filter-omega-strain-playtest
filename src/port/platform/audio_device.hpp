@@ -34,6 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -87,6 +88,10 @@ public:
 
 private:
     struct Impl;
+    // Port-only: the movie feeder may call submit/stats beside the front-end's mute, device test and log controls.
+    // The platform callback keeps using Impl's ring mutex; public calls take this outer lock before touching
+    // recovery, voices or logs. Recursive because simulate_default_change delegates to simulate_loss on PS5.
+    mutable std::recursive_mutex public_mutex_;
     std::unique_ptr<Impl> impl_;
     double latency_;
 };

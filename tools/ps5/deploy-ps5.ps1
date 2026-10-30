@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory)][string]$App,          # the folder title: <build>/app/dist/PPSA99720 (or out\132ps5c\app\PPSA99720)
   [string]$Ps5 = '10.1.1.93',
-  [int]$Port = 1337,
+  [int]$Port = 2121,
   [string]$Iso,                                # optional: the user's disc image, uploaded as omega_strain.iso (/app0)
   [string]$LogHost,                            # optional: this PC's IPv4 address for the TCP 18200 log stream
   [switch]$EbootOnly

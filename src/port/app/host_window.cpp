@@ -30,6 +30,18 @@ constexpr UINT capture_message = WM_APP + 0x133;   // re-evaluates the mouse cap
 constexpr UINT pause_command = 0x1320;
 constexpr const wchar_t* window_class = L"OmegaGameWindow";
 
+// Resource 101 is embedded in both player executables. Diagnostic hosts without
+// that resource keep their normal Windows fallback. Shared icons need no cleanup.
+void set_application_icons(HWND window, unsigned dpi) {
+    const auto instance = GetModuleHandleW(nullptr);
+    for (const bool small_icon : {false, true}) {
+        const auto icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(101), IMAGE_ICON,
+            GetSystemMetricsForDpi(small_icon ? SM_CXSMICON : SM_CXICON, dpi),
+            GetSystemMetricsForDpi(small_icon ? SM_CYSMICON : SM_CYICON, dpi), LR_SHARED));
+        if (icon) SendMessageW(window, WM_SETICON, small_icon ? ICON_SMALL : ICON_BIG, reinterpret_cast<LPARAM>(icon));
+    }
+}
+
 // Port-only (132win3): a device loss throws DeviceLost (device_lost.hpp); the owner of the frame recovers.
 void check(HRESULT hr, const char* what) { check_device(hr, what); }
 
@@ -149,6 +161,7 @@ HostWindow::HostWindow(const HostWindowOptions& options) : title_(options.title)
             // Checkpoint 132win14 (port-only HiDPI): the size at the DPI of the monitor the window was placed on (the
             // window is not shown yet). An unaware process's window is always 96 DPI, so nothing changes there.
             dpi_ = options.dpi_override ? options.dpi_override : std::max(96u, GetDpiForWindow(hwnd_));
+            set_application_icons(hwnd_, dpi_);
             MONITORINFO monitor{sizeof monitor};
             const bool have_monitor = GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE;
             const WindowRect work{monitor.rcWork.left, monitor.rcWork.top, monitor.rcWork.right, monitor.rcWork.bottom};
@@ -839,6 +852,7 @@ LRESULT HostWindow::handle_message(HWND window, UINT message, WPARAM w, LPARAM l
             // size in DIPs on the new monitor); fullscreen: the monitor covered again; kept hidden: unchanged (fixed
             // capture sizes) unless a test simulates it. WM_SIZE then bumps the size serial (the buffers follow).
             const unsigned before = dpi_.exchange(HIWORD(w));
+            set_application_icons(window, dpi_);
             const RECT* r = reinterpret_cast<const RECT*>(l);
             const char* action = "kept (hidden)";
             if (fullscreen_) {

@@ -4,7 +4,7 @@ An unofficial native port of the PlayStation 2 game *Syphon Filter: The Omega St
 **PS Vita**. It is **not an emulator**: the game's systems (mission scripts, AI, animation, collision, combat, menus,
 level loading, sound) are rebuilt in C++ from the original USA executable and checked against it.
 
-**No game data is included.** You need your own 1:1 image of the USA disc (SCUS-97264); the port reads it at run
+**No disc-extracted game data is included.** You need your own 1:1 image of the USA disc (SCUS-97264); the port reads it at run
 time and never modifies it. The required size and SHA-256 are in [docs/REQUIRED_DISC.md](docs/REQUIRED_DISC.md).
 
 This repository is the play-test snapshot of the port's source, updated from the development repository as work
@@ -22,7 +22,7 @@ After a successful build of `main`, download the newest **prerelease** from this
 | `OmegaStrain-ps5-PPSA99720.zip` | Extract the `PPSA99720` folder title for PS5 homebrew. |
 
 The Vita vitaGL build still has to pass CI but is not a prerelease download. Each prerelease links its source commit
-and successful Build run. Bring your own 1:1 USA disc image (SCUS-97264); no game data is included.
+and successful Build run. Bring your own 1:1 USA disc image (SCUS-97264); no disc-extracted game data is included.
 
 ## What works
 
@@ -35,7 +35,7 @@ and successful Build run. Bring your own 1:1 USA disc image (SCUS-97264); no gam
 | Port Settings page | Display, control and port options inside the game's own Options menu |
 | CPU co-op partners (port-only) | 1–3 CPU agents that follow, fight and climb, and take orders from a command menu (D-pad Up). They do the co-op objectives in TORONTO1–3, BELARUS2 and UKRAINE |
 | Mods (port-only) | Replace any disc file, texture (PNG / DDS, any resolution), character, gun or level model (glTF 2.0) without touching your disc ([docs/MODDING.md](docs/MODDING.md)) |
-| LAN Play (port-only) | **Play LAN** on the Offline / Online screen: host, browse and join on the local network (peer to peer, no server). Two-player startup, objective results/stage deactivation, loadout agent records and periodic statistics exchange are tested; full mission completion remains open |
+| LAN Play (port-only) | **Play LAN** on the Offline / Online screen: host, browse and join on the local network (peer to peer, no server). All players should update together; incompatible builds are rejected. Two-player startup, objective results/stage deactivation, loadout agent records and periodic statistics exchange are tested; full mission completion remains open |
 | Online (port-only server) | `omega_server`: accounts, lobby, game list, create / join, chat, contacts, stats, admin tools, relay and UPnP ([docs/ONLINE_DEPLOY.md](docs/ONLINE_DEPLOY.md)) |
 | PS Vita | Boot, intro movies and all menus run on real hardware in 16:9. The first in-level build (TORONTO1 / TRAINING) is being tested |
 
@@ -154,10 +154,11 @@ If a level stopped, say which level and roughly where. Never attach game files o
 
 ## Legal
 
-This repository contains only the port's own code and documents: no game files, extracted assets, disc image or
-executable, and none may be added. *Syphon Filter* is a trademark of Sony Interactive Entertainment. This is an
+This repository contains the port's own code and documents plus explicitly supplied
+shell artwork and selection music under `config/windows` and `config/ps5`. Disc images,
+extracted game assets and original executables must not be added. *Syphon Filter* is a trademark of Sony Interactive Entertainment. This is an
 unofficial fan project, not affiliated with or endorsed by Sony or Bend Studio.
 
 ## License
 
-The port's source code is licensed under the GNU General Public License v3.0 (see LICENSE). It contains no game data: Syphon Filter: The Omega Strain belongs to its rights holders, and you need your own copy of the game disc to play.
+The port's source code is licensed under the GNU General Public License v3.0 (see LICENSE). The supplied shell artwork/music remains the property of its respective rights holders and is not covered by the code license; see the READMEs in `config/windows` and `config/ps5`. Syphon Filter: The Omega Strain belongs to its rights holders, and you need your own copy of the game disc to play.

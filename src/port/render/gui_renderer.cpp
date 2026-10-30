@@ -665,6 +665,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         float aspect = 0.0F;   // wide_aspect_picture: GuiDrawBatch::port_picture_aspect
         MovieFit fit = MovieFit::bars;   // a picture's: movies= for a movie, movie_fill (fill / bars) otherwise
         std::uint32_t menu = 0;          // 132ws5: the wide menu draw's screen element (GuiDrawBatch::port_menu)
+        bool backdrop_eligible = false; // flat textured menu art, excluding text and HUD/pictures
     };
     thread_local std::vector<WideRange> wide_range_scratch;
     std::vector<WideRange>& wide_ranges = wide_range_scratch;
@@ -681,6 +682,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         return static_cast<const gfx::Texture*>(it->second.get());
     };
     bool depth_run = false, clear_next = false, full_run = false;
+    bool menu_backdrop_eligible = false;
     const bool movie_zoom = wide && frame_movie_zoom_setting();
     const MovieFit movie_fit = frame_movie_fit_setting();
     auto add = [&](const gfx::Texture* view, bool opaque, bool linear, std::size_t first, bool wrap = false) {
@@ -698,7 +700,8 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         const bool fit = wide && wide_anchor == 0 && !wide_free &&
                          ((kind == wide_frame && !wide_menu) || (kind == wide_picture && picture_fit == MovieFit::bars));
         if (wide && !fit)
-            wide_ranges.push_back({first, vertices.size(), wide_anchor, kind, wide_aspect, picture_fit, wide_menu_tag});
+            wide_ranges.push_back({first, vertices.size(), wide_anchor, kind, wide_aspect, picture_fit, wide_menu_tag,
+                                   menu_backdrop_eligible && view != gs_untextured_view_.get()});
         if (!segments.empty() && !clear_next) {
             Segment& s = segments.back();
             if (s.view == view && s.opaque == opaque && s.linear == linear && s.wrap == wrap && s.depth == depth_run
@@ -716,7 +719,9 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
     // (gui_wide_edge_images), drawn right after it with the same texture and sampler over the whole target.
     const auto edge_extend = [&](const GuiDrawBatch& b, std::size_t first, const gfx::Texture* tex, bool opaque, bool linear) {
         if (!wide || !wide_edge_extend_ || b.perspective || b.clip || b.port_anchor || b.port_picture || b.port_free) return;
-        if (wide_menu && b.port_text) return;  // 132ws5: no mirrored glyphs
+        // A wide menu's backdrop is stretched coherently below; mirroring any of its triangles
+        // repeats artwork and can make a sliding child appear twice at the 4:3 boundary.
+        if (wide_menu) return;
         if (first >= vertices.size()) return;
         std::vector<GuiEdgeVertex>& source = edge_source;
         source.clear();
@@ -726,12 +731,11 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             if (v.w != 1.0F) return;
             source.push_back({v.x, v.y, v.u, v.v, v.r, v.g, v.b, v.a});
         }
-        // 132ws5: under the wide menu draw a triangle still crossing the edge (after menu_trim) is drawn past it as is.
+        // Wide menus use a full-width backdrop mapping and never enter this mirror path.
         const float half_width = frame_wide_half_width(width, height);
-        const float overhang = wide_menu ? 0.5F : 1e30F, span = wide_menu ? menu_extend_span : 0.0F;
         std::vector<GuiEdgeVertex>& images = edge_out;
         images.clear();
-        gui_wide_edge_images_append(source, half_width, overhang, span, images);
+        gui_wide_edge_images_append(source, half_width, 1e30F, 0.0F, images);
         if (const auto& band = b.port_edge_band; band.y1 > band.y0 && !images.empty()) {
             // 132ws9: the band's images (the loading screen's ticker line) sample the art's rows on its edges: its
             // upper half the row at y1, its lower half the row at y0, so the names are not mirrored.
@@ -741,7 +745,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 const auto part = gui_edge_sample_row(gui_edge_rows(source, lo, hi, true), at);
                 rows.insert(rows.end(), part.begin(), part.end());
             }
-            images = gui_wide_edge_images(rows, half_width, overhang, span);
+            images = gui_wide_edge_images(rows, half_width, 1e30F, 0.0F);
         }
         if (images.empty()) return;
         const std::size_t at = vertices.size();
@@ -753,35 +757,6 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         add(tex, opaque, linear, at);
         wide_free = b.port_free;
         wide_menu_tag = tag;
-    };
-    // Port-only (checkpoint 132ws5): the wide menu draw cuts a flat batch's triangles that overhang a 4:3 edge
-    // by at most menu_trim_overhang at that edge (gui_wide_menu_trim) before they are drawn, so they are mirrored
-    // like the art ending on the edge rather than drawn a little past it under their own mirror images. Only a batch
-    // spanning the frame (a backdrop, a band) is cut that far; another (the CMDCENTR seal, a panel's end) only within
-    // menu_edge_reach, and is otherwise drawn whole past the edge, as the art continues.
-    const auto menu_trim = [&](const GuiDrawBatch& b, std::size_t first) {
-        if (!wide_menu || b.perspective || b.clip || b.port_anchor || b.port_picture || b.port_free) return;
-        if (first >= vertices.size()) return;
-        std::vector<GuiEdgeVertex>& source = edge_source;
-        source.clear();
-        source.reserve(vertices.size() - first);
-        bool over = false;
-        float x0 = 1e30F, x1 = -1e30F;
-        for (std::size_t k = first; k < vertices.size(); ++k) {
-            const HostVertex& v = vertices[k];
-            if (v.w != 1.0F || v.z != 0.0F) return;
-            over = over || v.x < -320.0F + menu_edge_reach || v.x > 320.0F - menu_edge_reach;
-            x0 = std::min(x0, v.x);
-            x1 = std::max(x1, v.x);
-            source.push_back({v.x, v.y, v.u, v.v, v.r, v.g, v.b, v.a});
-        }
-        if (!over) return;
-        const bool spans = x0 <= -320.0F + menu_edge_reach && x1 >= 320.0F - menu_edge_reach;
-        std::vector<GuiEdgeVertex>& cut = edge_out;
-        cut.clear();
-        gui_wide_menu_trim_append(source, spans ? menu_trim_overhang : menu_edge_reach, menu_edge_reach, cut);
-        vertices.resize(first);
-        for (const GuiEdgeVertex& e : cut) vertices.push_back({e.x, e.y, e.u, e.v, e.r, e.g, e.b, e.a});
     };
     // Checkpoint 132h: a run of 003836b0 batches (the HUD weapon preview's gun parts) is one model the
     // GS draws with its Z test; this target has no depth buffer, so the run's triangles are drawn far
@@ -801,6 +776,8 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         wide_movie_native_bars = wide_movie && b.port_movie_native_bars;
         wide_aspect = b.port_picture ? b.port_picture_aspect : 0.0F;
         wide_free = b.port_free;
+        menu_backdrop_eligible = !b.perspective && !b.clip && !b.port_anchor && !b.port_picture && !b.port_free &&
+                                 !b.port_text;
         wide_menu_tag = wide_menu ? b.port_menu : 0;
         // Checkpoint 132f6: a run of 002bfa90 batches (the loadout figure's parts) is one actor the GS draws
         // with its Z test under the figure's own camera: drawn here with a host depth buffer cleared at the
@@ -966,7 +943,6 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
                 if (x0 <= -wide_backdrop_reach && x1 >= wide_backdrop_reach)
                     backdrop_rows += std::min(y1, 224.0F) - std::max(y0, -224.0F);
             }
-            if (!full_run && !cover_run) menu_trim(b, first);
             add(textured ? view_of(b.slot) : gs_untextured_view_.get(), (b.render_mode & 0x200) != 0,
                 !textured || (b.filter & 0x20) != 0, first);
             const bool covered = full_run || cover_run;
@@ -988,7 +964,6 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             for (const HostVertex& v : {tl, tr, bl, bl, tr, br}) vertices.push_back(v);
         }
         // The subtitle sprites filter as their TEX1 pair says (MMAG, checkpoint 132cp11).
-        if (!b.port_text) menu_trim(b, first);
         add(view_of(b.slot), false, b.flush != 0x4118e0 || (b.filter & 0x20) != 0, first);
         edge_extend(b, first, view_of(b.slot), false, b.flush != 0x4118e0 || (b.filter & 0x20) != 0);
     }
@@ -1023,6 +998,7 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             }
         // 132ws5: the wide menu draw's header and legend spread (gui_wide_menu_shifts).
         std::map<std::uint32_t, float> menu_shift;
+        std::vector<bool> stretched_backdrop(wide_ranges.size(), false);
         if (wide_menu) {
             const auto range_bounds = [&](const WideRange& r) {
                 std::array<float, 4> b{1e30F, -1e30F, 1e30F, -1e30F};
@@ -1040,7 +1016,29 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
             ranges_bounds.resize(wide_ranges.size());
             for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
                 const WideRange& r = wide_ranges[i];
-                if (r.menu != 0 && r.anchor == 0 && r.kind == wide_frame) ranges_bounds[i] = range_bounds(r);
+                if (r.anchor == 0 && r.kind == wide_frame) ranges_bounds[i] = range_bounds(r);
+            }
+            // Each screen child is one port_menu group. The background image may be split into
+            // several textured batches, so measure their combined pretrim bounds before mapping.
+            std::map<std::uint32_t, std::array<float, 4>> backdrop_bounds;
+            const auto spans_frame = [](const std::array<float, 4>& b) {
+                return b[0] <= -wide_backdrop_reach && b[1] >= wide_backdrop_reach &&
+                       b[2] <= -0.95F * 224.0F && b[3] >= 0.95F * 224.0F;
+            };
+            for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
+                const WideRange& r = wide_ranges[i];
+                if (!r.menu || !r.backdrop_eligible || r.kind != wide_frame || r.anchor) continue;
+                const auto b = ranges_bounds[i];
+                auto [it, fresh] = backdrop_bounds.try_emplace(r.menu, b);
+                if (!fresh)
+                    it->second = {std::min(it->second[0], b[0]), std::max(it->second[1], b[1]),
+                                  std::min(it->second[2], b[2]), std::max(it->second[3], b[3])};
+            }
+            for (std::size_t i = 0; i < wide_ranges.size(); ++i) {
+                const WideRange& r = wide_ranges[i];
+                if (!r.backdrop_eligible || r.kind != wide_frame || r.anchor) continue;
+                const auto b = r.menu ? backdrop_bounds.at(r.menu) : ranges_bounds[i];
+                stretched_backdrop[i] = spans_frame(b);
             }
             const auto bounds_of = [&] {
                 std::map<std::uint32_t, std::array<float, 4>> out;
@@ -1071,14 +1069,18 @@ void GuiRenderer::draw(const GuiDrawList& list, const gfx::Texture* target, unsi
         }
         wide_menu_shifts_ = menu_shift;
         const GuiWideMap m = gui_wide_map(width, height);
-        for (const WideRange& r : wide_ranges) {
+        for (std::size_t ri = 0; ri < wide_ranges.size(); ++ri) {
+            const WideRange& r = wide_ranges[ri];
             if (r.kind == wide_full) continue;
             const auto it = r.anchor ? wide_shift.find(r.anchor) : wide_shift.end();
             const auto mt = r.menu && r.kind == wide_frame ? menu_shift.find(r.menu) : menu_shift.end();
             const float shift = it != wide_shift.end() ? it->second : mt != menu_shift.end() ? mt->second : 0.0F;
             for (std::size_t k = r.first; k < r.end; ++k) {
                 HostVertex& v = vertices[k];
-                if (r.kind == wide_picture && r.fit == MovieFit::fill) {  // the 4:3 picture scaled to the target's width
+                if (stretched_backdrop[ri]) {  // one full-height menu background across the entire wide target
+                    v.x = v.x + m.ox * v.w;
+                    v.y = v.y * m.ky + m.oy * v.w;
+                } else if (r.kind == wide_picture && r.fit == MovieFit::fill) {  // the 4:3 picture scaled to the target's width
                     v.x = v.x + m.ox * v.w;
                     v.y = v.y * m.ky / m.kx + m.oy * v.w;
                 } else if (r.kind == wide_picture && r.fit == MovieFit::stretch) {  // 132vt2a2: over the whole target

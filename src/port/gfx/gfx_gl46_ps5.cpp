@@ -1852,6 +1852,10 @@ void Impl::present(unsigned sync_interval) {
              px[1][0], px[1][1], px[1][2], at[2][0], at[2][1], px[2][0], px[2][1], px[2][2], at[3][0], at[3][1], px[3][0],
              px[3][1], px[3][2], draws_frame);
     }
+    // 132ps5d movie/menu present: this frame drew into back as an FBO, then the present samples it as a
+    // texture. The copy draws already barrier this transition on Mesa; a direct GUI frame has no copy to do so.
+    // Keep it under ps5_gl.txt's existing barrier A/B switch for a device-side ghosting check.
+    if (g_barrier.load(std::memory_order_relaxed) && gl_version >= 45) glTextureBarrier();
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     bound_fbo_ = 0;
     glViewport(0, 0, width, height);

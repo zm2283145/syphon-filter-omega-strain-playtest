@@ -27,6 +27,9 @@
 #include "lan_net_core.hpp"
 #include "lan_session.hpp"
 #include "mod_fingerprint.hpp"
+#ifndef __vita__
+#include "movie_audio_stage.hpp"
+#endif
 #include "movie_subtitle_overlay.hpp"
 #include "online_lobby_host.hpp"
 #include "pad_connection.hpp"
@@ -61,8 +64,10 @@
 #include <fstream>
 #include <iostream>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -401,6 +406,21 @@ struct FrontendApp::Impl {
     std::unique_ptr<GuiDrawer> drawer;
     IeDrawState ie_state;
     std::unique_ptr<audio::Device> sound;
+#ifndef __vita__
+    std::unique_ptr<movie::MovieAudioStage> movie_stage;  // outlives a PSS wrapper; stopped before sound resets
+    // Port-only movie audio A/B: one report per opening / mission movie on Windows and PS5. The PS5 device's
+    // independent ten-second output log also reports resynced frames, which Device::Stats does not expose.
+    struct MovieAudioProbe {
+        std::string name;
+        std::int64_t start_frame = 0;
+        std::uint64_t pcm_calls = 0, pcm_frames = 0, submit_calls = 0;
+        std::size_t max_pcm_frames = 0, max_device_queued = 0;
+        double submit_total_ms = 0.0, submit_max_ms = 0.0;
+        std::optional<audio::Device::Stats> device_start;
+    } movie_audio;
+    void start_movie_audio(std::string name);
+    void finish_movie_audio();
+#endif
 #ifdef __vita__
     // Port-only (132vt2b2, VitaMovieHooks::sound_pump): the mix on the audio core; it goes before the device.
     std::unique_ptr<VitaMovieHooks::SoundPumpHandle> sound_pump;
@@ -607,6 +627,23 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
     services.sound_level = [h = sound_host.get()](const std::string& level) { h->set_level(level); };
 #endif
     services.nested_frame = [this] { nested_frame(); };
+#ifndef __vita__
+    // Built-in PSS movies use a device-clocked, nonblocking PCM stage. Mod movies retain their own audio path.
+    services.open_movie = [this, open = std::move(services.open_movie)](const std::string& name)
+        -> std::unique_ptr<movie::MovieStream> {
+        if (movie_stage) {
+            movie_stage->stop();
+            finish_movie_audio();
+            movie_stage.reset();
+        }
+        auto opened = open ? open(name) : nullptr;
+        if (!opened || !sound || sound->stats().lost) return opened;
+        if (!dynamic_cast<movie::PssMovie*>(opened.get())) return opened;
+        movie_stage = std::make_unique<movie::MovieAudioStage>(*sound);
+        auto pss = std::unique_ptr<movie::PssMovie>(static_cast<movie::PssMovie*>(opened.release()));
+        return std::make_unique<movie::PacedPssMovie>(std::move(pss), *movie_stage);
+    };
+#endif
 #ifdef __vita__
     // Port-only (132vt2, research/VITA.md "Movies"): the Vita app's decode-ahead around each movie.
     if (vita_movie_hooks().wrap)
@@ -1151,6 +1188,11 @@ void FrontendApp::Impl::read_simulated_devices() {
 
 void FrontendApp::Impl::release_output() {
     finish_present();  // 132vf2: the last frame's job ends before its renderer and window go
+#ifndef __vita__
+    if (movie_stage) movie_stage->stop();
+    finish_movie_audio();
+    movie_stage.reset();
+#endif
 #ifdef __vita__
     sound_pump.reset();
 #endif
@@ -1164,6 +1206,61 @@ void FrontendApp::Impl::release_output() {
     std::cout << "Front end: " << (freed >> 10) << " KB of decoded pictures and HOG copies dropped for the level (PS Vita)\n";
 #endif
 }
+
+#ifndef __vita__
+void FrontendApp::Impl::start_movie_audio(std::string name) {
+    movie_audio = {};
+    movie_audio.name = std::move(name);
+    movie_audio.start_frame = session ? session->frames() : 0;
+    if (sound) {
+        movie_audio.device_start = sound->stats();
+        movie_audio.max_device_queued = movie_audio.device_start->queued_frames;
+    }
+}
+
+void FrontendApp::Impl::finish_movie_audio() {
+    if (movie_audio.name.empty()) return;
+    MovieAudioProbe probe = std::move(movie_audio);
+    movie_audio = {};
+    std::uint64_t staged_discarded = 0, staged_padding = 0;
+    if (movie_stage) {
+        const auto staged = movie_stage->stats();
+        probe.pcm_calls = staged.pcm_calls;
+        probe.pcm_frames = staged.pcm_frames;
+        probe.max_pcm_frames = staged.max_pcm_frames;
+        probe.submit_calls = staged.submit_calls;
+        probe.submit_total_ms = staged.submit_total_ms;
+        probe.submit_max_ms = staged.submit_max_ms;
+        probe.max_device_queued = std::max(probe.max_device_queued, staged.max_device_queued);
+        staged_discarded = staged.discarded_frames;
+        staged_padding = staged.padding_frames;
+    }
+    std::ostringstream out;
+    out << "Front end: movie audio (port-only A/B) " << probe.name << " frames " << probe.start_frame << ".."
+        << (session ? session->frames() : 0) << ": PCM " << probe.pcm_frames << " frames in " << probe.pcm_calls
+        << " calls, max chunk " << probe.max_pcm_frames << " frames ("
+        << std::fixed << std::setprecision(1) << (1000.0 * double(probe.max_pcm_frames) / audio::Mixer::output_rate)
+        << " ms); submit " << probe.submit_calls << " calls, " << std::setprecision(2) << probe.submit_total_ms
+        << " ms total, " << probe.submit_max_ms << " ms max";
+    if (staged_discarded) out << "; skipped movie PCM " << staged_discarded << " frames";
+    if (staged_padding) out << "; short-clip priming silence " << staged_padding << " frames";
+    if (sound && probe.device_start) {
+        const auto end = sound->stats();
+        const auto& start = *probe.device_start;
+        const auto delta = [](auto a, auto b) { return a >= b ? a - b : 0; };
+        out << "; device underruns +" << delta(end.underruns, start.underruns)
+            << ", silent +" << delta(end.silent_frames, start.silent_frames) << " frames, dropped +"
+            << delta(end.dropped_frames, start.dropped_frames) << " frames, losses +"
+            << delta(end.losses, start.losses) << ", queue peak "
+            << std::setprecision(1) << (1000.0 * double(probe.max_device_queued) / audio::Mixer::output_rate)
+            << " ms";
+        if (end.background_muted || start.background_muted) out << ", background muted during report";
+    } else {
+        out << "; no output device stats";
+    }
+    std::cout << out.str() << "\n";
+}
+#endif
 
 void FrontendApp::Impl::capture(const std::string& name) {
     if (!offscreen) return;
@@ -1180,10 +1277,24 @@ void FrontendApp::Impl::capture(const std::string& name) {
 
 void FrontendApp::Impl::step(std::uint16_t held) {
     FrontendSession& s = *session;
+#ifndef __vita__
+    const std::string movie_before = s.movie_playing() ? s.movie_name() : std::string{};
+#endif
     {
         FrontendProfileScope scope(profile, "session");  // port-only (132win5): includes the services timed apart
         s.frame(held);
     }
+#ifndef __vita__
+    if (!s.movie_playing() && movie_stage) movie_stage->stop();
+    const std::string movie_after = s.movie_playing() ? s.movie_name() : std::string{};
+    if (!movie_after.empty() && movie_audio.name != movie_after) {
+        finish_movie_audio();
+        start_movie_audio(movie_after);
+    } else if (movie_audio.name.empty() && !movie_before.empty()) {
+        // A movie may end during s.frame(), which clears its name before this step takes its last PCM.
+        start_movie_audio(movie_before);
+    }
+#endif
     if (lan_session) lan_session->pump();  // port-only (132ln3): the hosted LAN game's discovery and transport
     if (online_session) online_session->pump();  // port-only (132on2b2): the online game's
     if (lan_peer) lan_peer->pump();        // port-only test (132ln4): --lan-loopback-peer
@@ -1236,7 +1347,7 @@ void FrontendApp::Impl::step(std::uint16_t held) {
             movie_serial = s.movie_serial();
             offscreen->set_texture(movie_slot, movie_picture());
         }
-        shown = movie_list(s.movie_aspect(), attract_movie_native_bars(s.movie_name()));
+        shown = movie_list(s.movie_aspect());  // demos use the same fill/bars/stretch choice as other movies
         shown_is_last = true;
         if (const auto* track = s.movie_subtitles()) {
             append_subtitles(shown, data->fonts(), *track, s.movie_subtitle_colour(), last_render_mode);
@@ -1267,6 +1378,13 @@ void FrontendApp::Impl::step(std::uint16_t held) {
     // is not loaded while a movie plays (the boot movie precedes 002cb3d0,
     // the attract movies follow the suspend 002c9860's level unload).
     auto pcm = s.take_movie_audio();
+#ifndef __vita__
+    if (!pcm.empty() && !movie_audio.name.empty()) {
+        ++movie_audio.pcm_calls;
+        movie_audio.pcm_frames += pcm.size() / 2;
+        movie_audio.max_pcm_frames = std::max(movie_audio.max_pcm_frames, pcm.size() / 2);
+    }
+#endif
     while (sound && audio_event_at < audio_events.size() &&
            audio_events[audio_event_at].frame <= static_cast<std::uint64_t>(s.frames() - audio_pass_start)) {
         using K = audio::AudioDeviceEvent::Kind;
@@ -1286,7 +1404,22 @@ void FrontendApp::Impl::step(std::uint16_t held) {
 #endif
     if (sound && !s.movie_playing() && pcm.empty()) sound->submit(sound_pcm);
     if (sound && !pcm.empty()) {
-        if (s.movie_rate() == 48000 && s.movie_channels() == 2) sound->submit(pcm);
+        if (s.movie_rate() == 48000 && s.movie_channels() == 2) {
+#ifndef __vita__
+            const auto submit_begin = std::chrono::steady_clock::now();
+#endif
+            sound->submit(pcm);
+#ifndef __vita__
+            if (!movie_audio.name.empty()) {
+                const double submit_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - submit_begin).count();
+                ++movie_audio.submit_calls;
+                movie_audio.submit_total_ms += submit_ms;
+                movie_audio.submit_max_ms = std::max(movie_audio.submit_max_ms, submit_ms);
+                movie_audio.max_device_queued = std::max(movie_audio.max_device_queued, sound->stats().queued_frames);
+            }
+#endif
+        }
         else if (!audio_warned) {
             audio_warned = true;
             std::cout << "Front end: movie audio " << s.movie_rate() << " Hz x " << s.movie_channels()
@@ -1296,6 +1429,12 @@ void FrontendApp::Impl::step(std::uint16_t held) {
     // Port-only (132win6): the device's loss / re-open notes (audio_device.hpp).
     if (sound)
         for (const auto& line : sound->take_log()) std::cout << "Front end: " << line << " at frame " << session->frames() << "\n";
+#ifndef __vita__
+    if (!s.movie_playing()) {
+        finish_movie_audio();
+        movie_stage.reset();
+    }
+#endif
     // The view: the movie, else the top screen.
     std::string now;
     if (s.movie_playing()) now = "MOVIE_" + s.movie_name();
@@ -1381,17 +1520,15 @@ void FrontendApp::Impl::present() {
             if (const gui::Widget* top = session->runtime().top(); top && session->gui_active())
                 wide_background = screen->draw_wide_background(std::string("frontend.") + frontend_class_name(top->cls),
                                                                host->back_buffer(), host->width(), host->height());
-        // Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the front end's wide menus
-        // (GuiRenderer::set_wide_menu): the 4:3 content drawn unclipped, the art the frame's edges cut (backdrop,
-        // bands, panel lines) extended to the window's edges (set_wide_edge_extend), the header and legend spread;
-        // the blurred side fill (132ws) only for a frame with nothing to extend, and for the GuiSlideShow (the rank
-        // certificates, the ZEUS files: photographs and documents, whose mirror images would show reversed text), drawn as 132ws.
+        // Wide menus expand full-frame backdrop art while controls retain their proportions. Never fill their
+        // side areas from the composited menu: that duplicates moving controls at the fitted-frame boundary.
+        // The slideshow keeps its separate blurred side treatment for photographs and documents.
         const gui::Widget* shown_top = session->gui_active() ? session->runtime().top() : nullptr;
         const bool slideshow = shown_top && shown_top->cls == gui::WidgetClass::slideshow;
         screen->set_wide_edge_extend(!wide_background && !session->movie_playing() && !slideshow);
         screen->set_wide_menu(!slideshow);
         screen->draw(list, host->back_buffer(), host->width(), host->height());
-        if (!wide_background && !session->movie_playing() && !list.batches.empty() && screen->wide_edge_images() == 0)
+        if (slideshow && !wide_background && !session->movie_playing() && !list.batches.empty())
             screen->draw_wide_fill(host->back_buffer(), host->width(), host->height());
         draw_overlay(frame);
         draw_lan_notices();
@@ -1534,7 +1671,7 @@ void FrontendApp::Impl::present_threaded() {
             screen->set_wide_edge_extend(!wide_background && !slideshow);
             screen->set_wide_menu(!slideshow);
             screen->draw(render_list, host->back_buffer(), host->width(), host->height());
-            if (!wide_background && !render_list.batches.empty() && screen->wide_edge_images() == 0)
+            if (slideshow && !wide_background && !render_list.batches.empty())
                 screen->draw_wide_fill(host->back_buffer(), host->width(), host->height());
             if (overlay_drawn) draw_overlay_lines(lines);
             const auto present_begun = std::chrono::steady_clock::now();
@@ -1831,8 +1968,14 @@ FrontendResult FrontendApp::Impl::loop() {
                     std::cout << "Front end: application paused at front-end frame " << s.frames()
                               << " (Pause/Break or the window system menu; focus, minimise and resize remain independent)\n";
                 }
+#ifndef __vita__
+                if (movie_stage) movie_stage->set_paused(true);
+#endif
                 while (host->application_paused() && !host->close_requested()) Sleep(16);
                 if (host->close_requested()) continue;
+#ifndef __vita__
+                if (movie_stage) movie_stage->set_paused(false);
+#endif
                 was_application_paused = false;
                 const auto resumed = std::chrono::steady_clock::now();
                 last = resumed;
@@ -1954,6 +2097,11 @@ FrontendResult FrontendApp::Impl::loop() {
         if (steps == 0 && !pacing) Sleep(1);
     }
     finish_present();  // 132vf2: the pass's last frame presented before the level, the next pass or the exit
+#ifndef __vita__
+    if (movie_stage) movie_stage->stop();
+    finish_movie_audio();  // report a skipped or interrupted movie as well
+    movie_stage.reset();
+#endif
     present_log();
     if (sweep_call) {  // the pass ended inside a sweep: disarmed so that the loss cannot fire in the level
         device_lost_inject(-1);

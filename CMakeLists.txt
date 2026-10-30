@@ -492,7 +492,7 @@ target_link_libraries(omega_movie PRIVATE omega_core)
     add_executable(omega_actor src/port/app/actor_preview_main.cpp src/port/render/scene_renderer.cpp ${OMEGA_GFX_D3D11_SOURCES})
     # Checkpoint 132win8 (port-only): the play host is compiled once and linked twice: omega_play (console, the
     # scripted / diagnostic entry) and OmegaStrain (the player-facing GUI-subsystem launcher, launcher.hpp).
-    add_library(omega_play_objects OBJECT src/port/app/play_main.cpp src/port/app/launcher.cpp src/port/app/launcher_mod_panel.cpp src/port/app/frontend_app.cpp src/port/app/frontend_disc.cpp src/port/app/host_window.cpp
+    add_library(omega_play_objects OBJECT src/port/app/play_main.cpp src/port/app/launcher.cpp src/port/app/launcher_mod_panel.cpp src/port/app/frontend_app.cpp src/port/app/frontend_disc.cpp src/port/app/movie_audio_stage.cpp src/port/app/host_window.cpp
         src/port/app/agent_preview.cpp src/port/app/loading_screen_host.cpp src/port/render/scene_renderer.cpp
         src/port/render/gui_renderer.cpp src/port/render/particle_renderer.cpp src/port/render/corona_renderer.cpp src/port/platform/audio_device.cpp src/port/platform/gamepad_device.cpp
         src/port/render/frame_overlay.cpp src/port/platform/crash_report.cpp src/port/platform/gamepad_simulation.cpp
@@ -502,9 +502,12 @@ target_link_libraries(omega_movie PRIVATE omega_core)
     target_link_libraries(omega_actor PRIVATE d3d11 dxgi d3dcompiler user32 gdi32)
     add_executable(omega_play $<TARGET_OBJECTS:omega_play_objects>)
     add_executable(omega_strain WIN32 $<TARGET_OBJECTS:omega_play_objects>)
+    enable_language(RC)
+    configure_file(config/windows/omega.rc.in ${CMAKE_CURRENT_BINARY_DIR}/omega.rc @ONLY)
     set_target_properties(omega_strain PROPERTIES OUTPUT_NAME OmegaStrain)
     target_link_options(omega_strain PRIVATE /ENTRY:wmainCRTStartup)
     foreach(target omega_play omega_strain)
+        target_sources(${target} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/omega.rc)
         target_link_libraries(${target} PRIVATE d3d11 dxgi d3dcompiler user32 gdi32 xaudio2 ole32 setupapi hid comdlg32 shell32
             omega_core omega_windows)
         # Checkpoint 132win12 (port-only): the linker map next to the exe names the crash reporter's throw addresses
@@ -663,7 +666,7 @@ target_sources(omega_core_tests PRIVATE tests/input_device_tests.cpp tests/port_
         target_compile_definitions(omega_core_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(omega_core_tests PRIVATE omega_windows)
         # The front-end session test reads the disc as the window does.
-        target_sources(omega_core_tests PRIVATE src/port/app/frontend_disc.cpp src/port/app/agent_preview.cpp src/port/render/gui_renderer.cpp src/port/render/particle_renderer.cpp
+        target_sources(omega_core_tests PRIVATE src/port/app/frontend_disc.cpp src/port/app/movie_audio_stage.cpp src/port/app/agent_preview.cpp src/port/render/gui_renderer.cpp src/port/render/particle_renderer.cpp
             src/port/app/host_window.cpp src/port/app/loading_screen_host.cpp
             src/port/render/scene_renderer.cpp src/port/render/corona_renderer.cpp tests/corona_device_tests.cpp
             src/port/render/frame_overlay.cpp tests/frame_overlay_tests.cpp tests/gfx_render_thread_tests.cpp tests/gfx_skinning_capability_tests.cpp tests/gfx_texture_blocks_tests.cpp tests/gfx_vulkan_tests.cpp ${OMEGA_GFX_D3D11_SOURCES}

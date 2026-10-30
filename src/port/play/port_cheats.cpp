@@ -198,6 +198,11 @@ void port_set_cheat(PortCheat c, bool on) {
 
 void port_clear_cheats() { cheats().on.fill(false); }
 
+void port_activate_cheat(PortCheat c) {
+    if (!port_cheat_is_action(c)) throw std::runtime_error("port cheat: expected a one-click action");
+    if (cheats().hook) cheats().hook(c, true);
+}
+
 void port_on_cheat_changed(std::function<void(PortCheat, bool)> hook) { cheats().hook = std::move(hook); }
 
 bool port_cheat_menu_enabled() { return cheats().menu; }
@@ -206,7 +211,7 @@ void port_set_cheat_menu_enabled(bool enabled) { cheats().menu = enabled; }
 
 std::optional<std::string> port_cheat_string(const std::string& key) {
     if (key == "StartMenu7" || key == "PortCheatsTitle") return std::string("Cheats");
-    if (key == "StartMenuOpt7") return std::string("Port-only cheats: toggle each On or Off");
+    if (key == "StartMenuOpt7") return std::string("Port-only cheats and unlock actions");
     // Port-only (checkpoint 132win11): the pause menu's Port Settings entry.
     if (key == "StartMenu8") return std::string("Port Settings");
     if (key == "StartMenuOpt8") return std::string("Port-only settings");
@@ -353,7 +358,28 @@ void append_ingame_button(GuiNode& group, const std::string& name, const std::st
 }  // namespace
 
 GuiNode port_cheats_screen(const GuiNode& gameopt2) {
-    return options_rows_screen(gameopt2, "portcheats", "pc_", "$PortCheatsTitle", "$PortCheat", port_cheat_count, 85.0F, 35.0F);
+    // Ten rows fit between the title and bottom help text. Action labels use the
+    // whole selectable row rather than the left-hand toggle label column.
+    auto screen = options_rows_screen(gameopt2, "portcheats", "pc_", "$PortCheatsTitle", "$PortCheat",
+                                      port_cheat_count, 100.0F, 27.0F);
+    for (std::size_t i = 0; i < port_cheat_count; ++i) {
+        if (!port_cheat_is_action(static_cast<PortCheat>(i))) continue;
+        auto* label = find_node(screen, "pc_label" + std::to_string(i));
+        auto* value = find_node(screen, "pc_value" + std::to_string(i));
+        const auto* background = find_node(screen, "pc_background" + std::to_string(i));
+        const float centre = background->rect[0] + background->rect[2] * 0.5F;
+        const float width = background->rect[2] * 0.8F;
+        if (value->decorator) {
+            value->decorator->matrix[0] *= width / value->rect[2];
+            value->decorator->matrix[9] = centre;
+        }
+        value->rect[0] = centre - width * 0.5F;
+        value->rect[2] = width;
+        label->rect[0] = value->rect[0];
+        label->rect[2] = value->rect[2];
+        label->text->halign = 2;
+    }
+    return screen;
 }
 
 GuiNode port_settings_screen(const GuiNode& gameopt2, std::size_t rows) {

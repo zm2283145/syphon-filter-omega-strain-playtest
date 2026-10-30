@@ -39,6 +39,9 @@ struct AwardsAgentContext {
     // 00332610's sprintf("partname %s is not in table\n") for a part name not
     // in the table (the text is built on the stack and dropped).
     std::vector<std::string> missing_parts;
+    // PORT-ONLY: nullopt keeps native score-based HasRank; -1 forces no rank
+    // for a scratch AWARDS pass; nonnegative selects one registered rank row.
+    std::optional<std::int32_t> port_rank_override;
 };
 
 // One member native by its script name; `arguments` follow the agent (strings

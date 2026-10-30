@@ -105,15 +105,9 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4ea0a0, 4, 32);
     m.write(0x5061d8, 4, 33);
     m.write(dme::kState, 1, 6);
-    // 00227ed0: the objective manager constructor consumes category 0xF6's first key.
-    // Its NetObj registration precedes every objective constructor on each console.
-    objective_counter_ = 1;
-    m.write(kObjectiveManager, 4, 0x4db790);
-    m.write(kObjectiveManager + 0xc, 4, 0x00f60001);
-    m.write(kObjectiveManager + 0x10, 4, 0x00f60001);
-    // cSystem_ctor enables the manager; 00227ed0 clears it on a client.
-    m.write(kObjectiveManager + 0x14, 1, transport_.is_host() ? 1 : 0);
-    call(m, 0x3fb650, {0x00f60001, transport_.is_host() ? dme_->local_index() : session_host(), kObjectiveManager});
+    // 00227ed0 ran during static World_Construct with multiplayer off. The
+    // persistent objective manager has no NetMap key; 001350e0 resets category
+    // counters before each level's objectives take keys starting at F60001.
     // 132ln5f: the .data the character send 00185a30 reads: the default weapon list 0x0048a2f8 (twelve 0xff bytes)
     // and the player vtable 0x004da690's +0x1c (00185a30 itself).
     for (std::uint32_t k = 0; k < 12; k += 4) m.write(0x48a2f8 + k, 4, 0xffffffffU);
@@ -275,7 +269,7 @@ void LanNetCore::register_objective(std::uint32_t local_script_id) {
     if (!local_script_id) unhosted(0x229900, "an objective with script ID zero");
     if (objective_bindings_.contains(local_script_id))
         unhosted(0x229900, "an objective registered twice (" + std::to_string(local_script_id) + ")");
-    // 0040c240: one category counter, manager first, then each objective constructor.
+    // 0040c240: one category counter, incremented by each objective constructor.
     // The original wraps and searches visible GOBJs; this bounded port arena cannot
     // host that many, so fail explicitly before inventing a wrap search.
     if (objective_counter_ == 0xffffU) unhosted(0x40c240, "objective network key counter wrapped");
@@ -2416,8 +2410,18 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
 }
 
 void LanNetCore::level_load_begin(LevelLoadHost* level) {
-    level_ = level;
+    require_objective_main_thread();
     auto& m = memory_;
+    // The play host flushes deferred objective constructors before its
+    // 001350e0 adapter. Mirror that loader's 0040c2d0 reset here, before any
+    // new registration. Reusing IDs/storage requires the preceding native
+    // 003fbcd0 and finish_level_teardown, not merely removing C++ bindings.
+    if (level_loaded_ || !objective_bindings_.empty() || !objective_outcomes_.empty() ||
+        !objective_actives_.empty() || m.read(dme::kNetMap) || m.read(dme::kNetMap + 4))
+        throw std::runtime_error("LAN level load requires previous world network cleanup before objective ID reuse");
+    objective_counter_ = 0;
+    next_objective_block_ = kObjectiveBlocks;
+    level_ = level;
     if (m.read(dme::kNetworkGame, 1)) call(m, 0x42a770, {});
     call(m, 0x16a970, {});
 }

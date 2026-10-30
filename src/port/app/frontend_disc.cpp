@@ -495,9 +495,11 @@ FrontendServices FrontendDisc::services(const std::filesystem::path& card_folder
             const auto disc_movie = [this, m] {
                 const Extent e = disc_.archive_member_extent(movie::movies_hog(), m);
                 movie_stream_.clear();
-                auto movie = std::make_unique<movie::PssMovie>(movie::stream_source(movie_stream_, e.offset, e.size), 256 * 1024);
-                // Port-only (checkpoint 132win5): the 256 KiB read's pictures are decoded as they are shown, not all in
-                // the frame that read them (a 40-56 ms stall every ~24 frames); the frames and audio are unchanged.
+                // Port-only movie audio A/B: a 256 KiB read delivered roughly half a second of PCM at once to a
+                // 150 ms output queue. Smaller reads leave the stream unchanged and reduce each submit's burst.
+                auto movie = std::make_unique<movie::PssMovie>(movie::stream_source(movie_stream_, e.offset, e.size), 32 * 1024);
+                // Port-only (checkpoint 132win5): the read's pictures are decoded as they are shown, not all in
+                // the frame that read them. The video slice does not smooth the audio delivered per read.
                 movie->set_video_slice(2048);
                 return movie;
             };
@@ -583,14 +585,6 @@ const char* frontend_class_name(gui::WidgetClass c) {
         case gui::WidgetClass::missionstats: return "STATS";
         default: return "SCREEN";
     }
-}
-
-bool attract_movie_native_bars(std::string_view name) {
-    const auto upper = [](char c) {
-        return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A')) : c;
-    };
-    return name.size() >= 5 && upper(name[0]) == 'D' && upper(name[1]) == 'E' && upper(name[2]) == 'M' &&
-           upper(name[3]) == 'O' && std::isdigit(static_cast<unsigned char>(name[4])) != 0;
 }
 
 GuiDrawList movie_list(float aspect, bool native_bars) {

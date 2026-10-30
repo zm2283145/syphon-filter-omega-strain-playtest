@@ -138,12 +138,22 @@ enum class PortCheat : std::uint8_t {
     end_level,         // the level ends completed (objectives set, 0012fa60(G, 0))
     super_agent,       // the player's hits on other actors kill at once
     npcs_ignore_you,   // the NPC perception ignores the player
-    unlock_all,        // every registered weapon and outfit unlocked in the agent record
+    unlock_weapons,
+    unlock_levels,
+    max_rank,
+    unlock_rank_rewards,
 };
-inline constexpr std::size_t port_cheat_count = 7;
+inline constexpr std::size_t port_cheat_count = 10;
 // The screen's row label keys ("PortCheat%d"), in PortCheat order.
 inline constexpr std::array<const char*, port_cheat_count> port_cheat_names = {
-    "Infinite Health", "Infinite Armour", "Infinite Ammo", "End Level", "Super Agent", "NPCs Ignore You", "Unlock All"};
+    "Infinite Health", "Infinite Armour", "Infinite Ammo", "End Level", "Super Agent", "NPCs Ignore You",
+    "Unlock All Weapons", "Unlock All Levels", "Max Rank", "Unlock All Rank Rewards"};
+
+constexpr bool port_cheat_is_action(PortCheat c) {
+    return c == PortCheat::end_level || c >= PortCheat::unlock_weapons;
+}
+// Invoke a one-click unlock each time it is selected, without storing toggle state.
+void port_activate_cheat(PortCheat c);
 
 bool port_cheat(PortCheat c);
 // Sets the cheat and, when it changes, calls the changed hook.
@@ -157,7 +167,7 @@ bool port_cheat_menu_enabled();
 void port_set_cheat_menu_enabled(bool enabled);
 
 // The Cheats screen's strings: StartMenu7 / StartMenuOpt7 (the start menu's
-// 8th entry and its description), PortCheatsTitle and PortCheat0..6; StartMenu8 / StartMenuOpt8 the
+// 8th entry and its description), PortCheatsTitle and PortCheat0..9; StartMenu8 / StartMenuOpt8 the
 // port-only Port Settings entry (checkpoint 132win11).
 std::optional<std::string> port_cheat_string(const std::string& key);
 

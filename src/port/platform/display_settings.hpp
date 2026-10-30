@@ -12,8 +12,8 @@
 //                                  zoom to fill the window's width (Port Settings MEDIA > LOADING SCREENS)
 //   movies=fill|bars|stretch       132vt2a2: under wide, story/intro cutscenes scaled to the window's width preserving
 //                                  the PS2 display aspect (fill, the default), shown at native 4:3 with bars, or
-//                                  stretched over the window (frame_fit.hpp MovieFit). DEMOnn attract trailers keep
-//                                  their authored native 4:3 presentation.
+//                                  stretched over the window (frame_fit.hpp MovieFit). Attract demo videos use
+//                                  this same setting.
 //   render_scale=<0.25..4>         in window-resolution mode, the internal render scale: the swap chain's buffers
 //                                  are the window's client size times it (DXGI scales them to the window); default 1.
 //                                  Below 1 renders fewer pixels (faster, softer), above 1 supersamples.

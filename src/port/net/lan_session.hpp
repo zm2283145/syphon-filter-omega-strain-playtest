@@ -28,7 +28,9 @@ namespace omega::lan {
 // PORT-ONLY: bumped whenever the port changes what peers exchange (the LAN wire formats, the replicated game
 // state) without a change to the executable or the disc data. Part of the build hash.
 // 2 (checkpoint 132md5): JOIN_REQ's join extension (the mod report) and JOIN_NAK Refused with its reason.
-constexpr std::uint32_t kLanPortRevision = 2;
+// 3: objective keys start at F60001 and reset per level; revision 2 reserved
+// that key for a manager stand-in, so mixed peers would target wrong objectives.
+constexpr std::uint32_t kLanPortRevision = 3;
 
 // PORT-ONLY (§6 item 1): the discovery / join build hash. Both sides must run the same executable and the same
 // disc data (message type numbers come from registration order, receiver ids from creation order), and the same

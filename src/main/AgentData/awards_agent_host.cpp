@@ -244,6 +244,15 @@ struct Natives {
     // 0032fae0: the last rank (by row order) whose threshold the score
     // reached and is no lower than the previous pick.
     Word has_rank(const AwardsText& name) const {
+        if (c.port_rank_override) {
+            const std::int32_t selected = *c.port_rank_override;
+            if (selected == -1) return 0;
+            if (selected < 0 || static_cast<std::size_t>(selected) >= c.registries.ranks.size())
+                fail("a port rank override outside the registered rank rows");
+            const auto& rank_name = c.registries.ranks[static_cast<std::size_t>(selected)].name;
+            if (!rank_name || !name) fail("a null rank name reaches strcmp");
+            return *rank_name == *name ? 1 : 0;
+        }
         const auto s = award_score(c.agent, c.state, c.tables);  // 003305d0
         std::int32_t t0 = 0;
         std::optional<std::size_t> pick;

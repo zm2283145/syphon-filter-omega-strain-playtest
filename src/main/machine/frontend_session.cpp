@@ -1,6 +1,7 @@
 #include "frontend_session.hpp"
 
 #include "agent_network_receive.hpp"
+#include "awards_agent_host.hpp"
 #include "agent_parts.hpp"
 #include "appearance_parts.hpp"
 #include "movie_subtitle_overlay.hpp"
@@ -15,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -315,6 +318,15 @@ void FrontendSession::loading_hide(bool defer) {
     if (defer) {
         loading_hide_frame_ = std::max(loading_hide_frame_, frames_ + splash_minimum_frames);
         return;
+    }
+    if (splash_covered_screen_) {
+        // The menu was constructed and woken beneath SPLASH, but the authored
+        // splash background is translucent and does not cover the whole canvas.
+        // Restore its draw flag only when the port's presentation delay ends.
+        const auto& children = rt_.canvas().children;
+        if (std::find(children.begin(), children.end(), splash_covered_screen_) != children.end())
+            splash_covered_screen_->flags |= gui::flag_visible;
+        splash_covered_screen_ = nullptr;
     }
     rt_.release(loading_widget_);
     rt_.flush();
@@ -626,6 +638,13 @@ void FrontendSession::gui_start() {   // 002cb3d0(app, 0)
         record("002c9ee0 / 00145160 / 002c7d90(0, 0, 0)");
         rt_.push(screen, 0);
         loading_hide(true);
+        if (loading_widget_ && loading_name_ == "SPLASH" && loading_hide_frame_ >= 0) {
+            // 002cb3d0 initializes the menu while the original loading thread
+            // presents SPLASH. The port retains that splash for one second;
+            // keep the newly initialized menu out of the draw until it closes.
+            screen->flags &= ~gui::flag_visible;
+            splash_covered_screen_ = screen;
+        }
         record("003d1730 USB keyboard 0055a700 (app +278 = 0)");
     });
     app_28_ = 1;
@@ -850,16 +869,89 @@ void FrontendSession::agent_3328d0(std::int32_t a1, std::int32_t a2, std::int32_
 
 // ---------------------------------------------------------------- port cheats (PORT-ONLY)
 
+namespace {
+void port_unlock_levels(const ProfileAwards& awards, AgentRecord agent, std::uint8_t& level_restrict) {
+    // 003330c0 sets the registered level rows' +b08 bits. This leaves the
+    // objective completion words at +84 and the level history untouched.
+    for (const auto& row : awards.registries.levels) {
+        const auto bit = static_cast<std::uint32_t>(row.bit);
+        if (bit >= (0xb50 - 0xb08) * 8)
+            throw std::runtime_error("port unlock levels: a level bit lies past agent +b4f");
+        agent[0xb08 + (bit >> 3)] |= static_cast<std::uint8_t>(1u << (bit & 7));
+    }
+    level_restrict = 0;  // 004ffbb5: the command centre's extra level gate
+}
+
+void port_set_max_rank(AgentRecord agent, const ProfileAwards& awards) {
+    if (awards.registries.ranks.empty()) throw std::runtime_error("port max rank: no registered rank rows");
+    const std::uint32_t row = FrontendSession::rank_value(awards.registries.ranks.size() - 1);
+    std::memcpy(agent.data() + 0xb50, &row, sizeof row);
+}
+
+void port_unlock_rank_rewards(const ProfileAwards& awards, AgentRecord agent, AgentLoadState& state,
+                              std::span<const std::uint32_t> rank_parts) {
+    for (const auto& row : awards.tables.ranks) award_unlock(agent, awards.tables, row.unlock_id);
+    AwardsAgentContext context{agent, state, awards.registries, awards.tables, awards.pool, awards.parts, {}};
+    for (const std::uint32_t index : rank_parts) {
+        if (index >= awards.parts.size()) throw std::runtime_error("port rank rewards: part row outside PARTS.PRN");
+        call_awards_agent_native(context, "UnlockPart", {Value{awards.parts[index].name}});
+    }
+}
+}  // namespace
+
+void FrontendSession::collect_port_rank_parts() {
+    if (port_rank_parts_cached_) return;
+    const ProfileAwards& awards = *services_.awards;
+    const auto run_rank_parts = [&](std::int32_t selected) {
+        std::array<std::uint8_t, agent_record_size> scratch{};
+        AgentLoadState scratch_state;
+        construct_agent(AgentRecord(scratch), scratch_state, awards.registries);
+        AwardsAgentContext context{AgentRecord(scratch), scratch_state, awards.registries,
+                                   awards.tables, awards.pool, awards.parts, {}};
+        context.port_rank_override = selected;
+        run_set_awards_and_bonuses(awards.awards, context);
+        return std::set<std::uint32_t>(scratch_state.parts.begin(), scratch_state.parts.end());
+    };
+    // Each scratch pass differs only in HasRank. Keep the part rows added by
+    // an authored rank branch, excluding unconditional parts and other awards.
+    const auto no_rank = run_rank_parts(-1);
+    std::set<std::uint32_t> rank_parts;
+    for (std::size_t k = 0; k < awards.registries.ranks.size(); ++k) {
+        if (k > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+            throw std::runtime_error("port rank rewards: too many registered rank rows");
+        for (const std::uint32_t index : run_rank_parts(static_cast<std::int32_t>(k)))
+            if (!no_rank.contains(index)) rank_parts.insert(index);
+    }
+    port_rank_parts_.assign(rank_parts.begin(), rank_parts.end());
+    port_rank_parts_cached_ = true;
+}
+
 AgentRefillHost FrontendSession::refill_host() {
-    AgentRefillHost host = profile_refill_host(*services_.awards, rank_value);
-    if (port_unlock_all_ || port_unlock_weapons_) {
+    const std::optional<std::int32_t> rank_override = port_max_rank_
+        ? std::optional<std::int32_t>(static_cast<std::int32_t>(services_.awards->registries.ranks.size() - 1))
+        : std::nullopt;
+    AgentRefillHost host = profile_refill_host(*services_.awards, rank_value, nullptr, rank_override);
+    if (port_agent_patch_ || port_unlock_all_ || port_unlock_weapons_ || port_unlock_levels_ ||
+        port_max_rank_ || port_unlock_rank_rewards_) {
         auto script = host.set_awards_and_bonuses;
         host.set_awards_and_bonuses = [this, script](std::span<std::uint8_t, agent_record_size> agent,
                                                      AgentLoadState& state) {
             script(agent, state);
+            if (port_agent_patch_) port_agent_patch_(agent, state, *services_.awards);
             if (port_unlock_all_) omega::port_unlock_all(*services_.awards, agent, state, rt_.g.b_bb5);
-            else omega::port_unlock_all_weapons(*services_.awards, agent, state);
+            else {
+                if (port_unlock_weapons_) omega::port_unlock_all_weapons(*services_.awards, agent, state);
+                if (port_unlock_levels_) port_unlock_levels(*services_.awards, agent, rt_.g.b_bb5);
+            }
+            if (port_unlock_rank_rewards_) port_unlock_rank_rewards(*services_.awards, agent, state, port_rank_parts_);
+            if (port_max_rank_) port_set_max_rank(agent, *services_.awards);
         };
+        // The native award pass follows each script call and writes +b50 for
+        // each score-qualified row. Keep the rank display override through it.
+        if (port_max_rank_)
+            host.rank_value = [last = services_.awards->registries.ranks.size() - 1](std::size_t) {
+                return FrontendSession::rank_value(last);
+            };
     }
     return host;
 }
@@ -879,6 +971,26 @@ void FrontendSession::port_unlock_all_weapons() {
     port_unlock_weapons_ = true;
     omega::port_unlock_all_weapons(*services_.awards, AgentRecord(agent_), agent_state_);
     record("PORT-ONLY cheat: unlock all weapons in the loadout (port_cheats.hpp)");
+}
+
+void FrontendSession::port_unlock_all_levels() {
+    port_unlock_levels_ = true;
+    port_unlock_levels(*services_.awards, AgentRecord(agent_), rt_.g.b_bb5);
+    record("PORT-ONLY cheat: unlock all registered levels");
+}
+
+void FrontendSession::port_max_rank() {
+    port_set_max_rank(AgentRecord(agent_), *services_.awards);
+    port_max_rank_ = true;
+    port_refill_agent();  // AWARDS HasRank grants the authored top-rank eligibility
+    record("PORT-ONLY cheat: highest registered rank eligibility (statistics unchanged)");
+}
+
+void FrontendSession::port_unlock_all_rank_rewards() {
+    collect_port_rank_parts();
+    port_unlock_rank_rewards_ = true;
+    port_unlock_rank_rewards(*services_.awards, AgentRecord(agent_), agent_state_, port_rank_parts_);
+    record("PORT-ONLY cheat: unlock registered rank rewards and authored rank parts");
 }
 
 // 00335d50(agent, 1) from the level load (level_load.cpp's 0x335d50 call): the level statistics +50..+83 zeroed,
@@ -948,19 +1060,6 @@ void FrontendSession::end_agent_level(std::uint32_t completed, const std::functi
     record("00335830 agent end level " + g_.level_140 + " completed " + std::to_string(completed) + " (+b71 " +
            std::to_string(agent_[0xb71]) + ", 00332500 locked parts " + std::to_string(locked) + ", +b6c " +
            std::to_string(b6c) + ", +b68 " + std::to_string(agent_[0xb68]) + ")");
-}
-
-AgentRefillHost FrontendSession::refill_host() const {
-    const ProfileAwards& awards = *services_.awards;
-    AgentRefillHost host = profile_refill_host(awards, rank_value);
-    if (port_agent_patch_) {
-        host.set_awards_and_bonuses = [script = host.set_awards_and_bonuses, patch = port_agent_patch_, &awards](
-                                          std::span<std::uint8_t, agent_record_size> agent, AgentLoadState& state) {
-            script(agent, state);
-            patch(agent, state, awards);
-        };
-    }
-    return host;
 }
 
 void FrontendSession::port_refill_agent() {

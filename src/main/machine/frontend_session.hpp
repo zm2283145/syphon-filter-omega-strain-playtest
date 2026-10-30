@@ -354,13 +354,15 @@ public:
     void clear_other_agent_readiness();  // 0012ee30: all existing nonlocal records
     bool all_remote_agent_data_received(const std::array<bool, 4>& present_players) const;  // 0012ed60
 
-    // PORT-ONLY unlock helpers (port_cheats.hpp), used by --unlock-all and tests. The visible cheat controls live
-    // only in the in-game pause menu. Each helper applies its unlocks to the agent now and stays on for the session:
-    // the refill
-    // 00335e50 (load, create, level end) clears the unlock bits, so
-    // refill_host re-applies them after the script.
+    // PORT-ONLY helpers used by the visible cheat controls and tests. Each
+    // applies now and stays on for the session: refill 00335e50 clears the
+    // unlock bits and can rewrite +b50, so refill_host reapplies enabled
+    // helpers after the script and the rank pass.
     void port_unlock_all();
     void port_unlock_all_weapons();
+    void port_unlock_all_levels();
+    void port_max_rank();
+    void port_unlock_all_rank_rewards();
     // --unlock-all: on from boot, applied by the refill of the agent the front end loads or creates
     // (the constructed agent before that has no award lists to unlock).
     void port_unlock_all_at_boot();
@@ -679,9 +681,15 @@ private:
     const AgentLoadState& state_for_client(std::uint8_t client) const;
     // profile_refill_host, followed by the PORT-ONLY cheats that are on.
     AgentRefillHost refill_host();
+    void collect_port_rank_parts();
     FrontendServices services_;
     bool port_unlock_all_ = false;
     bool port_unlock_weapons_ = false;
+    bool port_unlock_levels_ = false;
+    bool port_max_rank_ = false;
+    bool port_unlock_rank_rewards_ = false;
+    bool port_rank_parts_cached_ = false;
+    std::vector<std::uint32_t> port_rank_parts_;  // derived from AWARDS script calls, no copied asset list
     gui::GuiRuntime rt_;
     std::deque<UsbKeyReport> usb_keys_;
     GuiDecor decor_;
@@ -700,7 +708,6 @@ private:
     std::array<std::unique_ptr<OtherAgent>, 4> other_agents_{};
     std::uint8_t local_agent_client_index_ = 0;
     PortAgentPatch port_agent_patch_;
-    AgentRefillHost refill_host() const;
     std::unique_ptr<AgentSaveBuffer> save_buffer_;
     std::map<std::string, std::unique_ptr<GuiFile>> gui_files_;
 
@@ -712,6 +719,7 @@ private:
     std::uint8_t loading_51ee90_ = 0;   // byte 0051ee90 (the loading screen's thread runs)
     gui::Widget* loading_widget_ = nullptr;
     gui::Widget* loading_anim_ = nullptr;
+    gui::Widget* splash_covered_screen_ = nullptr;  // port-only: the initialized menu stays hidden until deferred SPLASH ends
     std::string loading_name_;
     std::int32_t loading_started_ms_ = 0;
     std::int32_t loading_target_ = 0;

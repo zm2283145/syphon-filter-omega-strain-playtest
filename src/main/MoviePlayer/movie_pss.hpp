@@ -166,6 +166,7 @@ public:
     // not yet decoded stays under read_ahead_video_limit; only with a video slice
     // (set_video_slice), which keeps the read video until next_frame needs it.
     bool read_ahead() override;
+    bool source_done() const { return source_done_; }  // read-ahead reached the container end, before video drains
     static constexpr std::size_t read_ahead_video_limit = 8u << 20;
     mpeg2::Decoder& decoder() { return decoder_; }
     const PssDemuxer& demuxer() const { return demuxer_; }

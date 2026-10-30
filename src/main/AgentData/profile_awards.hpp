@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,7 +50,8 @@ AgentLoadResult load_profile(const ProfileAwards& awards, const AgentRefillHost&
 // the table lacks are appended to missing_parts when it is given. `awards`
 // must outlive the host.
 AgentRefillHost profile_refill_host(const ProfileAwards& awards,
-    std::function<std::uint32_t(std::size_t rank)> rank_value, std::vector<std::string>* missing_parts = nullptr);
+    std::function<std::uint32_t(std::size_t rank)> rank_value, std::vector<std::string>* missing_parts = nullptr,
+    std::optional<std::int32_t> port_rank_override = std::nullopt);
 
 // 00332ac0(agent, vec): the weapons the agent may pick. For each unlock row of
 // 00532b10 (stride 0x18) whose bit (+4) is set in the agent's words at +b08,

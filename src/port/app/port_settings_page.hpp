@@ -10,7 +10,7 @@
 //   DISPLAY    fullscreen, vsync, aspect, render_scale, frame_overlay, frame_overlay_key, background_audio (132win12)
 //   INPUT      mouse_look, mouse_sensitivity, mouse_invert_y, controller_prompt, KEY BINDINGS (a submenu), reset keys,
 //              fov (132ws3: FIELD OF VIEW, 70..150%) and renderer (132vk1, PC only)
-//   MEDIA      CUTSCENES (FILL / BARS / STRETCH; DEMOnn trailers always keep native bars) and LOADING SCREENS
+//   MEDIA      CUTSCENES (FILL / BARS / STRETCH, including attract demo videos) and LOADING SCREENS
 //              (BARS / ZOOM). This replaces the misleading WIDE ZOOM aspect choice from issue #7.
 //   PERFORMANCE issue #4: GAMEPLAY FPS (native 29.97 Hz or enhanced 60 Hz, applied at the next level) and
 //              RESOLUTION (native 640 x 448 picture density or the window resolution times render_scale)

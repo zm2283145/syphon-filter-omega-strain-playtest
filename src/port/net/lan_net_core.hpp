@@ -293,7 +293,7 @@ public:
     bool hosting() const { return transport_.is_host(); }
     std::uint16_t session_host() const { return 0; }
 
-    // Objective.c's category-0xF6 NetObj registrations. The manager consumes the first key;
+    // Objective.c's category-0xF6 NetObj registrations start at F60001 each level;
     // objective script IDs only index this port-side binding and never appear on the wire.
     struct RemoteObjectiveOutcome {
         std::uint32_t local_script_id = 0;
@@ -753,7 +753,7 @@ private:
     std::vector<RemoteDeath> remote_deaths_;
     std::uint32_t deaths_sent_ = 0, deaths_received_ = 0;
     std::uint32_t despawns_sent_ = 0, despawns_received_ = 0;
-    static constexpr std::uint32_t kObjectiveManager = 0x1d46000, kObjectiveBlocks = 0x1d46100;
+    static constexpr std::uint32_t kObjectiveBlocks = 0x1d46100;
     std::uint32_t objective_counter_ = 0;
     std::uint32_t next_objective_block_ = kObjectiveBlocks;
     std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> objective_bindings_; // script id -> (key, block)

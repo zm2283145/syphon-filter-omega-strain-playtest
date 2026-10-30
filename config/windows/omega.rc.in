@@ -1,0 +1,2 @@
+// User-supplied shell artwork; see README.md beside the source icon.
+101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/config/windows/omega.ico"

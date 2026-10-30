@@ -392,8 +392,8 @@ public:
     //   - a picture batch (GuiDrawBatch::port_picture: the loading screen) stays 4:3 with bars, or with
     //     movie_fill zoom is scaled to the target's width (top and bottom cut). A movie (GuiDrawBatch::port_movie,
     //     132vt2a2) follows frame_movie_fit_setting instead: fill (the zoom's mapping, the default), bars, or stretch
-    //     (the 4:3 picture over the whole target). Authored DEMOnn attract trailers set port_movie_native_bars
-    //     and retain their native 4:3 presentation independently of the story-cutscene setting.
+    //     (the 4:3 picture over the whole target). Attract demos use the same fit choice; an explicit
+    //     port_movie_native_bars override remains available to callers requiring a 4:3 draw.
     //     A picture with GuiDrawBatch::port_picture_aspect (132md14: a mod movie wider than 4:3, letterboxed in the
     //     canvas) is drawn at that aspect across the target's width (bars: scaled to fit when narrower than the target;
     //     stretch: over the whole target);
@@ -422,19 +422,18 @@ public:
     // Port-only (checkpoint 132ws2): under the wide aspect, the 4:3 panel art the frame's edges cut (flat batches drawn
     // in the fitted rectangle, textured or untextured, IE or sprite: not covers, HUD elements, pictures or
     // perspective / clip batches) is extended into the side areas with gui_wide_edge_images, each image drawn right
-    // after its batch (same texture and sampler, the whole viewport). Off by default; the play overlay sets it, and
-    // 132ws5: the front end and the Vita set it with set_wide_menu (they skip draw_wide_fill when it added images). wide_edge_images counts the triangles the last draw added.
+    // after its batch (same texture and sampler, the whole viewport). Off by default; the play overlay sets it.
+    // Wide menus use coherent background expansion instead of edge mirroring. wide_edge_images counts the triangles
+    // the last draw added.
     void set_wide_edge_extend(bool on) { wide_edge_extend_ = on; }
     bool wide_edge_extend() const { return wide_edge_extend_; }
     std::size_t wide_edge_images() const { return wide_edge_images_; }
     // Port-only (checkpoint 132ws5, research/FRONTEND.md "Checkpoint 132ws5"): the front end's wide menus (the front
     // end and the Vita set it; the play overlay does not). Under the wide aspect draw() then also:
-    //   - draws the flat 4:3 content (untagged frame batches) unclipped over the whole target at its 4:3 place, so
-    //     art that continues past the PS2 frame (the CMDCENTR ring) shows; a triangle overhanging an edge by at
-    //     most menu_trim_overhang is cut there first (gui_wide_menu_trim) and edge-extended with the rest;
-    //   - with set_wide_edge_extend, extends the art the 4:3 edges cut as the play overlay does, but never a font
-    //     string (GuiDrawBatch::port_text: no mirrored glyphs);
+    //   - expands a flat textured backdrop group covering at least 95% of the 4:3 frame across the target width;
+    //   - draws other flat content unclipped at its 4:3 place, so art continuing past the frame remains visible;
     //   - spreads the header and legend elements (GuiDrawBatch::port_menu) with gui_wide_menu_shifts.
+    // Menus never mirror a moving element at the 4:3 boundary.
     // wide_menu_shifts: the last draw's moved elements (tag -> x shift, GUI units).
     void set_wide_menu(bool on) { wide_menu_ = on; }
     bool wide_menu() const { return wide_menu_; }

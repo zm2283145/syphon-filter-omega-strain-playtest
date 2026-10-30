@@ -150,8 +150,8 @@ struct GuiDrawBatch {
     // Port-only (132vt2a2): a port_picture that is a movie (frontend_disc movie_list): the wide renderer fits it by
     // frame_movie_fit_setting (movies=: fill, bars or stretch) instead of movie_fill (the loading screen's).
     bool port_movie = false;
-    // Port-only (issues #5 / #25): the authored DEMOnn attract trailers always retain their native 4:3 presentation
-    // under wide, while story/intro movies continue to follow frame_movie_fit_setting.
+    // Optional per-draw 4:3 override. Ordinary movies, including attract demos, leave this false
+    // so they follow frame_movie_fit_setting.
     bool port_movie_native_bars = false;
     // Port-only (checkpoint 132ws2): a HUD batch placed by the 3D view (the callouts / name tags, the lock-on
     // elements): the wide draw maps it over the whole window (Hor+ positions past the 4:3 edges stay visible),

@@ -35,12 +35,14 @@ AgentLoadResult load_profile(const ProfileAwards& awards, const AgentRefillHost&
 }
 
 AgentRefillHost profile_refill_host(const ProfileAwards& awards,
-    std::function<std::uint32_t(std::size_t rank)> rank_value, std::vector<std::string>* missing_parts) {
+    std::function<std::uint32_t(std::size_t rank)> rank_value, std::vector<std::string>* missing_parts,
+    std::optional<std::int32_t> port_rank_override) {
     AgentRefillHost host;
     host.rank_value = std::move(rank_value);
-    host.set_awards_and_bonuses = [&awards, missing_parts](std::span<std::uint8_t, agent_record_size> agent,
+    host.set_awards_and_bonuses = [&awards, missing_parts, port_rank_override](std::span<std::uint8_t, agent_record_size> agent,
                                       AgentLoadState& state) {
         AwardsAgentContext context{agent, state, awards.registries, awards.tables, awards.pool, awards.parts, {}};
+        context.port_rank_override = port_rank_override;
         run_set_awards_and_bonuses(awards.awards, context);
         if (missing_parts)
             missing_parts->insert(missing_parts->end(), context.missing_parts.begin(), context.missing_parts.end());

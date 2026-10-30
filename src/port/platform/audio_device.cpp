@@ -301,6 +301,7 @@ Device::Device(double latency_seconds, bool muted, bool simulate_absent) : laten
 Device::~Device() = default;
 
 void Device::submit(const std::vector<std::int16_t>& samples) {
+    std::lock_guard control(public_mutex_);
     if (samples.size() % 2) throw std::runtime_error("Audio device: odd sample count");
     const auto frames = samples.size() / 2;
     auto& d = *impl_;
@@ -331,6 +332,7 @@ void Device::submit(const std::vector<std::int16_t>& samples) {
 }
 
 Device::Stats Device::stats() const {
+    std::lock_guard control(public_mutex_);
     std::lock_guard lock(impl_->mutex);
     const auto& d = *impl_;
     Stats s{d.ring.underruns(), d.ring.silent_frames(), d.submitted, d.dropped, d.ring.queued()};
@@ -345,6 +347,7 @@ Device::Stats Device::stats() const {
 }
 
 void Device::set_background_muted(bool on) {
+    std::lock_guard control(public_mutex_);
     auto& d = *impl_;
     if (d.background_muted == on) return;
     d.background_muted = on;
@@ -353,22 +356,36 @@ void Device::set_background_muted(bool on) {
                        : "Audio device (port-only): output back with the window's focus");
 }
 
-bool Device::background_muted() const { return impl_->background_muted; }
+bool Device::background_muted() const {
+    std::lock_guard control(public_mutex_);
+    return impl_->background_muted;
+}
 
-std::vector<std::string> Device::take_log() { return std::exchange(impl_->log, {}); }
+std::vector<std::string> Device::take_log() {
+    std::lock_guard control(public_mutex_);
+    return std::exchange(impl_->log, {});
+}
 
 void Device::simulate_loss(bool gone) {
+    std::lock_guard control(public_mutex_);
     if (gone) impl_->simulate_gone = true;
     impl_->lose(simulated_loss);
 }
 
-void Device::simulate_default_change() { impl_->lose(simulated_switch); }
+void Device::simulate_default_change() {
+    std::lock_guard control(public_mutex_);
+    impl_->lose(simulated_switch);
+}
 
 void Device::simulate_device_back() {
+    std::lock_guard control(public_mutex_);
     impl_->simulate_gone = false;
     impl_->arrived = true;
 }
 
-void Device::set_retry_seconds(double seconds) { impl_->recovery.set_retry(seconds); }
+void Device::set_retry_seconds(double seconds) {
+    std::lock_guard control(public_mutex_);
+    impl_->recovery.set_retry(seconds);
+}
 
 }
