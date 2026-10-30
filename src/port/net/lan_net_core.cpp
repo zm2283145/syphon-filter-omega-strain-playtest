@@ -99,10 +99,11 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     net_registry_image(m);
     call(m, 0x165bc0, {});
     if (!m.read(dme::kMessagesReady, 1)) throw std::runtime_error("LanNetCore: 00165bc0 did not register the network messages");
-    // StaticInit_hud registered cNetTimerMsg as generic cNetMsg inner ID 16;
-    // 004c3700 later registered cNetAgentUpdateMsg as ID 32. The verified
-    // boot image's next ID is 33; those static constructors are outside this
-    // network core.
+    // StaticInit_human registered cNetUpdateStatsMsg as generic ID 6,
+    // StaticInit_hud registered cNetTimerMsg as ID 16, and 004c3700 later
+    // registered cNetAgentUpdateMsg as ID 32. These static constructors are
+    // outside this network core.
+    m.write(0x4ef010, 4, 6);
     m.write(0x4f7dc8, 4, 16);
     m.write(0x4f8588, 4, 19);
     m.write(0x4ea0a0, 4, 32);
@@ -548,6 +549,49 @@ std::vector<LanNetCore::RemotePersonalTimer> LanNetCore::take_personal_timers() 
     return out;
 }
 
+void LanNetCore::send_kill_statistics(std::uint32_t victim_key,std::uint32_t killer_key,
+                                      std::uint8_t type,std::uint8_t category) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN kill statistics send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    if (!has_npc(victim_key)) unhosted(0x186f30, "cNetUpdateStatsMsg victim is not a registered NPC");
+    const auto encoded_client = (killer_key & 0x7f000000U) >> 24;
+    if (!encoded_client || encoded_client > 4)
+        unhosted(0x186f30, "cNetUpdateStatsMsg killer key has no player client");
+    const auto recipient = static_cast<std::uint16_t>(encoded_client - 1);
+    if (recipient == local_client_index())
+        unhosted(0x186f30, "cNetUpdateStatsMsg remote branch selected the local player");
+    const auto envelope = m.read(0x5061c8);
+    const auto id = m.read(0x4ef010);
+    if (!envelope || id != 6) unhosted(0x186f30, "the cNetUpdateStatsMsg registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, victim_key);
+        m.write(packet + 8, 2, 6);
+        m.write(packet + 0xa, 2, id);
+        m.write(packet + 0xc, 4, killer_key);
+        m.write(packet + 0x10, 1, type);
+        m.write(packet + 0x11, 1, category);
+        if (call(m, 0x3fad50, {envelope, 18, packet, recipient, 0x40U})) ++kill_statistics_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemoteKillStatistics> LanNetCore::take_kill_statistics() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN kill statistics access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteKillStatistics> out;
+    out.swap(kill_statistics_);
+    return out;
+}
+
 void LanNetCore::send_player_sound(std::uint16_t recipient, bool stop, std::int32_t type, std::string_view name,
                                   std::int32_t priority, std::uint32_t owner_key, std::uint8_t flags) {
     if (pump_.joinable())
@@ -688,6 +732,21 @@ std::uint32_t LanNetCore::receive_generic_message(std::uint32_t origin, std::uin
                 // may differ from the immediate origin when the host forwards.
                 agent_updates_.push_back(std::move(update));
                 ++agent_updates_received_;
+            } else if (id == static_cast<std::int32_t>(m.read(0x4ef010))) {
+                if (len != 6) unhosted(0x187230, "an invalid cNetUpdateStatsMsg payload size");
+                RemoteKillStatistics statistics;
+                statistics.origin = static_cast<std::uint16_t>(origin);
+                statistics.timestamp = m.read(data) >> 2;
+                statistics.victim_key = m.read(data + 4);
+                statistics.killer_key = m.read(data + 0xc);
+                statistics.type = static_cast<std::uint8_t>(m.read(data + 0x10, 1));
+                statistics.category = static_cast<std::uint8_t>(m.read(data + 0x11, 1));
+                if (statistics.killer_key != local_player_key())
+                    unhosted(0x187230, "cNetUpdateStatsMsg does not name this console's local player");
+                if (!has_npc(statistics.victim_key))
+                    unhosted(0x187230, "cNetUpdateStatsMsg victim is not a registered NPC");
+                kill_statistics_.push_back(statistics);
+                ++kill_statistics_received_;
             } else if (id == static_cast<std::int32_t>(m.read(0x4f7dc8))) {
                 if (origin != 0) unhosted(0x245750, "a cNetTimerMsg from a non-authoritative client");
                 if (len < 7 || len > 22) unhosted(0x245750, "an invalid cNetTimerMsg payload size");
@@ -2665,6 +2724,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     remote_healths_.clear();
     remote_damages_.clear();
     remote_deaths_.clear();
+    kill_statistics_.clear();
     objective_bindings_.clear();
     objective_outcomes_.clear();
     objective_actives_.clear();

@@ -293,6 +293,8 @@ struct CombatPlayConfig {
     std::function<std::uint32_t()> net_session_host;
     std::function<std::uint32_t(std::size_t actor)> net_actor_key;
     std::function<std::optional<std::size_t>(std::uint32_t key)> net_actor;
+    std::function<void(std::uint32_t victim_key,std::uint32_t killer_key,std::uint8_t type,std::uint8_t category)>
+        net_kill_statistics;
     bool net_hosting{};
     std::function<void(std::uint32_t id,std::uint32_t owner,std::uint32_t address)> net_backpack_bind;
     std::function<void(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
@@ -722,6 +724,9 @@ public:
     std::optional<WeaponBackpackOwner> backpack_owner(std::size_t i) const;
     // The local agent record's statistics (nullopt: not supplied).
     const std::optional<AgentStatistics>& agent_statistics() const;
+    // cNetUpdateStatsMsg's receive callback: apply only 00186f30's local
+    // statistics/quip branch for the local player killing the given NPC.
+    std::vector<NpcDeathNoticeEvent> apply_remote_kill_statistics(std::size_t victim,std::uint8_t type,std::uint8_t category);
     // The config's player name (00336170 of the agent record; checkpoint 132f3b's stats screen).
     const std::optional<std::string>& player_name() const;
     // The throw flow (nullptr without CombatPlayConfig::throws).

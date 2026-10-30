@@ -9252,6 +9252,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     cc.net_actor_key=[&](std::size_t a)->std::uint32_t{
                         if(a==0)return lan_net->local_player_key();
                         for(const auto& r:lan_remotes)if(r.key&&r.figure&&r.figure->actor==a)return r.key;
+                        if(const auto n=lan_named_npcs.find(a);n!=lan_named_npcs.end())
+                            return npcs.at(n->second).actor_id;
+                        if(const auto s=spawned_npcs.find(static_cast<std::uint32_t>(a));s!=spawned_npcs.end())
+                            return s->second.id;
                         return static_cast<std::uint32_t>(combat_ids.at(a));};
                     cc.net_actor=[&](std::uint32_t key)->std::optional<std::size_t>{
                         if(key==lan_net->local_player_key())return 0;
@@ -9259,6 +9263,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         for(std::size_t a=0;a<combat_ids.size();++a)
                             if(static_cast<std::uint32_t>(combat_ids[a])==key)return a;
                         return std::nullopt;};
+                    cc.net_kill_statistics=[&](std::uint32_t victim,std::uint32_t killer,std::uint8_t type,std::uint8_t category){
+                        lan_net->send_kill_statistics(victim,killer,type,category);};
                     cc.net_backpack_bind=[&](std::uint32_t id,std::uint32_t owner,std::uint32_t address){
                         lan_net->bind_backpack(id,static_cast<std::uint16_t>(owner),address);};
                     cc.net_backpack_send=[&](std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
@@ -12778,6 +12784,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"LAN (132ln5h14c): the received death action delivered to actor "<<a<<" (001a92a0 -> 0018a950): life state "
                     <<int(actors.actor(a).life_state())<<" at frame "<<frame<<"\n";
             lan_deaths_queued.clear();
+            for(const auto& s:lan_net->take_kill_statistics()){
+                const auto victim=lan_actor_of_key(s.victim_key,false);
+                std::cout<<"LAN (A8): cNetUpdateStatsMsg received for victim +c 0x"<<std::hex<<s.victim_key
+                    <<" (killer 0x"<<s.killer_key<<std::dec<<", type "<<int(s.type)<<", category "<<int(s.category)<<")";
+                if(!victim){
+                    std::cout<<": no NPC actor of the key here (PORT-ONLY: dropped) at frame "<<frame<<"\n";
+                    continue;
+                }
+                if(!combat_session)throw std::runtime_error("cNetUpdateStatsMsg: kill statistics need --combat");
+                const auto events=combat_session->apply_remote_kill_statistics(*victim,s.type,s.category);
+                const auto added=std::count_if(events.begin(),events.end(),[](const NpcDeathNoticeEvent& e){
+                    return e.kind==NpcDeathNoticeEvent::Kind::statistic;});
+                std::cout<<": 00187230 -> 00186f30 on actor "<<*victim<<" added "<<added
+                    <<" statistic event(s) at frame "<<frame<<"\n";
+            }
             for(const auto& d:lan_net->take_remote_damages()){
                 const auto victim=lan_actor_of_key(d.victim_key,d.local_player);
                 std::ostringstream line;   // one line: the damage below may log the network messages it sends

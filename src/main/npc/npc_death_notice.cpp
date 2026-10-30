@@ -13,13 +13,18 @@ template<class F> const F& need(const F& f,const char* what){
 void add(std::vector<NpcDeathNoticeEvent>& ev,NpcDeathNoticeEvent::Kind k,std::int32_t value=0,std::uint64_t object=0){
     ev.push_back({k,value,object});
 }
+}
+
 // 00186f30(actor, killer, type, category).
-void kill_statistics(const NpcDeathNoticeInput& in,const NpcDeathNoticeHost& h,std::vector<NpcDeathNoticeEvent>& ev){
+void npc_kill_statistics(const NpcDeathNoticeInput& in,const NpcDeathNoticeHost& h,std::vector<NpcDeathNoticeEvent>& ev){
     using K=NpcDeathNoticeEvent::Kind;
     if(in.killer==0)return;
     const auto k=need(h.killer,"killer")(in.killer);
     if(!k||!k->player)return;                                                  // +58 virtual +54
-    if(!k->byte_14)throw std::runtime_error("NPC death notice: a remote player's kill (00186f30 network message 003fb020) is not hosted");
+    if(!k->byte_14){
+        need(h.remote_statistics,"remote_statistics")(h.actor,in.killer,in.type,in.category);
+        return;
+    }
     if(!h.statistics)throw std::runtime_error("NPC death notice 0014f680: the agent record's statistics (001314f0(004ffb50, -1)) are not supplied");
     AgentStatistics& stats=*h.statistics;
     auto statistic=[&](std::int32_t index){add_agent_statistic(stats,static_cast<std::uint32_t>(index),1);add(ev,K::statistic,index);};
@@ -40,6 +45,8 @@ void kill_statistics(const NpcDeathNoticeInput& in,const NpcDeathNoticeHost& h,s
     }
     if(in.category==2)statistic(2);
 }
+
+namespace {
 std::int32_t trunc_word(float v){
     if(!(v>-2147483648.0F&&v<2147483648.0F))throw std::runtime_error("NPC death notice: a delay outside the cvt.w.s range");
     return static_cast<std::int32_t>(v);
@@ -52,7 +59,7 @@ void npc_death_notice(NpcAiComponent& c,NpcPerception& p,WeaponInventoryOps& inv
     if(h.actor==0)return;                                                      // 0014f6ac
     add(ev,K::route_reservations,0,h.actor);                                   // 00163c50
     add(ev,K::script_death,in.type,in.killer);                                 // 004ff278, transport 0
-    kill_statistics(in,h,ev);                                                  // 00186f30
+    npc_kill_statistics(in,h,ev);                                              // 00186f30
     const float pause=std::bit_cast<float>(static_cast<std::uint32_t>(c.field_84));
     if(c.field_a8>0&&pause<=0.0F&&(c.perception_flags_20&1U)!=0&&(c.perception_flags_20&4U)!=0&&inv.full_auto()&&h.secondary
        &&secondary_state_allows_fire((*h.secondary)[0])&&secondary_state_allows_fire((*h.secondary)[1])){

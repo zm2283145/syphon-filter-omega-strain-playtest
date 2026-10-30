@@ -55,6 +55,7 @@ struct NpcCombatLink {
     const WeaponDatabase* database{};
     std::function<std::optional<NpcKillerView>(std::uint64_t killer)> killer;
     std::function<bool(std::uint64_t killer)> killer_hostile;          // 003cc8e0(killer, actor)
+    std::function<void(std::uint64_t victim,std::uint64_t killer,std::uint8_t type,std::uint8_t category)> remote_statistics;
     AgentStatistics* statistics{};                                     // the local agent record (00333f10 / 00333ee0)
     // 0018c770(killer, line): the player killer's friendly-kill voice line (00186f30). Empty: recorded only.
     std::function<void(std::uint64_t killer,std::int32_t line)> voice_line;

@@ -617,7 +617,8 @@ void NpcAiController::death_notice_7c(SoloActorSimulation& actor,const ActorDeat
     h.actor_root={1,actor.byte_2d(),0};                                       // +2c = 1, +2e = 0 (constructor 003cf120 / 003cf130)
     h.actor_3468=actor.pickupable_3468();h.actor_3488=0;
     if(combat_.secondary)h.secondary=combat_.secondary();
-    h.killer=combat_.killer;h.killer_hostile=combat_.killer_hostile;h.statistics=combat_.statistics;h.random=combat_.random;
+    h.killer=combat_.killer;h.killer_hostile=combat_.killer_hostile;h.remote_statistics=combat_.remote_statistics;
+    h.statistics=combat_.statistics;h.random=combat_.random;
     h.ammo_pct=system_.npc_ammo_pct;
     NpcAiComponent* self=&component_;
     h.remove_from_think_list=[this,self]{                                    // 0015ad70

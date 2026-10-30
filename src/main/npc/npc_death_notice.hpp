@@ -21,8 +21,9 @@
 //             component appended to the dead list 004ea370, both unless the
 //             actor is present (+2d, +2c, !+2e) with +3468 set (the dead
 //             list only when present).
-// A killer that is a remote player (+14 clear: the network kill message
-// 003fb020) throws.
+// A killer that is a remote player (+14 clear) sends cNetUpdateStatsMsg to
+// that player's client; the receiving console calls the statistics helper
+// without replaying the rest of the death notice.
 #include "agent_statistics.hpp"
 #include "npc_ai.hpp"
 #include "npc_perception.hpp"
@@ -67,6 +68,9 @@ struct NpcDeathNoticeHost {
     std::optional<std::array<std::uint8_t,2>> secondary;       // +3314 present: +310 / +311
     std::function<std::optional<NpcKillerView>(std::uint64_t killer)> killer;
     std::function<bool(std::uint64_t killer)> killer_hostile;  // 003cc8e0(killer, actor)
+    // 00186f30's remote-player branch: cNetUpdateStatsMsg carries the victim
+    // and killer GOBJ keys plus the damage type/category to the killer's client.
+    std::function<void(std::uint64_t victim,std::uint64_t killer,std::uint8_t type,std::uint8_t category)> remote_statistics;
     // The local agent record 001314f0(004ffb50, -1): 00333f10 adds each
     // statistic event, 00333ee0 reads 0x19 (null throws when a player kill is noted).
     AgentStatistics* statistics{};
@@ -77,6 +81,8 @@ struct NpcDeathNoticeHost {
     std::function<std::int32_t()> remove_from_think_list;
     std::function<void()> append_to_dead_list;                 // 0014ab90(004ea370, &component)
 };
+void npc_kill_statistics(const NpcDeathNoticeInput& input,const NpcDeathNoticeHost& host,
+    std::vector<NpcDeathNoticeEvent>& events);
 void npc_death_notice(NpcAiComponent& component,NpcPerception& perception,WeaponInventoryOps& inventory,
     const NpcDeathNoticeInput& input,const NpcDeathNoticeHost& host,std::vector<NpcDeathNoticeEvent>& events);
 

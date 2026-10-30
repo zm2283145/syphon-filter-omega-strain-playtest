@@ -2680,6 +2680,15 @@ NpcCombatLink CombatPlaySession::npc_combat_link(std::size_t actor){
         return NpcKillerView{self->world.actor(*v).player_controller(),self->world.actor(*v).byte_14()!=0};
     };
     link.killer_hostile=[self,actor](std::uint64_t k){return self->enemy(k,self->world.actor(actor).handle());};
+    link.remote_statistics=[self,actor](std::uint64_t victim,std::uint64_t killer,std::uint8_t type,std::uint8_t category){
+        if(!self->config.net_actor_key||!self->config.net_kill_statistics)
+            fail("00186f30's remote-player cNetUpdateStatsMsg bridge is not supplied");
+        if(victim!=self->world.actor(actor).handle())
+            fail("00186f30's remote-player victim is not the NPC receiving its death notice");
+        const auto k=self->find_index(killer);
+        if(!k)fail("00186f30's remote player killer is outside the actor world");
+        self->config.net_kill_statistics(self->config.net_actor_key(actor),self->config.net_actor_key(*k),type,category);
+    };
     link.statistics=self->config.agent_statistics?&*self->config.agent_statistics:nullptr;
     link.voice_line=[self](std::uint64_t k,std::int32_t line){
         const auto v=self->find_index(k);
@@ -3089,6 +3098,35 @@ std::optional<WeaponBackpackOwner> CombatPlaySession::backpack_owner(std::size_t
     return impl_->owner_view(impl_->actor_at(owner));
 }
 const std::optional<AgentStatistics>& CombatPlaySession::agent_statistics() const{return impl_->config.agent_statistics;}
+std::vector<NpcDeathNoticeEvent> CombatPlaySession::apply_remote_kill_statistics(
+    std::size_t victim,std::uint8_t type,std::uint8_t category){
+    auto& s=*impl_;
+    if(victim>=s.world.size())fail("cNetUpdateStatsMsg names an actor outside the world");
+    NpcDeathNoticeInput in;
+    in.killer=s.world.actor(s.config.player).handle();
+    in.type=type;in.category=category;
+    NpcDeathNoticeHost h;
+    h.actor=s.world.actor(victim).handle();
+    h.actor_3488=0;
+    h.killer=[&s](std::uint64_t killer)->std::optional<NpcKillerView>{
+        const auto k=s.find_index(killer);
+        if(!k)return std::nullopt;
+        return NpcKillerView{s.world.actor(*k).player_controller(),s.world.actor(*k).byte_14()!=0};
+    };
+    h.killer_hostile=[&s,victim](std::uint64_t killer){
+        return s.enemy(killer,s.world.actor(victim).handle());
+    };
+    h.statistics=s.config.agent_statistics?&*s.config.agent_statistics:nullptr;
+    std::vector<NpcDeathNoticeEvent> events;
+    npc_kill_statistics(in,h,events);
+    for(const auto& e:events)
+        if(e.kind==NpcDeathNoticeEvent::Kind::voice){
+            const auto k=s.find_index(e.object);
+            if(!k)fail("cNetUpdateStatsMsg's friendly-kill voice killer is outside the actor world");
+            s.world.actor(*k).voice_line(e.value);
+        }
+    return events;
+}
 bool CombatPlaySession::hosts_backpacks() const{return impl_->config.backpack_world.has_value();}
 bool CombatPlaySession::backpack_rider_live(std::uint32_t address,std::uint32_t id){
     auto& b=impl_->backpack_at(address);

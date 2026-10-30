@@ -363,6 +363,19 @@ public:
     std::vector<RemotePersonalTimer> take_personal_timers();
     std::uint32_t personal_timers_sent() const { return personal_timers_sent_; }
     std::uint32_t personal_timers_received() const { return personal_timers_received_; }
+    // 00186f30 / 001ba510 / 00187230: cNetUpdateStatsMsg is generic inner ID
+    // 6. The NPC owner addresses the remote killer's client; the body names
+    // the killer GOBJ and carries damage type/category.
+    struct RemoteKillStatistics {
+        std::uint16_t origin{};
+        std::uint32_t timestamp{},victim_key{},killer_key{};
+        std::uint8_t type{},category{};
+    };
+    void send_kill_statistics(std::uint32_t victim_key,std::uint32_t killer_key,
+                              std::uint8_t type,std::uint8_t category);
+    std::vector<RemoteKillStatistics> take_kill_statistics();
+    std::uint32_t kill_statistics_sent() const { return kill_statistics_sent_; }
+    std::uint32_t kill_statistics_received() const { return kill_statistics_received_; }
     struct RemotePlayerSound {
         std::uint16_t origin = 0;
         bool stop = false;
@@ -859,6 +872,8 @@ private:
     std::uint32_t global_timers_sent_ = 0, global_timers_received_ = 0;
     std::vector<RemotePersonalTimer> personal_timers_;
     std::uint32_t personal_timers_sent_ = 0, personal_timers_received_ = 0;
+    std::vector<RemoteKillStatistics> kill_statistics_;
+    std::uint32_t kill_statistics_sent_ = 0, kill_statistics_received_ = 0;
     std::uint32_t receive_generic_message(std::uint32_t origin, std::uint32_t data);
     std::vector<RemotePlayerSound> player_sounds_;
     std::uint32_t player_sounds_sent_ = 0, player_sounds_received_ = 0;
