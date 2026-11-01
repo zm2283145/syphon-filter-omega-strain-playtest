@@ -390,6 +390,9 @@ public:
     // (client_player_003fb8d0 stands in for its lookups), so its size is the number of clients 0..3 that lookup finds.
     std::int32_t player_map_count();
     bool level_info_pending();                            // 0042b4e0 on this memory
+    // 134eq1 batch 2: 0042b5d0, the host's admission of a joining client (the LAN JOIN_REQ stands in for the Medius
+    // join 004451b0 answers), with the current valid clients; it reserves a level-info slot when it admits.
+    bool join_admission();
     void send_play_game();                                // 00429b30 cDME_SendPlayGame
     bool play_game() const { return memory_.read(0x572400, 1) != 0; }  // byte 0x00572400
     std::uint32_t play_games_received() const { return play_games_received_; }

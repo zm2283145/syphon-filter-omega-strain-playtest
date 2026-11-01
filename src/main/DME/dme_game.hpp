@@ -852,6 +852,11 @@ std::uint32_t play_game_receive_00431850(LevelLoadMemory& m);
 // 0042b4e0: a level-info send queued for a client (0x00572428 / 0x0057242c / 0x00572430) is due at or past the
 // threshold from the TIM0 count 0x00572538 (v < 0x0ffffffe and v >= threshold).
 bool level_info_pending_0042b4e0(LevelLoadMemory& m);
+// 0042b5d0 (the host's join admission; Callback_ServerJoinGame 004451b0 answers the Medius join with it): with
+// 0x00572400 and 0x005723f8 clear and fewer valid clients (`valid_clients`, NetGetValidClientCount) than 0x00494180,
+// the first level-info slot 0x00572428 / 0x0057242c / 0x00572430 that is below 0x0ffffffe and below the threshold
+// 0042b4e0 uses is reserved for 45000 ticks (t + 45000); false when no slot is free or the game cannot take a player.
+bool join_admission_0042b5d0(LevelLoadMemory& m, std::int32_t valid_clients);
 
 // ---- the damage message MSGLIB_DAMAGE_REQUEST (vtable 0x004e08a0, type 0x005716f0, serial type 0x005716f8;
 // 132ln5h14c, 4.27). 003ccb00 (the human's +0x100) builds it with 003c9e30: +0x24 the amount (word), +0x28 the

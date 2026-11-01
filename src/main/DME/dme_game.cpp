@@ -4029,6 +4029,21 @@ std::uint32_t play_game_receive_00431850(LevelLoadMemory& m) {
     return 8;
 }
 
+bool join_admission_0042b5d0(LevelLoadMemory& m, std::int32_t valid_clients) {
+    if (r8(m, kPlayGame) || r8(m, 0x5723f8) || !(valid_clients < s32(r32(m, 0x494180)))) return false;
+    const auto ticks = static_cast<std::int32_t>(r32(m, 0x572538));
+    const auto t = static_cast<std::uint32_t>(static_cast<std::int64_t>(
+        static_cast<double>(ticks) - 0.0625 * static_cast<double>(static_cast<float>(ticks))));
+    for (const std::uint32_t a : {0x572428U, 0x57242cU, 0x572430U}) {
+        const auto v = r32(m, a);
+        if (v < 0x0ffffffeU && v < t) {
+            w32(m, a, t + 45000);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool level_info_pending_0042b4e0(LevelLoadMemory& m) {
     const auto ticks = static_cast<std::int32_t>(r32(m, 0x572538));
     const auto threshold = static_cast<std::uint32_t>(static_cast<std::int64_t>(

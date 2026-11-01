@@ -537,6 +537,11 @@ LevelLightTable level_start_light_table(const LevelLights& lights){
     return out;
 }
 
+float& camera_record_half_angle_100(){
+    static float value=0.0F;   // cXViewport_ctor 003755c0: memset
+    return value;
+}
+
 LevelLightCamera loadout_light_camera(float theta){
     LevelLightCamera c;
     c.half_angle=theta;                                                          // C+0x100 (002bfa90: 0x3f060a92)

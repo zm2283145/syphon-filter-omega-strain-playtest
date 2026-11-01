@@ -165,6 +165,9 @@ public:
     // world leaves; LanDme makes the call in update(), after the poll's frames, for each client the transport lost
     // (a BYE or the timeout) that had reached the barrier. 0: no call.
     void set_client_left_callback(std::uint32_t function) { left_cb_ = function; }
+    // 134eq1b2: the world's client-joined callback (0042a870 / 00429790 give the world 00429a90), with the left one's
+    // argument layout (+4 the client).
+    void set_client_world_joined_callback(std::uint32_t function) { world_joined_cb_ = function; }
     std::uint32_t left_callbacks() const { return left_calls_; }
     // 002ec6a0 (left the world) / 002ec738 (disconnected it) were called (132ln5h7, 0042b1f0).
     bool left_world() const { return left_; }
@@ -222,6 +225,7 @@ private:
     std::uint32_t link_status_ = 0;  // world 0's transient 002e47b0 status, cleared at each update
     std::uint32_t joined_calls_ = 0;
     std::uint32_t left_cb_ = 0, left_calls_ = 0;
+    std::uint32_t world_joined_cb_ = 0;
     std::uint32_t messages_sent_ = 0, messages_received_ = 0;
     std::uint32_t refused_ = 0, last_refused_ = 0;
     std::uint16_t last_refused_origin_ = 0;

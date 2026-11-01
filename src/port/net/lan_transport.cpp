@@ -367,6 +367,8 @@ void LanTransport::handle_join_request(const LanAddress& from, std::span<const s
             detail = why->substr(0, kLanMaxJoinDetail);
         }
     }
+    if (error == LanJoinError::None && join_admission_ && !join_admission_())  // 134eq1b2: 004451b0 -> 0042b5d0
+        error = LanJoinError::InProgress;
     if (error != LanJoinError::None) {
         // Stateless: every retried JOIN_REQ gets the NAK again.
         std::vector<std::uint8_t> nak{static_cast<std::uint8_t>(error)};

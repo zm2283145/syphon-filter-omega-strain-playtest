@@ -2,6 +2,7 @@
 
 #include "agent_camera.hpp"
 #include "disc.hpp"
+#include "level_lights.hpp"
 #include "mod_movie.hpp"
 #include "mod_set.hpp"
 #include "movie_pss.hpp"
@@ -349,6 +350,7 @@ std::string FrontendDisc::agent_figure_draw(GuiDrawList& out, const AgentPacking
                                             float seconds, std::uint32_t flush, const std::array<float, 4>& turns) {
     lights();
     if (!preview_) preview_ = std::make_unique<AgentPreviewRenderer>(disc_);
+    camera_record_half_angle_100() = camera.half_fov;  // 0028d870 / 00341f00 / 00361e70: c->fov = self->fov (134eq1b2)
     const AgentCameraView view = agent_camera_view(camera, turns);
     const auto& m = view.model;
     // The agent screens' camera turns +b0..+b8 are zero (R the identity), so MANLIGHT's rows light the

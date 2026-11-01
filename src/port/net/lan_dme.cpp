@@ -255,6 +255,11 @@ void LanDme::joined(LevelLoadMemory& memory, std::uint16_t client) {
     joined_[client] = true;
     ++joined_calls_;
     newly_joined(memory, client);  // 002db720's info step (132ln5h)
+    if (world_joined_cb_) {  // 134eq1b2: 00429a90
+        memory.write(scratch_ + 0x30, 4, 0);
+        memory.write(scratch_ + 0x34, 4, client);
+        invoke_(memory, world_joined_cb_, scratch_ + 0x30);
+    }
     if (joined_cb_) {
         memory.write(scratch_ + 0x10, 4, 0);
         memory.write(scratch_ + 0x14, 4, 0);  // the world

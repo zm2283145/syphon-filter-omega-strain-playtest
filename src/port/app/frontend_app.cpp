@@ -914,6 +914,11 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
             lan_session->cancel_join();
         };
         services.lan_join_notice = [this]() -> std::optional<std::string> {  // 132md5
+            if (lan_session->join_error() == lan::LanJoinError::InProgress) {  // 134eq1b2: the original's popup text
+                std::cout << "Front end: LAN join refused by the host: JOIN_NAK InProgress (its 0042b5d0: the game "
+                             "started or is counting down, or is full)\n";
+                return std::nullopt;
+            }
             if (lan_session->join_error() != lan::LanJoinError::Refused) return std::nullopt;
             std::string why = lan_session->join_detail();
             for (char& c : why)
@@ -1829,6 +1834,8 @@ void FrontendApp::Impl::lan_mod_config(lan::LanSessionConfig& config) {
                   << (options.lan_mod_policy ? " (--lan-mod-policy)" : " (lan_mod_policy)") << "\n";
     }
     config.join_extension = [] { return lan::lan_mod_extension(mods::active_online_report()); };
+    // 134eq1 batch 2: the game's own admission (0042b5d0, the original's Callback_ServerJoinGame 004451b0) is not this
+    // PORT-ONLY mod filter: the level's LanNetCore installs it on the transport (LanTransport::set_join_admission).
     config.join_filter = [gate = lan_mod_gate](const lan::LanAddress& from, const std::string& name,
                                                std::span<const std::uint8_t> extension) {
         return gate->check(from, name, extension);
@@ -2287,6 +2294,9 @@ FrontendResult FrontendApp::Impl::loop() {
             if (lan_core) throw std::logic_error("Network level load found an unreleased network core");
             lan_core = std::make_unique<lan::LanNetCore>(*ns->transport(), [ns] { return ns->clock_ms(); },
                                                          s.host_role());
+            // 134eq1b2: SFOLobby_CreateGame 0044e960 stores the hosted game's player limit (MSNSETUP num_agents) in
+            // 00494180, which 0042b5d0 compares NetGetValidClientCount with; LanSession::host stands in for it.
+            if (s.host_role()) lan_core->memory().write(0x494180, 4, ns->advert().agents_max);
         }
         // Checkpoint 132ln5f: the lobby keep-alive 002ca580 in the level serves LanSession's discovery (the host's
         // advertisement goes on, as the Medius listing does), not its transport (LanDme polls that).

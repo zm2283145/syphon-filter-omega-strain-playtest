@@ -554,7 +554,12 @@ struct ScriptStep{unsigned frames{};float x{},y{},p10{},p11{},rx{},ry{},cross{},
     // other console's human (its pickup-menu drop at its feet); "tobackpack" places the local player on that backpack
     // (the test teleport, the heading kept) before the next frame.
     bool wait_backpack{},to_backpack{};
-    unsigned wait_peers{};};   // 133lt3 "waitpeers N"
+    unsigned wait_peers{};     // 133lt3 "waitpeers N"
+    // 134eq1 (LAN test conveniences for the network level start's roster GuiEquipmentSetup): "waitready" gives no input
+    // until every other roster player is ready (status 2) or the game has started; "waitstart" until the level start's
+    // loadout is no longer pending (00572400 closed the roster); a line "R <input line>" is given only while the level
+    // start is pending (a client loading into a game already started skips it).
+    bool wait_ready{},wait_start{},roster_only{};};
 // --dt-trace: one world dt per frame as the IEEE-754 bits in hex (for example
 // 3d08a4b2, as read from the emulator's 005383d0), '#' comments allowed.
 std::vector<float> read_dt_trace(const fs::path& path){
@@ -600,6 +605,9 @@ std::vector<ScriptStep> read_script(const fs::path& path){
         if(line=="waittimer"){s.wait_timer=true;steps.push_back(s);continue;}
         if(line=="waitbackpack"){s.wait_backpack=true;steps.push_back(s);continue;}
         if(line=="tobackpack"){s.to_backpack=true;steps.push_back(s);continue;}
+        if(line=="waitready"){s.wait_ready=true;steps.push_back(s);continue;}
+        if(line=="waitstart"){s.wait_start=true;steps.push_back(s);continue;}
+        if(line.rfind("R ",0)==0){line=line.substr(2);fields=std::istringstream(line);s.roster_only=true;}
         if(!(fields>>s.frames>>s.x>>s.y>>s.p10>>s.p11)||s.frames>100000)throw std::runtime_error("Invalid input script line: "+line);
         if(fields>>s.rx){if(!(fields>>s.ry))throw std::runtime_error("Script right stick needs two values: "+line);
             if(fields>>s.cross){if(!(fields>>s.triangle))throw std::runtime_error("Script buttons need Cross and Triangle: "+line);
@@ -2424,6 +2432,11 @@ struct PlayGuiOverlay{
     std::array<std::optional<LoadoutFigure>,4> eqsetup_figures;
     bool building_eqsetup=false;
     bool eqsetup_figure_logged=false;
+    // 134eq1 batch 2: the slots that hold 002a47e0's default appearance (no player copied into them yet) and its
+    // builder: 0055d510[*00493a60] (the ctor sets 00493a60 = 1 when it is -1; 00292c54's agent activation leaves 0
+    // and the agent's appearance in 0055d510[0], the look the play's player wears).
+    std::array<bool,4> eqsetup_default{};
+    std::function<void(std::size_t)> build_default_eqsetup_figure;
     static constexpr std::uint32_t eqsetup_figure_slot_base=0x90400000U;
     static constexpr std::uint32_t figure_slot_base=0x90000000U;
     static constexpr std::uint32_t stats_figure_slot_base=0x90100000U;
@@ -2549,6 +2562,7 @@ struct PlayGuiOverlay{
     void map_draw(GuiDrawList& out){
         if(!host.hud_map)throw std::runtime_error("unhosted(0x26ca70): the HUD map's models (--gui-overlay --textured)");
         if(!host.iamap_60)return;
+        camera_record_half_angle_100()=host.hud_map->g.zoom_48b2b0;   // 0026ca70: SetClip's record +0x100 = 0048b2b0 (134eq1b2)
         const auto clip=hud_map_clip(*host.hud_map);
         ShadowMatrix cull_clip;
         for(std::size_t k=0;k<4;++k)cull_clip.column[k]=clip[k];
@@ -2679,6 +2693,7 @@ struct PlayGuiOverlay{
         const auto drawn=display_figure_draw(out,*figure,&placement,eqmodify_figure_clip_2bfa90(),man_world,
                                              screen.em->preview,guns,0x2bfa90);
         gui_camera_theta=std::bit_cast<float>(0x3f060a92U);   // 002bfa90: record +0x100 (132ws6)
+        camera_record_half_angle_100()=*gui_camera_theta;
         if(!eqmodify_figure_logged){
             eqmodify_figure_logged=true;
             std::cout<<"Loadout screen: figure 002c2340 -> 002bfa90 drawn ("<<figure->character->geometry().size()
@@ -2731,6 +2746,7 @@ struct PlayGuiOverlay{
     // hand's weapon moved to its record's +30 point and that point cleared).
     void stats_figures_draw(GuiDrawList& out,const gui::Widget& screen,const PlayGunPreview& guns){
         if(!screen.se)throw std::runtime_error("0035df30: the stats figure callback without its GuiScoresEquip screen *00533760");
+        camera_record_half_angle_100()=std::bit_cast<float>(0x3f060a92U);   // 0035b390: record +0x100 = 0.5235988 (134eq1b2)
         const auto& e=*screen.se;
         // Checkpoint 132f8: any +1d0 angles and X / Y / Z turns (figure_camera: 0035b4d4..0035b8b8).
         const auto camera=figure_camera_rotation(e.cam_1d0);
@@ -2787,9 +2803,17 @@ struct PlayGuiOverlay{
         for(std::size_t slot=0;slot<4;++slot){
             const auto& fig=e.figures[slot];
             if(fig.b2c3a<0)continue;
-            if(!fig.copied)throw std::runtime_error("002a2590: display actor "+std::to_string(slot)
-                +" without 003927a0's player copy (002a47e0's default appearance 0055d510 is not ported)");
             auto& f=eqsetup_figures[slot];
+            if(fig.copied&&eqsetup_default[slot]){f.reset();eqsetup_default[slot]=false;}   // 003927a0 replaced the default
+            if(!fig.copied&&!f){   // 002a47e0's default appearance (+2c71 = 1): no player was copied into this actor
+                if(!build_default_eqsetup_figure)
+                    throw std::runtime_error("002a47e0: display actor "+std::to_string(slot)+"'s default appearance 0055d510 cannot be built here");
+                building_eqsetup=true;
+                try{build_default_eqsetup_figure(slot);}catch(...){building_eqsetup=false;throw;}
+                building_eqsetup=false;
+                eqsetup_default[slot]=true;
+                std::cout<<"Roster: display actor "<<slot<<" drawn in 002a47e0's default appearance 0055d510[*00493a60]\n";
+            }
             if(!f){
                 if(!build_stats_figure)throw std::runtime_error("002a47e0: the roster display actor cannot be built here");
                 building_eqsetup=true;
@@ -2804,6 +2828,7 @@ struct PlayGuiOverlay{
         }
         // 002a2590 stores the record's +0x100 = 0x3f060a92 (half fov) and does not restore it, as 002bfa90 (132ws6).
         gui_camera_theta=std::bit_cast<float>(0x3f060a92U);
+        camera_record_half_angle_100()=*gui_camera_theta;
         if(!eqsetup_figure_logged&&!drawn.empty()){
             eqsetup_figure_logged=true;
             std::cout<<"Roster: GuiEquipmentSetup figures 002a5460 -> 002a2590 drawn (camera +70 ("<<e.cam_70[0]<<", "
@@ -3313,7 +3338,9 @@ struct PlayGuiOverlay{
     bool network_open_deferred=false;
     void loadout_open(){
         loadout_pending=true;
-        gui_camera_theta.reset();
+        // 134eq1b2: the record's +0x100 as the process last wrote it (a level's first roster / loadout draw reads it
+        // before its figure draw writes 0x3f060a92), not an unknown.
+        gui_camera_theta=camera_record_half_angle_100();
         driver.poll();
         if(rt.g.b_21c8){network_open_deferred=true;return;}
         gui::Widget* s=rt.factory("GuiEquipmentModify",std::string("eqmodify"));
@@ -4256,7 +4283,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<std::pair<std::string,std::string>> part_names;std::vector<std::string> part_textures;
         bool fog_on=true;   // 133pr1: the GS distance fog (--no-fog, a PORT-ONLY comparison switch, draws without it)
     std::optional<float> options_gamma;bool objects=false,hidden=false,textured=false,first_pass=false,no_coronas=false;unsigned max_frames=0;std::set<unsigned> captures;float ledge_survey=0;bool hotbox_survey=false;bool shadows_on=true;unsigned shadow_capture=0;bool shadow_debug=false;std::optional<std::array<float,4>> start_override;bool activate_all=false;std::optional<std::int32_t> npc_serial;bool mission_scripts=false;bool script_start_calls=false;
-        bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;bool lan_loadout_direct=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
+        bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
         std::optional<float> fixed_dt;std::wstring dt_trace_path;
 #if defined(OMEGA_PS5)
         // Port-only (132ps5c hw10): the PS5's GL 4.6 frames take about 60 ms, so 4 catch-up steps a loop (66.7 ms) let
@@ -4305,7 +4332,6 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         unsigned next_level_frames=0;std::set<unsigned> next_level_captures;std::optional<unsigned> next_level_god;
         for(int i=1;i<argc;++i){const std::wstring arg=argv[i];
             auto value=[&](){if(++i>=argc)throw std::runtime_error("Missing sandbox argument");return std::wstring(argv[i]);};
-            if(arg==L"--lan-loadout-direct"){lan_loadout_direct=true;continue;}   // PORT-ONLY test convenience (134eq1)
             // The port-only test options (132win6 / 132win12), parsed apart: one if-else chain for every option exceeds
             // MSVC's nesting limit (C1061).
             const auto port_test_option=[&]()->bool{
@@ -4888,7 +4914,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "It is the default with --frontend --gui-overlay --combat (the original shows it after every Play Mission);\n"
                     "--no-loadout-screen skips it, and --loadout (headless runs) makes its Accept without the screen.\n"
                     "In LAN play (005721c8 set) the level start opens the network roster GuiEquipmentSetup (EQSETUP) instead\n"
-                    "(134eq1); the PORT-ONLY test convenience --lan-loadout-direct keeps the earlier direct GuiEquipmentModify.\n"
+                    "(134eq1).\n"
                     "--weapon-models (with --combat; implied by --loadout and --loadout-screen) loads the records' weapon models (00145710 -> 00147150 on\n"
                     "GAMEDATA/COMMON/WPNHOG.HOG, the level's preload list 001457c0) and draws the attached ones at the actors' attach\n"
                     "points (003870c0 / 003855d0, gun_model_draw.hpp); the shot frames add the model's muzzle offset (00385370).\n"
@@ -14177,10 +14203,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 o.host.network_game_playing=[&]{return lan_net->memory().read(0x572400,1)!=0;};
                 // Checkpoint 134eq1: the overlay's 005721c8 / 005721c0 as the LAN game's (the original sets them for the
                 // whole network game); the roster's services over the LAN memory.
-                // PORT-ONLY test convenience --lan-loadout-direct (134eq1): the LAN runners written before the roster
-                // (their scripts accept GuiEquipmentModify at once) keep the overlay's 005721c8 at 0 for the level.
-                if(lan_loadout_direct)std::cout<<"PORT-ONLY --lan-loadout-direct: the overlay's 005721c8 stays 0 (no roster)\n";
-                else o.rt.g.b_21c8=1;
+                o.rt.g.b_21c8=1;
                 o.rt.g.b_21c0=static_cast<std::uint8_t>(lan_net->memory().read(0x5721c0,1));
                 if(frontend_app)o.rt.g.app_254=frontend_app->session().runtime().g.app_254;   // *004ffc04 +254
                 o.host.lan_core=lan_net;
@@ -14286,6 +14309,21 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 for(const auto& p:character.parts())figure_parts.push_back({p.name,p.mesh});
                 o.set_stats_figure(std::make_unique<AnimatedCharacter>(skeleton,player_manifest,std::move(figure_parts),MorphHostConfig{}),
                                    player_manifest,clips,player_registry,part_images,textured_parts,player_models,slot);   // 132md3: the current parts' replacements
+            };
+            // 134eq1 batch 2: 002a47e0's default appearance 0055d510[*00493a60] for a roster display actor no player was
+            // copied into. 00292c54 (the agent's activation) stores 00493a60 = 0 and the agent's appearance block in
+            // 0055d510[0]; 002a47e0 keeps 0 (it writes 1 only over -1). That block is the look the play's player wears
+            // (agent_look: the same appearance resolved), so the actor is the player's skeleton and parts with no weapon.
+            o.build_default_eqsetup_figure=[&o,&frontend_app,&agent_look,&character,&skeleton,&player_manifest,&clips,&player_registry,
+                                            &part_images,&textured_parts,&player_models](std::size_t slot){
+                const int sel=frontend_app?int(frontend_app->session().runtime().g.packing_slot):-2;
+                if(sel!=0||!agent_look)
+                    throw std::runtime_error("002a47e0: the default appearance 0055d510["+std::to_string(sel==-1?1:sel)
+                        +"] is not the activated agent's (00493a60 = "+std::to_string(sel)+"); only 0055d510[0] is hosted");
+                std::vector<AnimatedCharacterPart> figure_parts;
+                for(const auto& p:character.parts())figure_parts.push_back({p.name,p.mesh});
+                o.set_stats_figure(std::make_unique<AnimatedCharacter>(skeleton,player_manifest,std::move(figure_parts),MorphHostConfig{}),
+                                   player_manifest,clips,player_registry,part_images,textured_parts,player_models,slot);
             };
             if(loadout_screen){
                 // 002c1100: the display actor with the player's skeleton and appearance (the player's parts).
@@ -15479,7 +15517,10 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 std::array<float,4> dpad{};   // sp+fb0..fbc: Up, Down, Left, Right
                 if(!script.empty()){
                     script_teleport();
-                    const auto waits=[](const ScriptStep& st){return st.wait_peer||st.wait_left||st.quit||st.wait_timer||st.wait_peers!=0||st.wait_backpack;};
+                    // 134eq1: the level start's roster is pending (004ffc29) while the overlay's loadout waits.
+                    const auto roster_pending=[&]{return gui_overlay_draw&&(gui_overlay_draw->loadout_pending||gui_overlay_draw->loadout_done_pending);};
+                    const auto waits=[&](const ScriptStep& st){return st.wait_peer||st.wait_left||st.quit||st.wait_timer||st.wait_peers!=0||
+                        st.wait_ready||st.wait_start||st.wait_backpack||(st.roster_only&&!roster_pending());};
                     for(;;){
                         while(script_index<script.size()&&script_left==0&&!waits(script[script_index])){++script_index;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}}
                         if(script_index>=script.size()||!waits(script[script_index]))break;
@@ -15487,6 +15528,29 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                         if(w.quit){   // 132ln5h14: the play ends after this frame (no input), as at --frames
                             if(running)std::cout<<"Script quit at frame "<<frame<<": the play ends (port-only test convenience)\n";
                             running=false;break;
+                        }
+                        if(w.roster_only){   // 134eq1: a roster line after the level started: skipped
+                            ++script_index;script_left=0;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}
+                            continue;
+                        }
+                        if(w.wait_start||w.wait_ready){   // 134eq1
+                            bool ready=!roster_pending();
+                            if(!ready&&w.wait_ready&&gui_overlay_draw->rt.g.b_21c8&&gui_overlay_draw->host.lan_core){
+                                std::size_t others=0,waiting=0;
+                                for(std::int32_t i=0;i<4;++i){
+                                    const auto p=gui_overlay_draw->host.es_player(i);
+                                    if(!p||p->local)continue;
+                                    ++others;
+                                    if(p->status!=2)++waiting;
+                                }
+                                ready=others>0&&waiting==0;
+                            }
+                            if(!ready)break;   // no input this frame
+                            std::cout<<"Script "<<(w.wait_start?"waitstart":"waitready")<<" at frame "<<frame<<": "
+                                <<(roster_pending()?"every other roster player is ready":"the level start is no longer pending")
+                                <<" (port-only test convenience)\n";
+                            ++script_index;script_left=0;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}
+                            continue;
                         }
                         if(w.wait_timer){   // 133lt1
                             if(!hud_global_timer_expired)break;   // no input this frame
@@ -20205,6 +20269,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 }
                 // This frame's render table (0013e820 -> 00373670, the same camera as the shadow scene below).
                 if(stealth_wanted||particle_light_wanted)stealth_table=shadow_scene.light_table(render_camera,player_camera.rig.half_fov_60);
+                camera_record_half_angle_100()=player_camera.rig.half_fov_60;   // 00132e50 SetView: record +0x100 (134eq1b2)
                 // Display only (vertex colours): on a catch-up loop only the last step's pass is drawn.
                 OMEGA_ZONE_LAP(step_laps,"sim.vision");
                 if(textured&&k+1==steps){   // 00394d48 per terrain instance, then the VU1 light pass per batch (0x11f0..0x15b8)

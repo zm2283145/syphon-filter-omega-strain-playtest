@@ -287,6 +287,15 @@ ShadowMatrix level_camera_projection(const LevelLightCamera& camera);
 // (0, 0, 640, 480; 00168550 / 002bfa90). theta is C+0x100 as the previous frame's figure draw 002bfa90 left it
 // (0.5236 = 0x3f060a92; it sets +0x100 / +0xf4 / +0xfc and restores only +0xf0 / +0xf8 / +0x104..+0x106).
 LevelLightCamera loadout_light_camera(float theta);
+// Checkpoint 134eq1 batch 2: C+0x100 of the current camera record (renderer +0x1f0 + 0x110 * *00538c60) as the
+// process last wrote it, so the first loadout / roster frame of a level reads the value the record really holds.
+// The record starts at 0 (cXViewport_ctor 003755c0 memsets it; XLib_Init 0037e780 does not touch it). Its
+// writers in the decomp: the render pass 00132e50 (SetView: the game camera's +0x60, states 0x0f / 0x13 only),
+// cGameCamera_CanSee 0017a1e0 (the camera's +0x60; in the frame's update, so 00132e50 overwrites it before any
+// reader: not tracked), the HUD map 0026ca70 (0048b2b0), the figure draws 002bfa90 /
+// 002a2590 / 0035b390 (0.5235988 = 0x3f060a92) and the front end's 0028d870 / 00341f00 / 00361e70 (their
+// camera's half fov). A late joiner's first level reaches its one roster draw with no writer run: 0.
+float& camera_record_half_angle_100();
 ShadowMatrix loadout_light_view();
 // 00373670 / 00373940: the point pool, then the spot pool, then the
 // directional pool, each in pool order; enabled lights enter as class 1

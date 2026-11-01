@@ -215,6 +215,10 @@ public:
 
     // Host: whether new joins are accepted (false -> JOIN_NAK InProgress).
     void set_accepting_joins(bool accepting) { accepting_joins_ = accepting; }
+    // Host (134eq1 batch 2): the game's own answer to a join that passed the other checks, as the original's host
+    // answers the Medius server's join (Callback_ServerJoinGame 004451b0 -> 0042b5d0): false -> JOIN_NAK InProgress.
+    // Unset (no level running: the front end's lobby) admits.
+    void set_join_admission(std::function<bool()> admit) { join_admission_ = std::move(admit); }
 
     LanTransportState state() const { return state_; }
     bool is_host() const { return state_ == LanTransportState::Hosting; }
@@ -308,6 +312,7 @@ private:
     LanJoinError join_error_ = LanJoinError::None;
     std::string join_detail_;
     bool accepting_joins_ = true;
+    std::function<bool()> join_admission_;
     std::uint64_t session_id_ = 0;
     std::int64_t host_clock_offset_ms_ = 0;
     std::array<std::unique_ptr<Link>, kLanMaxClients> links_{};  // by client index (a client: [0] = host)

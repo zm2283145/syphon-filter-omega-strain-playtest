@@ -36,6 +36,16 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
                                         if (function == dme::kSyncCallback) dme_sync_callback_00429c00(m, arg);
                                         else if (function == dme::kClientJoinedGame) dme_remote_client_joined_003faab0(m, *this, arg);
                                         else if (function == 0x429920) call(m, 0x429920, {arg});
+                                        else if (function == 0x429a90) {
+                                            dme_client_joined_00429a90(m, arg);
+                                            // PORT-ONLY: 00429d30 would send the slot's queued NetLevelInfoMsg
+                                            // (vtable 004e1180 through 00440450) and leave it 0xffffffff;
+                                            // LanSession's advertisement carries the level, so the slot is left
+                                            // as after that send (0042b5d0's reservation is taken, 0042b4e0 idle).
+                                            const auto c = m.read(arg + 4, 4);
+                                            if (c >= 1 && c <= 3 && m.read(0x572424 + c * 4, 4) == 0x0ffffffeU)
+                                                m.write(0x572424 + c * 4, 4, 0xffffffffU);
+                                        }
                                         else if (function == 0x2d7620) receive_objective_message(arg);
                                         else unhosted(function, "a DME callback that is not ported");
                                     },
@@ -43,9 +53,13 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
                                         return call(m, address, args);
                                     });
     auto& m = memory_;
+    // 134eq1 batch 2: the host answers each join with the game's 0042b5d0 (the original's Medius server join callback
+    // Callback_ServerJoinGame 004451b0, the only caller) while this level's network state exists.
+    transport_.set_join_admission([this] { return join_admission(); });
     // The executable's initial .data values that the DME.cc code reads.
     m.write(dme::kLocalSlot, 4, 0xffffffffU);
     m.write(0x494198, 4, 0xffffffffU);
+    m.write(0x494180, 4, 4);  // 134eq1b2: the game's player limit (DME_11.c's .data 4; SFOLobby_CreateGame 0044e960 sets it)
     for (std::uint32_t k = 0; k < 4; ++k) m.write(0x493a10 + k, 1, 2);
     m.write(0x497540, 1, 1);
     m.copy(0x4bfa10, "Foo");
@@ -136,6 +150,7 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // callback; LanSession creates the world, so it is set here. 004d6aa0's static constructors leave the client map
     // 0x0055c770 empty (003fb750 reads it; its inserts 003fb9c0 come from the stubbed 001ae450, so it stays empty).
     dme_->set_client_left_callback(0x429920);
+    dme_->set_client_world_joined_callback(0x429a90);  // 134eq1b2: its slot write takes 0042b5d0's reservation
     m.write(0x55c77c, 4, 0x55c774);
     // NPCInfo's static list/tree constructors: an empty list links both ends
     // to its sentinel. Native cleanup must not traverse a zero next pointer.
@@ -2661,6 +2676,16 @@ std::int32_t LanNetCore::player_map_count() {
 
 bool LanNetCore::level_info_pending() { return level_info_pending_0042b4e0(memory_); }
 
+bool LanNetCore::join_admission() {
+    const auto clients = valid_client_count();
+    const bool admitted = join_admission_0042b5d0(memory_, clients);
+    log_.push_back(std::string("004451b0 Callback_ServerJoinGame -> 0042b5d0: the join is ") +
+                   (admitted ? "admitted" : "refused") + " (00572400 = " + std::to_string(memory_.read(0x572400, 1)) +
+                   ", 005723f8 = " + std::to_string(memory_.read(0x5723f8, 1)) + ", " + std::to_string(clients) +
+                   " valid clients of 00494180 = " + std::to_string(memory_.read(0x494180, 4)) + ")");
+    return admitted;
+}
+
 void LanNetCore::send_play_game() {
     if (pump_.joinable())
         throw std::runtime_error("LAN NetPlayGameMsg send during background load pump; defer until stop_load_pump");
@@ -4446,6 +4471,7 @@ void LanNetCore::mirror_empty_level_objects() {
 }
 
 LanNetCore::~LanNetCore() {
+    transport_.set_join_admission({});
     if (pump_.joinable()) {
         pump_stop_ = true;
         pump_.join();
