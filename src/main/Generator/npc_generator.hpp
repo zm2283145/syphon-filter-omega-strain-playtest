@@ -359,8 +359,10 @@ void generator_remote_enable(GeneratorState& s, std::int32_t client, const Gener
 // < 0: +cc = 0); +cc = 0: +2c = 0, 0043b190, 0043a030.
 void generator_remote_disable(GeneratorState& s, std::int32_t client, const GeneratorNetHost& net);
 // 00221610, after the script filter: an EnableMsg / DisableMsg dispatches to
-// EnableNet / DisableNet on the solo or authoritative console, and to Enable /
-// Disable on a multiplayer client. The message's +24 is passed unchanged.
+// virtual +64 / +68 (00220fd0 / 00220d70, which send the message on) on the
+// solo or authoritative console, and to +28 / +2c (00220e60 / 00220d00, no
+// send) on a multiplayer client (00221aac..00221b8c; 134lt12 corrected the
+// earlier swapped reading). The message's +24 is passed unchanged.
 void generator_receive_enable_disable(GeneratorState& s, bool enable, std::int32_t client,
                                       const GeneratorNetHost& net);
 // 002214b0 (virtual +5c) in a network game after 003ce980 (+2d = 1): the

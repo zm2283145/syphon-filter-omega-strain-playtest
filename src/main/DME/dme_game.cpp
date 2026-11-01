@@ -794,9 +794,8 @@ void net_objects_send_0042cf30(LevelLoadMemory& m, LevelLoadHost& host, std::uin
 }
 
 void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host) {
-    for (const auto map : {0x5826c0U, 0x5826e0U})
-        if (r32(m, map) || r32(m, map + 4) || r32(m, map + 0xc) != map + 4)
-            throw std::runtime_error("0042e6d0: a nonempty short-value or pending-message map is not ported");
+    if (r32(m, 0x5826c0) || r32(m, 0x5826c4) || r32(m, 0x5826cc) != 0x5826c4)
+        throw std::runtime_error("0042e6d0: a nonempty short-value map 0x005826c0 is not ported");
     // 134lt8: the transfer-object map 0x005826a0 (0042e180's entries): each entry's TransferReference (line 0x61), the
     // entry (line 0x62), then the map is cleared (clear_void_2).
     for (auto it = r32(m, 0x5826a0 + 0xc); it != 0x5826a0 + 4; it = net_map_next(m, it)) {
@@ -809,6 +808,17 @@ void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host) {
         heap_leave(m, host);
     }
     rb_map_clear(m, host, 0x5826a0, 0x4bfbb8);
+    // 134lt13: the pending copies 0x005826e0 (AddCopyMsg's): each message's virtual destructor (-1) and 0036b130
+    // ("NetObjectMgr.cc" line 0x6b) under the allocator guard, then the map is cleared (clear_void_3 0042f280:
+    // "allocator.hh" 0x004bfba8 line 0x64).
+    for (auto it = r32(m, 0x5826e0 + 0xc); it != 0x5826e0 + 4; it = net_map_next(m, it)) {
+        const auto msg = r32(m, it + 0x10);
+        heap_enter(m, host);
+        host.call(m, r32(m, r32(m, msg) + 8), {msg, 0xffffffffU});
+        host.call(m, 0x36b130, {0, msg, 0x4bfb00, 0x6b});
+        heap_leave(m, host);
+    }
+    rb_map_clear(m, host, 0x5826e0, 0x4bfba8);
     constexpr std::uint32_t references = 0x582700, timers = 0x582720;
     constexpr std::uint32_t payload_file = 0x4bfb00, reference_node_file = 0x4bfb98, timer_node_file = 0x4bfb88;
     const auto end = references + 4;
@@ -3996,6 +4006,285 @@ std::uint32_t copy_message_receive_002c5b80(LevelLoadMemory& m, LevelLoadHost& h
     }
     w8(m, kBusy, 0);
     return 0x2f0;
+}
+
+// ---- the NPC ownership transfer's NetObjectMgr part (134lt13; NET_INLEVEL.md "The NPC ownership transfer") --------
+namespace {
+constexpr std::uint32_t kPendingCopies = 0x5826e0;   // map<cObjectId, cMessage*>: AddCopyMsg / TransferRequest
+constexpr std::uint32_t kTransferRecvMessage = 0x4e1160, kTransferRecvType = 0x583990, kTransferRecvSerialType = 0x583988;
+constexpr std::uint32_t kEnabledList = 0x4ea1b0;     // npc.cc's std::list<cEnabledListItem*>
+
+std::string transfer_hex(std::uint32_t v) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string s(8, '0');
+    for (int i = 7; i >= 0; --i, v >>= 4) s[static_cast<std::size_t>(i)] = digits[v & 0xfU];
+    return s;
+}
+
+// MW's delete of a cMessage in NetObjectMgr.cc: the allocator guard, the virtual destructor (+8) with -1 (it frees
+// nothing), 0036b130(0, msg, "NetObjectMgr.cc" 0x004bfb00, line), the guard's end. There is no null test.
+void release_transfer_message(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t line,
+                              std::uint32_t at) {
+    if (!msg)
+        throw std::runtime_error(transfer_hex(at) + ": the release of a null message (the original calls its "
+                                                    "destructor through null)");
+    heap_enter(m, host);
+    host.call(m, r32(m, r32(m, msg) + 8), {msg, 0xffffffffU});
+    host.call(m, 0x36b130, {0, msg, 0x4bfb00, line});
+    heap_leave(m, host);
+}
+}  // namespace
+
+void net_add_copy_msg_0042d310(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t msg) {
+    if (!msg) throw std::runtime_error("0042d310: AddCopyMsg of a null message (the original calls its +0xc through null)");
+    const auto value = host.call(m, r32(m, r32(m, msg) + 0xc), {msg});
+    const auto key = r32(m, idp);
+    if (transfer_map_find(m, kPendingCopies, key) == kPendingCopies + 4)
+        transfer_map_insert(m, host, kPendingCopies, key, value, 0x4bfb68);
+}
+
+void net_transfer_request_0042d360(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t peer,
+                                   std::uint32_t stack) {
+    const auto sp = stack - 0x90;
+    const auto id = r32(m, idp);
+    const auto object = host.call(m, 0x40c540, {idp});
+    const auto ctl = [&] { return r32(m, object + 0x58); };
+    const auto virt = [&](std::uint32_t self, std::uint32_t slot) { return r32(m, r32(m, self) + slot); };
+    if (object && ctl() && host.call(m, virt(ctl(), 0x58), {ctl()})) {
+        const auto node = transfer_map_find(m, kPendingCopies, id);
+        if (node != kPendingCopies + 4) {
+            const auto msg = r32(m, node + 0x10);
+            host.call(m, 0x3fb020, {id, msg, 0, short_peer(peer)});
+            release_transfer_message(m, host, msg, 0x202, 0x42d360);
+            rb_map_erase(m, host, kPendingCopies, node, 0x4bfba8);   // 0042f2c0
+        } else if (host.call(m, virt(ctl(), 0x58), {ctl()}) && host.call(m, virt(ctl(), 0x44), {ctl()})) {
+            const auto msg = host.call(m, virt(ctl(), 0x90), {ctl()});
+            if (msg) host.call(m, 0x3fb020, {id, msg, 0, short_peer(peer)});
+            release_transfer_message(m, host, msg, 0x211, 0x42d360);
+        }
+        if (r8(m, object + 0x2d) && r8(m, object + 0x2c) && !r8(m, object + 0x2e)) {
+            host.call(m, virt(ctl(), 0x98), {ctl(), 1});
+            host.call(m, virt(object, 0x60), {object, 0});
+            host.call(m, 0x42d790, {object});
+        }
+        return;
+    }
+    host.call(m, 0x436c00, {sp + 0x7c});
+    if (transfer_is_host(m)) {
+        if (!object || !ctl())
+            throw std::runtime_error("0042d360: the host's message for an object that is not here (the original reads "
+                                     "its controller through null)");
+        const auto msg = host.call(m, virt(ctl(), 0x90), {ctl()});
+        if (msg) {
+            if (!(peer & 0xffffU)) host.call(m, virt(ctl(), 0x9c), {ctl(), msg});
+            else host.call(m, 0x3fb020, {id, msg, 0, short_peer(peer)});
+        }
+        release_transfer_message(m, host, msg, 0x22f, 0x42d360);
+    }
+    host.call(m, 0x436ba0, {sp + 0x7c, 0xffffffffU});
+}
+
+void net_remove_transfer_timer_0042d110(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp) {
+    constexpr std::uint32_t map = 0x582720;
+    const auto key = r32(m, idp);
+    const auto node = transfer_map_find(m, map, key);
+    host.call(m, 0x127358, {0x4bfab0, key});   // "RemoveTransferTimer timer for %.8X\n"
+    if (node != map + 4) rb_map_erase(m, host, map, node, 0x4bfb88);   // 0042f760
+}
+
+void net_transfer_received_0042ce10(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t stack) {
+    if (transfer_is_host(m)) {
+        host.call(m, 0x42d300, {idp});
+        return;
+    }
+    const auto msg = stack - 0x60 + 0x20;
+    host.call(m, 0x3c9e30, {msg, kTransferRecvType});
+    w32(m, msg, kTransferRecvMessage);
+    w32(m, msg + 0x24, r32(m, idp));
+    w32(m, msg + 0x1c, 0x40);
+    w8(m, msg + 0x20, 2);
+    host.call(m, 0x3fb020, {0, msg, 0, 0});
+    w32(m, msg, kTransferRecvMessage);
+    host.call(m, 0x3c9d60, {msg, 0});
+}
+
+std::uint32_t transfer_recv_message_destroy_0042ced0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                     std::uint32_t flag) {
+    return generator_message_destroy(m, host, msg, flag, kTransferRecvMessage);
+}
+
+std::uint32_t transfer_recv_message_clone_0043ff70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x28, 0x4c0300, 0x14});   // "NetTransferRecvMsg.hh"
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, kTransferRecvMessage);
+        w32(m, copy + 0x24, r32(m, msg + 0x24));
+    }
+    return copy;
+}
+
+std::uint32_t transfer_recv_message_serialise_00440160(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                       std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                                       std::uint32_t buf) {
+    if (cap < 0xc || !buf) return 0xffffffffU;
+    message_header_003c9ca0(m, host, msg, key, cap, buf);
+    w32(m, buf + 8, r32(m, msg + 0x24));
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, kTransferRecvSerialType));
+    return 0xc;
+}
+
+std::uint32_t transfer_recv_message_receive_00440100(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
+                                                     std::uint32_t stack) {
+    const auto sp = stack - 0x30;
+    busy_enter(m);
+    if (r8(m, kInLevel)) {
+        w32(m, sp + 0x18, r32(m, buf + 8));
+        host.call(m, 0x42d300, {sp + 0x18});
+    }
+    w8(m, kBusy, 0);
+    return 0xc;
+}
+
+std::uint32_t npc_enabled_item(const LevelLoadMemory& m, std::uint32_t id) {
+    for (auto n = r32(m, kEnabledList + 8); n != kEnabledList + 4; n = r32(m, n + 4))
+        if (r32(m, r32(m, n + 8)) == id) return r32(m, n + 8);
+    return 0;
+}
+
+std::uint32_t npc_enabled_find_or_add(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t line) {
+    const auto actor = r32(m, controller + 0x30);
+    if (const auto found = npc_enabled_item(m, r32(m, actor + 0xc))) return found;
+    heap_enter(m, host);
+    const auto item = host.call(m, 0x36b180, {0, 0xc, 0x49b670, line});
+    heap_leave(m, host);
+    if (item) {
+        w32(m, item, r32(m, actor + 0xc));
+        w32(m, item + 4, 0);
+        w32(m, item + 8, 0);
+    }
+    geninfo_list_push(m, host, kEnabledList, item);   // 0015b1f0 -> 00138ea0
+    return item;
+}
+
+std::uint32_t npc_get_enabled_0015b060(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller) {
+    return r32(m, npc_enabled_find_or_add(m, host, controller, 0xff) + 4);
+}
+
+void npc_set_enabled_0015b220(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t bit,
+                              std::uint32_t set) {
+    const auto item = npc_enabled_find_or_add(m, host, controller, 0xd7);
+    auto mask = r32(m, item + 4);
+    if (set & 0xffU) mask = s32(bit) >= 0 ? mask | (1U << (bit & 31U)) : 0xffU;
+    else mask = s32(bit) >= 0 ? mask & ~(1U << (bit & 31U)) : 0U;
+    w32(m, item + 4, mask);
+}
+
+void npc_activate_00157940(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t v) {
+    const auto was = npc_get_enabled_0015b060(m, host, controller);
+    if (s32(v) >= 0) {
+        npc_set_enabled_0015b220(m, host, controller, v, 1);
+    } else {
+        npc_set_enabled_0015b220(m, host, controller, 0xffffffffU, 1);
+        const auto body = host.call(m, r32(m, r32(m, controller) + 0xf0), {controller});   // 0014afd0
+        v = body ? ((r32(m, body + 0xc) & 0x7f000000U) >> 24) - 1 : local_slot(m, host, r8(m, kNetworkGame), r32(m, kWorld));
+    }
+    if (!was) host.call(m, 0x42e180, {r32(m, controller + 0x30), v});
+}
+
+void npc_activate_00157800(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t gobj) {
+    if (!r8(m, kNetworkGame))
+        throw std::runtime_error("00157800: the single-player branch (+30's controller +5c(1)) is the play's");
+    if (!host.call(m, r32(m, r32(m, controller) + 0x44), {controller})) return;
+    std::uint32_t v = 0xffffffffU;
+    if (gobj) {
+        const auto sub = r32(m, gobj + 0x58);
+        const bool generator_like = sub && (host.call(m, r32(m, r32(m, sub) + 0x58), {sub}) ||
+                                            host.call(m, r32(m, r32(m, sub) + 0x5c), {sub}));
+        if (generator_like) throw std::runtime_error("00157800: the NPC info owner of a generator-like object (00434440)");
+        v = ((r32(m, gobj + 0xc) & 0x7f000000U) >> 24) - 1;
+    }
+    host.call(m, r32(m, r32(m, controller) + 0xc8), {controller, v});   // 00157940
+}
+
+bool npc_deactivate_local_001577b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t a) {
+    npc_set_enabled_0015b220(m, host, controller, a, 0);
+    return npc_get_enabled_0015b060(m, host, controller) == 0;
+}
+
+void npc_critical_net_0015a440(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, float dt,
+                               std::uint32_t stack) {
+    if (!host_or_solo(m)) return;
+    const auto obj = r32(m, controller + 0x30);
+    if (!obj) return;
+    if (!r8(m, kNetworkGame) || host.call(m, r32(m, r32(m, obj) + 0x7c), {obj})) return;
+    const auto sp = stack - 0x400;
+    const auto idp = sp + 0x3a8, info = sp + 0x3a0;   // the local id copy and lk2
+    const auto objid = obj + 0xc;
+    w32(m, idp, r32(m, objid));
+    const auto active = [&](std::uint32_t p, std::uint32_t j) { return host.call(m, 0x434190, {info, p, j}) != 0; };
+    const auto in_terrain = [&](std::uint32_t p, std::uint32_t j) { return host.call(m, 0x433ec0, {info, p, j}) != 0; };
+    const auto player = [&](std::uint32_t j) { return host.call(m, 0x3fb8d0, {j}) != 0; };
+    const auto copy_msg = [&] { return host.call(m, r32(m, r32(m, controller) + 0x90), {controller}); };
+    host.call(m, 0x436c00, {info});
+    try {
+        const auto slot = host.call(m, 0x434440, {info, idp});
+        const auto alt = host.call(m, 0x434380, {info, idp});
+        const auto rec = s32(slot) >= 0 ? npc_enabled_item(m, r32(m, objid)) : 0U;
+        if (rec && r8(m, controller + 0x169)) {
+            if (slot == 0) {
+                if (!r8(m, obj + 0x14))
+                    throw std::runtime_error("0015a440: the host's takeover of a dropped owner's NPC (001584b0 / 00148b50, "
+                                             "cSwitchControllersMsg 0x00582730 kind 1, 00148cd0) is not ported");
+                std::uint32_t who = 0;
+                for (std::uint32_t i = 0; i < 4; ++i)
+                    if (player(i) && (r32(m, rec + 4) & (1U << i))) {
+                        who = i;
+                        if (active(objid, i) && in_terrain(objid, i)) break;
+                    }
+                if (who == 0 || s32(r32(m, 0x4ea380)) < s32(host.call(m, 0x42b1a0, {1}))) {
+                    w8(m, controller + 0x169, 0);
+                    w32(m, rec + 8, 0);
+                    if (s32(who) > 0) {
+                        host.call(m, 0x42d310, {objid, copy_msg()});
+                        host.call(m, 0x42da30, {obj, 0, who});
+                        host.call(m, 0x127358, {0x49b730});
+                        w32(m, 0x4ea380, host.call(m, 0x42b1a0, {1}) + 0xfa);
+                    }
+                }
+            }
+        } else if (rec && (!player(slot) || (slot == 0xffffffffU && !player(alt)))) {
+            host.call(m, 0x127358, {0x49b780, slot, r32(m, idp)});
+            host.call(m, 0x435d80, {info, idp, 0});   // cNPCInfoObject::DisconnectOwner
+            w8(m, controller + 0x169, 1);
+            w32(m, rec + 4, r32(m, rec + 4) & ~(1U << (slot & 31U)));
+        } else if (rec) {
+            float t = 0.0F;
+            if (active(idp, slot) && !in_terrain(idp, slot)) t = std::bit_cast<float>(r32(m, rec + 8)) + dt;
+            w32(m, rec + 8, std::bit_cast<std::uint32_t>(t));
+            if (!(t <= 2.0F)) {
+                w32(m, rec + 8, 0);
+                std::int32_t to = -1;
+                for (std::uint32_t j = 0; j < 4; ++j)
+                    if (j != slot && player(j) && active(objid, j) && in_terrain(objid, j)) {
+                        to = static_cast<std::int32_t>(j);
+                        if (r32(m, rec + 4) & (1U << j)) break;
+                    }
+                if (to >= 0) {
+                    if (slot == local_slot(m, host, r8(m, kNetworkGame), r32(m, kWorld))) host.call(m, 0x42d310, {objid, copy_msg()});
+                    host.call(m, 0x42da30, {obj, slot, static_cast<std::uint32_t>(to)});
+                }
+            }
+        }
+    } catch (...) {
+        host.call(m, 0x436ba0, {info, 0xffffffffU});
+        throw;
+    }
+    host.call(m, 0x436ba0, {info, 0xffffffffU});
 }
 
 // ---- the health message (vtable 0x004e0ee0; checkpoint 132ln5h14c; NET_INLEVEL.md 4.26) ------------------------

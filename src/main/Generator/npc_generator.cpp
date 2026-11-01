@@ -436,14 +436,17 @@ void generator_remote_disable(GeneratorState& s, std::int32_t client, const Gene
 
 void generator_receive_enable_disable(GeneratorState& s, bool enable, std::int32_t client,
                                       const GeneratorNetHost& net) {
+    // 134lt12: 00221610 (00221aac..00221b0c, read from the ELF): single player or the session host (005721c0)
+    // calls virtual +64 (00220fd0) / +68 (00220d70), which on the host also send the cEnableMsg / cDisableMsg to
+    // the clients; a client calls +28 (00220e60) / +2c (00220d00), which send nothing (vtable 004db680).
     if (!net.network) {
         generator_receive_link_message(s, enable);
     } else if (net.host_role) {
-        if (enable) generator_remote_enable(s, client, net);
-        else generator_remote_disable(s, client, net);
-    } else {
         if (enable) generator_enable_network(s, client, net);
         else generator_disable_network(s, client, net);
+    } else {
+        if (enable) generator_remote_enable(s, client, net);
+        else generator_remote_disable(s, client, net);
     }
 }
 

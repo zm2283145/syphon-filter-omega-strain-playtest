@@ -353,6 +353,60 @@ BodySwitch switch_body_packing(AppearancePacking& model, AppearancePacking& cost
     return out;
 }
 
+DisguiseTable sklhog_disguise_table(std::span<const std::string> member_names,
+                                    std::span<const AppearancePacking> packings) {
+    if (member_names.size() != packings.size()) fail("00407830: member names and packings differ in count");
+    DisguiseTable t;
+    std::array<std::size_t, 2> n{};
+    for (std::size_t i = 0; i < member_names.size(); ++i) {
+        // Libc_Strncmp(name, "DISGUISE_", 8): a shorter name differs at its NUL.
+        if (member_names[i].size() < 8 || member_names[i].compare(0, 8, "DISGUISE") != 0) continue;
+        ++t.count_55de94;
+        const std::size_t row = body_kind(packings[i]) == 0 ? 0 : 1;
+        if (n[row] < 4) t.rows[row][n[row]] = i;
+        ++n[row];
+    }
+    for (std::size_t row = 0; row < 2; ++row)
+        if (n[row] != 0 && n[row] < 4)
+            for (std::size_t k = n[row]; k < 4; ++k) t.rows[row][k] = t.rows[row][n[row] - 1];
+    return t;
+}
+
+std::optional<std::size_t> disguise_table_entry(const DisguiseTable& t, std::uint8_t kind, std::int32_t index) {
+    if (kind > 1) fail("the disguise table read for 004067e0 kind 2 (+118.., past g_AgentPartCache +f8 / +108)");
+    if (index < 0 || index > 3) fail("the disguise table read outside the four entries of a row");
+    return t.rows[kind][static_cast<std::size_t>(index)];
+}
+
+DisguiseApplication add_disguise_packing(AppearancePacking& model, AppearancePacking& disguise,
+                                         std::optional<AppearancePacking>& backup) {
+    DisguiseApplication out;
+    out.merge = switch_body_packing(model, disguise, backup);                 // 00390940, 00406e00
+    const auto count = pair_count(model);                                     // 00406dc0 -> +23c0
+    out.count_23c0 = static_cast<std::uint16_t>(count);
+    auto hard = quad(model, 0x20);                                            // 00405940(model +40, 1, ...)
+    if (!prefix_equal(hard.data() + 1, "HARD", 4)) {                          // 004be910
+        hard = to_quad("_HARD_DEF_DEFA0");                                    // 004be920
+        hard[0] = body_kind(model) == 0 ? '2' : '1';
+        put(model, 0x20, hard);
+    }
+    out.hard_mesh = mesh_request(hard);
+    out.mesh_loads.push_back(out.hard_mesh);
+    for (std::size_t k = 0; k < count; ++k) out.mesh_loads.push_back(mesh_request(quad(model, first_of(k))));
+    for (std::size_t k = 0; second_of(k) + 16 <= capacity && nonzero(quad(model, second_of(k))); ++k)
+        out.texture_loads.push_back(texture_request(quad(model, second_of(k))));   // 00403a20
+    if (!backup) fail("00391020: 00390940 left no +2c14 block");
+    const auto& old = *backup;
+    const auto n = pair_count(old);                                           // 00406dc0(+2c14)
+    for (std::size_t j = 0; j <= n; ++j) {                                    // 004027e0, 00403940
+        const auto q = quad(old, second_of(j));
+        out.texture_frees.push_back(nonzero(q) ? c_string(q) : std::string());
+    }
+    for (std::size_t i = 0; i < n; ++i) out.mesh_frees.push_back(c_string(quad(old, first_of(i))));   // 004046f0, 00404d90
+    backup.reset();                                                           // Mem_Free "man.cc" 0x2da, +2c14 = 0
+    return out;
+}
+
 bool restore_body_packing(AppearancePacking& model, std::optional<AppearancePacking>& backup) {
     if (!backup) return false;                                                // 00391210: +2c14 == 0
     copy_manifest(model, *backup);

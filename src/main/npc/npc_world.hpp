@@ -282,6 +282,12 @@ public:
     bool remote_following() const{return remote_&&(remote_->flags_214&0x01U)!=0;}
     // 134lt11 (npc_remote.hpp; PORT-ONLY boundary, the original's byte layout): the NPC ownership transfer.
     void set_transfer_link(NpcTransferLink link){transfer_link_=std::move(link);}
+    bool has_transfer_link() const{return static_cast<bool>(transfer_link_.lookup);}
+    // 134lt13 (PORT-ONLY boundary): cNPC_CriticalNextFrame 0015a440's network half, which runs on LanNetCore's block
+    // (LanNetCore::npc_critical_net_0015a440). always_run calls it each frame with the frame's dt after the radius
+    // half, on both the AI and the remote controller (0015a440 is both vtables' +3c). Unset: single player.
+    void set_critical_net(std::function<void(float dt)> f){critical_net_=std::move(f);}
+    bool has_critical_net() const{return static_cast<bool>(critical_net_);}
     // cNPC::GetCopyMsg 00158350's payload (both NPC controllers' +90): 00148b50 of this component into `out` (the
     // controller's +50, 0015b820, does nothing on either controller).
     void pack_transfer_00148b50(NpcTransferBytes& out);
@@ -548,6 +554,7 @@ public:
     void set_not_gasable(bool value){not_gasable_346b_=value?1:0;}
 private:
     NpcAiHost host(SoloActorSimulation& actor);
+    void radius_half(SoloActorSimulation& actor);   // 0015a440's radius half (check_npc_activation_radius)
     void script_weapon(const char* what,const std::function<void(WeaponInventoryOps&)>& body);
     // npc_remote.cpp
     void remote_update(SoloActorSimulation& actor,float dt);                 // 002d5160
@@ -563,6 +570,7 @@ private:
     std::uint32_t remote_death_cleanups_{};
     NpcRemoteLink remote_link_;
     NpcTransferLink transfer_link_;
+    std::function<void(float dt)> critical_net_;   // 134lt13
     NpcAiSystem& system_;
     const NpcNodeGraph& graph_;
     std::uint32_t actor_id_;

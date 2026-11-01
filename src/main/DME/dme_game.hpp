@@ -831,6 +831,82 @@ void copy_message_build_002c60f0(LevelLoadMemory& m, LevelLoadHost& host, std::u
 // msg + 0x30); then 0042ce10(&id) and 003c9d60; 0x2f0.
 std::uint32_t copy_message_receive_002c5b80(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack);
 
+// ---- the NPC ownership transfer's NetObjectMgr part (134lt13; NET_INLEVEL.md "The NPC ownership transfer") --------
+// cNetObjectMgr_AddCopyMsg 0042d310(&id, msg) (NetObjectMgr.c): the message's clone (its virtual +0xc) under the id in
+// the pending-copy map 0x005826e0 (insert_one 0042f400: node 0x14 bytes, "allocator.hh" 0x004bfb68 line 0x5c). An id
+// already there keeps its node; the new clone is not freed (as the original). A null message throws (the original
+// calls through it).
+void net_add_copy_msg_0042d310(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t msg);
+// cNetObjectMgr_TransferRequest 0042d360(&id, peer) (NetObjectMgr_2.c). The object (0040c540) whose controller answers
+// is_ready (+58): its pending copy in 0x005826e0 is sent (003fb020(id, msg, 0, (short)peer)), released (the virtual
+// destructor +8 with -1, 0036b130 "NetObjectMgr.cc" 0x202) and erased (0042f2c0: "allocator.hh" 0x004bfba8);
+// without one, a controller answering is_ready and +44 sends its +90 message and releases it (0x211). Then a live
+// object (+2d, +2c, !+2e) gets the controller's +98(1), its own +60(0) and 0042d790. Otherwise (no object or not
+// ready), under an NPC info object, the host builds the controller's +90 message and applies it (+9c) for peer 0 or
+// sends it, then releases it (0x22f). A null message's release and a missing object's controller throw (the
+// original reads through null).
+void net_transfer_request_0042d360(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t peer,
+                                   std::uint32_t stack);
+// NetObjectMgr_RemoveTransferTimer 0042d110(&id) (0042d300 forwards to it): the debug print 00127358
+// ("RemoveTransferTimer timer for %.8X\n" 0x004bfab0), then the id's node in 0x00582720 is erased when present.
+void net_remove_transfer_timer_0042d110(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp);
+// 0042ce10(&id) (func_0042CE10.c, after cNetNPC_ConvertToNpc): on the host (or solo) 0042d300(&id); otherwise the
+// cNetTransferRecvMsg (003c9e30 type 0x00583990 at sp+0x20, vtable 0x004e1160, +24 the id, +1c 0x40, byte +20 2)
+// to the host (003fb020(0, msg, 0, 0)), then the destructor.
+void net_transfer_received_0042ce10(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t stack);
+// cNetTransferRecvMsg (vtable 0x004e1160): the destructor 0042ced0, the clone 0043ff70 (0x28 bytes, the heap file
+// "NetTransferRecvMsg.hh" 0x004c0300 line 0x14), the serialiser 00440160 (0xc bytes: 003c9ca0's header, +8 the
+// message's +24; type *0x00583988) and the receive 00440100 (under the receive guard, in a level 0042d300 with the
+// record's +8; 0xc).
+std::uint32_t transfer_recv_message_destroy_0042ced0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                     std::uint32_t flag);
+std::uint32_t transfer_recv_message_clone_0043ff70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+std::uint32_t transfer_recv_message_serialise_00440160(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                       std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                                       std::uint32_t buf);
+std::uint32_t transfer_recv_message_receive_00440100(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
+                                                     std::uint32_t stack);
+// The enabled list 0x004ea1b0 (npc.cc's std::list<cEnabledListItem*>: +0 the count, the header node at +4: +4 the
+// last, +8 the first; nodes {prev, next, item}, pushed by 00138ea0) of {+0 the controller's actor id, +4 the enabled mask,
+// +8 the transfer timer (float)}. cNPC_GetEnabled 0015b060(controller) and cNPC_SetEnabled 0015b220(controller, bit,
+// set) find the actor's item or append a new one (0036b180(0, 0xc, 0x0049b670, 0xff / 0xd7): {id, 0, 0}). Set: bit
+// >= 0 ors 1 << bit, else 0xff; clear: bit >= 0 clears 1 << bit, else 0.
+std::uint32_t npc_enabled_find_or_add(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t line);
+std::uint32_t npc_get_enabled_0015b060(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller);
+void npc_set_enabled_0015b220(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t bit,
+                              std::uint32_t set);
+// The item of an actor id in 0x004ea1b0 (0015a440's walk), or 0.
+std::uint32_t npc_enabled_item(const LevelLoadMemory& m, std::uint32_t id);
+// cNPC_Activate_int 00157940(controller, v) (npc_46.c): r = GetEnabled; v >= 0 sets bit v; else all bits (-1) and v
+// from the body (+0xa4's virtual: the controller's +30 here; its +c's top byte - 1) or the local slot; AddActivate
+// 0042e180(the actor, v) when r was 0.
+void npc_activate_00157940(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t v);
+// cNPC_Activate_cGOBJP 00157800(controller, gobj) in a network game (npc_46.c): when the controller answers +44
+// (cNPC_WantsToBeActive), v = -1, or for a gobj: a generator-like object answering either of its +58 object's +54 /
+// +58 virtuals takes its NPC info owner (00434440), else its id's top byte - 1; then 00157940(v). The port's gobjs
+// are players or 0 (a generator-like gobj throws naming 00157800).
+void npc_activate_00157800(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t gobj);
+// cNPC_DeactivateLocal 001577b0(controller, a): SetEnabled(a, 0); when nothing is left enabled the controller's +b8
+// (Reset) is the caller's (returns 1 then).
+bool npc_deactivate_local_001577b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, std::uint32_t a);
+// cNPC_CriticalNextFrame 0015a440's network half (npc_57.c; the radius half is npc_ai's check_npc_activation_radius).
+// Only the host (or solo) runs 0015a440. In a network game, for an actor whose +7c answers 0 (authored), under an NPC
+// info object: the owner (00434440) and the previous owner (00434380); for an owner >= 0 with an enabled item
+// (0x004ea1b0, keyed by the actor's id):
+//  - controller +169 set (the owner dropped) with the owner 0: on a present actor (+14) the first player p (003fb8d0)
+//    whose mask bit is set, stopping at one active (00434190) in its active terrain (00433ec0); when there is none or
+//    the retry time 0x004ea380 is before cDME_GetTime(1) (0042b1a0): +169 = 0, t = 0, and for p > 0 AddCopyMsg
+//    0042d310(&id, +90's message), AddDeactivate 0042da30(actor, 0, p), the print 0x0049b730 and 0x004ea380 = time +
+//    0xfa. An absent actor (+14 clear) throws (the host's takeover of a dropped owner's NPC is not ported);
+//  - else an owner that is not a player (or -1 without the previous owner): the print 0x0049b780, DisconnectOwner
+//    00435d80(&id, 0), +169 = 1 and the owner's mask bit cleared;
+//  - else t (item +8) grows by dt while the owner has the NPC active outside its active terrain (0 otherwise); past
+//    2 s, t = 0 and the first other player with it active in its active terrain (preferring one whose mask bit is
+//    set) takes it: the owner's console (the local slot) AddCopyMsg 0042d310(&id, +90's message), then AddDeactivate
+//    0042da30(actor, owner, that player). The +90 message itself is not freed (as the original).
+void npc_critical_net_0015a440(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t controller, float dt,
+                               std::uint32_t stack);
+
 // ---- the health message (vtable 0x004e0ee0, type 0x00582750, serial type 0x00582748; 132ln5h14c, 4.26) ----------
 // 003cc990(human, hp, a2): +0x40 = cvt.s.w(hp); in a network game with a2 == 0 the message (003c9e30 type 0x00582750
 // at sp+0x30, the vtable, byte +0x24 = 0, +0x28 the human's +0xc, byte +0x20 = 4, +0x2c hp) to the human

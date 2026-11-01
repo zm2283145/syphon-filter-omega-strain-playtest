@@ -575,6 +575,14 @@ void OmegaServer::on_disconnect(std::uint32_t conn) {
         std::erase_if(resumable_, [&](const auto& kv) { return kv.second.until <= now; });
         resumable_[it->second.session_key] = {it->second.account_id, now + 120};
     }
+    if (!it->second.mgcl_key.empty()) {
+        // 134on4 batch 3: the host's MGCL connection is the game's server side; without it the game cannot be joined.
+        std::vector<std::uint32_t> hosted;
+        for (const auto& [world, g] : games_)
+            if (g.mgcl_conn == conn) hosted.push_back(world);
+        for (const std::uint32_t world : hosted) close_world(world, "the host's MGCL connection closed");
+    }
+    std::erase_if(pending_joins_, [&](const auto& kv) { return kv.second.joiner == conn; });
     log_out(it->second, "disconnected");
     log("conn " + std::to_string(conn) + " closed");
     conns_.erase(it);
@@ -590,8 +598,16 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
         if (c.kind == ClientKind::Port) on_ext(c, frame);  // an original session never speaks the extensions
         return;
     }
-    if (c.kind == ClientKind::Original && !c.account_id && frame.type != mid::SessionBegin && !resumable_.empty())
-        resume_original(c, b);
+    // 134on4 batch 3: the MGCL messages (class 3) of an original game host (ONLINE.md §8.7).
+    if (frame.type >= mid::kMgclBase && frame.type < mid::kMgclBase + mid::kMgclCount) {
+        if (c.kind == ClientKind::Original) on_mgcl(c, frame);
+        return;
+    }
+    // 134on4: the MLS connection's first request is UpdateUserState (SFOLobby_MediusConnectMLS 0x0044ce60 ->
+    // MediusUpdateClientState 0x00468f78), whose SessionKey sits at +0 rather than +0x15.
+    if (c.kind == ClientKind::Original && !c.account_id && frame.type != mid::SessionBegin &&
+        frame.type != mid::MediusSessionBegin)
+        resume_original(c, b, frame.type == mid::UpdateUserState ? 0 : kSessionKeyOffset);
     auto sized = [&](std::size_t need) {
         if (b.size() >= need) return true;
         log("conn " + std::to_string(conn) + ": Medius id " + std::to_string(frame.type) + " too short (" +
@@ -599,7 +615,25 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
         return false;
     };
     switch (frame.type) {
-    case mid::SessionBegin: if (sized(msize::SessionBegin)) on_session_begin(c, b); break;
+    case mid::SessionBegin:
+        // 134on4: registration 27 is GetMyIP; an original session that ran the real SessionBegin (3) is answered so.
+        if (c.kind == ClientKind::Original && c.medius_session) {
+            if (sized(msize::GetMyIP)) on_get_my_ip(c, b);
+        } else if (sized(msize::SessionBegin)) {
+            on_session_begin(c, b);
+        }
+        break;
+    case mid::MediusSessionBegin: if (sized(msize::MediusSessionBegin)) on_medius_session_begin(c, b); break;
+    case mid::SessionEnd: if (sized(msize::SessionEnd)) on_session_end(c, b); break;
+    case mid::UpdateUserState: if (sized(msize::UpdateUserState)) on_update_user_state(c, b); break;
+    case mid::DnasSignature:
+        // 134on4: SFOLobby_Authenticate 0x0044d510 posts it (class 4 entry 10) and waits for nothing. PORT-ONLY:
+        // nothing checks it (DNAS is bypassed, ONLINE.md §6.6).
+        if (sized(msize::DnasSignature))
+            log("conn " + std::to_string(conn) + ": DNAS signature post (not checked, PORT-ONLY; no answer, as the client expects)");
+        break;
+    case mid::GetLocations: if (sized(msize::GetLocations)) on_get_locations(c, b); break;
+    case mid::PickLocation: if (sized(msize::PickLocation)) on_pick_location(c, b); break;
     case mid::AccountRegistration: if (sized(msize::AccountRegistration)) on_registration(c, b); break;
     case mid::AccountLogin: if (sized(msize::AccountLogin)) on_login(c, b); break;
     case mid::AccountLogout: if (sized(msize::AccountLogout)) on_logout(c, b); break;
@@ -610,8 +644,25 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
     case mid::GetAccountStats: if (sized(msize::GetAccountStats)) on_get_stats(c, b); break;
     case mid::PlayerReport: if (sized(msize::PlayerReport)) on_player_report(c, b); break;
     case mid::WorldReport: if (sized(msize::WorldReport)) on_world_report(c, b); break;
-    case mid::CreateGame: if (sized(msize::CreateGame)) on_create_game(c, b); break;
-    case mid::JoinGame: if (sized(msize::JoinGame)) on_join_game(c, b); break;
+    case mid::CreateGame:
+        // 253 is MediusCreateChannel (class 4 entry 0). The port's own client creates its game with it (PORT-ONLY,
+        // §9.4); the original creates a lobby channel (134on4 batch 2, ONLINE.md §8.6).
+        if (!sized(msize::CreateGame)) break;
+        if (c.kind == ClientKind::Original) on_create_channel(c, b);
+        else on_create_game(c, b);
+        break;
+    case mid::FindWorldByName:
+        if (c.kind == ClientKind::Original && sized(msize::FindWorldByName)) on_find_world_by_name(c, b);
+        break;
+    case mid::JoinChannel:
+        if (c.kind == ClientKind::Original && sized(msize::JoinChannel)) on_join_channel(c, b);
+        break;
+    case mid::ChannelInfo:
+        if (c.kind == ClientKind::Original && sized(msize::ChannelInfo)) on_channel_info(c, b);
+        break;
+    case mid::SetGameListFilter: if (sized(msize::SetGameListFilter)) on_set_game_list_filter(c, b); break;
+    case mid::JoinGame:
+    case mid::JoinGameRequest: if (sized(msize::JoinGame)) on_join_game(c, b); break;  // 134on4: 243 = MediusJoinGame's
     case mid::GameList: if (sized(msize::GameList)) on_game_list(c, b); break;
     case mid::GameInfo: if (sized(msize::GameInfo)) on_game_info(c, b); break;
     case mid::ChatMessage: if (sized(msize::ChatMessage)) on_chat(c, b); break;
@@ -655,9 +706,34 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
     }
 }
 
-bool OmegaServer::resume_original(Conn& c, std::span<const std::uint8_t> body) {
-    if (body.size() < kSessionKeyOffset + kSessionKeyLength) return false;
-    const std::string key = get_str(body, kSessionKeyOffset, kSessionKeyLength);
+bool OmegaServer::resume_original(Conn& c, std::span<const std::uint8_t> body, std::size_t key_offset) {
+    if (body.size() < key_offset + kSessionKeyLength) return false;
+    const std::string key = get_str(body, key_offset, kSessionKeyLength);
+    if (key.empty()) return false;
+    // 134on4: the MAS connection may still be open when the MLS connection speaks (the two sockets are separate);
+    // its login moves over by the same SessionKey.
+    for (auto& [id, other] : conns_) {
+        if (id == c.id || other.kind != ClientKind::Original || !other.account_id || other.session_key != key) continue;
+        c.account_id = other.account_id;
+        c.name = other.name;
+        c.admin = other.admin;
+        c.session_key = key;
+        c.in_channel = true;
+        c.medius_session = other.medius_session;
+        c.policy_seen = other.policy_seen;
+        // 134on4 batch 3: a game it is in (or hosts through MGCL) follows the login to the new connection.
+        c.world_id = other.world_id;
+        other.world_id = 0;
+        for (auto& [world, g] : games_)
+            if (g.host_conn == id) g.host_conn = c.id;
+        other.account_id = 0;  // the old connection leaves without a logout of this login
+        other.session_key.clear();
+        log("login: " + c.name + " moved from conn " + std::to_string(id) + " to conn " + std::to_string(c.id) +
+            " (the original's move to the MLS connection, 0044ce60; by its SessionKey)");
+        broadcast_roster();
+        return true;
+    }
+    if (resumable_.empty()) return false;
     const auto it = resumable_.find(key);
     const std::uint64_t now = clock_ ? clock_() : 0;
     if (it == resumable_.end() || it->second.until <= now) return false;
@@ -681,6 +757,395 @@ void OmegaServer::on_session_begin(Conn& c, std::span<const std::uint8_t> req) {
     put_str(r, kSessionKeyOffset, kSessionKeyLength, c.session_key);  // 0x00446d00 copies resp+0x15 to lobby+0x2429
     put_i32(r, 0x2c, status::Success);                               // 0x00446d00 tests +0x2c
     send(c.id, mid::SessionBeginResponse, r);
+}
+
+// 134on4 (ONLINE.md §8.5): the original wire's SessionBegin, the first request of SFOLobby_Authenticate 0x0044d510.
+// Request (0x1c, SFOLobby_SessionBeginRequest 0x0044cbe0): MessageID "1" at +0, ConnectionClass 1 at +0x18.
+// Response (0x30, handler 0x0046c8b0): status +0x18 (the request fails unless 0), SessionKey[17] +0x1c, which the
+// handler keeps for MediusGetMySessionKey and the client puts in every later request.
+void OmegaServer::on_medius_session_begin(Conn& c, std::span<const std::uint8_t> req) {
+    c.session_key = to_hex(random_bytes(8));  // 16 characters + NUL = SessionKey[17]
+    c.medius_session = true;
+    auto r = response(req, msize::MediusSessionBeginResponse);
+    put_i32(r, kStatusOffset, status::Success);
+    put_str(r, 0x1c, kSessionKeyLength, c.session_key);
+    send(c.id, mid::MediusSessionBeginResponse, r);
+}
+
+// 134on4: GetMyIP (registration 27 / 28) on the original wire. Request (0x26): MessageID, SessionKey +0x15.
+// Response (0x30): the address text at +0x15 (SFOLobby_Callback_GetMyIP 0x00446d00 copies it to myIp +0x2429, read
+// back by SFOLobby_PackIPAddress in the MLS move), status +0x2c. SFOLobby_GetMyIP 0x0044c620 fails (error 1) on an
+// empty address. The server gives the address it sees the client at, as a Medius server would.
+void OmegaServer::on_get_my_ip(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetMyIPResponse);
+    put_str(r, 0x15, 0x2c - 0x15, ipv4_text(c.peer_ip));
+    put_i32(r, 0x2c, status::Success);
+    send(c.id, mid::SessionBeginResponse, r);
+}
+
+// 134on4: SessionEnd (5 -> 6). SFOLobby_ConnectUniverse 0x00442b50 sends it before a second Authenticate on a live
+// connection; the response (0x1c, handler 0x0046c940) carries status +0x18; 0 makes the client drop its key.
+void OmegaServer::on_session_end(Conn& c, std::span<const std::uint8_t> req) {
+    c.medius_session = false;
+    auto r = response(req, msize::SessionEndResponse);
+    put_i32(r, kStatusOffset, status::Success);
+    send(c.id, mid::SessionEndResponse, r);
+}
+
+// 134on4: UpdateUserState (73, 0x18 bytes: SessionKey[17] +0, the state +0x14; Login_CE60 in
+// SFOLobby_MediusConnectMLS 0x0044ce60 sends state 1). Nothing answers it (UpdateUserStateHandler only sizes it).
+void OmegaServer::on_update_user_state(Conn& c, std::span<const std::uint8_t> req) {
+    log("conn " + std::to_string(c.id) + ": user state " + std::to_string(get_i32(req, 0x14)) +
+        (c.account_id ? " (" + c.name + ")" : std::string(" (no login on this connection)")));
+}
+
+// 134on4: the region list. SFOLobby_ServerMuisGetRegionList 0x00442d80 sends GetLocations (0x26: MessageID "1",
+// SessionKey +0x15) and waits for EndOfList; SFOLobby_Callback_GetLocations 0x00446ea0 takes each 0x64-byte row:
+// +0x18 LocationID, +0x1c LocationName[64] (appended to lobbyList when status +0x5c is 0), +0x60 EndOfList; the
+// request fails when the last row's status is negative. PORT-ONLY content: omega_server is one lobby, listed under
+// server_name; GuiOnlineConnect_DnasRetry 0x0029d390 then offers it (or the agent's saved lobby, Find_D390).
+void OmegaServer::on_get_locations(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetLocationsResponse);
+    put_i32(r, 0x18, kLocationId);
+    put_str(r, 0x1c, 64, config_.server_name);
+    put_i32(r, 0x5c, status::Success);
+    r[0x60] = 1;  // EndOfList
+    send(c.id, mid::GetLocationsResponse, r);
+}
+
+// 134on4: SFOLobby_RegionSelect 0x00442840: PickLocation (0x2c: MessageID, SessionKey +0x15, the LocationID +0x28);
+// the response (0x1c) is only waited for (SFOLobby_Callback_PickLocation 0x00446e50 keeps it), status +0x18.
+void OmegaServer::on_pick_location(Conn& c, std::span<const std::uint8_t> req) {
+    const std::int32_t id = get_i32(req, 0x28);
+    auto r = response(req, msize::PickLocationResponse);
+    put_i32(r, kStatusOffset, id == kLocationId ? status::Success : status::GameNotFound);
+    send(c.id, mid::PickLocationResponse, r);
+}
+
+// ---- 134on4 batch 2 (ONLINE.md §8.6): the lobby channels of the original client --------------------------------
+
+std::uint32_t OmegaServer::channel_of(const Conn& c) const {
+    if (!c.account_id) return 0;
+    const auto it = account_channel_.find(c.account_id);
+    return it == account_channel_.end() ? 0 : it->second;
+}
+
+std::size_t OmegaServer::channel_members(std::uint32_t id) {
+    std::size_t n = 0;
+    for (const auto& [account, channel] : account_channel_)
+        if (channel == id && conn_of_account(account)) ++n;
+    return n;
+}
+
+// MediusCreateChannel 0x00469b58 (253 = class 4 entry 0), from SFOLobby_CreateChannel 0x004524c0: 0x94 bytes,
+// MessageID "1" +0, SessionKey +0x15, ApplicationID +0x28 (KM_GetSoftwareID), MaxPlayers +0x2c (D_00497758),
+// LobbyName[64] +0x30, LobbyPassword +0x70. The answer is 34 (CreateChannelResponse, handler 0x0046cc28, 0x20):
+// SFOLobby_Callback_CreateChannel 0x00446f80 keeps it at lobby +0x1b1c; SFOLobby_CreateChannel fails unless the
+// status +0x18 (+0x1b34) is 0, and JoinChannel then uses the new world id +0x1c (+0x1b38).
+void OmegaServer::on_create_channel(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::CreateGameResponse);
+    const std::string name = get_str(req, 0x30, 64);
+    std::int32_t code = status::Success;
+    std::uint32_t id = 0;
+    if (!c.account_id) {
+        code = status::WMError;
+    } else if (name.empty() || channels_.size() >= kMaxChannels) {
+        code = status::RequestDenied;
+    } else if (std::any_of(channels_.begin(), channels_.end(), [&](const auto& kv) { return kv.second.name == name; })) {
+        code = status::ClanNameInUse;  // PORT-ONLY choice: the name is taken (the client looks it up first)
+    } else {
+        ServerChannel ch;
+        ch.id = id = next_channel_++;
+        ch.name = name;
+        ch.password = get_str(req, 0x70, 0x24);
+        ch.app_id = get_i32(req, 0x28);
+        ch.max_players = get_i32(req, 0x2c);
+        channels_[id] = ch;
+        log("channel " + std::to_string(id) + " '" + name + "' created by " + c.name + " (max " +
+            std::to_string(ch.max_players) + ")");
+    }
+    put_i32(r, kStatusOffset, code);
+    put_i32(r, 0x1c, static_cast<std::int32_t>(id));
+    send(c.id, mid::CreateGameResponse, r);
+}
+
+// MediusFindWorldByName (55, 0x6c): MessageID +0, SessionKey +0x15, the name +0x26 [0x42], +0x68 1. One 0x90 row per
+// match (handler 0x0046ce78): +0x18 status, +0x1c ApplicationID, +0x20 ApplicationName[32], +0x40 ApplicationType,
+// +0x44 the world id, +0x48 WorldName[64], +0x88 WorldStatus, +0x8c EndOfList.
+//  * SFOLobby_FindChannel 0x00451ed0 (exact names such as the mission room "%s_%d_0:") reads the last row: found
+//    unless its status is 1 (MediusNoResult in this SDK: SFOLobby_Callback_GetLocations tests the same value), then
+//    joins its world id +0x44 (lobby +0x1b80).
+//  * 0x004526d0 (the main lobby, "MediusLobby_%d") asks with the prefix and func_00452a70 files each status-0 row by
+//    the number after the last '_' of "<prefix>_<n>:" into its table of D_00585F90 rooms.
+// PORT-ONLY match rule (the server's own is not in the client): the exact name, or "<name>_<digits>:".
+void OmegaServer::on_find_world_by_name(Conn& c, std::span<const std::uint8_t> req) {
+    const std::string want = get_str(req, 0x26, 0x42);
+    auto matches = [&](const std::string& n) {
+        if (n == want) return true;
+        if (n.size() < want.size() + 3 || n.compare(0, want.size(), want) != 0 || n[want.size()] != '_' || n.back() != ':')
+            return false;
+        for (std::size_t i = want.size() + 1; i + 1 < n.size(); ++i)
+            if (n[i] < '0' || n[i] > '9') return false;
+        return true;
+    };
+    std::vector<const ServerChannel*> rows;
+    if (c.account_id && !want.empty())
+        for (const auto& [id, ch] : channels_)
+            if (matches(ch.name)) rows.push_back(&ch);
+    if (rows.empty()) {
+        auto r = response(req, msize::FindWorldByNameResponse);
+        put_i32(r, kStatusOffset, kMediusNoResult);
+        r[0x8c] = 1;
+        send(c.id, mid::FindWorldByNameResponse, r);
+        return;
+    }
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        auto r = response(req, msize::FindWorldByNameResponse);
+        put_i32(r, kStatusOffset, status::Success);
+        put_i32(r, 0x1c, rows[i]->app_id);
+        put_i32(r, 0x44, static_cast<std::int32_t>(rows[i]->id));
+        put_str(r, 0x48, 64, rows[i]->name);
+        put_i32(r, 0x88, 1);
+        r[0x8c] = i + 1 == rows.size() ? 1 : 0;
+        send(c.id, mid::FindWorldByNameResponse, r);
+    }
+}
+
+// MediusJoinChannel (37, 0x4c): MessageID "1", SessionKey +0x15, the world id +0x28, LobbyPassword +0x2c [0x20].
+// The answer 38 (handler 0x0046cca8, 0xb8) lands at lobby +0x9b0: status +0x18 (+0x9c8; SFOLobby_JoinChannel
+// 0x00452050 fails unless 0) and a ConnectInfo (+0x1c, 0x9c bytes, §3.3). The client then drops this connection
+// (MediusDisconnect), connects to that ConnectInfo, sends UpdateUserState 1 (73) and asks ChannelInfo (53): the same
+// move as the login's MLS move, resumed by the SessionKey (resume_original).
+void OmegaServer::on_join_channel(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::JoinChannelResponse);
+    const std::uint32_t id = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const auto it = channels_.find(id);
+    std::int32_t code = status::Success;
+    if (!c.account_id) code = status::WMError;
+    else if (it == channels_.end()) code = status::GameNotFound;
+    else if (!it->second.password.empty() && get_str(req, 0x2c, 0x20) != it->second.password) code = status::InvalidPassword;
+    else if (it->second.max_players > 0 && channel_of(c) != id &&
+             channel_members(id) >= static_cast<std::size_t>(it->second.max_players))
+        code = status::RequestDenied;
+    put_i32(r, kStatusOffset, code);
+    if (code == status::Success) {
+        account_channel_[c.account_id] = id;
+        put_connect_info(r, 0x1c, config_.public_ip, config_.original_port ? config_.original_port : config_.port, id,
+                         c.session_key, to_hex(random_bytes(8)));
+        log("channel: " + c.name + " joins " + std::to_string(id) + " '" + it->second.name + "'");
+    }
+    send(c.id, mid::JoinChannelResponse, r);
+}
+
+// MediusGetChannelInfo (53, 0x2c: SessionKey +0x15, the world id +0x28). The answer 54 (handler 0x0046ce08, 0x64)
+// lands at lobby +0x1bcc: +0x18 status, +0x1c LobbyName[64] (+0x1be8), +0x5c ActivePlayerCount (+0x1c28),
+// +0x60 MaxPlayers (+0x1c2c); SFOLobby_HandleOverflowJoinChannel 0x00451be0 joins while MaxPlayers - Active > 0.
+void OmegaServer::on_channel_info(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::ChannelInfoResponse);
+    const auto it = channels_.find(static_cast<std::uint32_t>(get_i32(req, 0x28)));
+    if (!c.account_id || it == channels_.end()) {
+        put_i32(r, kStatusOffset, c.account_id ? status::GameNotFound : status::WMError);
+    } else {
+        put_i32(r, kStatusOffset, status::Success);
+        put_str(r, 0x1c, 64, it->second.name);
+        put_i32(r, 0x5c, static_cast<std::int32_t>(channel_members(it->first)));
+        put_i32(r, 0x60, it->second.max_players);
+    }
+    send(c.id, mid::ChannelInfoResponse, r);
+}
+
+// SFOLobby_FilterGameListByMyMission 0x0044e1a0 sends two SetGameListFilter (78, 0x34: +0x28 field, +0x2c the
+// comparison, +0x30 the value: field 4 == the mission, field 7 == 1) and waits for neither. omega_server answers 79
+// (0x1c, status +0x18 0) and keeps sending every game: the client filters the list by the GameName fields (§3.4).
+void OmegaServer::on_set_game_list_filter(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::SetGameListFilterResponse);
+    put_i32(r, kStatusOffset, c.account_id ? status::Success : status::WMError);
+    send(c.id, mid::SetGameListFilterResponse, r);
+}
+
+// ---- 134on4 batch 3 (ONLINE.md §8.7): MGCL, the original game host --------------------------------------------
+// SFOLobby_CreateGame 0x0044e960 -> SFOMGCL_Startup 0x004441d0: SFOMGCL_Connect_MAS 0x004449c0 opens an RT connection
+// to the MAS, sends ServerSessionBegin (entry 3) and ServerAuthentication (entry 1), and disconnects; Inner_4441d0
+// connects to the ConnectInfo the authentication returned, sends a ServerReport (entry 0, the MGCL SessionKey +0), and
+// SFOMGCL_CreateGameOnSelf 0x00444460 sends CreateGameOnMe (entry 15). The host's game then reports every 15 s
+// (ServerReport; WorldReport 0 and PlayerReport 1 on its lobby connection).
+void OmegaServer::on_mgcl(Conn& c, const Frame& frame) {
+    const std::span<const std::uint8_t> b(frame.body);
+    const std::uint16_t entry = static_cast<std::uint16_t>(frame.type - mid::kMgclBase);
+    auto sized = [&](std::size_t need) {
+        if (b.size() >= need) return true;
+        log("conn " + std::to_string(c.id) + ": MGCL entry " + std::to_string(entry) + " too short (" +
+            std::to_string(b.size()) + " < " + std::to_string(need) + ")");
+        return false;
+    };
+    const std::uint16_t port = config_.original_port ? config_.original_port : config_.port;
+    MgclSession* session = nullptr;
+    if (const auto it = mgcl_.find(c.mgcl_key); !c.mgcl_key.empty() && it != mgcl_.end()) session = &it->second;
+    switch (frame.type) {
+    case mid::MgclSessionBeginRequest: {
+        // 0x38: MessageID "1", the LocationID +0x18 (lobby +0x1f38), ApplicationID +0x1c, ServerType 2 +0x20. The
+        // answer (entry 4, 0xb4): Confirmation +0x15 (0 = success), a ConnectInfo +0x18 whose SessionKey (+0x90)
+        // Callback_MGCLServerSessionBegin 0x00445260 keeps as the MGCL session key (D_00584220, the ServerReport's).
+        if (!sized(msize::MgclSessionBeginRequest)) return;
+        const std::string key = to_hex(random_bytes(8));
+        MgclSession s;
+        s.location = get_i32(b, 0x18);
+        s.app_id = get_i32(b, 0x1c);
+        s.conn = c.id;
+        mgcl_[key] = s;
+        c.mgcl_key = key;
+        auto r = response(b, msize::MgclSessionBeginResponse);
+        r[0x15] = 0;
+        put_connect_info(r, 0x18, config_.public_ip, port, 0, key, to_hex(random_bytes(8)));
+        send(c.id, mid::MgclSessionBeginResponse, r);
+        log("mgcl: conn " + std::to_string(c.id) + " session begin (location " + std::to_string(s.location) +
+            ", application " + std::to_string(s.app_id) + ")");
+        return;
+    }
+    case mid::MgclAuthenticationRequest: {
+        // 0x4c: MessageID, TrustLevel 1 +0x18, the host's NetAddress +0x1c (type 1, its IP text +0x20, the MGCL
+        // server port +0x30). The answer (entry 2, 0xb4): Confirmation +0x15, a ConnectInfo +0x18 that
+        // Callback_MGCLServerAuthentication 0x00444e10 copies (0x9c bytes) to D_005842dc for the reconnect.
+        if (!sized(msize::MgclAuthenticationRequest)) return;
+        auto r = response(b, msize::MgclAuthenticationResponse);
+        if (!session) {
+            r[0x15] = static_cast<std::uint8_t>(-1);
+            send(c.id, mid::MgclAuthenticationResponse, r);
+            return;
+        }
+        session->host_addr = get_str(b, 0x20, 16);
+        session->host_port = static_cast<std::uint16_t>(get_i32(b, 0x30));
+        r[0x15] = 0;
+        put_connect_info(r, 0x18, config_.public_ip, port, 0, c.mgcl_key, to_hex(random_bytes(8)));
+        send(c.id, mid::MgclAuthenticationResponse, r);
+        log("mgcl: conn " + std::to_string(c.id) + " authenticated (host address " + session->host_addr + ":" +
+            std::to_string(session->host_port) + ")");
+        return;
+    }
+    case mid::MgclServerReport: {
+        // 0x20: the MGCL SessionKey +0, MaxWorlds +0x12, MaxPlayersPerWorld +0x14, ActiveWorldCount +0x16,
+        // TotalActivePlayers +0x18, AlertLevel +0x1c. No answer. The first one on the reconnected socket binds it.
+        if (!sized(msize::MgclServerReport)) return;
+        const std::string key = get_str(b, 0, 17);
+        const auto it = mgcl_.find(key);
+        if (it == mgcl_.end()) return;
+        if (it->second.conn != c.id || c.mgcl_key != key) {
+            const std::uint32_t old = it->second.conn;
+            it->second.conn = c.id;
+            c.mgcl_key = key;
+            for (auto& [world, g] : games_)
+                if (g.mgcl_conn == old) g.mgcl_conn = c.id;
+            log("mgcl: conn " + std::to_string(c.id) + " reports for its session (" + std::to_string(b[0x16] | b[0x17] << 8) +
+                " world(s), " + std::to_string(b[0x18] | b[0x19] << 8) + " player(s))");
+        }
+        return;
+    }
+    case mid::MgclCreateGameOnMeRequest: {
+        // 0x1d4: MessageID, GameName[64] +0x15 (SFOLobby_CreateGame's "%s\t%d\t%d\t%d\t%d": the host's account
+        // name, players, mission, rules, account id), GameStats[256] +0x55, GamePassword[32] +0x155, ApplicationID
+        // +0x178, MaxClients +0x17c, MinClients +0x180, GameLevel +0x184, ... GameHostType +0x19c, an address list
+        // +0x1a0, WorldID +0x1d0. The answer (entry 16, 0x1c): Confirmation +0x15, the MediusWorldID +0x18
+        // (Callback_MGCLCreateGameOnMeRequest 0x004446a0 keeps it in D_004976d8).
+        if (!sized(msize::MgclCreateGameOnMeRequest)) return;
+        auto r = response(b, msize::MgclCreateGameOnMeResponse);
+        const std::string name = get_str(b, 0x15, 64);
+        if (!session || name.empty()) {
+            r[0x15] = static_cast<std::uint8_t>(-1);
+            send(c.id, mid::MgclCreateGameOnMeResponse, r);
+            return;
+        }
+        // The host's lobby session: the account id the name carries (its 5th field), else an original login from
+        // the same address (PORT-ONLY link: MGCL carries no account).
+        Conn* host = nullptr;
+        const auto fields = parse_game_name(name);
+        if (fields) host = conn_of_account(static_cast<std::uint32_t>(fields->d));
+        if (!host || host->kind != ClientKind::Original)
+            for (auto& [id, other] : conns_)
+                if (other.kind == ClientKind::Original && other.account_id && other.peer_ip == c.peer_ip && id != c.id) {
+                    host = &other;
+                    break;
+                }
+        ServerGame g;
+        g.world_id = next_world_++;
+        g.game_name = name;
+        g.game_stats.assign(b.begin() + 0x55, b.begin() + 0x155);
+        g.mgcl_conn = c.id;
+        g.host_conn = host ? host->id : c.id;
+        g.host_account = host ? host->account_id : 0;
+        g.host_ip = c.peer_ip;  // PORT-ONLY: the address the server sees (the host may sit behind NAT)
+        g.host_port = session->host_port ? session->host_port : config_.default_game_port;
+        g.max_players = std::clamp(get_i32(b, 0x17c) > 0 ? get_i32(b, 0x17c) : (fields ? fields->a : 4), 2,
+                                   config_.max_players);
+        g.created = clock_ ? clock_() : 0;
+        if (host) {
+            leave_world(*host);
+            g.players.push_back(host->account_id);
+            host->world_id = g.world_id;
+        }
+        games_[g.world_id] = g;
+        if (host) enter_world_stats(games_[g.world_id], *host);
+        r[0x15] = 0;
+        put_i32(r, 0x18, static_cast<std::int32_t>(g.world_id));
+        send(c.id, mid::MgclCreateGameOnMeResponse, r);
+        log("game " + std::to_string(g.world_id) + " created on its host (MGCL CreateGameOnMe) by " +
+            (host ? host->name : std::string("an unknown account")) + ": '" + name + "', host " + ipv4_text(g.host_ip) +
+            ":" + std::to_string(g.host_port));
+        broadcast_roster();
+        return;
+    }
+    case mid::MgclJoinGameResponse: {
+        if (!sized(msize::MgclJoinGameResponse)) return;
+        const auto it = pending_joins_.find(get_str(b, 0, kMessageIdLength));
+        if (it == pending_joins_.end()) return;
+        const PendingJoin pj = it->second;
+        pending_joins_.erase(it);
+        const auto joiner = conns_.find(pj.joiner);
+        if (joiner == conns_.end()) return;
+        if (static_cast<std::int8_t>(b[0x15]) == 0) {
+            on_join_game(joiner->second, pj.request, true);
+        } else {
+            auto r = response(pj.request, msize::JoinGameResponse);
+            put_i32(r, kStatusOffset, status::RequestDenied);
+            send(pj.joiner, mid::JoinGameResponse, r);
+            log("join refused by the host: " + joiner->second.name + " -> world " + std::to_string(pj.world));
+        }
+        return;
+    }
+    case mid::MgclEndGameOnMeRequest: {
+        // 0x1c: MessageID, the MediusWorldID +0x18. The answer (entry 18, 0x16): Confirmation +0x15.
+        if (!sized(msize::MgclEndGameOnMeRequest)) return;
+        const std::uint32_t world = static_cast<std::uint32_t>(get_i32(b, 0x18));
+        auto r = response(b, msize::MgclEndGameOnMeResponse);
+        const auto it = games_.find(world);
+        r[0x15] = it != games_.end() && it->second.mgcl_conn == c.id ? 0 : static_cast<std::uint8_t>(-1);
+        if (r[0x15] == 0) close_world(world, "the host ended it (MGCL EndGameOnMe)");
+        send(c.id, mid::MgclEndGameOnMeResponse, r);
+        return;
+    }
+    case mid::MgclWorldReportOnMe: {
+        // 0x1a8: MessageID, GameName +0x15, GameStats +0x55, GamePassword +0x155, then 12 words (+0x178..+0x1a4,
+        // their order is not decoded [U]). No answer. Kept: the name and the GameStats.
+        if (!sized(msize::MgclWorldReportOnMe)) return;
+        for (auto& [world, g] : games_)
+            if (g.mgcl_conn == c.id) {
+                const std::string name = get_str(b, 0x15, 64);
+                if (!name.empty()) g.game_name = name;
+                g.game_stats.assign(b.begin() + 0x55, b.begin() + 0x155);
+            }
+        return;
+    }
+    case mid::MgclSessionEndRequest: {
+        if (!sized(msize::MgclSessionEndRequest)) return;
+        auto r = response(b, msize::MgclSessionEndResponse);
+        r[0x15] = 0;
+        send(c.id, mid::MgclSessionEndResponse, r);
+        return;
+    }
+    default:
+        log("conn " + std::to_string(c.id) + ": unhandled MGCL entry " + std::to_string(entry) + " (" +
+            std::to_string(b.size()) + " bytes)");
+        return;
+    }
 }
 
 void OmegaServer::on_registration(Conn& c, std::span<const std::uint8_t> req) {
@@ -882,6 +1347,7 @@ void OmegaServer::finish_login(Conn& c, const std::string& name, const std::stri
 }
 
 void OmegaServer::on_logout(Conn& c, std::span<const std::uint8_t> req) {
+    if (c.account_id) account_channel_.erase(c.account_id);  // 134on4: the account leaves its lobby channel
     log_out(c, "logout");
     auto r = response(req, msize::AccountLogoutResponse);
     put_i32(r, kStatusOffset, status::Success);  // 0x004474c0 tests +0x18
@@ -1157,7 +1623,7 @@ void OmegaServer::on_create_game(Conn& c, std::span<const std::uint8_t> req) {
     broadcast_roster();
 }
 
-void OmegaServer::on_join_game(Conn& c, std::span<const std::uint8_t> req) {
+void OmegaServer::on_join_game(Conn& c, std::span<const std::uint8_t> req, bool host_confirmed) {
     if (refused_by_mod_policy(c, req, false)) return;
     const auto world = static_cast<std::uint32_t>(get_i32(req, 0x28));  // 0x0044e430: world id at +0x28
     auto r = response(req, msize::JoinGameResponse);
@@ -1178,6 +1644,19 @@ void OmegaServer::on_join_game(Conn& c, std::span<const std::uint8_t> req) {
         return;
     }
     ServerGame& g = it->second;
+    if (!host_confirmed && g.mgcl_conn && conns_.count(g.mgcl_conn) && c.world_id != world) {
+        // 134on4 batch 3: an MGCL-hosted game asks its host first. MGCL JoinGame (class 3 entry 9, 0xb4: MessageID,
+        // the joiner's ConnectInfo +0x18) reaches Callback_ServerJoinGame 0x004451b0, which answers entry 10 (0x68:
+        // the MessageID, Confirmation +0x15: 0 when the game has room, func_003a6bb0). The joiner's 36 follows it.
+        const std::string token = "j" + std::to_string(next_join_token_++);
+        pending_joins_[token] = PendingJoin{c.id, world, std::vector<std::uint8_t>(req.begin(), req.end())};
+        std::vector<std::uint8_t> ask(msize::MgclJoinGameRequest, 0);
+        put_str(ask, 0, kMessageIdLength, token);
+        put_connect_info(ask, 0x18, ipv4_text(c.peer_ip), 0, world, c.session_key, to_hex(random_bytes(8)));
+        send(g.mgcl_conn, mid::MgclJoinGameRequest, ask);
+        log("join: " + c.name + " -> world " + std::to_string(world) + " asked of its host (MGCL JoinGame " + token + ")");
+        return;
+    }
     if (c.world_id != world) {
         leave_world(c);
         // 132on2g (PORT-ONLY store): each pair now in the game has played together (the recent players).
@@ -1248,6 +1727,10 @@ void OmegaServer::on_game_info(Conn& c, std::span<const std::uint8_t> req) {
         put_i32(r, 0x20, 1);
         put_i32(r, 0x24, g.max_players);                                  // 0x00446b40 passes +0x24
         put_i32(r, 0x30, static_cast<std::int32_t>(g.players.size()));    // and +0x30
+        // 134on4 batch 3: an MGCL host's own GameStats (CreateGameOnMe +0x55, SFOLobby_CreateGame's 00585e70: the
+        // creator, the mission, the world, the rules), as the original's server echoed them; the derived words below
+        // carry the same values.
+        for (std::size_t i = 0; i < g.game_stats.size() && i < 0x100; ++i) r[0x34 + i] = g.game_stats[i];
         // +0x34.. is GameStats (256 bytes). Checkpoint 132on2b: JOINMIS's join 0033e5b0 reads +0x34 (the creator's id,
         // the name's 5th field) and +0x38 (the mission, its 3rd); PORT-ONLY: omega_server derives these GameStats from
         // the game name 0044e960 sent (the original's server echoed the creator's own GameStats).
@@ -1287,10 +1770,17 @@ void OmegaServer::on_chat(Conn& c, std::span<const std::uint8_t> req) {
     std::vector<std::uint8_t> filtered;
     log("chat " + std::string(type ? "whisper" : "lobby") + " " + c.name +
         (type ? " -> " + std::to_string(target) : std::string()) + ": " + text);
+    // 134on4 batch 2: an original sender's room chat stays in its lobby channel (the Medius channel it joined,
+    // ONLINE.md §8.6); port sessions have no channels and stay in the one lobby, which every channel shares
+    // (PORT-ONLY mixing rule).
+    const std::uint32_t room = channel_of(c);
+    auto in_room = [&](const Conn& other) {
+        if (c.kind == ClientKind::Original && room && other.kind == ClientKind::Original) return channel_of(other) == room;
+        return other.in_channel || other.world_id == c.world_id;
+    };
     for (auto& [id, other] : conns_) {
         if (!other.account_id || id == c.id) continue;
-        if (type != 0 ? static_cast<std::int32_t>(other.account_id) == target
-                      : other.in_channel || other.world_id == c.world_id) {
+        if (type != 0 ? static_cast<std::int32_t>(other.account_id) == target : in_room(other)) {
             if (filter_for(other) && chat_filter_.changes(text)) {
                 if (filtered.empty()) {
                     filtered = fwd;
@@ -1322,9 +1812,13 @@ void OmegaServer::on_text_filter(Conn& c, std::span<const std::uint8_t> req) {
 // through ext::Roster.
 void OmegaServer::on_player_list(Conn& c, std::span<const std::uint8_t> req) {
     std::vector<const Conn*> players;
+    // 134on4 batch 2: an original client asks for its channel (+0x18 = lobby +0x1eac, set by SFOLobby_JoinChannel):
+    // the players in that channel, plus the port sessions (the one lobby, PORT-ONLY mixing rule).
+    const std::uint32_t room = c.kind == ClientKind::Original ? static_cast<std::uint32_t>(get_i32(req, 0x18)) : 0;
     if (c.account_id)
         for (const auto& [id, other] : conns_)
-            if (other.account_id) players.push_back(&other);
+            if (other.account_id && (!room || other.kind == ClientKind::Port || channel_of(other) == room))
+                players.push_back(&other);
     if (players.empty()) {
         auto r = response(req, msize::PlayerListResponse);
         put_i32(r, kStatusOffset, status::NoResult);

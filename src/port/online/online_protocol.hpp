@@ -117,6 +117,67 @@ constexpr std::uint16_t GetAllClanMessages = 126;
 constexpr std::uint16_t GetAllClanMessagesResponse = 127;
 constexpr std::uint16_t SetLocalizationParams = 163;
 constexpr std::uint16_t SetLocalizationParamsResponse = 164;
+// Checkpoint 134on4 (ONLINE.md §8.5): what the retail client sends on the original wire before the port's screens
+// begin. RegisterPackets 0x0046e790 calls rt_parse_register 0x00305998 270 times with class 1 (253 entries) or class
+// 4 (17 entries); rt_parse_register numbers the entries per class, and NetSendMessage puts the class in the channel
+// byte and that number in the sub-type byte (NetISendMessage 0x002de398 / NetSendMessageByTCP 0x002de280). The ids
+// here are the global registration ordinal: equal to the wire sub-type in class 1 (0..252); class-4 entry k has the
+// id 253 + k (kClass4Base; online_rt.cpp maps both ways).
+//  * NOTE the id 27 above (mid::SessionBegin): registration 27 is GetMyIP (MediusGetMyIP 0x0046af60, handler
+//    0x0046d7a8; SFOLobby_GetMyIP 0x0044c620, SFOLobby_Callback_GetMyIP 0x00446d00 copies resp +0x15 to myIp
+//    +0x2429 when status +0x2c is 0). The port's own client uses it as its session start (PORT-ONLY); an original
+//    session that ran the real SessionBegin below gets 27 answered as GetMyIP (its address).
+//  * SFOLobby_ConnectUniverse 0x00442b50 = SFOLobby_Authenticate 0x0044d510, then SFOLobby_ServerMuisGetRegionList
+//    0x00442d80; a failure of either is ONLINECN's "Failed to Get Region List". Authenticate: MAS connect,
+//    SessionBegin (3 -> 4), MediusGetMySessionKey, DnasSignature (class 4 entry 10, no answer), GetMyIP (27 -> 28),
+//    SetLocalizationParams (163 -> 164). Then GetLocations (140 -> 141 rows, EndOfList) and, on the player's pick,
+//    SFOLobby_RegionSelect 0x00442840: PickLocation (142 -> 143).
+constexpr std::uint16_t MediusSessionBegin = 3;          // MediusSessionBegin 0x00469000 (SFOLobby_SessionBeginRequest 0x0044cbe0)
+constexpr std::uint16_t MediusSessionBeginResponse = 4;  // handler 0x0046c8b0: status +18 == 0 -> SessionKey +1c; cb 0x004471b0
+constexpr std::uint16_t SessionEnd = 5;                  // MediusSessionEnd 0x004690a0 (SFOLobby_SessionEndRequest 0x0044ca90)
+constexpr std::uint16_t SessionEndResponse = 6;          // handler 0x0046c940: status +18 (0 clears the key), 0x1c bytes
+constexpr std::uint16_t UpdateUserState = 73;            // MediusUpdateClientState 0x00468f78: SessionKey +0, state +14; no answer
+constexpr std::uint16_t GetLocations = 140;              // MediusGetLocations (SFOLobby_ServerMuisGetRegionList 0x00442d80)
+constexpr std::uint16_t GetLocationsResponse = 141;      // handler 0x0046d8f8 (100 bytes), SFOLobby_Callback_GetLocations 0x00446ea0
+constexpr std::uint16_t PickLocation = 142;              // MediusPickLocation (SFOLobby_RegionSelect 0x00442840)
+constexpr std::uint16_t PickLocationResponse = 143;      // handler 0x0046d8f8 (28 bytes), SFOLobby_Callback_PickLocation 0x00446e50
+constexpr std::uint16_t JoinGameRequest = 243;           // what MediusJoinGame 0x00469c10 sends (slot 0x0059857c = registration
+                                                         // 243); mid::JoinGame 35 (JoinGameRequestHandler0) is the port's
+constexpr std::uint16_t DnasSignature = 263;             // MediusDnasSignature 0x004691d8: class 4 entry 10, 0x50 bytes, no answer
+// 134on4 batch 2 (ONLINE.md §8.6): the lobby channels. MediusCreateChannel 0x00469b58 is mid::CreateGame (253, class
+// 4 entry 0) and is answered by 34 (CreateChannelResponse); for an original session it creates a channel, not a game.
+constexpr std::uint16_t JoinChannel = 37;                // MediusJoinChannel, SFOLobby_JoinChannel 0x00452050
+constexpr std::uint16_t JoinChannelResponse = 38;        // handler 0x0046cca8 (0xb8), SFOLobby_Callback_JoinChannel 0x00446fd0
+constexpr std::uint16_t ChannelInfo = 53;                // MediusGetChannelInfo, SFOLobby_ChannelInfoRequest 0x00451d70
+constexpr std::uint16_t ChannelInfoResponse = 54;        // handler 0x0046ce08 (0x64), SFOLobby_Callback_ChannelInfo 0x00446f30
+constexpr std::uint16_t FindWorldByName = 55;            // MediusFindWorldByName (0x00451ed0 / 0x004526d0)
+constexpr std::uint16_t FindWorldByNameResponse = 56;    // handler 0x0046ce78 (0x90), callbacks 0x00447020 / 0x00452a70
+constexpr std::uint16_t SetGameListFilter = 78;          // SFOLobby_FilterGameListByMyMission 0x0044e1a0 (no wait)
+constexpr std::uint16_t SetGameListFilterResponse = 79;  // handler 0x0046d188 (0x1c)
+constexpr std::uint16_t kClass4Base = 253;               // RegisterPackets' first class-4 entry (CreateChannelRequestHandler)
+constexpr std::uint16_t kClass4Count = 17;
+// 134on4 batch 3 (ONLINE.md §8.7): MGCL, the game host's own Medius messages. MGCLInitialize 0x002cf648 registers 22
+// entries of class 3 with NetRegisterMessage, which calls rt_parse_register 0x00305998 (NetIRegisterMessage
+// 0x002ed528), so they go as channel 3 and their per-class index. The port names entry k kMgclBase + k (no global
+// ordinal: these are not in RegisterPackets). Entry 13 and 14 both store into D_0048c3b4 (14 wins); D_0048c3b8
+// (WorldStatusResponse) is never registered, so it stays 0.
+constexpr std::uint16_t kMgclBase = 0x300;
+constexpr std::uint16_t kMgclCount = 22;
+constexpr std::uint16_t MgclServerReport = kMgclBase + 0;             // MGCLSendServerReport 0x002d0560, 0x20, no answer
+constexpr std::uint16_t MgclAuthenticationRequest = kMgclBase + 1;    // MGCLAuthenticationSend 0x002cf078, 0x4c
+constexpr std::uint16_t MgclAuthenticationResponse = kMgclBase + 2;   // 0xb4 -> Callback_MGCLServerAuthentication 0x00444e10
+constexpr std::uint16_t MgclSessionBeginRequest = kMgclBase + 3;      // MGCLSessionBegin 0x002cf1c8, 0x38
+constexpr std::uint16_t MgclSessionBeginResponse = kMgclBase + 4;     // 0xb4 -> Callback_MGCLServerSessionBegin 0x00445260
+constexpr std::uint16_t MgclSessionEndRequest = kMgclBase + 5;        // MGCLSessionEnd, 0x15
+constexpr std::uint16_t MgclSessionEndResponse = kMgclBase + 6;       // 0x16
+constexpr std::uint16_t MgclJoinGameRequest = kMgclBase + 9;          // server -> host, 0xb4 -> Callback_ServerJoinGame 0x004451b0
+constexpr std::uint16_t MgclJoinGameResponse = kMgclBase + 10;        // MGCLJoinGameResponse 0x002d08d8, 0x68
+constexpr std::uint16_t MgclEndGameResponse = kMgclBase + 12;         // MGCLEndGameResponse 0x002d0958, 0x16
+constexpr std::uint16_t MgclCreateGameOnMeRequest = kMgclBase + 15;   // MGCLCreateGameOnMeRequest 0x002d0a38, 0x1d4
+constexpr std::uint16_t MgclCreateGameOnMeResponse = kMgclBase + 16;  // 0x1c -> Callback_MGCLCreateGameOnMeRequest 0x004446a0
+constexpr std::uint16_t MgclEndGameOnMeRequest = kMgclBase + 17;      // MGCLEndGameOnMeRequest 0x002d0b58, 0x1c
+constexpr std::uint16_t MgclEndGameOnMeResponse = kMgclBase + 18;     // 0x16
+constexpr std::uint16_t MgclWorldReportOnMe = kMgclBase + 19;         // MGCLSendWorldReportOnMe 0x002d0be0, 0x1a8, no answer
 }  // namespace mid
 
 // Checkpoint 133on1 (ONLINE.md §3.7): the SCE-RT layer's own server messages, carried in the port's framing under
@@ -209,6 +270,28 @@ constexpr std::size_t GetClanMemberListExtraInfo = 0x24, GetClanMemberListExtraI
 constexpr std::size_t SetLocalizationParams = 0x30, SetLocalizationParamsResponse = 0x1c;
 constexpr std::size_t DeleteClanMessage = 0x2c, DeleteClanMessageResponse = 0x1c;
 constexpr std::size_t GetAllClanMessages = 0x30, GetAllClanMessagesResponse = 0xf0;
+// 134on4: the original wire's connect and region list (mid:: above); the APIs' NetSendMessage sizes and the
+// handlers' return values.
+constexpr std::size_t MediusSessionBegin = 0x1c, MediusSessionBeginResponse = 0x30;
+constexpr std::size_t SessionEnd = 0x26, SessionEndResponse = 0x1c;
+constexpr std::size_t UpdateUserState = 0x18;
+constexpr std::size_t GetLocations = 0x26, GetLocationsResponse = 0x64;
+constexpr std::size_t PickLocation = 0x2c, PickLocationResponse = 0x1c;
+constexpr std::size_t DnasSignature = 0x50;
+constexpr std::size_t GetMyIP = 0x26, GetMyIPResponse = 0x30;  // registration 27 / 28 (mid::SessionBegin's ids)
+// 134on4 batch 3: MGCL (the struct layouts MGCLInitialize 0x002cf648 describes field by field).
+constexpr std::size_t MgclServerReport = 0x20, MgclAuthenticationRequest = 0x4c, MgclAuthenticationResponse = 0xb4;
+constexpr std::size_t MgclSessionBeginRequest = 0x38, MgclSessionBeginResponse = 0xb4;
+constexpr std::size_t MgclSessionEndRequest = 0x15, MgclSessionEndResponse = 0x16;
+constexpr std::size_t MgclJoinGameRequest = 0xb4, MgclJoinGameResponse = 0x68;
+constexpr std::size_t MgclCreateGameOnMeRequest = 0x1d4, MgclCreateGameOnMeResponse = 0x1c;
+constexpr std::size_t MgclEndGameOnMeRequest = 0x1c, MgclEndGameOnMeResponse = 0x16;
+constexpr std::size_t MgclWorldReportOnMe = 0x1a8;
+// 134on4 batch 2: the channels (CreateChannel is mid::CreateGame's 0x94 / 0x20).
+constexpr std::size_t JoinChannel = 0x4c, JoinChannelResponse = 0xb8;
+constexpr std::size_t ChannelInfo = 0x2c, ChannelInfoResponse = 0x64;
+constexpr std::size_t FindWorldByName = 0x6c, FindWorldByNameResponse = 0x90;
+constexpr std::size_t SetGameListFilter = 0x34, SetGameListFilterResponse = 0x1c;
 }  // namespace msize
 
 // Field offsets every message shares (the API functions copy these two fields first).

@@ -196,4 +196,50 @@ bool appearance_mouth_mesh(std::string_view mesh_name);   // bytes 1..5 read "MO
 inline bool appearance_mouth_drawn(std::uint32_t draw_alpha) {
     return draw_alpha == 0x80;
 }
+
+// The player disguise (Checkpoint 134dg1, CHARACTER_APPEARANCE.md "Disguise"; interpreter goldens
+// tools/ee/gen_add_disguise.py).
+// The level's disguise table, SKLHog::LoadSKLHog 00407830 (manUtils.cc 184, matched C manUtils_11.c) over the
+// mission SKL.HOG in archive order: *0055de94 (g_AgentPartCache +f4) counts the members whose name starts with
+// "DISGUISE" (Libc_Strncmp(name, "DISGUISE_" 004be978, 8): eight bytes, case kept); each one's packing goes to
+// +f8[nA] when SKL::FindSex 004067e0 returns 0 (female), else to +108[nB] (male, and a BODY or empty look), at most
+// four per row while the counts go on; a row with 1..3 entries is padded with its last; an empty row stays null.
+struct DisguiseTable {
+    std::int32_t count_55de94{};
+    std::array<std::array<std::optional<std::size_t>, 4>, 2> rows{};   // [0] +f8, [1] +108: registry indices
+};
+DisguiseTable sklhog_disguise_table(std::span<const std::string> member_names,
+                                    std::span<const AppearancePacking> packings);
+// The callers' table read, int[][4] at +f8: kind (004067e0 of the wearer's packing) 0 / 1 picks the row; kind 2
+// reads +118.. past the table (not hosted: throws), as does an index outside 0..3. The callers:
+//   cLoader::LoadSKMs 001c1e70 (every game; the local player, record 0): index ((actor +c & 0x7f000000) >> 24) - 1,
+//     at least 0 (the object id's peer byte; 0 in single player);
+//   GuiEquipmentSetup 002a2f00 at 002a30d8 (network roster, each player's first frame): the same from the player's key;
+//   GuiEquipmentModify::onAdvanceTime 002c03c0 at 002c0560 (network): the roster slot i;
+//   GuiEquipmentModify 002c1100 (single player, the loadout screen): index 0 (D_0055de98[kind]).
+std::optional<std::size_t> disguise_table_entry(const DisguiseTable& t, std::uint8_t kind, std::int32_t index);
+// cMan::AddDisguise 00391020 (man.cc 697, matched C man_21.c) on model +40 with the disguise packing (its a1, passed
+// on to 00390940 untouched):
+//   1. cMan::MergeSKLs 00390940, 00406e00, +23c0 = 00406dc0: switch_body_packing (the disguise packing is rewritten
+//      in place by its step 3 when the kinds differ, so the table's registry entry changes);
+//   2. SKL::LoadSKLParts 00405940(model +40, 1, model +20): slot 2 not "HARD" at bytes 1..4 becomes "_HARD_DEF_DEFA0"
+//      with byte 0 '2' (004067e0 0) or '1'; 00404750 for slot 2, then for every pair;
+//   3. 00403a20 (Monster_FindAddTexture, MANTEX.HOG 005711b0) for every nonzero texture slot from pair 0 (+22c0 /
+//      +2300 the handles, +22c0[n] = 0);
+//   4. the old look's (+2c14) textures are released: 004027e0 for its texture slots 0..n (n = its 00406dc0; a found
+//      slot 00403940 drops a reference), then its pair names 0..n-1 through 004046f0 / 00404d90;
+//   5. +2c14 is freed (Mem_Free "man.cc" 0x2da) and cleared: a later RestoreBody 00391210 does nothing;
+//   6. cMan::SortParts 00390570 and cMan::BuildMan 0038c920 (the caller's rebuild).
+// The cache's reference counts are not modelled here: the frees are returned for the caller.
+struct DisguiseApplication {
+    BodySwitch merge;                                      // step 1's 004046f0 lookups (a miss loads) and backup
+    std::uint16_t count_23c0{};
+    AppearanceMeshRequest hard_mesh;                       // step 2's slot 2
+    std::vector<AppearanceMeshRequest> mesh_loads;         // step 2's 00404750 requests, slot 2 first
+    std::vector<AppearanceTextureRequest> texture_loads;   // step 3
+    std::vector<std::string> texture_frees;                // step 4's 004027e0 names ("" for a zero slot)
+    std::vector<std::string> mesh_frees;                   // step 4's 004046f0 names
+};
+DisguiseApplication add_disguise_packing(AppearancePacking& model, AppearancePacking& disguise,
+                                         std::optional<AppearancePacking>& backup);
 }

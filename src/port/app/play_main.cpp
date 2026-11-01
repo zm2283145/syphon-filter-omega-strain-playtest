@@ -640,6 +640,8 @@ std::vector<ScriptStep> read_script(const fs::path& path){
 //                                       MASK (decimal), then Triangle for N frames (default 1)
 //   hold N x y p10 p11 rx ry cross triangle square r1 l1 [circle [up down left right [select [r3]]]]   raw input for N frames
 //   wait N                              no input for N frames
+//   waitframe F                         (checkpoint 134rf1) no input until the level frame F (at once when it has passed):
+//                                       a closed-loop segment that ends early keeps the next segment on the route's timeline
 //   waitcommand N                       (checkpoint 132pc1) no input until the CPU partner's command (coop_partner.hpp
 //                                       CoopCommandRule) reports its action over, at most N frames
 //   waitactive N ID                     (checkpoint 132ms4) no input until the NPC ID is present (activated by its
@@ -777,9 +779,9 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
             if(used!=token.size())throw std::runtime_error("Pilot command arguments: "+line);
         }
         if((!c.generators.empty()||c.cover||c.up!=0||c.spacing||c.kill_hold!=300||c.ids_done||c.lock_only||c.level_only||c.anchor||c.generator_range>0||c.until_active>0||c.near_first>0)&&c.op!="aim"&&c.op!="hunt")throw std::runtime_error("Pilot command arguments: "+line);
-        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch"&&c.op!="strike"&&c.op!="waitbeam"&&c.op!="waitbeamrise"&&c.op!="waitbeamoff"&&c.op!="waitbeamend"&&c.op!="waitpathed")throw std::runtime_error("Unknown pilot command: "+line);
+        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="waitframe"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch"&&c.op!="strike"&&c.op!="waitbeam"&&c.op!="waitbeamrise"&&c.op!="waitbeamoff"&&c.op!="waitbeamend"&&c.op!="waitpathed")throw std::runtime_error("Unknown pilot command: "+line);
         if(c.op=="clear"){c.cover=20;if(c.args.size()<4||std::any_of(c.args.begin()+4,c.args.end(),[](float v){return v>=0;}))throw std::runtime_error("Pilot command arguments: "+line);}
-        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||(c.op=="waitpathed"&&c.args.size()!=2)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18&&c.args.size()!=19)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
+        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||(c.op=="waitpathed"&&c.args.size()!=2)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18&&c.args.size()!=19)||((c.op=="wait"||c.op=="waitframe"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
             (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6)||(c.op=="npcwatch"&&(c.args.size()!=2||c.args[1]<0))||(c.op=="strike"&&c.args.size()!=3&&c.args.size()!=4))
             throw std::runtime_error("Pilot command arguments: "+line);
         out.push_back(std::move(c));
@@ -2239,6 +2241,13 @@ struct PlayGuiHost final:GuiStaticHost{
     std::int32_t es_disguise_count() override{
         if(!disguise_55de94)throw std::runtime_error("unhosted(0x55de94): the mission SKL.HOG's DISGUISE_ count");
         return *disguise_55de94;
+    }
+    // Checkpoint 134dg1: cMan_AddDisguise 00391020 on a player's model (the play session's apply_player_disguise for
+    // the local player, the remote human's figure otherwise).
+    std::function<void(std::int32_t,std::int32_t,std::uint32_t)> add_disguise;
+    void es_add_disguise(std::int32_t player,std::int32_t index,std::uint32_t site) override{
+        if(!add_disguise)throw std::runtime_error("unhosted(0x"+hex_word(site)+"): cMan_AddDisguise 00391020 without the play session's models");
+        add_disguise(player,index,site);
     }
     void es_send_agent_data() override{   // 0012eee0(G, 0, 0) from the roster's first sight of a player
         if(!loadout_network_resume)throw std::runtime_error("unhosted(0x12eee0): the roster's AgentData send without the LAN game");
@@ -4193,7 +4202,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance=1;
 static int play_main(int argc,wchar_t** argv){
     try{
         enable_ps2_denormal_flush();
-        fs::path iso,manifest_path,female_manifest_path,tuning_path,script_path,next_level_script_path,frames_hold_file,output,navigation_tuning_path,audio_wav_path,pilot_path,record_path,collision_dump_path;bool audio_out=false;
+        fs::path iso,manifest_path,female_manifest_path,tuning_path,script_path,next_level_script_path,next_level_pilot_path,next_level_record_path,frames_hold_file,output,navigation_tuning_path,audio_wav_path,pilot_path,record_path,collision_dump_path;bool audio_out=false;
         bool hotbox_list=false;bool npc_trace=false;   // --npc-trace: active NPC positions in trace.json (diagnostic)
         bool foot_trace=false;   // --foot-trace: the player's feet and ground contacts in trace.json (diagnostic)
         struct DiagnosticMoveToNode{unsigned frame{};std::uint32_t actor_id{},node_id{};bool teleport{};};
@@ -4531,7 +4540,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             else if(arg==L"--frames-hold-file")frames_hold_file=value();
             else if(arg==L"--next-level-frames")next_level_frames=number<unsigned>(value());
             else if(arg==L"--next-level-capture")next_level_captures.insert(number<unsigned>(value()));
-            else if(arg==L"--next-level-script")next_level_script_path=value();
+            // 134rf1 (port-only route authoring): --next-level-pilot / --next-level-record are --pilot / --record for the next level.
+            else if(arg==L"--next-level-script"||arg==L"--next-level-pilot"||arg==L"--next-level-record")
+                (arg==L"--next-level-script"?next_level_script_path:arg==L"--next-level-pilot"?next_level_pilot_path:next_level_record_path)=value();
             else if(arg==L"--next-level-god")next_level_god=number<unsigned>(value());   // 132ob10 (port-only test cheat): --god for the next level
             else if(arg==L"--dt")fixed_dt=number<float>(value());
             else if(arg==L"--dt-trace")dt_trace_path=value();
@@ -5023,6 +5034,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             throw std::runtime_error("--next-level-frames, --next-level-capture, --next-level-script and --next-level-god need --frontend (the next level follows a level end)");
         if(next_level_god&&!combat)throw std::runtime_error("--next-level-god needs --combat");
         if(!next_level_script_path.empty()&&script_path.empty())throw std::runtime_error("--next-level-script needs --script");
+        if(!next_level_pilot_path.empty()&&next_level_script_path.empty())throw std::runtime_error("--next-level-pilot needs a --next-level-script prefix");
+        if(!next_level_record_path.empty()&&next_level_pilot_path.empty())throw std::runtime_error("--next-level-record needs --next-level-pilot");
         if(!next_level_captures.empty()&&(output.empty()||script_path.empty()))throw std::runtime_error("--next-level-capture needs --script and --output");
         // Checkpoint 132win (port-only): the session's one game window and D3D11 device (host_window.hpp), made
         // here for a windowed front end and kept through every hand-off (loading screen, play, level end, the
@@ -5469,6 +5482,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         if(!profile_path.empty())local_path(profile_path);
         if(!script_path.empty())local_path(script_path);
         if(!next_level_script_path.empty())local_path(next_level_script_path);
+    if(!next_level_pilot_path.empty())local_path(next_level_pilot_path);
+    if(!next_level_record_path.empty())local_path(next_level_record_path);
         if(!pilot_path.empty()){if(script_path.empty())throw std::runtime_error("--pilot needs a --script prefix");local_path(pilot_path);}
         if(!record_path.empty()){if(pilot_path.empty())throw std::runtime_error("--record needs --pilot");local_path(record_path);}
         if(!collision_dump_path.empty())local_path(collision_dump_path);
@@ -5585,6 +5600,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             mission=*r.level;
             captures=next_level_captures;
             if(!next_level_script_path.empty())script_path=next_level_script_path;
+            if(!next_level_pilot_path.empty()){pilot_path=next_level_pilot_path;next_level_pilot_path.clear();}
+            if(!next_level_record_path.empty()){record_path=next_level_record_path;next_level_record_path.clear();}
             if(next_level_frames)max_frames=next_level_frames;
             if(next_level_god)god_from=next_level_god;
             if(!output.empty()){
@@ -6830,9 +6847,31 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // 00404060's MORPH.HOG shapes: each SKM's SKF (cached part record +c) and the face shape-key tables 005712f8[g]
         // (counts 005712f0[g]): FEMALE.BIN g 0, MALE.BIN g 1 (s0 = 1; the name "FEMALE" 004be848 sets 0).
         std::size_t face_parts=0,hand_skf_parts=0;
+        // Checkpoint 134dg1: SKLHog::LoadSKLHog 00407830's disguise table over the same members (g_AgentPartCache +f4 /
+        // +f8 / +108): the count *0055de94 from the names alone (every game), the rows with the registry.
+        std::optional<DisguiseTable> disguise_table;
+        std::int32_t disguise_count_55de94=0;
+        for(const auto& name:disc.archive_member_names(skl_archive))
+            if(name.size()>=8&&name.compare(0,8,"DISGUISE")==0)++disguise_count_55de94;   // Libc_Strncmp(name, "DISGUISE_", 8)
         if(activate_all||script_npcs){
-            for(const auto& name:disc.archive_member_names(skl_archive))
+            std::vector<std::string> skl_names;
+            for(const auto& name:disc.archive_member_names(skl_archive)){
                 registry.push_back({appearance_registry_key(name),pack_appearance(disc.archive_member(skl_archive,name))});
+                skl_names.push_back(name);
+            }
+            {
+                std::vector<AppearancePacking> packings;for(const auto& e:registry)packings.push_back(e.packing);
+                disguise_table=sklhog_disguise_table(skl_names,packings);
+                if(disguise_table->count_55de94!=disguise_count_55de94)throw std::runtime_error("00407830: the disguise counts disagree");
+                if(disguise_table->count_55de94){
+                    std::cout<<"Disguise table (00407830, checkpoint 134dg1): 0055de94 = "<<disguise_table->count_55de94;
+                    for(std::size_t row=0;row<2;++row){
+                        std::cout<<(row?"; +108 (FindSex 1)":"; +f8 (FindSex 0)");
+                        for(const auto& w:disguise_table->rows[row])std::cout<<' '<<(w?skl_names[*w]:std::string("null"));
+                    }
+                    std::cout<<"\n";
+                }
+            }
             // Part caches filled before any character (00404060, 00404aa0, 00403d20).
             for(const auto& name:disc.archive_member_names(morph_archive)){
                 if(ends_with(name,".SKM"))mesh_cache.push_back({morph_archive,name});
@@ -8847,7 +8886,11 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 [&](Word id){objective_network_call([&,id]{lan_net->unregister_objective(id);});},
                 [&](Word id,bool success){objective_network_call([&,id,success]{lan_net->send_objective_outcome(id,success);});},
                 [&](Word id,bool active){objective_network_call([&,id,active]{lan_net->send_objective_active(id,active);});},
-                lan_net->memory().read(dme::kHostRole,1)!=0});
+                lan_net->memory().read(dme::kHostRole,1)!=0,
+                // 134lt12: game::AddObjective's cNetAddObjectiveMsg (00333b90's network branch).
+                [&](std::int32_t index){objective_network_call([&,index]{
+                    lan_net->send_add_objective(index);
+                    std::cout<<"LAN (134lt12): cNetAddObjectiveMsg sent: string index "<<index<<"\n";});}});
             // 134on3: the HUD's network messages (NetLabelMsg 002d2920 / NetCalloutMsg 002c53a0): the keys become
             // 003fdb40 indices over the same common + mission pools on every console (the level's STRINGS.DAT).
             if(lan_net&&lan_net->memory().read(dme::kNetworkGame,1)){
@@ -11710,6 +11753,180 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             script_world->body_request=[&body_requests](bool restore,Word costume){body_requests.push_back({restore,costume,std::nullopt});return true;};
             script_world->npc_body_request=[&body_requests](Word receiver,Word costume){body_requests.push_back({false,costume,receiver});return true;};
         }
+        // Checkpoint 134dg1: cMan::AddDisguise 00391020 on the player's model (actor +60) with the level table's word
+        // (00407830, disguise_table). The packing part is add_disguise_packing (00390940 / 00406e00 / 00405940's slot 2,
+        // character_appearance.hpp); its loads go through the part caches as a figure's (00404750: the registered key, else
+        // the MANSKM.HOG '0' / '1' members, an absent '0' no mesh; 00403a20: the registered key, the NPCTEX.HOG
+        // preregistration, else the MANTEX.HOG members, an absent '0' ERROR.TDX), then 00390570 and 0038c920 rebuild the
+        // parts as after a body switch, MORPH.HOG parts bound to the player's shape table (00385d40). Not hosted: a change
+        // of the skeleton slot (003aa160 is not run again) or of the shape table; the hard mesh's attach points stay the
+        // figure's, as after a body switch. +2c14 is freed: a later RestoreBody does nothing.
+        // The released old parts (00403940 / 00404d90): a loaded key no figure wears any more is dropped from the run-time
+        // caches (its reference count reached 0); the preregistered entries (below the static counts) are never freed.
+        // Callers: the loader 001c1e70 (below), the single-player loadout screen 002c1100 and the network roster
+        // 002a30d8 / 002c0560 (o.host.add_disguise).
+        bool player_disguised=false;
+        const auto apply_player_disguise=[&](std::int32_t index,std::uint32_t site)->bool{
+            if(!disguise_table)throw std::runtime_error("unhosted(0x"+hex_word(site)+"): cMan_AddDisguise 00391020 without the appearance "
+                "registry (00407830's packings; --mission-scripts)");
+            auto& look=resolve_player_look();
+            const auto kind=appearance_shape_table(look.state);
+            const auto entry=disguise_table_entry(*disguise_table,kind,index);
+            std::ostringstream text;
+            text<<"cMan::AddDisguise (00391020 from "<<hex_word(site)<<"): table +f8["<<int(kind)<<"]["<<index<<"]";
+            if(!entry){std::cout<<text.str()<<" is null: no disguise\n";return false;}
+            text<<" = "<<registry.at(*entry).key;
+            const auto before=look.state;
+            const auto result=[&]{
+                try{return add_disguise_packing(look.state,registry.at(*entry).packing,player_body_backup);}
+                catch(const std::exception& e){throw std::runtime_error(text.str()+" on the player's "+look.name+" packing: "+e.what());}
+            }();
+            load_switch_lookups(result.merge);
+            // 00405940: 00404750 for slot 2 and every pair.
+            std::size_t mesh_loaded=0,mesh_absent=0;
+            for(const auto& m:result.mesh_loads){
+                if(m.blank)continue;                                   // the blank key loads nothing
+                bool found=false;
+                for(const auto& c:mesh_cache)if(appearance_preregistered_slot(m,c.name))found=true;
+                for(const auto& c:loaded_part_meshes)if(appearance_preregistered_slot(m,c.key.members[0]))found=true;
+                if(found)continue;
+                if(!manskm.count(m.members[0])){++mesh_absent;continue;}   // cFileMan_Open fails: no mesh
+                register_loaded_mesh(m,m.members[0],manskm.count(m.members[1])?std::optional<std::string>(m.members[1]):std::nullopt);
+                ++mesh_loaded;
+            }
+            // 00403a20 for every nonzero texture slot.
+            std::size_t tex_loaded=0;
+            for(const auto& t:result.texture_loads){
+                if(loaded_part_textures.count(t.name))continue;
+                const Member* t0=nullptr;const Member* t1=nullptr;
+                for(const auto& c:texture_cache)if(const auto slot=appearance_preregistered_texture_slot(t,c.name)){if(*slot==0)t0=&c;else t1=&c;}
+                if(t0||t1){
+                    loaded_part_textures.emplace(t.name,*(t0?t0:t1));
+                    if(t.name.size()>14){auto n1=t.name;n1[14]='1';loaded_part_textures.emplace(n1,*(t1?t1:t0));}
+                    continue;
+                }
+                if(t.blank){
+                    if(t.name==result.texture_loads.back().name&&result.texture_loads.size()>result.count_23c0)continue;   // the terminator's: no drawn part
+                    throw std::runtime_error("00403a20: the disguised part texture "+t.name+" is blank (texture-cache entry 0's handles are not tracked)");
+                }
+                if(!mantex.count(t.members[0]))continue;              // 00381000: ERROR.TDX (switched_parts' miss)
+                loaded_part_textures.emplace(t.name,Member{mantex_archive,t.members[0]});
+                if(t.name.size()>14&&mantex.count(t.members[1])){auto n1=t.name;n1[14]='1';loaded_part_textures.emplace(n1,Member{mantex_archive,t.members[1]});}
+                ++tex_loaded;
+            }
+            // 00403940 / 00404d90 on the old look: a key nothing wears any more is dropped.
+            std::set<std::string> worn_meshes,worn_textures;
+            const auto wear=[&](const AppearancePacking& state){
+                const auto a=appearance_of_packing("",state);
+                worn_meshes.insert(a.hard_mesh.name);
+                for(const auto& p:a.parts){worn_meshes.insert(p.mesh.name);worn_textures.insert(p.texture.name);}
+                if(a.extra_texture)worn_textures.insert(a.extra_texture->name);
+            };
+            wear(look.state);
+            // A figure with no packing (the LAN remote human derived from record 0 before its console's packing arrives)
+            // wears its parts' meshes; its images are not keyed, so no texture is dropped while one exists.
+            bool unkeyed_figure=false;
+            for(const auto& f:npcs){
+                if(f.sort_state.initialized[0x40]){
+                    try{wear(f.sort_state);}
+                    catch(const std::exception& e){throw std::runtime_error(text.str()+": the parts NPC "+f.label+" wears: "+e.what());}
+                    continue;
+                }
+                unkeyed_figure=true;
+                if(f.character)for(const auto& p:f.character->parts())worn_meshes.insert(p.name.substr(0,p.name.find('.')));
+            }
+            std::size_t released=0;
+            for(const auto& name:result.mesh_frees){
+                if(worn_meshes.count(name))continue;
+                const auto key=appearance_mesh_request(name);
+                const auto at=std::find_if(loaded_part_meshes.begin(),loaded_part_meshes.end(),
+                    [&](const LoadedPartMesh& c){return appearance_preregistered_slot(key,c.key.members[0]).has_value();});
+                if(at!=loaded_part_meshes.end()){loaded_part_meshes.erase(at);++released;}
+            }
+            for(const auto& name:result.texture_frees){
+                if(name.empty()||worn_textures.count(name)||unkeyed_figure)continue;
+                auto n1=name;if(n1.size()>14)n1[14]='1';
+                const auto at=loaded_part_textures.find(name);
+                if(at==loaded_part_textures.end()||at->second.archive!=mantex_archive)continue;   // NPCTEX.HOG's are static
+                loaded_part_textures.erase(at);++released;
+                if(n1!=name){const auto a1=loaded_part_textures.find(n1);if(a1!=loaded_part_textures.end()&&a1->second.archive==mantex_archive)loaded_part_textures.erase(a1);}
+            }
+            const auto body=appearance_of_packing(look.name,look.state);
+            if(body.skeleton!=look.skeleton)throw std::runtime_error("0038c920: the disguise changed the player's skeleton slot to "+body.skeleton+" (003aa160 is not run again)");
+            if(appearance_shape_table(look.state)!=player_morph_table)
+                throw std::runtime_error("0038c920: the disguise changed the player's shape table (its morph curves are kept; not hosted)");
+            const bool same=before.bytes==look.state.bytes&&before.initialized==look.state.initialized;
+            auto switched=switched_parts(body,player_morph_table<2?std::optional<std::uint8_t>(player_morph_table):std::nullopt);
+            if(switched.parts.empty())throw std::runtime_error("0038c920: the disguised packing resolves no parts");
+            auto& lod1=switched.lod1;
+            character.replace_parts(std::move(switched.parts));
+            player_part_pairs=std::move(switched.pairs);player_body_resort=1;   // 00390570 in 00391020 (man_sort_of)
+            for(std::size_t i=0;i<lod1.size();++i)if(!lod1[i]&&switched.lod1_own[i])lod1[i]=&character.parts()[i].mesh;
+            part_images=std::move(switched.images);textured_parts=std::move(switched.textured);
+            player_lod1=std::move(lod1);player_lod1_images=std::move(switched.lod1_images);
+            player_models=omega::mods::character_model_overrides(skeleton,player_skeleton_name,switched.model_keys,switched.lod1_keys);   // 132md2
+            if(player_models)omega::mods::attach_model_images(*player_models,part_images,textured_parts,player_lod1_images);
+            player_surfaces=static_cast<std::uint32_t>(character.geometry().size());
+            if(combat_session){
+                std::vector<HitVolumePart> hit_parts;
+                for(std::size_t i=0;i<character.parts().size();++i){
+                    HitVolumePart hp;hp.lod0=&character.parts()[i].mesh;hp.lod1=player_lod1[i];
+                    hp.flags0=hp.flags1=part_mesh_hit_flags(std::string_view(switched.mesh_names[i]));
+                    hit_parts.push_back(hp);
+                }
+                combat_session->actors().replace_model_parts(0,std::move(hit_parts));
+            }
+            npc_figures_added=true;   // the overlay images again (the player's parts first)
+            player_disguised=true;
+            // The new slot 2: 00404750 loaded it above; cMan_CheckLoading 00389a50 runs 0038e100 on it once the model's
+            // parts are resident (the port's loads are synchronous: now). The figure's hit model takes the new slots.
+            std::string attach_note;
+            if(result.hard_mesh.name!=player_hard_mesh_name.substr(0,player_hard_mesh_name.find('.'))){
+                std::optional<Member> hard;
+                for(const auto& c:mesh_cache)if(const auto slot=appearance_preregistered_slot(result.hard_mesh,c.name);slot&&*slot==0)hard=c;
+                if(!hard)for(const auto& c:loaded_part_meshes)if(appearance_preregistered_slot(result.hard_mesh,c.key.members[0]))hard=Member{manskm_archive,c.lod0};
+                if(player_model&&player_model->attach){
+                    if(!hard)throw std::runtime_error("0038e100: the disguise's hard mesh "+result.hard_mesh.name+" has no mesh (its attach points are not hosted)");
+                    combat_meshes.push_back(std::make_unique<SkinnedMesh>(decode_skinned_mesh(disc.archive_member(hard->archive,hard->name))));
+                    ModelAttachSlots again{};
+                    hard_mesh_attach_points(*combat_meshes.back(),player_model->inverse_bind,std::nullopt,again);
+                    std::size_t written=0,same_slots=0;
+                    for(std::size_t k=0;k<again.size();++k){
+                        written+=again[k].has_value();
+                        same_slots+=again[k].has_value()==(*player_model->attach)[k].has_value()&&
+                            (!again[k]||(again[k]->node==(*player_model->attach)[k]->node&&again[k]->local==(*player_model->attach)[k]->local));
+                    }
+                    player_model->attach=again;player_hard_mesh=combat_meshes.back().get();
+                    if(combat_session)combat_session->actors().replace_model_attach(0,again);
+                    attach_note=" (0038e100 on "+hard->name+": "+std::to_string(written)+" slots written, "+std::to_string(same_slots)+" / "
+                        +std::to_string(again.size())+" identical to "+player_hard_mesh_name+"'s)";
+                }
+                player_hard_mesh_name=hard?hard->name:result.hard_mesh.name;
+            }
+            text<<": "<<(same?"the look is unchanged (worn already), ":"")<<character.parts().size()<<" parts, +23c0 "<<result.count_23c0
+                <<", hard mesh "<<result.hard_mesh.name<<attach_note<<"; 00390940 lookups";
+            for(const auto& n:result.merge.cache_lookups)text<<' '<<n;
+            text<<"; 00404750 "<<result.mesh_loads.size()<<" ("<<mesh_loaded<<" loaded, "<<mesh_absent<<" absent), 00403a20 "<<result.texture_loads.size()
+                <<" ("<<tex_loaded<<" loaded); old look released "<<result.texture_frees.size()<<" / "<<result.mesh_frees.size()<<" ("<<released
+                <<" dropped); +2c14 freed;"<<switched.report;
+            std::cout<<text.str()<<"\n";
+            return true;
+        };
+        // 001c1e70 (Loader_16.c 170..178), right after the local player's construction: with *0055de94, the word
+        // +f8[004067e0(player +a0)][((player +c & 0x7f000000) >> 24) - 1, at least 0] (the object id's peer byte: 0 in
+        // single player, the client slot + 1 in a network game).
+        if(disguise_count_55de94){
+            if(!disguise_table)std::cout<<"cMan::AddDisguise (001c1e70): "<<mission<<" has "<<disguise_count_55de94<<" DISGUISE_ skeletons; NOT applied: "
+                "the appearance registry (00407830's packings) is built with --mission-scripts only (PORT-ONLY gap)\n";
+            else{
+                std::uint32_t key=0;
+                if(lan_net)key=lan_net->local_player_key();
+                else for(const auto& e:roster)if(e.record==0)key=e.actor_id;
+                std::int32_t index=static_cast<std::int32_t>((key&0x7f000000U)>>24)-1;
+                if(index<0)index=0;
+                apply_player_disguise(index,0x1c1e70);
+            }
+        }
         // 003870c0's attach-point section for each drawn actor: points 0..7 whose +2410 model is loaded, the
         // point's world matrix (00385240's 0019f350), the eleven GUN matrices and 003855d0's parts, skinned on
         // the CPU with the part's texture.
@@ -13422,15 +13639,42 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 for(auto& n:npcs)if(n.actor==*a&&n.ai)return n;
                 throw std::runtime_error(std::string(what)+": an NPC key without the play's AI controller");
             };
+            // 134lt13: the controllers' NpcTransferLink (npc_remote.hpp), set before a pack or a conversion: 0040c540 is
+            // the combat session's object lookup; a target is an actor (its controller +58 is set); cTargetManager_AddGobj
+            // of a target without a controller (a hosted GOB) is not ported and throws naming 0016e890.
+            const auto transfer_link=[&](NpcFigure& n){
+                if(n.ai->has_transfer_link())return;
+                if(!combat_session||!perception_world)
+                    throw std::runtime_error("NPC transfer: the transfer link needs the combat session's object lookup (0040c540)");
+                auto by_id=combat_session->npc_perception_link(*perception_world).object_by_id;
+                NpcTransferLink l;
+                l.lookup=by_id;
+                l.handle_live=[by_id](std::uint64_t o,std::int32_t id){return o!=0&&by_id(id)==o;};
+                l.has_controller=[&](std::uint64_t o){
+                    for(std::size_t k=0;k<combat_ids.size();++k)if(!actors.destroyed(k)&&actors.actor(k).handle()==o)return true;
+                    return false;};
+                l.add_target=[](std::uint64_t){
+                    throw std::runtime_error("0016e890: cTargetManager_AddGobj of a transferred target without a controller is not ported");};
+                n.ai->set_transfer_link(std::move(l));
+            };
             lan_net->set_npc_transfer_hosts({
-                [transfer_figure](std::uint32_t c,lan::LanNetCore::NpcCopyPayload& p){
-                    transfer_figure(c,"00158350").ai->pack_transfer_00148b50(p);},
+                [transfer_figure,transfer_link](std::uint32_t c,lan::LanNetCore::NpcCopyPayload& p){
+                    auto& n=transfer_figure(c,"00158350");transfer_link(n);n.ai->pack_transfer_00148b50(p);},
                 [transfer_figure](std::uint32_t c,bool on){transfer_figure(c,"0015b810").ai->set_transferring_0015b810(on);},
-                [&,transfer_figure](std::uint32_t c,const lan::LanNetCore::NpcCopyPayload& p){
-                    auto& n=transfer_figure(c,"002d5ee0");
+                [&,transfer_figure,transfer_link](std::uint32_t c,const lan::LanNetCore::NpcCopyPayload& p){
+                    auto& n=transfer_figure(c,"002d5ee0");transfer_link(n);
                     n.ai->convert_to_npc_002d5ee0(actors.actor(n.actor),p);
                     std::cout<<"LAN (134lt11): 002d5ee0: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<n.actor
-                        <<") is this console's AI again (00148cd0)\n";}});
+                        <<") is this console's AI again (00148cd0)\n";},
+                // 134lt13: TransferRequest 0042d360's +60(0) on the handed-over NPC: the actor leaves this world.
+                [&,transfer_figure](std::uint32_t c){
+                    auto& n=transfer_figure(c,"001b5190");
+                    actors.deactivate(n.actor);
+                    const auto& a=actors.actor(n.actor);
+                    std::cout<<"LAN (134lt13): 0042d360: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<n.actor
+                        <<") handed over: +98(1), +60(0)\n";
+                    return std::pair<std::uint8_t,float>{a.life_state(),a.health().health_40};},
+                {}});
         }
         // 134lt7: Follow in a network game (001488f0 / 002d2d50): the cNetNPCMsgs 0x32 {the target's +c or -1, the two
         // floats' bits}; len 4 (every peer) from an AI controller, len 8 (the owner) from a remote one, whose 002d2d50
@@ -14217,6 +14461,45 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             o.host.weapons=weapon_db?&*weapon_db:nullptr;
             o.host.weapon_models=weapon_library.get();
             o.host.item_strings=&o.strings;
+            // Checkpoint 134dg1: *0055de94 (00407830's count, every game) and cMan_AddDisguise 00391020 for the GUI's callers
+            // (002c1100 in single player; the roster 002a30d8 / 002c0560 in a network game): the local player through
+            // apply_player_disguise; a remote human's figure wears its console's packing (002c72a0 sends the disguised
+            // +a0), on which 00391020 must change nothing (a change would rebuild another console's look: not hosted).
+            o.host.disguise_55de94=disguise_count_55de94;
+            o.host.add_disguise=[&](std::int32_t player,std::int32_t index,std::uint32_t site){
+                const bool local=!lan_net||player==o.host.network_local_slot;
+                if(local){(void)apply_player_disguise(index,site);return;}
+                for(auto& remote:lan_remotes){
+                    if(remote.peer!=static_cast<std::uint32_t>(player)||!remote.key||remote.gone||!remote.figure)continue;
+                    if(!remote.dressed)throw std::runtime_error("unhosted(0x"+hex_word(site)+"): cMan_AddDisguise on remote player "+std::to_string(player)
+                        +" before its agent packing arrived (its figure is record 0's)");
+                    if(!disguise_table)throw std::runtime_error("unhosted(0x"+hex_word(site)+"): cMan_AddDisguise without the appearance registry");
+                    AppearancePacking packing;packing.bytes=*remote.dressed;packing.initialized.fill(true);
+                    const auto worn=resolve_character_appearance_custom(packing).state;
+                    const auto kind=appearance_shape_table(worn);
+                    const auto entry=disguise_table_entry(*disguise_table,kind,index);
+                    if(!entry){std::cout<<"cMan::AddDisguise (00391020 from "<<hex_word(site)<<"): remote player "<<player<<": table +f8["<<int(kind)
+                        <<"]["<<index<<"] is null: no disguise\n";return;}
+                    auto merged=worn;std::optional<AppearancePacking> scratch;
+                    (void)add_disguise_packing(merged,registry.at(*entry).packing,scratch);
+                    // What 0038c920 would build from each (the received packing went through 004073c0 / 00406ec0, so the
+                    // bytes past its terminator need not be the sender's): the slots, the pairs and the terminator texture.
+                    const auto drawn=[](const AppearancePacking& s){
+                        const auto a=appearance_of_packing("",s);
+                        std::string t=a.bone_scale_preset+"|"+a.shape+"|"+a.hard_mesh.name+"|"+a.skeleton+"|";
+                        for(const auto& p:a.parts)t+=p.mesh.name+"/"+p.texture.name+" ";
+                        return t+"|"+(a.extra_texture?a.extra_texture->name:std::string());
+                    };
+                    const auto was=drawn(worn),now=drawn(merged);
+                    if(was!=now)throw std::runtime_error("unhosted(0x"+hex_word(site)+"): cMan_AddDisguise changes remote player "
+                        +std::to_string(player)+"'s look (table word "+registry.at(*entry).key+"): "+was+" -> "+now
+                        +"; rebuilding another console's figure is not hosted");
+                    std::cout<<"cMan::AddDisguise (00391020 from "<<hex_word(site)<<"): remote player "<<player<<" ("<<remote.figure->label
+                             <<") already wears "<<registry.at(*entry).key<<" (its console's 001c1e70): the look is unchanged\n";
+                    return;
+                }
+                throw std::runtime_error("unhosted(0x"+hex_word(site)+"): cMan_AddDisguise on roster player "+std::to_string(player)+" without a figure");
+            };
             for(const auto& e:roster)if(e.record==0)o.host.player_id=e.actor_id;
             if(frontend_app)o.host.agent_b70=frontend_app->session().agent()[0xb70];
             if(lan_net){
@@ -14229,12 +14512,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 if(frontend_app)o.rt.g.app_254=frontend_app->session().runtime().g.app_254;   // *004ffc04 +254
                 o.host.lan_core=lan_net;
                 o.host.loadout_clear_pending=[&o]{o.loadout_pending=false;o.loadout_done_pending=true;};
-                {   // *0055de94: SKLHog_LoadSKLHog's count of the mission SKL.HOG's members named DISGUISE_*
-                    std::int32_t n=0;
-                    for(const auto& name:disc.archive_member_names({"GAMEDATA",mission,"SKL.HOG"}))
-                        if(uppercase_asset(name).rfind("DISGUISE_",0)==0)++n;
-                    o.host.disguise_55de94=n;
-                }
+
                 std::cout<<"LAN (134eq1): overlay 005721c8 = 1, 005721c0 = "<<int(o.rt.g.b_21c0)<<", +254 = "<<o.rt.g.app_254
                          <<", 0055de94 = "<<*o.host.disguise_55de94<<"\n";
                 o.host.network_local_slot=lan_net->local_client_index();
@@ -14348,8 +14626,11 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             };
             if(loadout_screen){
                 // 002c1100: the display actor with the player's skeleton and appearance (the player's parts).
+                // Checkpoint 134dg1: on a disguise level its 00391020 (gui_runtime em_build) has run on the player's model,
+                // and 003927a0 copies the disguised model: the player's current parts.
                 std::vector<AnimatedCharacterPart> figure_parts;
-                for(const auto& [archive,name]:part_names)
+                if(player_disguised)for(const auto& p:character.parts())figure_parts.push_back({p.name,p.mesh});
+                else for(const auto& [archive,name]:part_names)
                     figure_parts.push_back({name,decode_skinned_mesh(disc.archive_member({"GAMEDATA","COMMON",archive},name))});
                 o.set_loadout_figure(std::make_unique<AnimatedCharacter>(skeleton,player_manifest,std::move(figure_parts),MorphHostConfig{}),
                                      player_manifest,clips,player_registry,part_images,textured_parts,player_models);   // 132md3
@@ -14360,10 +14641,11 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 // (none is 00539248 +440's placeholder) and the head's cache record is resident.
                 {
                     ModelStreamWaitModel wait;
-                    if(part_names.size()>wait.parts[0].size())throw std::runtime_error("00389a50: more than 32 player parts");
-                    wait.part_count=static_cast<std::uint16_t>(part_names.size());
+                    const std::size_t wait_parts=character.parts().size();   // 134dg1: a disguise's parts (part_names before it)
+                    if(wait_parts>wait.parts[0].size())throw std::runtime_error("00389a50: more than 32 player parts");
+                    wait.part_count=static_cast<std::uint16_t>(wait_parts);
                     wait.byte_2bdc=1;
-                    for(std::size_t i=0;i<part_names.size();++i){
+                    for(std::size_t i=0;i<wait_parts;++i){
                         wait.parts[0][i]={1U,static_cast<std::uint16_t>(i+1)};
                         if(i<player_lod1.size()&&player_lod1[i])wait.parts[1][i]={1U,static_cast<std::uint16_t>(i+1)};
                         wait.textures_lod0[i]=wait.textures_lod1[i]=static_cast<std::int16_t>(i);
@@ -15360,6 +15642,13 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                             <<", frame "<<frame<<", "<<(result.handled?"applied":"ignored by game state")<<"\n";
                     }
                     lan_backpacks(frame);
+                    // 134lt13: 0015a440's network half for every NPC figure with an AI controller (LanNetCore's block, by
+                    // the figure's LAN key; nothing for a key without a block or an enabled item).
+                    for(auto& n:npcs)if(n.ai&&!n.ai->has_critical_net()){
+                        const auto actor=n.actor;
+                        n.ai->set_critical_net([&,actor](float dt){
+                            if(const auto key=lan_actor_key(actor))lan_net->npc_critical_net_0015a440(key,dt);});
+                    }
                     lan_npc_sections(frame);
                     lan_damages(frame);
                     lan_world_messages(frame);   // 133lt4
@@ -15650,6 +15939,10 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                                 if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitcommand timed out: "+c.text);
                                 ++pilot_frames;done=true;continue;
                             }
+                            if(c.op=="waitframe"){                    // 134rf1 (port-only authoring aid)
+                                if(frame>=static_cast<std::uint64_t>(c.args[0])){finish();continue;}
+                                done=true;continue;
+                            }
                             if(c.op=="waitactive"){
                                 // Checkpoint 132ms4: wait (at most BUDGET frames) until the listed NPC is present
                                 // (activated by its script), so a hunt does not fire at an inactive slot.
@@ -15817,11 +16110,6 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                                         }
                                         continue;
                                     }
-                                    // 134lt10 (PORT-ONLY pilot): another console's NPC that is not active here (a puppet of
-                                    // 0021e0c0 whose generator this console never enabled: not drawn, not hit by a shot) is
-                                    // not a target; the joiner-led TORONTO1 route spent all its rounds on the scan defence's.
-                                    if(k<combat_figures.size()&&combat_figures[k]&&combat_figures[k]->ai&&combat_figures[k]->ai->is_remote()
-                                       &&!actors.actor(k).eligible())continue;
                                     const auto p=actors.actor(k).published_position();
                                     const float d=std::hypot(p[0]-here.position[0],p[1]-here.position[1]);
                                     if(clear){const auto cc=pilot_clear_covered.find(combat_ids[k]);
@@ -16962,6 +17250,12 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                                  <<(outcome.success?" succeeded":" failed")<<" at frame "<<frame
                                  <<(applied?" (received, no echo)":" (deleted before queue delivery)")<<"\n";
                     }
+                    // 134lt12: cNetAddObjectiveMsg's receiver 00333d60: the objective bit on this console's agent.
+                    if(lan_net)for(const auto& add:lan_net->take_add_objectives()){
+                        const bool applied=mission_host->objectives().receive_network_add_objective(add.string_index);
+                        std::cout<<"LAN (134lt12): cNetAddObjectiveMsg from client "<<add.origin<<": string index "<<add.string_index
+                                 <<" at frame "<<frame<<(applied?": 00333d60 -> 00333b90(agent, key, 0)":": no objective inputs")<<"\n";
+                    }
                     mission_host->pump(script_clock.delta(elapsed));
                     if(debug_objective_state_frames.contains(frame)){
                         const auto& objectives=mission_host->objectives().stage();
@@ -17459,10 +17753,10 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                             generator_receive_enable_disable(s,enable,client_24,net);
                         }else if(!handled)generator_receive_link_message(s,enable);
                         std::cout<<(enable?"EnableMsg":"DisableMsg")<<" -> generator "<<generator<<" at frame "<<frame<<(handled?": script handler"
-                            :(generator_world->network_host?": 00221610 "+std::string(enable?"+64(":"+68(")+std::to_string(client_24)
+                            :(generator_world->network_host?": 00221610 "+std::string(lan_net->generator_net_host().host_role?(enable?"+64(":"+68("):(enable?"+28(":"+2c("))+std::to_string(client_24)
                                 +(lan_net->generator_net_host().host_role
-                                    ?(enable?") host (00220e60) +2c ":") host (00220d00) +2c ")
-                                    :(enable?") client (00220fd0) +2c ":") client (00220d70) +2c "))
+                                    ?(enable?") host (00220fd0) +2c ":") host (00220d70) +2c ")
+                                    :(enable?") client (00220e60) +2c ":") client (00220d00) +2c "))
                                 :": 00221610 +2c ")+std::to_string(before)+" -> "
                              +std::to_string(int(s.enabled_2c))+(generator_world->network_host?", +cc 0x"+hex_word(s.interest_cc):std::string()))<<"\n";
                     }

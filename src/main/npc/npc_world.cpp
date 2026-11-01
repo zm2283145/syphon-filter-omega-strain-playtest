@@ -467,12 +467,15 @@ void NpcAiController::pump(SoloActorSimulation& actor){
         dispatch_npc_ai(component_,m,h);                                        // 00151d30
     }
 }
-void NpcAiController::always_run(SoloActorSimulation& actor,float){
+void NpcAiController::always_run(SoloActorSimulation& actor,float dt){
     system_.frame=npc_logic_frame(system_,actor);                              // 005383c8
     if(port_remote_controlled_)return;                                         // PORT-ONLY (132ln5h)
-    if(remote_)return;                                                         // 132ln5h13: the remote controller (npc_remote.hpp)
-    if(!npc_logic_step(system_,actor))return;                                  // PORT-ONLY (132fx2): once per logic frame
-    if(!(component_.flags_141&0x80U))return;
+    // 132ln5h13: the remote controller (npc_remote.hpp) has no radius half here; PORT-ONLY (132fx2): once per logic
+    // frame. 134lt13: 0015a440's network half then runs on both controllers (critical_net_).
+    if(!remote_&&npc_logic_step(system_,actor)&&(component_.flags_141&0x80U))radius_half(actor);
+    if(critical_net_)critical_net_(dt);
+}
+void NpcAiController::radius_half(SoloActorSimulation& actor){
     auto h=host(actor);
     NpcAiRadiusHost r;r.actor_id=actor_id_;
     r.closest_player_distance_squared=[this]{

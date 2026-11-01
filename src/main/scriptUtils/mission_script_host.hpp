@@ -127,6 +127,9 @@ public:
         std::function<void(Word, bool)> send_outcome;
         std::function<void(Word, bool)> send_active;
         bool host_role = true;
+        // 134lt12: game::AddObjective's cNetAddObjectiveMsg (00333b90 with its last argument 1 in a network
+        // game): the key's string index to every peer. Optional (not every network test sends it).
+        std::function<void(std::int32_t)> send_add_objective;
     };
     void set_network_services(NetworkServices services);
     // Queue delivery to an objective that is still alive. No outbound send or
@@ -136,6 +139,9 @@ public:
     // game::AddObjective(key) (0032e150 -> 0032e180 -> 00333b90 on the local
     // agent; solo sends no event). false (not applied) without the inputs.
     bool add_progression(const Script& script, const Function& function, const std::vector<Value>& arguments);
+    // 134lt12: cNetAddObjectiveMsg's receiver 00333d60: 00333b90(the local agent, the key of the string index, 0),
+    // the bit only (no send). false (not applied) without the inputs.
+    bool receive_network_add_objective(std::int32_t string_index);
     const ObjectiveStage& stage() const { return stage_; }
     // The ObjectiveHost records (SetType / SetMenuString properties), in AddObjective order.
     const std::vector<Objective>& objective_records() const { return host_.objectives; }

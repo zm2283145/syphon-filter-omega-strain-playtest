@@ -202,6 +202,9 @@ inline constexpr std::uint32_t npc_freed_ai_resume_slot=0x15bff0;       // 004df
 // nothing (Checkpoint 132zf5, freed_ai_natives goldens).
 inline constexpr std::uint32_t npc_freed_ai_set_mode_slot=0x148870;     // 004dfde0 +dc
 inline constexpr std::uint32_t npc_freed_ai_awareness_of_players_slot=0x15c000;   // 004dfde0 +ec
+// Checkpoint 134rf1: SetViewConeRadius 00149320 (+180 = 0012ece0, cSystem::ScriptGetObjectId: jr ra;
+// v0 = a0 + c) reads and writes nothing either; the native returns 0 (freed_ai_natives goldens).
+inline constexpr std::uint32_t npc_freed_ai_view_cone_radius_slot=0x12ece0;   // 004dfde0 +180
 // SetMode(NPC, eMode) 0014a4f0 -> +dc = 0014bcf0(c, mode, 0): for mode & 0xff
 // below 7 a request at priority 100; +13f and the route to a node are only
 // for a non-null node argument, which SetMode does not pass.

@@ -130,6 +130,10 @@ struct ServerGame {
     bool reported = false;  // a PlayerReport or WorldReport arrived (the game was played; a result is kept)
     std::map<std::uint32_t, GameResultPlayer> results;
     std::optional<WorldReportFields> world_report;
+    // 134on4 batch 3 (ONLINE.md §8.7): a game an original host created through MGCL (CreateGameOnMe): its MGCL
+    // connection (joins are asked of it, its loss closes the game) and the GameStats the host sent (+0x55).
+    std::uint32_t mgcl_conn = 0;
+    std::vector<std::uint8_t> game_stats;
 };
 
 struct ServerPlayer {
@@ -166,6 +170,7 @@ public:
 
     std::vector<ServerPlayer> players() const;
     const std::map<std::uint32_t, ServerGame>& games() const { return games_; }
+    std::size_t channel_count() const { return channels_.size(); }  // 134on4: the original clients' lobby channels
     const ServerConfig& config() const { return config_; }
     // PORT-ONLY: the cheat permission a player gets: allow_cheats, but never in a world with an original (PS2)
     // player (ONLINE.md §8.3).
@@ -261,6 +266,9 @@ private:
         bool hashing = false;  // 132on2h: a registration / login waits for its password work
         // 133on1: SetLocalizationParams (163): the CharacterEncoding / Language the RT system messages carry.
         std::uint8_t encoding = 0, language = 0;
+        // 134on4: the session ran the original wire's SessionBegin (3); its 27 is then GetMyIP (ONLINE.md §8.5).
+        bool medius_session = false;
+        std::string mgcl_key;  // 134on4 batch 3: the MGCL session this connection speaks for (a game host's)
         Platform platform() const { return kind == ClientKind::Original ? Platform::Ps2 : hello.platform; }
         bool has(std::uint32_t c) const { return kind == ClientKind::Port && helloed && (hello.caps & c) == c; }
     };
@@ -275,6 +283,19 @@ private:
     void push_cheat_policy();
 
     void on_session_begin(Conn& c, std::span<const std::uint8_t> req);
+    // 134on4 (ONLINE.md §8.5): the original wire's connect and region list.
+    static constexpr std::int32_t kLocationId = 1;  // PORT-ONLY: omega_server's one lobby in GetLocations
+    void on_medius_session_begin(Conn& c, std::span<const std::uint8_t> req);
+    void on_get_my_ip(Conn& c, std::span<const std::uint8_t> req);
+    void on_session_end(Conn& c, std::span<const std::uint8_t> req);
+    void on_update_user_state(Conn& c, std::span<const std::uint8_t> req);
+    void on_get_locations(Conn& c, std::span<const std::uint8_t> req);
+    void on_pick_location(Conn& c, std::span<const std::uint8_t> req);
+    void on_create_channel(Conn& c, std::span<const std::uint8_t> req);
+    void on_find_world_by_name(Conn& c, std::span<const std::uint8_t> req);
+    void on_join_channel(Conn& c, std::span<const std::uint8_t> req);
+    void on_channel_info(Conn& c, std::span<const std::uint8_t> req);
+    void on_set_game_list_filter(Conn& c, std::span<const std::uint8_t> req);
     void on_registration(Conn& c, std::span<const std::uint8_t> req);
     void finish_registration(Conn& c, const std::string& name, const AccountStore::HashParams& params,
                              std::span<const std::uint8_t> digest, std::vector<std::uint8_t> r);
@@ -300,7 +321,23 @@ private:
     std::uint64_t login_locked(const std::string& name, std::uint32_t ip, std::uint64_t now);
     void login_failed(const std::string& name, std::uint32_t ip, std::uint64_t now);
     void on_create_game(Conn& c, std::span<const std::uint8_t> req);
-    void on_join_game(Conn& c, std::span<const std::uint8_t> req);
+    // 134on4 batch 3: a join of an MGCL-hosted game is first asked of the host (MGCL JoinGame); host_confirmed is set
+    // when its answer came back.
+    void on_join_game(Conn& c, std::span<const std::uint8_t> req, bool host_confirmed = false);
+    void on_mgcl(Conn& c, const Frame& frame);
+    struct MgclSession {
+        std::int32_t location = 0, app_id = 0;
+        std::string host_addr;       // the AuthenticationRequest's address text (+0x20)
+        std::uint16_t host_port = 0;  // and port (+0x30, MGCLGetServerPort)
+        std::uint32_t conn = 0;      // the connection that last spoke with this key
+    };
+    std::map<std::string, MgclSession> mgcl_;
+    struct PendingJoin {
+        std::uint32_t joiner = 0, world = 0;
+        std::vector<std::uint8_t> request;
+    };
+    std::map<std::string, PendingJoin> pending_joins_;
+    std::uint32_t next_join_token_ = 1;
     // PORT-ONLY (132md4): true when config_.mod_policy refuses this create / join; the refusal is already answered.
     bool refused_by_mod_policy(Conn& c, std::span<const std::uint8_t> req, bool create);
     void on_game_list(Conn& c, std::span<const std::uint8_t> req);
@@ -375,9 +412,26 @@ private:
         std::uint64_t until = 0;
     };
     std::map<std::string, Resumable> resumable_;
-    bool resume_original(Conn& c, std::span<const std::uint8_t> body);
+    bool resume_original(Conn& c, std::span<const std::uint8_t> body, std::size_t key_offset = kSessionKeyOffset);
     std::map<std::uint32_t, ServerGame> games_;
     std::uint32_t next_world_ = 1;
+    // 134on4 batch 2 (ONLINE.md §8.6): the original client's lobby channels (MediusCreateChannel / FindWorldByName /
+    // JoinChannel / GetChannelInfo). PORT-ONLY storage: a channel lives while the server runs. The channel an
+    // account joined is kept per account, since the client changes its connection after each JoinChannel.
+    struct ServerChannel {
+        std::uint32_t id = 0;
+        std::string name, password;
+        std::int32_t app_id = 0, max_players = 0;
+    };
+    std::map<std::uint32_t, ServerChannel> channels_;
+    std::map<std::uint32_t, std::uint32_t> account_channel_;
+    std::uint32_t next_channel_ = 1;
+    static constexpr std::size_t kMaxChannels = 512;
+    std::uint32_t channel_of(const Conn& c) const;
+    std::size_t channel_members(std::uint32_t id);
+    // MediusNoResult in this SDK (SFOLobby_FindChannel 0x00451ed0 tests 1; SFOLobby_Callback_GetLocations 0x00446ea0
+    // the same value). The port's status::NoResult (10) is what its game list sends; any nonzero skips a row there.
+    static constexpr std::int32_t kMediusNoResult = 1;
     std::string policy_file_;
     int policy_backups_ = 0;
     StatsStore stats_;

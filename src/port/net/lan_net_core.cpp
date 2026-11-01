@@ -119,6 +119,8 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // outside this network core.
     m.write(0x4ef010, 4, 6);
     m.write(0x4eee88, 4, 2);  // 133on2: StaticInit_human's cEquipGogglesMsg, generic ID 2 (the savestate's word)
+    m.write(0x5329c8, 4, 29);  // 134lt12: 004d3840's cNetAddObjectiveMsg, generic ID 29 (*005329c8 = *005329d0, the savestate's words)
+    m.write(0x5329d0, 4, 29);
     m.write(0x52ace0, 4, 27);  // 134on3: cNetQuickChatMsg's generic ID 27 (*0052ace0 = *0052ace8, the savestate's words)
     m.write(0x52ace8, 4, 27);
     m.write(0x4f7dc8, 4, 16);
@@ -303,7 +305,67 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4de110 + 0x8, 4, 0x2c5460);
     m.write(0x4de110 + 0xc, 4, 0x2c54c0);
     m.write(0x4de110 + 0x10, 4, 0x2c5c80);
+    // 134lt13: the cNetTransferRecvMsg vtable 0x004e1160 (+8 the destructor 0042ced0, +0xc the clone 0043ff70, +0x10
+    // the serialiser 00440160; func_0042CE10.c's D_004E1160).
+    m.write(0x4e1160 + 0x8, 4, 0x42ced0);
+    m.write(0x4e1160 + 0xc, 4, 0x43ff70);
+    m.write(0x4e1160 + 0x10, 4, 0x440160);
+    // 134lt13: the slots the transfer reaches (.data): the human's +60 001b5190 and +7c 00184cd0 (lbu +3598); both NPC
+    // controllers' +c8 Activate(int) 00157940 and +f0 cNPC_GetClosestPlayer 0014afd0.
+    m.write(0x4da690 + 0x60, 4, 0x1b5190);
+    m.write(0x4da690 + 0x7c, 4, 0x184cd0);
+    for (const auto vtable : {0x4d9380U, 0x4de2a0U}) {
+        m.write(vtable + 0xc8, 4, 0x157940);
+        m.write(vtable + 0xf0, 4, 0x14afd0);
+    }
+    // 134lt13: npc.cc's enabled list 0x004ea1b0 (static construction: empty, the header +4 linked to itself).
+    m.write(0x4ea1b0, 4, 0);
+    m.write(0x4ea1b4, 4, 0x4ea1b4);
+    m.write(0x4ea1b8, 4, 0x4ea1b4);
 }
+
+// 134lt13 (the header): 0015a440's network half on the NPC's block.
+void LanNetCore::npc_critical_net_0015a440(std::uint32_t c, float dt) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN 0015a440 during the background load pump");
+    if (!npc_blocks_.contains(c)) return;   // PORT-ONLY: an NPC the network layer never registered has no block
+    const auto block = npc_block(c);
+    const auto controller = m.read(block + 0x58);
+    if (!controller) return;
+    const auto copies = m.read(0x5826e0), deactivates = transfer_requests_;
+    const auto caller = sp_;
+    sp_ -= 0x480;
+    try {
+        omega::npc_critical_net_0015a440(m, *this, controller, dt, caller);
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+    if (m.read(0x5826e0) != copies || transfer_requests_ != deactivates)
+        log_.push_back("0015a440: NPC +c 0x" + hex8(c) + ": pending copies " + std::to_string(m.read(0x5826e0)) +
+                       ", TransferRequests " + std::to_string(transfer_requests_));
+}
+
+// 134lt13 (the header): 00157940 on the NPC's controller.
+void LanNetCore::npc_activate_00157940(std::uint32_t c, std::int32_t v) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN 00157940 during the background load pump");
+    const auto controller = m.read(npc_block(c) + 0x58);
+    if (!controller) unhosted(0x157940, "an NPC block without a controller");
+    call(m, 0x157940, {controller, static_cast<std::uint32_t>(v)});
+}
+
+std::uint32_t LanNetCore::npc_enabled_mask(std::uint32_t c) const {
+    const auto item = npc_enabled_item(memory_, c);
+    return item ? memory_.read(item + 4) : 0U;
+}
+float LanNetCore::npc_enabled_timer(std::uint32_t c) const {
+    const auto item = npc_enabled_item(memory_, c);
+    return item ? std::bit_cast<float>(memory_.read(item + 8)) : 0.0F;
+}
+bool LanNetCore::npc_enabled_listed(std::uint32_t c) const { return npc_enabled_item(memory_, c) != 0; }
+std::uint32_t LanNetCore::pending_copies() const { return memory_.read(0x5826e0); }
 
 std::uint32_t LanNetCore::local_player_key() const {
     return (static_cast<std::uint32_t>(dme_->local_index()) + 1) << 24 | kLocalPlayerId;
@@ -669,6 +731,44 @@ void LanNetCore::send_goggles(std::uint32_t target_key, std::uint8_t value) {
     sp_ = caller;
 }
 
+void LanNetCore::send_add_objective(std::int32_t string_index) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN AddObjective send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    // 00333b90's send needs 005721c8 and a live local player; 003c9420's network branch needs 005721d0.
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto envelope = m.read(0x5061c8);
+    const auto id = m.read(0x5329c8);
+    if (!envelope || id != 29) unhosted(0x333b90, "the cNetAddObjectiveMsg registration is unavailable");
+    const auto key = local_player_key();
+    if (!key) unhosted(0x333b90, "cNetAddObjectiveMsg without the local player's NetMap key");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        // 003fb020 -> 002823e0: Event_PackHeader (clock, the player's key), the body length, the inner ID, then
+        // 00336f70's word.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, key);
+        m.write(packet + 8, 2, 4);
+        m.write(packet + 0xa, 2, id);
+        m.write(packet + 0xc, 4, static_cast<std::uint32_t>(string_index));
+        if (call(m, 0x3fad50, {envelope, 0x10, packet, 0xffffffffU, 0x40U})) ++add_objectives_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemoteAddObjective> LanNetCore::take_add_objectives() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN AddObjective access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteAddObjective> out;
+    out.swap(add_objectives_);
+    return out;
+}
+
 void LanNetCore::send_label(std::uint8_t kind, std::int32_t object, std::int32_t key0, std::int32_t key1,
                             std::uint32_t recipient) {
     if (pump_.joinable())
@@ -1030,6 +1130,16 @@ std::uint32_t LanNetCore::receive_generic_message(std::uint32_t origin, std::uin
                 goggles.value = static_cast<std::uint8_t>(m.read(data + 0xc, 1));
                 goggles_.push_back(goggles);
                 ++goggles_received_;
+            } else if (id == static_cast<std::int32_t>(m.read(0x5329c8))) {
+                // 134lt12: 00333d60: one word (cNetMsg_GetInt), then 00333b90(001314f0(G, -1), the key, 0).
+                if (len != 4) unhosted(0x333d60, "an invalid cNetAddObjectiveMsg payload size");
+                RemoteAddObjective add;
+                add.origin = static_cast<std::uint16_t>(origin);
+                add.timestamp = m.read(data) >> 2;
+                add.key = m.read(data + 4);
+                add.string_index = static_cast<std::int32_t>(m.read(data + 0xc));
+                add_objectives_.push_back(add);
+                ++add_objectives_received_;
             } else if (id == static_cast<std::int32_t>(m.read(0x52ace0))) {
                 // 00323ad0: two words; the play resolves the header key's object (0040c540) and its client.
                 if (len != 8) unhosted(0x323ad0, "an invalid cNetQuickChatMsg payload size");
@@ -3868,12 +3978,56 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
             throw;
         }
     }
+    // 134lt13: the NPC ownership transfer's NetObjectMgr part (dme_game: net_transfer_*, transfer_recv_message_*), the
+    // enabled list 0x004ea1b0 (00157800 / 00157940 / 0015b060 / 0015b220) and the actor's +60(0) / 0042d790 on a block.
+    case 0x42d310: { Frame f(sp_); net_add_copy_msg_0042d310(m, *this, arg(0), arg(1)); return 0; }
+    case 0x42d360: { Frame f(sp_); ++transfer_requests_; net_transfer_request_0042d360(m, *this, arg(0), arg(1), f.caller); return 0; }
+    case 0x42ce10: { Frame f(sp_); net_transfer_received_0042ce10(m, *this, arg(0), f.caller); return 0; }
+    case 0x42d300: case 0x42d110: { Frame f(sp_); ++transfer_timers_removed_; net_remove_transfer_timer_0042d110(m, *this, arg(0)); return 0; }
+    case 0x42ced0: { Frame f(sp_); return transfer_recv_message_destroy_0042ced0(m, *this, arg(0), arg(1)); }
+    case 0x43ff70: { Frame f(sp_); return transfer_recv_message_clone_0043ff70(m, *this, arg(0)); }
+    case 0x440160: { Frame f(sp_); return transfer_recv_message_serialise_00440160(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x440100: {
+        Frame f(sp_);
+        ++transfer_recvs_received_;
+        try {
+            return transfer_recv_message_receive_00440100(m, *this, arg(3), f.caller);
+        } catch (...) {
+            m.write(dme::kBusy, 1, 0);
+            throw;
+        }
+    }
+    case 0x184cd0: return m.read(arg(0) + 0x3598, 1);   // jr ra; lbu v0, 0x3598(a0)
+    case 0x15b060: { Frame f(sp_); return npc_get_enabled_0015b060(m, *this, arg(0)); }
+    case 0x15b220: { Frame f(sp_); npc_set_enabled_0015b220(m, *this, arg(0), arg(1), arg(2)); return 0; }
+    case 0x157940: { Frame f(sp_); omega::npc_activate_00157940(m, *this, arg(0), arg(1)); return 0; }
+    case 0x157800: { Frame f(sp_); npc_activate_00157800(m, *this, arg(0), arg(1)); return 0; }
+    case 0x14afd0: {   // cNPC_GetClosestPlayer on an NPC block's controller: the play's (PORT-ONLY boundary), as GetPlayer
+        const auto key = m.read(m.read(arg(0) + 0x30) + 0xc);
+        if (!npc_transfer_hosts_.closest_player) unhosted(0x14afd0, "the NPC's closest player without the play's host");
+        const auto slot = npc_transfer_hosts_.closest_player(key);
+        return slot < 0 ? 0U : client_player_003fb8d0(slot);
+    }
+    case 0x42d790: {   // cNetObjectMgr_TerrainActivation on an NPC block (is_registered +7c: cHuman's +3598)
+        const auto key = m.read(arg(0) + 0xc);
+        if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != arg(0)) unhosted(0x42d790, "an object that is not an NPC block");
+        npc_terrain_activation_0042d790(key, m.read(arg(0) + 0x3598, 1) != 0, false);
+        return 0;
+    }
+    case 0x1b5190: {   // the NPC block's +60(a1) (cHuman::Deactivate): the play's actor (PORT-ONLY boundary), then 001b5190
+        const auto key = m.read(arg(0) + 0xc);
+        if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != arg(0)) unhosted(0x1b5190, "an object that is not an NPC block");
+        if (!npc_transfer_hosts_.deactivate) unhosted(0x1b5190, "the NPC's +60 without the play's host");
+        const auto [life, health] = npc_transfer_hosts_.deactivate(key);
+        npc_deactivate_001b5190(key, life, health);
+        return 0;
+    }
     case 0x1b4f40: { Frame f(sp_); npc_net_activate_001b4f40(arg(0)); return 0; }   // 134lt7: cHuman_NetActivate
     case 0x1b4970: { Frame f(sp_); npc_net_deactivate_001b4970(arg(0)); return 0; }   // 134lt7: cHuman_NetDeactivate
     case 0x431d60: return receive_terrain_activation_00431d60(arg(3));   // 134lt7: cNetTerrainActivation's receive
     case 0x4320f0: {  // 134lt8: cNetTransferMsg_TransferMsgCallback (NetTransferMsg.c): 0x10 bytes, +8 the id, short +c
         // the peer; under the receive guard (set when clear, cleared at the end), in a level: TransferRequest
-        // 0042d360(&id, peer). 0042d360 is not hosted yet (it throws naming its address).
+        // 0042d360(&id, peer) (134lt13: hosted, dme_game's net_transfer_request_0042d360).
         const auto buf = arg(3);
         if (!m.read(dme::kBusy, 1)) m.write(dme::kBusy, 1, 1);
         try {
@@ -4038,6 +4192,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     global_timers_.clear();
     personal_timers_.clear();
     goggles_.clear();
+    add_objectives_.clear();
     labels_.clear();
     quick_chats_.clear();
     callouts_.clear();

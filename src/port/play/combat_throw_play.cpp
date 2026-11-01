@@ -1137,6 +1137,14 @@ struct CombatThrows::Impl final:AreaWorld {
             write_inventory_view(inv,state);
         };
         h.null_target_key=[this]{return *c.none_word;};
+        // Checkpoint 134rf1: token 0x92 / 0x93 (001a3780, the dead state) calls 00143770(+3524): with the inventory object +0
+        // it runs 00263080 (taser_release; returns at once at state 0). The candidate's view of the object's byte +8 follows.
+        h.cancel_inventory_component=[this,a](std::uint64_t,ActorAnimationReceiverState& state,const MotionDeliveryView&){
+            const auto& inv=s.combat->inventory(a);
+            if(!inv.object_0)return;                                             // 00143770: *inv == 0
+            taser_release(a);
+            if(state.inventory)state.inventory->owner_control_active=inv.object_0->state_8!=0;
+        };
         // Checkpoint 132ms4: the takedown tokens 0x98 (knife, 001a3fd8) and 0x99 (unarmed, 001a40a0).
         // 0x98: 0040c540(&+33cc) (0: the token does nothing more), lw of *00236f20(0x19), 00132a30 / 00133ed0
         // on the target with the node byte *0049d023 (9; the receiver config's target_transform_selector),

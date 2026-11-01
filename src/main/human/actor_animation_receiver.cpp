@@ -477,15 +477,18 @@ void token(ActorAnimationReceiverState& s,const ActorAnimationReceiverConfig& co
             if(!s.inventory||!config.controller_receiver||!host.controller_is_player||
                !host.create_world_inventory||!host.reset_history_template||!host.enqueue_controller)
                 throw std::runtime_error("Actor reset inventory/controller dependencies are unresolved");
-            if(s.inventory->owner_control_active&&
-               (!s.inventory->control_component||!host.cancel_inventory_component))
-                throw std::runtime_error("Actor active inventory component teardown is unresolved");
+            // 001a3780 calls 00143770(+3524) unconditionally: with the inventory
+            // object +0 present it runs 00263080, which returns at once while the
+            // object's byte +8 is clear (owner_control_active false). Only the
+            // active case needs the host; the identity may be null (unresolved).
+            if(s.inventory->owner_control_active&&!host.cancel_inventory_component)
+                throw std::runtime_error("Actor active inventory component teardown (001a3780 -> 00143770 -> 00263080) is unresolved");
         }
         action(s,27,false);
         if(!(s.active_actions&0x80000000U)) {
             action(s,31,true);
             const auto component=s.inventory->control_component;
-            if(component&&s.inventory->owner_control_active)
+            if(s.inventory->owner_control_active)
                 host.cancel_inventory_component(component,s,view);
             if(!host.controller_is_player(config.controller_receiver))
                 host.create_world_inventory(s,view);

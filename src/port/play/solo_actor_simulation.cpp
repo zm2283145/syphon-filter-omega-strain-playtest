@@ -573,6 +573,7 @@ struct SoloActorSimulation::Impl {
     void sync_external_parents();
     ActorBodyCarryHost carry_host(std::uint64_t body);
     void deliver_carry_pickup(std::uint64_t body,std::uint8_t kind);
+    void deliver_carry_drop(std::int32_t action);
     void hide_inventory_for_carry();
     void restore_inventory();
     void leave_carry();
@@ -860,6 +861,20 @@ void SoloActorSimulation::Impl::deliver_cancel(){
     if(current&&r.installed)current->ledge_motions.push_back("retained");
 }
 
+// 001a92a0 case 0x2c / 0x2d -> 001ac360: the carried body's drop, from the pad
+// (send_pad_action) or queued (the AI's CarryBodyToNode arrival, npc_carry_body
+// +ec 2: 0x2c kind 5); the handler reads neither +28 nor +2c.
+void SoloActorSimulation::Impl::deliver_carry_drop(std::int32_t action){
+    const auto& p=frame_state.response.physical;
+    const auto body=linked();
+    ActorCarryDropInput in;in.action=action;in.life_state=life_state();in.byte_14=true;
+    in.physical_dc=p.byte_dc!=0;in.linked=body.has_value();
+    if(body)in.body_flags_324c=peer(*body).actions.flags_324c;
+    in.edge_root_weight=root_weight(ActorRoot::edge);
+    const auto r=handle_actor_carry_drop(transition_2ef8,actions.flags_324c,handle,in,carry_host(body.value_or(0)));
+    if(current)current->carry_motions.insert(current->carry_motions.end(),r.motions.begin(),r.motions.end());
+}
+
 // 003c9420 -> 001a92a0 for the pad actions of the button senders.
 void SoloActorSimulation::Impl::send_pad_action(std::int32_t action,bool alternate){
     if(current)current->pad_actions.push_back(action);
@@ -879,16 +894,7 @@ void SoloActorSimulation::Impl::send_pad_action(std::int32_t action,bool alterna
     s.physical_present=true;s.physical_dd=p.byte_dd!=0;s.physical_dc=p.byte_dc!=0;
     s.physical_9a5=frame_state.edges.ladder.flags_99c[9]!=0;
     s.slots=&frame_state.edges.slots;
-    if(action==0x2c||action==0x2d){                                    // 001ac360: the carried body's drop
-        const auto body=linked();
-        ActorCarryDropInput in;in.action=action;in.life_state=life_state();in.byte_14=true;
-        in.physical_dc=p.byte_dc!=0;in.linked=body.has_value();
-        if(body)in.body_flags_324c=peer(*body).actions.flags_324c;
-        in.edge_root_weight=root_weight(ActorRoot::edge);
-        const auto r=handle_actor_carry_drop(transition_2ef8,actions.flags_324c,handle,in,carry_host(body.value_or(0)));
-        if(current)current->carry_motions.insert(current->carry_motions.end(),r.motions.begin(),r.motions.end());
-        return;
-    }
+    if(action==0x2c||action==0x2d){deliver_carry_drop(action);return;}   // 001ac360: the carried body's drop
     if(!handle_actor_pad_action(s,action))
         throw std::runtime_error("Solo actor: pad action "+std::to_string(action)+" is not hosted");
     actions.flags_3248=s.flags_3248;byte_31b5=s.byte_31b5;
@@ -1119,6 +1125,8 @@ void SoloActorSimulation::Impl::receive_motion_effect(const MotionEffect& effect
         receiver_host.resolve_named_target=ih.resolve_named_target;receiver_host.effect_descriptor=ih.effect_descriptor;
         receiver_host.target_transform=ih.target_transform;receiver_host.emit_directional_effect=ih.emit_directional_effect;
         receiver_host.sound_preset=ih.sound_preset;
+        // Token 0x92 / 0x93's 00143770(+3524) -> 00263080 on the inventory object +0 (the air taser of roles 1 / 3).
+        if(ih.cancel_inventory_component)receiver_host.cancel_inventory_component=ih.cancel_inventory_component;
         receiver_config.target_transform_selector=static_cast<std::int8_t>(9);
     }
     // With action 0x1f already set (the revive's step 5) it only clears 0x1b.
@@ -1870,6 +1878,8 @@ void SoloActorSimulation::Impl::deliver_queued(){
         }else if(m.code==actor_cancel_request_action){     // 001ad0e8 (queued, game::StopPerformingAction)
             if(actor_cancel_request_admitted(static_cast<std::int32_t>(mode()),actions.flags_324c,ActorCancelRequest{m.payload,m.word}))
                 queue_action(actor_cancel_action);
+        }else if(m.code==0x2c||m.code==0x2d){              // 001ac360 (Checkpoint 134rf1: queued by an AI carrier)
+            deliver_carry_drop(m.code);
         }else if(m.code==8){                               // 001aa468
             deliver_roll();
         }else throw std::runtime_error("Solo actor: queued actor action "+std::to_string(m.code)+" is not hosted (001a92a0)");

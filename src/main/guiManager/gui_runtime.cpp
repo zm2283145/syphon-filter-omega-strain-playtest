@@ -554,6 +554,9 @@ std::uint8_t GuiHost::es_byte_5723f8() { unhosted(0x5723f8, "the byte 005723f8")
 void GuiHost::es_set_byte_5723f8(std::uint8_t) { unhosted(0x5723f8, "the byte 005723f8"); }
 void GuiHost::es_lobby_started() { unhosted(0x4294c0, "the lobby's game-started mark +26a0"); }
 std::int32_t GuiHost::es_disguise_count() { unhosted(0x55de94, "the level's DISGUISE_ skeleton count 0055de94"); }
+void GuiHost::es_add_disguise(std::int32_t player, std::int32_t, std::uint32_t site) {
+    unhosted(site, "cMan_AddDisguise 00391020 on player " + std::to_string(player) + "'s model (no character host)");
+}
 void GuiHost::es_send_agent_data() { unhosted(0x12eee0, "cGameSystem_SendAgentData"); }
 void GuiHost::es_sound(const std::array<char, 8>&, std::uint32_t) { unhosted(0x1ca210, "the roster's player sound"); }
 std::string GuiHost::es_agent_rank(std::int32_t) { unhosted(0x336110, "a network player's rank text"); }
@@ -9560,6 +9563,10 @@ void GuiRuntime::em_build(Widget* w) {  // 002c1100 (the player copy)
     // +48 = 003fb8d0(*00506500): GuiEquipmentSetup's update stores the local player's index there (134eq1); solo
     // play never writes it (0, the game's player 0).
     e.player = host_.scores_attach(g.es_506500);
+    // Checkpoint 134dg1 (0x002c11d8..0x002c1218): in single player (g_IsMultiplayer 005721c8 clear) with a level
+    // disguise (*0055de94), cMan_AddDisguise 00391020 on the player's model with D_0055de98[004067e0(its packing)]
+    // (the table row's word 0) before the copy 003927a0; the loader 001c1e70 applied the same word at the level load.
+    if (!g.b_21c8 && host_.es_disguise_count()) host_.es_add_disguise(g.es_506500, 0, 0x2c1100);
     e.preview = e.player;               // 0038c920 / 003913d0: the preview copies the player's model
     if (e.player[0] != em_empty) {
         const auto r = host_.weapon_record(e.player[0]);

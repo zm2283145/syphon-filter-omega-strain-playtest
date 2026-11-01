@@ -374,7 +374,8 @@ void GuiRuntime::eqs_update(Widget* w, float dt) {
         const auto uk = static_cast<std::size_t>(k);
         if (!g.es_506518[uk]) {
             g.es_506518[uk] = 1;
-            if (e.cc) unhosted(0x2a30d8, "cMan_AddDisguise 0038f... of a level with DISGUISE_ skeletons (0055de94)");
+            // 134dg1: g_AgentPartCache +f8[004067e0(player +a0)][k] (0x002a30a8..0x002a30d8), then 00391020.
+            if (e.cc) host_.es_add_disguise(i, k, 0x2a30d8);
             if (k) host_.es_sound(g.es_48baa0[uk], p->key);
             host_.es_send_agent_data();  // 0012eee0(G, 0, 0)
         }
@@ -518,7 +519,8 @@ void GuiRuntime::em_net_update(Widget* w, float dt) {
         const auto ui = static_cast<std::size_t>(i);
         if (g.es_506518[ui]) continue;
         g.es_506518[ui] = 1;
-        if (host_.es_disguise_count()) unhosted(0x2c0560, "cMan_AddDisguise of a level with DISGUISE_ skeletons (+80)");
+        // 134dg1: +80 (*0055de94 at 002c1100): g_AgentPartCache +f8[004067e0(player +a0)][i], then 00391020.
+        if (host_.es_disguise_count()) host_.es_add_disguise(i, i, 0x2c0560);
         if (i != 0) host_.es_sound(g.es_48baa0[ui], p->key);
         host_.es_send_agent_data();
     }

@@ -256,6 +256,15 @@ bool ObjectiveNatives::add_progression(const Script& script, const Function& fun
     const auto intern_id = inputs_.base_pool->lookup(*key);
     progression_bits_.add(*inputs_.progression, intern_id);
     progression_adds_.push_back({*key, intern_id, inputs_.progression->lookup(intern_id)});
+    // 134lt12: 00333b90(agent, key, 1)'s network branch (005721c8 and a live local player): the cNetAddObjectiveMsg
+    // with nGlobalization_GetStringIndex(key), the same base-pool index on every console.
+    if (network_services_ && network_services_->send_add_objective) network_services_->send_add_objective(intern_id);
+    return true;
+}
+
+bool ObjectiveNatives::receive_network_add_objective(std::int32_t string_index) {
+    if (!inputs_.progression) return false;
+    progression_bits_.add(*inputs_.progression, string_index);   // 00333d60 -> 00333b90(agent, key, 0)
     return true;
 }
 
@@ -2573,8 +2582,10 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             // vtable 004dfde0 left by 003cb330 gives 0015bff0 (v0 = 0, no
             // writes; npc_freed_ai_resume_slot). SetMode 0014a4f0 (+dc =
             // 00148870) and AddAwarenessOfPlayers 00149420 (+ec = 0015c000)
-            // reach root slots that also return at once (132zf5).
-            if (name == "ResumeAIMode" || name == "SetMode" || name == "AddAwarenessOfPlayers") return std::nullopt;
+            // reach root slots that also return at once (132zf5); so does SetViewConeRadius 00149320 (+180 =
+            // 0012ece0: jr ra; v0 = a0 + c, no load or store; the native returns 0; Checkpoint 134rf1, YEMEN1).
+            if (name == "ResumeAIMode" || name == "SetMode" || name == "AddAwarenessOfPlayers" ||
+                name == "SetViewConeRadius") return std::nullopt;
             // ResendNewAwarenessMessage 0014a340 / 0014a390 reach +f4 =
             // 003cde00, which loads word +50 and, when nonzero, calls its
             // vtable +c. On the AI component +50 is the mode request's pending

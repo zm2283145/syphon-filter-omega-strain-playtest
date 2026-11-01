@@ -17,10 +17,18 @@
 //  * App messages: the client sends type 0x0b to the server (rt_msg_client_isend_target 0x002fd180 for id 0xffff;
 //    3 / 2 carry a u16 target first), the server sends type 10 (0x00300068, no target). Their payload is the Net
 //    layer's (NetISendMessage 0x002de398 / NetSendMessageByTCP 0x002de280): u8 channel, u8 sub-type, then the
-//    struct. The Medius client library sends channel 1 and its registration index as the sub-type
-//    (NetSendMessage(0x40, connection, 0xffff, 1, index, size, struct)), so the Medius ids of online_protocol.hpp
-//    are the sub-types. A payload of 0x1ff bytes or more is split by the client into 0x1ea-byte chunks with a
-//    0x14-byte header; the server side of that is not decoded [U].
+//    struct. The Medius client library sends the registration's class as the channel and its per-class index as
+//    the sub-type (NetSendMessage(0x40, connection, 0xffff, class, index, size, struct); rt_parse_register
+//    0x00305998 counts per class). Class 1 holds registrations 0..252, whose index is the Medius id of
+//    online_protocol.hpp; class 4 holds 17 more (134on4), the ids mid::kClass4Base + index (CreateChannel 253,
+//    the contacts 258..262, DnasSignature 263): this layer maps them both ways. A payload of 0x1ff bytes or more is
+//    split by the client into 0x1ea-byte chunks with a 0x14-byte header; the server side of that is not decoded [U].
+//  * The client's keep-alive (134on4): in state 8 rt_msg_client_update_send 0x002fddf0 queues type 5 with the one
+//    byte 0xa5 every channel+0x30 ms (15 s on the retail client) and counts it in channel+0x3c; the client's type-5
+//    handler (rt_msg_client_process_message 0x002ff4d8, jump table 0x004af4f0 entry 5 -> 0x002ff760) only takes one
+//    off that count. rt_msg_client_update_connection 0x002fdae8 fails the connection (0x19) when nothing at all was
+//    received for 35 s (the channel's receive timer, rt_msg_client_recv_channel_circ_buf 0x00300d68). The server
+//    answers each echo with type 5 and the same byte. Type 1 is the client's disconnect: the session closes.
 //  * Other server types the client handles: 5 (an echo answer), 17 disconnect, 19 / 27 crypt keys, 20 session key,
 //    28 system message (online_protocol.hpp rt::SystemMessage), 29 cheat query, 30 memory poke.
 
@@ -35,6 +43,8 @@ namespace omega::online {
 
 namespace rtmsg {
 constexpr std::uint8_t ClientConnectTcp = 0x00;
+constexpr std::uint8_t ClientDisconnect = 0x01;  // 134on4: no payload; the client leaves
+constexpr std::uint8_t ClientEcho = 0x05;        // 134on4: the keep-alive, one byte 0xa5; answered with ServerEcho
 constexpr std::uint8_t ClientAppList = 0x02, ClientAppSingle = 0x03;  // u16 target first
 constexpr std::uint8_t ServerEcho = 0x05;
 constexpr std::uint8_t ServerConnectReject = 0x06, ServerConnectAccept = 0x07;
@@ -46,6 +56,8 @@ constexpr std::uint8_t ServerConnectComplete = 0x1a;
 constexpr std::uint8_t ServerSystemMessage = 0x1c;
 constexpr std::uint8_t kEncrypted = 0x80;
 constexpr std::uint8_t kMediusChannel = 1;
+constexpr std::uint8_t kMediusClass4Channel = 4;  // 134on4: RegisterPackets' class-4 entries (mid::kClass4Base)
+constexpr std::uint8_t kMgclChannel = 3;          // 134on4 batch 3: MGCLInitialize's class-3 entries (mid::kMgclBase)
 }  // namespace rtmsg
 
 std::vector<std::uint8_t> rt_message(std::uint8_t type, std::span<const std::uint8_t> payload);
@@ -64,7 +76,8 @@ public:
     Output feed(std::span<const std::uint8_t> bytes);
     bool connected() const { return connected_; }
     // An omega_server frame (encode_frame bytes) to RT bytes: a Medius response as type 10 [1][id][struct], the
-    // system message as type 28; an extension (never sent to an original session) or an id over 255 gives nothing.
+    // system message as type 28; an extension (never sent to an original session) or an id that is no registration
+    // gives nothing. A class-4 id (mid::kClass4Base..) goes as channel 4 and its index (134on4).
     static std::vector<std::uint8_t> from_server_frame(const Frame& f, std::string* note = nullptr);
 
 private:

@@ -1834,6 +1834,10 @@ public:
     virtual void es_set_byte_5723f8(std::uint8_t v);
     virtual void es_lobby_started();                        // 004294c0 cDME_GetLobby(): when a lobby, its +26a0 = 1
     virtual std::int32_t es_disguise_count();               // *0055de94 (SKLHog_LoadSKLHog's DISGUISE_ count)
+    // Checkpoint 134dg1: cMan_AddDisguise 00391020 on player `player`'s model (003fb8d0(player) +60) with the table
+    // word g_AgentPartCache +f8[004067e0 of its packing][index] (a null word: nothing). `site` is the caller: the
+    // roster 002a30d8, EQMODIFY's network update 002c0560 or its single-player constructor 002c1100.
+    virtual void es_add_disguise(std::int32_t player, std::int32_t index, std::uint32_t site);
     virtual void es_send_agent_data();                      // 0012eee0 cGameSystem_SendAgentData(G, 0, 0)
     // 001ca210(req, 4, name, 0, 0), 0020f190(msg, req, player), msg +20 = 1, 003c9420(msg, G, 0): the roster sound.
     virtual void es_sound(const std::array<char, 8>& name, std::uint32_t key);

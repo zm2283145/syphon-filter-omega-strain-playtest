@@ -315,6 +315,10 @@ void ActorWorldCombat::replace_model_parts(std::size_t a,std::vector<HitVolumePa
     config_.models[a]->parts=std::move(parts);
     gore_.at(a).parts.assign(config_.models[a]->parts.size(),std::nullopt);
 }
+void ActorWorldCombat::replace_model_attach(std::size_t a,std::optional<ModelAttachSlots> attach){
+    if(a>=config_.models.size()||!config_.models[a])throw std::runtime_error("0038e100: attach points of an actor without a hit model");
+    config_.models[a]->attach=std::move(attach);
+}
 void ActorWorldCombat::recreate_secondary(std::size_t a){
     secondary_.at(a)=SecondaryComponent{};aim_.at(a)=make_secondary_aim_state();aim_angle_.at(a)=0.0F;aim_result_.at(a)={};
     auto& slot=aim_slots_.at(a);

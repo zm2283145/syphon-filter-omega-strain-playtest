@@ -99,6 +99,19 @@ void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Outp
     case rtmsg::ClientConnectUdp:
         out.log.push_back(std::string(head) + ": connect (UDP kind) on the TCP stream; ignored");
         return;
+    case rtmsg::ClientEcho: {
+        // 134on4: the keep-alive (0x002fddf0 queues type 5, byte 0xa5, every 15 s in state 8); the client's type-5
+        // handler 0x002ff760 takes one off its count of unanswered echoes, and any received byte restarts its 35 s
+        // receive timer (0x002fdae8). The answer is type 5 with the same payload.
+        const auto e = rt_message(rtmsg::ServerEcho, p);
+        out.to_client.insert(out.to_client.end(), e.begin(), e.end());
+        out.log.push_back(std::string(head) + ": echo " + hex_preview(p) + ", answered (type 5)");
+        return;
+    }
+    case rtmsg::ClientDisconnect:
+        out.log.push_back(std::string(head) + ": the client disconnects");
+        out.close = true;
+        return;
     case rtmsg::ClientAppToServer:
     case rtmsg::ClientAppSingle:
     case rtmsg::ClientAppList: {
@@ -112,13 +125,18 @@ void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Outp
             return;
         }
         if (!connected_) out.log.push_back(std::string(head) + ": app message before the connect");
-        if (body[0] != rtmsg::kMediusChannel) {
+        Frame f;
+        if (body[0] == rtmsg::kMediusChannel) {
+            f.type = body[1];
+        } else if (body[0] == rtmsg::kMediusClass4Channel && body[1] < mid::kClass4Count) {
+            f.type = static_cast<std::uint16_t>(mid::kClass4Base + body[1]);  // 134on4: class-4 entry -> its id
+        } else if (body[0] == rtmsg::kMgclChannel && body[1] < mid::kMgclCount) {
+            f.type = static_cast<std::uint16_t>(mid::kMgclBase + body[1]);  // 134on4 batch 3: MGCL (class 3)
+        } else {
             out.log.push_back(std::string(head) + ": app channel " + std::to_string(body[0]) + " type " +
-                              std::to_string(body[1]) + " (not Medius), " + hex_preview(body.subspan(2)));
+                              std::to_string(body[1]) + " (no Medius registration), " + hex_preview(body.subspan(2)));
             return;
         }
-        Frame f;
-        f.type = body[1];
         f.body.assign(body.begin() + 2, body.end());
         out.medius.push_back(std::move(f));
         return;
@@ -132,14 +150,22 @@ void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Outp
 std::vector<std::uint8_t> RtSession::from_server_frame(const Frame& f, std::string* note) {
     if (f.type == rt::SystemMessage) return rt_message(rtmsg::ServerSystemMessage, f.body);
     if (f.type >= 0xF000) return {};
-    if (f.type > 0xff) {
-        if (note) *note = "Medius id " + std::to_string(f.type) + " does not fit the Net sub-type byte [U]; not sent";
+    std::uint8_t channel = rtmsg::kMediusChannel;
+    std::uint16_t sub = f.type;
+    if (f.type >= mid::kClass4Base && f.type < mid::kClass4Base + mid::kClass4Count) {
+        channel = rtmsg::kMediusClass4Channel;  // 134on4: the class-4 registrations (contacts 259 / 262, ...)
+        sub = static_cast<std::uint16_t>(f.type - mid::kClass4Base);
+    } else if (f.type >= mid::kMgclBase && f.type < mid::kMgclBase + mid::kMgclCount) {
+        channel = rtmsg::kMgclChannel;  // 134on4 batch 3: the MGCL answers and the host's JoinGame request
+        sub = static_cast<std::uint16_t>(f.type - mid::kMgclBase);
+    } else if (f.type >= mid::kClass4Base) {
+        if (note) *note = "Medius id " + std::to_string(f.type) + " is no registration of RegisterPackets; not sent";
         return {};
     }
     std::vector<std::uint8_t> payload;
     payload.reserve(2 + f.body.size());
-    payload.push_back(rtmsg::kMediusChannel);
-    payload.push_back(static_cast<std::uint8_t>(f.type));
+    payload.push_back(channel);
+    payload.push_back(static_cast<std::uint8_t>(sub));
     payload.insert(payload.end(), f.body.begin(), f.body.end());
     if (note && payload.size() >= 0x1ff)
         *note = "Medius id " + std::to_string(f.type) + " is " + std::to_string(payload.size()) +

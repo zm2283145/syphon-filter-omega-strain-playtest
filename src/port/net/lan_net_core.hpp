@@ -460,6 +460,21 @@ public:
     std::vector<RemoteGoggles> take_goggles();
     std::uint32_t goggles_sent() const { return goggles_sent_; }
     std::uint32_t goggles_received() const { return goggles_received_; }
+    // 134lt12: cNetAddObjectiveMsg (AgentData.cc), generic cNetMsg inner ID 29 (*005329c8 = *005329d0, read from
+    // the retail savestate; registered by the static constructor 004d3840 with the receiver 00333d60). game::
+    // AddObjective's 00333b90(agent, key, 1) in a network game queues it (+20 = 4, +1c = 0x40) on the local
+    // player's object, so 003c9420 sends it to every peer with the player's NetMap key in the header; the body is
+    // one word, nGlobalization_GetStringIndex(key) (Pack 00336f70). The receiver 00333d60 runs 00333b90(the
+    // local agent, the key, 0): the objective bit on this console's agent, without a send.
+    struct RemoteAddObjective {
+        std::uint16_t origin{};
+        std::uint32_t timestamp{}, key{};
+        std::int32_t string_index{};
+    };
+    void send_add_objective(std::int32_t string_index);
+    std::vector<RemoteAddObjective> take_add_objectives();
+    std::uint32_t add_objectives_sent() const { return add_objectives_sent_; }
+    std::uint32_t add_objectives_received() const { return add_objectives_received_; }
     // 134on3: NetLabelMsg (NetLabelMsg.c), its own DME message *0051f090 on channel 2 (InitNet 002d2850),
     // size 0x18 (Pack 002d2920: Event_PackHeader, +8 kind, +c object, +10 / +14 string-pool indices from
     // 003fdb40, +1c = 0x40). cNetObj_SendMessage 003fb020(0, msg, 0, recipient): +20 = 4 or the constructor's
@@ -928,6 +943,11 @@ public:
         // 002d5ee0's play part after 0015ad70 (the think list), cHuman_CreateGobjController(a, 2, ..), +14 = 1 and
         // 00148cd0: NpcAiController::convert_to_npc_002d5ee0.
         std::function<void(std::uint32_t c, const NpcCopyPayload& payload)> convert;
+        // 134lt13: the actor's +60(a1) (cHuman::Deactivate 001b5190's play part: the actor leaves the world), as
+        // TransferRequest 0042d360 runs it on the handed-over NPC; returns its +108 and +40 for 001b5190's tail.
+        std::function<std::pair<std::uint8_t, float>(std::uint32_t c)> deactivate;
+        // 134lt13: cNPC_GetClosestPlayer 0014afd0's answer (the closest player's slot, or -1), for 00157940(-1).
+        std::function<std::int32_t(std::uint32_t c)> closest_player;
     };
     void set_npc_transfer_hosts(NpcTransferHosts hosts) { npc_transfer_hosts_ = std::move(hosts); }
     // cNPC::GetCopyMsg 00158350(controller): the controller's +50; outside a network game 0; else a 0x310 cNetCopyMsg
@@ -938,6 +958,20 @@ public:
     // cHuman_CreateGobjController(actor, 2, ..) on the block (the AI controller 0x004d9380, as 001b3b60's fresh AI,
     // without the play's swap), +14 = 1, then the play's part (NpcTransferHosts::convert).
     void npc_convert_to_npc_002d5ee0(std::uint32_t controller, std::uint32_t payload);
+    // 134lt13: cNPC_CriticalNextFrame 0015a440's network half (dme_game: npc_critical_net_0015a440) on the NPC's block
+    // controller, with the frame's dt: the owner's handover after 2 s outside its active terrain (AddCopyMsg 0042d310
+    // into 0x005826e0, AddDeactivate 0042da30 -> TransferRequest 0042d360) and the dropped owner's branches.
+    void npc_critical_net_0015a440(std::uint32_t c, float dt);
+    // 134lt13: cNPC_Activate_int 00157940(controller, v) on the NPC's block (the enabled list 0x004ea1b0; AddActivate
+    // 0042e180 when the NPC was enabled for nobody).
+    void npc_activate_00157940(std::uint32_t c, std::int32_t v);
+    std::uint32_t npc_enabled_mask(std::uint32_t c) const;    // the 0x004ea1b0 item's +4 (0 without one)
+    float npc_enabled_timer(std::uint32_t c) const;           // its +8
+    bool npc_enabled_listed(std::uint32_t c) const;
+    std::uint32_t pending_copies() const;                     // the entries of 0x005826e0
+    std::uint32_t transfer_requests() const { return transfer_requests_; }
+    std::uint32_t transfer_timers_removed() const { return transfer_timers_removed_; }
+    std::uint32_t transfer_recvs_received() const { return transfer_recvs_received_; }
     std::uint32_t npc_copy_messages_built() const { return npc_copy_messages_built_; }
     std::uint32_t npc_conversions() const { return npc_conversions_; }
     std::uint32_t copy_messages_received() const { return copy_messages_received_; }
@@ -1201,6 +1235,7 @@ private:
     NpcTerrainHosts npc_terrain_hosts_;
     NpcTransferHosts npc_transfer_hosts_;
     std::uint32_t npc_copy_messages_built_ = 0, npc_conversions_ = 0, copy_messages_received_ = 0;
+    std::uint32_t transfer_requests_ = 0, transfer_timers_removed_ = 0, transfer_recvs_received_ = 0;   // 134lt13
     std::uint32_t npc_net_activations_ = 0;
     std::vector<std::uint32_t> remote_npc_deactivates_;
     std::uint32_t sections_gated_3269_ = 0;
@@ -1283,6 +1318,8 @@ private:
     std::vector<RemotePersonalTimer> personal_timers_;
     std::vector<RemoteGoggles> goggles_;
     std::uint32_t goggles_sent_ = 0, goggles_received_ = 0;
+    std::vector<RemoteAddObjective> add_objectives_;
+    std::uint32_t add_objectives_sent_ = 0, add_objectives_received_ = 0;
     std::vector<RemoteLabel> labels_;
     std::uint32_t labels_sent_ = 0, labels_received_ = 0;
     std::vector<RemoteCallout> callouts_;

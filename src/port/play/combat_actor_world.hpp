@@ -206,6 +206,8 @@ public:
     // attach slots stay (0038c920 does not run 0038e100). 00390940 frees each part's gore array
     // +2340 and the setup zeroes the pointers, so every part starts without gore; +2c08 stays.
     void replace_model_parts(std::size_t actor,std::vector<HitVolumePart> parts);
+    // Checkpoint 134dg1: 0038e100 run again on a new hard mesh (a disguise's slot 2, cMan_CheckLoading 00389a50's tail).
+    void replace_model_attach(std::size_t actor,std::optional<ModelAttachSlots> attach);
     std::vector<std::pair<std::size_t,SecondaryStep>> take_secondary_steps();
     // The aim half's retained state (+140..+30c, the layers) and aim slot 0
     // (+3a5 / +3b0, written by the aim actions, actor_aim_actions.hpp).
