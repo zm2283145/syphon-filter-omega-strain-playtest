@@ -1889,7 +1889,14 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         const auto* track = std::get_if<std::string>(&arguments.at(0));
         if (!track) throw std::runtime_error(name + " without a name string");
         std::uint32_t player = 0;
-        if (!null_handle(arguments.at(1))) {
+        const auto* remote = std::get_if<RuntimeObjectHandle>(&arguments.at(1));
+        if (remote && remote_players_.contains(remote->id) && objects_.objects.alive(*remote)) {
+            // 134lt5: a remote player's human (133lt4's controller object, keyed by its LAN key). 001c6a00 in a network
+            // game queues the sound event locally only for a human whose +14 is set (this console's); for another
+            // console's human it goes to that human's owner (cNetObj_SendMessage(0, ev, 0, LocalId(h))). The key is the
+            // owner word the sound host's player_music_hook routes.
+            player = remote->id;
+        } else if (!null_handle(arguments.at(1))) {
             const auto actor = actor_owner(arguments.at(1), name);
             if (!actor) {
                 applied = false;
@@ -2042,6 +2049,9 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         // 00175910 / 001758a0 / 00175830: 003cc820(GOBJ), then any actor (+4c == *0x49d010) uses its own +3528
         // list. Checkpoint 132ms5: besides the player, an actor the scripts know as an NPC (a CPU partner taking
         // BELARUS2's C-4 as the second agent, Who of its trigger) keeps its list in item_list; other GOBJs throw.
+        // 134lt5: so does another console's human, the Who of a joiner's routed hotbox (133lt4's remote player object):
+        // Script_PlayerAddItem (player_7.c, matched) adds to any human's own inventory (cInventory_Add on +3528), the host's
+        // copy of the remote human here, with no network message (TORONTO3's box 402143 on a joiner).
         const auto npc_actor = [this](Word id) {
             for (const auto& [npc, plus_c] : spawned_plus_c_)
                 if (plus_c == id) return true;
@@ -2049,7 +2059,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             return section != objects_.sections.end() && section->second == "npc";
         };
         const bool actor_ok = handle && handle->kind == RuntimeObjectHandle::Kind::world_object &&
-                              objects_.objects.alive(*handle) && (handle->id == objects_.player || npc_actor(handle->id));
+                              objects_.objects.alive(*handle) &&
+                              (handle->id == objects_.player || npc_actor(handle->id) || remote_players_.contains(handle->id));
         if (!actor_ok) throw std::runtime_error(name + " is hosted only for the player actor or an NPC actor");
         auto& items = item_list(handle->id);
         const auto* key = std::get_if<std::string>(&arguments.at(1));

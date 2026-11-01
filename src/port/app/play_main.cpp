@@ -9086,7 +9086,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 sound_host->player_music_hook=[lan_net,&lan_remotes](std::uint32_t owner,std::string_view name,bool stop){
                     if(!lan_net)throw std::runtime_error("gameSound: player-targeted network music requested outside LAN");
                     for(const auto& remote:lan_remotes)
-                        if(!remote.gone&&remote.figure&&remote.figure->actor_id==owner){
+                        // 134lt5: the owner is the figure's id or (a script's remote player object, 133lt4) its LAN key.
+                        if(!remote.gone&&remote.figure&&(remote.figure->actor_id==owner||(remote.key&&remote.key==owner))){
                             lan_net->send_player_sound(static_cast<std::uint16_t>(remote.peer),stop,5,name,0,0,stop?1:0);
                             std::cout<<"LAN "<<(stop?"StopMusic":"PlayMusic")<<" routed to client "<<remote.peer
                                 <<" for actor "<<owner<<": "<<name<<"\n";
@@ -12573,6 +12574,64 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             std::cout<<"\n";
         };
+        // 134lt5: 002c6b70 for a client that joins its slot again (NetCreateCharacterMsg_2.c, matched). The handler does not
+        // reuse an object: a human already registered under the message's id is removed (0040b720 path: cNetObj_RemovePlayer,
+        // cBaseObjList_Remove, the 0.1 s scheduled delete), then a new cHuman (0x35a0 bytes, 001b8130 role 3) is constructed
+        // at the message's matrix with its health and the local player's team (+3264), its +14 cleared, added to the actor
+        // list (0040b790), given its hit points, the cNetPlayer controller (CreateGobjController 3), the local player's
+        // invulnerability, Activate, cNetObj_AddSystem and its network id / fields, and the HUD callout name. The leaver's
+        // figure was already taken out at its leave (001b2e90: 0040b720, 003cb230, +60), so here only the construction
+        // remains. The port appends a new AI actor the way a generator's spawn is appended (create_spawned above:
+        // ActorWorld::add_ai, CombatPlaySession::append_actor, the blast / stealth entries), derived from record 0 like the
+        // load-time remote figure (make_partner_figure), and the key's script tables name the new actor from now on (as for
+        // 0040c240's reused ID). The look (lan_dress_remote), the activation and the placement follow in lan_place_remotes.
+        // PORT-ONLY as at load: the figure's AI seed draw is undone, so the level's random stream is not disturbed.
+        const auto lan_remake_remote=[&](LanRemote& slot,unsigned frame){
+            const NpcFigure& old=*slot.figure;
+            const NpcRosterEntry* entry=nullptr;for(const auto& e:roster)if(e.record==old.record)entry=&e;
+            if(!entry)throw std::runtime_error("002c6b70 -> 001b8130: the returning human's figure has no roster record");
+            if(!navigation_tuning)throw std::runtime_error("002c6b70 -> 001b8130: the returning human's actor needs --navigation-tuning");
+            if(!actors.removed(old.actor))throw std::runtime_error("002c6b70: the returning human's old figure is still in the traversal");
+            const std::size_t old_actor=old.actor;
+            NpcFigure figure=make_partner_figure("LAN remote human record "+std::to_string(old.record)+" (joined again)",old.config.start,
+                old.config.yaw_degrees*3.14159265F/180.0F);
+            figure.record=old.record;figure.config.population_parameters=old.config.population_parameters;
+            figure.config.fall_start_30a4=-std::numeric_limits<float>::max();
+            figure.start_node=old.start_node;figure.actor_id=old.actor_id;
+            npcs.push_back(std::move(figure));auto& npc=npcs.back();
+            npc.animation=std::make_unique<CharacterAnimation>(*npc.character,*npc.model,clips,*npc.registry,motion);npc.animation->speech_clock=&speech_clock_ms;
+            const auto random_before=actors.random();
+            npc.ai=std::make_unique<NpcAiController>(npc_system,npc_graph,npc.start_node,npc.actor_id,actors.random());
+            actors.random()=random_before;
+            SoloActorController controller;controller.ai=npc.ai.get();controller.navigation=*navigation_tuning;
+            npc.actor=actors.add_ai(npc.config,npc.animation.get(),tuning,controller,false);
+            npc.character->play(motion,MotionInstallMode::reset);
+            if(attach_actor_sound)attach_actor_sound(npc.actor,npc.actor_id);
+            if(attach_actor_footsteps)attach_actor_footsteps(npc.actor);
+            if(combat_session){
+                combat_session->append_actor(static_cast<std::int32_t>(npc.actor_id),npc.combat_model,false,entry->item_words,
+                    make_secondary_motion_registry(npc.model->graph,clips));
+                combat_ids.push_back(static_cast<std::int32_t>(npc.actor_id));
+                if(blast_objects)blast_objects->append_actor(static_cast<std::int32_t>(npc.actor_id));
+                if(combat_figures.size()!=npc.actor)throw std::runtime_error("002c6b70 -> 001b8130: the combat figures do not follow the actor world");
+                combat_figures.push_back(&npc);
+                npc.ai->set_combat_link(combat_session->npc_combat_link(npc.actor));
+                combat_session->combat().inventory(npc.actor).infinite_reserve_99=false;   // a human agent's (COOP.md "Rounds")
+                if(perception_world)npc.ai->set_perception_link(combat_session->npc_perception_link(*perception_world));
+            }
+            if(stealth)stealth->append_actor();
+            set_npc_team(npc.ai->component(),0);   // the local player's team (+3264)
+            npc.ai->port_remote_controlled(true);
+            actors.actor(npc.actor).set_byte_14(0);   // 002c6b70: a->b14 = 0
+            actors.set_agent_slot(static_cast<int>(&slot-lan_remotes.data())+1,npc.actor);
+            if(script_npcs_host){script_npcs_host->remove(npc.actor_id);script_npcs_host->add(npc.actor_id,npc.actor,*npc.ai);}
+            if(mission_host){mission_host->delete_spawned_npc(npc.actor_id);mission_host->register_spawned_npc(npc.actor_id,std::nullopt);}
+            slot.figure=&npc;slot.gone=false;slot.dressed.reset();slot.last.reset();slot.anim_bits.reset();slot.shots=0;slot.los_3580=0;
+            slot.fixed_skeleton=player_skeleton_name;slot.fixed_hard=player_hard_mesh_name;slot.fixed_table=player_morph_table;slot.fixed_preset.clear();
+            npc_figures_added=true;
+            std::cout<<"LAN (134lt5): 002c6b70 -> 001b8130 for a returning client: "<<npc.label<<" ("<<npc.actor_id<<") constructed as actor "<<npc.actor
+                     <<" (the leaver's actor "<<old_actor<<" stays out of the traversal) at frame "<<frame;
+        };
         const auto lan_place_remotes=[&](unsigned frame){
             for(const auto& h:lan_net->take_remote_humans()){
                 const auto& m=h.matrix;
@@ -12580,9 +12639,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                          <<m[12]<<", "<<m[13]<<", "<<m[14]<<") health "<<h.health<<" at frame "<<frame;
                 auto* slot=lan_remote_of(h.key);
                 if(!slot||!script_npcs_host){std::cout<<"; no figure to place\n";continue;}
-                // A peer's figure taken out by its leave (0040b720) is not traversed again: the original makes a new
-                // human (001b8130) for a client that joins again, which the port's derived figures cannot.
-                if(slot->gone){std::cout<<"; its peer's figure was removed (a new 001b8130 actor is not ported), not placed\n";continue;}
+                // A peer's figure taken out by its leave (0040b720) is not traversed again: 002c6b70 constructs a new human
+                // (001b8130) for the client that joined again (134lt5: lan_remake_remote).
+                if(slot->gone){std::cout<<"\n";lan_remake_remote(*slot,frame);std::cout<<"\nLAN (port-only, 132ln5f): 002c6b70: remote human key "<<std::hex<<h.key<<std::dec;}
                 slot->key=h.key;
                 if(mission_host)mission_host->register_remote_player(h.key);   // 133lt4: Who / WhoPlayer / SetCheckpoint
                 // 132ln5h8: the agent first (a rebuild of the figure, 001b8130, replaces its actor before it is activated).

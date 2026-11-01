@@ -118,6 +118,11 @@ struct ScriptStep {
     // (the "state" name the log prints, e.g. TITLESCR) or focuses the widget NAME. A loaded machine changes how many
     // unpaced frames the intro movie and fades take, so frame counts alone can fall out of step with the screens.
     std::optional<std::string> wait_view;
+    // PORT-ONLY test (134lt5): "waitplayers N" holds this step the same way until the online room's player list (JOINMIS,
+    // 004516e0's PlayerList, asked about once a second of wall time) holds at least N players. The front end runs unpaced,
+    // so a fixed frame count after the other game entered the room can end before the next list arrives (133lt3's relay
+    // run: the host's agent_chat found only itself in the list and opened no chat keyboard).
+    std::optional<std::size_t> wait_players;
 };
 
 // PORT-ONLY test (checkpoint 132on2b): "keys TEXT" as USB keyboard reports (sceUsbKb HID codes, shift = mod 2), then
@@ -261,7 +266,7 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
     int number = 0;
     std::optional<std::string> card;
     std::optional<std::string> keys, touch_file, wait_file, capture;
-    std::optional<std::size_t> wait_games, wait_messages;
+    std::optional<std::size_t> wait_games, wait_messages, wait_players;
     std::optional<std::uint8_t> wait_mission;
     std::optional<std::string> wait_view;
     // The rest of the line, trimmed (a path or text that may hold spaces).
@@ -310,6 +315,13 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
             wait_messages = static_cast<std::size_t>(n);
             continue;
         }
+        if (word == "waitplayers") {  // PORT-ONLY test (134lt5): see ScriptStep
+            long long n = -1;
+            if (!(s >> n) || n < 0)
+                throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"waitplayers N\"");
+            wait_players = static_cast<std::size_t>(n);
+            continue;
+        }
         if (word == "waitmission") {  // PORT-ONLY test (A10): see ScriptStep
             long long n = -1;
             if (!(s >> n) || n < 0 || n > 0xff)
@@ -337,8 +349,9 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
         if (!(s >> buttons) || n <= 0)
             throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"N BUTTONS\"");
         steps.push_back({n, frontend_buttons(buttons), std::move(card), std::move(keys), std::move(touch_file), std::move(wait_file),
-                         wait_games, wait_mission, std::move(capture), wait_messages, std::move(wait_view)});
+                         wait_games, wait_mission, std::move(capture), wait_messages, std::move(wait_view), wait_players});
         wait_view.reset();
+        wait_players.reset();
         capture.reset();
         wait_messages.reset();
         card.reset();
@@ -348,9 +361,9 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
         wait_games.reset();
         wait_mission.reset();
     }
-    if (touch_file || wait_file || wait_games || wait_mission || capture || wait_messages || wait_view)
+    if (touch_file || wait_file || wait_games || wait_mission || capture || wait_messages || wait_view || wait_players)
         throw std::runtime_error(
-            "Front-end script: a \"touch\" / \"waitfile\" / \"waitgames\" / \"waitmission\" / \"capture\" line after the last step");
+            "Front-end script: a \"touch\" / \"waitfile\" / \"waitgames\" / \"waitplayers\" / \"waitmission\" / \"capture\" line after the last step");
     if (keys) throw std::runtime_error("Front-end script: a \"keys\" line after the last step");
     if (card) throw std::runtime_error("Front-end script: a \"card\" line after the last step");
     return steps;
@@ -2104,7 +2117,8 @@ FrontendResult FrontendApp::Impl::loop() {
                 if (script[script_index].capture) capture(*script[script_index].capture);  // PORT-ONLY test (132on2h)
                 script_waiting = script[script_index].wait_file.has_value() || script[script_index].wait_games.has_value() ||
                                  script[script_index].wait_mission.has_value() ||
-                                 script[script_index].wait_messages.has_value() || script[script_index].wait_view.has_value();
+                                 script[script_index].wait_messages.has_value() || script[script_index].wait_view.has_value() ||
+                                 script[script_index].wait_players.has_value();
             }
             std::uint16_t held = script[script_index].held;
             if (script_waiting) {  // PORT-ONLY test (132on2c): the step waits, buttons up, for its file / games
@@ -2122,8 +2136,12 @@ FrontendResult FrontendApp::Impl::loop() {
                     !st.wait_messages ||
                     (online_lobby && static_cast<std::size_t>(online_lobby->message_count()) >= *st.wait_messages);
                 const bool viewed = !st.wait_view || view == *st.wait_view || focused_name == *st.wait_view;
-                if (file && games && mission && messages && viewed) {
+                const bool players = !st.wait_players || (online_lobby && online_lobby->player_list().rows.size() >= *st.wait_players);
+                if (file && games && mission && messages && viewed && players) {
                     script_waiting = false;
+                    if (st.wait_players)
+                        std::cout << "Front-end script: waitplayers " << *st.wait_players << " met at front-end frame "
+                                  << s.frames() << " (port-only)\n";
                     if (st.wait_messages)
                         std::cout << "Front-end script: waitmessages " << *st.wait_messages << " met at front-end frame "
                                   << s.frames() << " (port-only)\n";
