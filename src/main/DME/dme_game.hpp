@@ -321,8 +321,9 @@ void net_objects_update_0042eb20(LevelLoadMemory& m, LevelLoadHost& host);
 // 0042cf30: a period from 0x00572538 (soft double, read only per object), 00436c00 on the stack, the sends over the
 // map 0x00582720 (004313a0 empties it), 00436ba0(.., -1). Expired timers retry ownership through the saved owner.
 void net_objects_send_0042cf30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack = 0x1f00000);
-// 0042e6d0: release the owned references in 0x00582700 and clear it and the transfer-timer map 0x00582720. The
-// transfer-object, short-value and pending-message maps remain required to be empty until their producers are hosted.
+// 0042e6d0: release each transfer-object entry of 0x005826a0 (its TransferReference, line 0x61, then the entry, line 0x62)
+// and clear that map (node file 0x004bfbb8), then the owned references in 0x00582700 and the transfer-timer map 0x00582720.
+// The short-value and pending-message maps remain required to be empty until their producers are hosted.
 void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host);
 // 134lt6: 0042d790's insert for an object whose +7c answers 0: a TransferReference {object, +c} (0036b180(8)) under +c in
 // 0x00582700 by insert_one (an existing key keeps its node; the new reference is not freed). True when inserted.
@@ -331,6 +332,33 @@ bool terrain_activation_insert_0042d790(LevelLoadMemory& m, LevelLoadHost& host,
 // (find_uintR_2); on a hit free the TransferReference (0036b130, "NetObjectMgr.cc" 0x1a7) and erase the node
 // (erase_tree_4). True on a hit.
 bool remove_from_terrain_activation_0042d910(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object);
+// 134lt8: NetObjectMgr_AddTransferTimer 0042d1b0 (NetObjectMgr.c): the debug print 00127358("Adding transfer timer for
+// %.8X"), then the object's timer in 0x00582720 (find_uintR_3): absent, a node {id, deadline} by insert_one_pairR_4
+// (node 0x14 bytes, "allocator.hh" 0x004bfb48 line 0x5c); present, its +0x10 deadline renewed. The deadline is the
+// software clock of 0042cf30 (0x00572538 - 0.0625 * float(0x00572538)) + 45000.
+void net_transfer_timer_add_0042d1b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t stack = 0x1f00000);
+// 134lt8: cNetObjectMgr_AddActivate 0042e180 (NetObjectMgr_6.c). The object's controller (+0x58) must answer its
+// virtual +0x44; an object not yet in the transfer-object map 0x005826a0 gets an entry (0036b180(4), line 0xa6) holding
+// a TransferReference {object, +c} (0036b180(8), line 0xa8), inserted by insert_one_pairR_2 (node "allocator.hh"
+// 0x004bfb78 line 0x5c). With peer >= 0: the NPC info owner (00434440, else the previous owner 00434380),
+// cNetObj_SetOwner 003fb4b0(+0x10, peer); an owner other than peer: cNetTransferMsg (0x00582770, vtable 004e0f20,
+// +0x1c 0x40, +0x24 the id, +0x28 the peer) to that owner (003fb020) and 0042d1b0 when it is another console, else
+// TransferRequest 0042d360; otherwise the activate notice (0x00582680, vtable 004e0ea0, +0x1c 0x40, +0x20 8 for another
+// console's peer / 1 for this one, +0x2c the object's +0x10) through 003c9420(.., object, 1). Then, for another
+// console's peer, an object neither owned here (003fb340) nor live (+2d, +2c, not +2e) whose controller is absent or
+// not in mode 2 (virtual +0x88) gets the release notice (0x00582730, vtable 004d9300, +0x20 1, +0x24 2) by 003c9420(.., 0).
+void net_object_add_activate_0042e180(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object, std::uint32_t peer,
+                                      std::uint32_t stack = 0x1f00000);
+// 134lt8: cNetObjectMgr_AddDeactivate 0042da30 (NetObjectMgr_4.c): only for an object in 0x005826a0. Owner o (00434440)
+// and previous owner p (00434380):
+//  - previous == o: next >= 0 on the host: 00434600(next), then cNetTransferMsg to o (another console) or 0042d360; next
+//    < 0: with a controller, cDeactivateMsg (0x00572198, vtable 004e0e80) by 00429200 to previous when it is another
+//    console, else the controller's virtual +0x4c; then 0042d910;
+//  - o < 0: p >= 0 with a player (003fb8d0): 00434600(next) and cNetTransferMsg to p (another console) or 0042d360;
+//    otherwise 0042d360;
+//  - else: cDeactivateMsg to previous (another console) or the object's virtual +0x24.
+void net_object_add_deactivate_0042da30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object, std::uint32_t previous,
+                                        std::uint32_t next, std::uint32_t stack = 0x1f00000);
 // 00438340 (from 00438770): on the host / solo, once (0x00582cf0 clear): in a level the "HeadsetSemaphore" DME object
 // (002eaf28(sp+0x48, 2, 4, 1000, 0, 0, 0, 0), the class 0x00583868; its handle into 0x00583870, its +0x1c into
 // 0x00582cf0 when 002eb650 finds it), before the level 0x00582cf0 = 0. The first call (0x00497568) runs the headset

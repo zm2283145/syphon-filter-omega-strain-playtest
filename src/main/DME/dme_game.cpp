@@ -793,9 +793,21 @@ void net_objects_send_0042cf30(LevelLoadMemory& m, LevelLoadHost& host, std::uin
 }
 
 void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host) {
-    for (const auto map : {0x5826a0U, 0x5826c0U, 0x5826e0U})
+    for (const auto map : {0x5826c0U, 0x5826e0U})
         if (r32(m, map) || r32(m, map + 4) || r32(m, map + 0xc) != map + 4)
-            throw std::runtime_error("0042e6d0: a nonempty transfer-object, short-value or pending-message map is not ported");
+            throw std::runtime_error("0042e6d0: a nonempty short-value or pending-message map is not ported");
+    // 134lt8: the transfer-object map 0x005826a0 (0042e180's entries): each entry's TransferReference (line 0x61), the
+    // entry (line 0x62), then the map is cleared (clear_void_2).
+    for (auto it = r32(m, 0x5826a0 + 0xc); it != 0x5826a0 + 4; it = net_map_next(m, it)) {
+        const auto entry = r32(m, it + 0x10);
+        heap_enter(m, host);
+        host.call(m, 0x36b130, {0, r32(m, entry), 0x4bfb00, 0x61});
+        heap_leave(m, host);
+        heap_enter(m, host);
+        host.call(m, 0x36b130, {0, entry, 0x4bfb00, 0x62});
+        heap_leave(m, host);
+    }
+    rb_map_clear(m, host, 0x5826a0, 0x4bfbb8);
     constexpr std::uint32_t references = 0x582700, timers = 0x582720;
     constexpr std::uint32_t payload_file = 0x4bfb00, reference_node_file = 0x4bfb98, timer_node_file = 0x4bfb88;
     const auto end = references + 4;
@@ -1422,6 +1434,223 @@ bool remove_from_terrain_activation_0042d910(LevelLoadMemory& m, LevelLoadHost& 
     heap_leave(m, host);
     rb_map_erase(m, host, map, node, 0x4bfb98);
     return true;
+}
+
+namespace {
+// 134lt8: insert_one into an int-keyed transfer map whose node payload (+0x10) is one word (the header at map + 4,
+// the leftmost at map + 0xc), the shape 0042d790's insert takes: a new node (0036b180(0x14), file / line 0x5c) below
+// the last node the descent visits, then the rebalance. The caller has found no node with the key. The transfer maps
+// compare their GobjId keys unsigned (sltu in find_intR_3 0042edf0, find_uintR_3 0042ef70 and the inserts).
+void transfer_map_insert(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t map, std::uint32_t key, std::uint32_t value,
+                         std::uint32_t file) {
+    bool left = true, leftmost = true;
+    std::uint32_t parent = map + 4;
+    for (auto n = r32(m, map + 4); n;) {
+        parent = n;
+        if (key < r32(m, n + 0xc)) {
+            n = r32(m, n);
+            left = true;
+        } else {
+            n = r32(m, n + 4);
+            left = leftmost = false;
+        }
+    }
+    heap_enter(m, host);
+    const auto node = host.call(m, 0x36b180, {0, 0x14, file, 0x5c});
+    heap_leave(m, host);
+    w32(m, node + 0xc, key);
+    w32(m, node + 0x10, value);
+    w32(m, node + 4, 0);
+    w32(m, node, 0);
+    w32(m, node + 8, parent | (r32(m, node + 8) & 1));
+    w32(m, parent + (left ? 0 : 4), node);
+    w32(m, map, r32(m, map) + 1);
+    net_map_rebalance(m, node, r32(m, map + 4));
+    if (leftmost) w32(m, map + 0xc, node);
+}
+
+// find_intR_3 / find_uintR_3: the node with the key (unsigned compare), or the end (map + 4).
+std::uint32_t transfer_map_find(const LevelLoadMemory& m, std::uint32_t map, std::uint32_t key) {
+    const auto end = map + 4;
+    auto at = end;
+    for (auto n = r32(m, map + 4); n;) {
+        if (r32(m, n + 0xc) < key) {
+            n = r32(m, n + 4);
+        } else {
+            at = n;
+            n = r32(m, n);
+        }
+    }
+    if (at == end || key < r32(m, at + 0xc)) return end;
+    return at;
+}
+
+// The software clock 0042cf30 and 0042d1b0 read: 0x00572538 - 0.0625 * float(0x00572538), truncated.
+std::uint32_t transfer_clock(const LevelLoadMemory& m) {
+    const auto ticks = static_cast<std::int32_t>(r32(m, 0x572538));
+    return static_cast<std::uint32_t>(static_cast<std::int64_t>(
+        static_cast<double>(ticks) - 0.0625 * static_cast<double>(static_cast<float>(ticks))));
+}
+
+// The idiom g_IsMultiplayer ? 0x005721c0 : 1 (is_host).
+bool transfer_is_host(const LevelLoadMemory& m) { return r8(m, kNetworkGame) ? r8(m, kHostRole) != 0 : true; }
+
+std::uint32_t transfer_local(LevelLoadMemory& m, LevelLoadHost& host) {
+    return local_slot(m, host, r8(m, kNetworkGame), r32(m, kWorld));
+}
+
+std::uint32_t short_peer(std::uint32_t peer) {   // dsll32 / dsra32 by 0x10: the low half, sign-extended
+    return static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(peer & 0xffffU)));
+}
+
+// request_transfer: cNetTransferMsg {vtable 004e0f20, +0x1c 0x40, +0x24 the object's id, +0x28 the peer (half)} at
+// `notice`, sent to `owner` (003fb020(id, notice, 0, owner)), then 0042d1b0(&object +c), the destructor.
+void transfer_request_message(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object, std::uint32_t peer,
+                              std::uint32_t owner, std::uint32_t notice) {
+    host.call(m, 0x3c9e30, {notice, 0x582770});
+    w32(m, notice, 0x4e0f20);
+    w32(m, notice + 0x24, r32(m, object + 0xc));
+    w32(m, notice + 0x1c, 0x40);
+    w16(m, notice + 0x28, static_cast<std::uint16_t>(peer));
+    host.call(m, 0x3fb020, {r32(m, object + 0xc), notice, 0, owner});
+    host.call(m, 0x42d1b0, {object + 0xc});
+    w32(m, notice, 0x4e0f20);
+    host.call(m, 0x3c9d60, {notice, 0});
+}
+
+// request_release: cDeactivateMsg (0x00572198, vtable 004e0e80) by cDeactivateMsg_SendDeactivated 00429200(notice, id,
+// peer), the destructor.
+void transfer_release_message(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object, std::uint32_t peer,
+                              std::uint32_t notice) {
+    host.call(m, 0x3c9e30, {notice, 0x572198});
+    w32(m, notice, 0x4e0e80);
+    host.call(m, 0x429200, {notice, r32(m, object + 0xc), peer});
+    w32(m, notice, 0x4e0e80);
+    host.call(m, 0x3c9d60, {notice, 0});
+}
+}  // namespace
+
+void net_transfer_timer_add_0042d1b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t idp, std::uint32_t stack) {
+    (void)stack;
+    constexpr std::uint32_t map = 0x582720;
+    const auto key = r32(m, idp);
+    const auto node = transfer_map_find(m, map, key);
+    host.call(m, 0x127358, {0x4bfae0, r32(m, idp)});   // "Adding transfer timer for %.8X\n"
+    const auto deadline = transfer_clock(m) + 45000U;  // 0x7fff + 0x2fc9
+    if (node == map + 4) transfer_map_insert(m, host, map, r32(m, idp), deadline, 0x4bfb48);
+    else w32(m, node + 0x10, deadline);
+}
+
+void net_object_add_activate_0042e180(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object, std::uint32_t peer,
+                                      std::uint32_t stack) {
+    const auto sp = stack - 0x110;
+    constexpr std::uint32_t map = 0x5826a0;
+    {
+        const auto controller = r32(m, object + 0x58);
+        if (!controller || !host.call(m, r32(m, r32(m, controller) + 0x44), {controller})) return;
+    }
+    const auto found = transfer_map_find(m, map, r32(m, object + 0xc));
+    host.call(m, 0x436c00, {sp + 0x10c});
+    if (found == map + 4) {
+        heap_enter(m, host);
+        const auto entry = host.call(m, 0x36b180, {0, 4, 0x4bfb00, 0xa6});
+        heap_leave(m, host);
+        if (entry) w32(m, entry, 0);
+        heap_enter(m, host);
+        const auto reference = host.call(m, 0x36b180, {0, 8, 0x4bfb00, 0xa8});
+        heap_leave(m, host);
+        if (reference) {
+            w32(m, reference + 4, 0xffffffffU);
+            w32(m, reference, object);
+            w32(m, reference + 4, object ? r32(m, object + 0xc) : 0xffffffffU);
+        }
+        w32(m, entry, reference);   // no null test on the entry (0042e338)
+        transfer_map_insert(m, host, map, r32(m, object + 0xc), entry, 0x4bfb78);
+    }
+    if (s32(peer) >= 0) {
+        auto owner = host.call(m, 0x434440, {sp + 0x10c, object + 0xc});
+        if (s32(owner) < 0) owner = host.call(m, 0x434380, {sp + 0x10c, object + 0xc});
+        host.call(m, 0x3fb4b0, {r32(m, object + 0x10), peer});
+        if (owner != peer && s32(owner) >= 0) {
+            if (owner != transfer_local(m, host)) transfer_request_message(m, host, object, peer, owner, sp + 0xb0);
+            else host.call(m, 0x42d360, {object + 0xc, short_peer(peer)});
+        } else {
+            const auto notice = sp + 0x80;
+            const auto target = r32(m, object + 0x10);
+            host.call(m, 0x3c9e30, {notice, 0x582680});
+            w32(m, notice, 0x4e0ea0);
+            w32(m, notice + 0x1c, 0x40);
+            w32(m, notice + 0x2c, target);
+            w8(m, notice + 0x20, peer != transfer_local(m, host) ? 8 : 1);
+            host.call(m, 0x3c9420, {notice, object, 1});
+            w32(m, notice, 0x4e0ea0);
+            host.call(m, 0x3c9d60, {notice, 0});
+        }
+        if (peer != transfer_local(m, host)) {
+            const auto id = r32(m, object + 0xc);
+            const auto local = transfer_local(m, host);
+            if (host.call(m, 0x3fb340, {id}) != local) {
+                const bool live = r8(m, object + 0x2d) && r8(m, object + 0x2c) && !r8(m, object + 0x2e);
+                if (!live) {
+                    const auto controller = r32(m, object + 0x58);
+                    if (!controller || (host.call(m, r32(m, r32(m, controller) + 0x88), {controller}) & 0xffU) != 2) {
+                        const auto notice = sp + 0x50;
+                        host.call(m, 0x3c9e30, {notice, 0x582730});
+                        w32(m, notice, 0x4d9300);
+                        w8(m, notice + 0x24, 2);
+                        w8(m, notice + 0x20, 1);
+                        host.call(m, 0x3c9420, {notice, object, 0});
+                        w32(m, notice, 0x4d9300);
+                        host.call(m, 0x3c9d60, {notice, 0});
+                    }
+                }
+            }
+        }
+    }
+    host.call(m, 0x436ba0, {sp + 0x10c, 0xffffffffU});
+}
+
+void net_object_add_deactivate_0042da30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object, std::uint32_t previous,
+                                        std::uint32_t next, std::uint32_t stack) {
+    const auto sp = stack - 0x130;
+    constexpr std::uint32_t map = 0x5826a0;
+    const auto found = transfer_map_find(m, map, r32(m, object + 0xc));
+    host.call(m, 0x436c00, {sp + 0x12c});
+    if (found != map + 4) {
+        const auto owner = host.call(m, 0x434440, {sp + 0x12c, object + 0xc});
+        const auto prior = host.call(m, 0x434380, {sp + 0x12c, object + 0xc});
+        if (previous == owner) {
+            if (s32(next) >= 0) {
+                if (transfer_is_host(m)) {
+                    host.call(m, 0x434600, {sp + 0x12c, object + 0xc, next});
+                    if (owner != transfer_local(m, host)) transfer_request_message(m, host, object, next, owner, sp + 0xf0);
+                    else host.call(m, 0x42d360, {object + 0xc, short_peer(next)});
+                }
+            } else {
+                if (r32(m, object + 0x58)) {
+                    if (previous != transfer_local(m, host)) {
+                        transfer_release_message(m, host, object, previous, sp + 0xc0);
+                    } else {
+                        const auto controller = r32(m, object + 0x58);
+                        host.call(m, r32(m, r32(m, controller) + 0x4c), {controller});
+                    }
+                }
+                host.call(m, 0x42d910, {object});
+            }
+        } else if (s32(owner) < 0) {
+            if (s32(prior) >= 0 && host.call(m, 0x3fb8d0, {prior})) {
+                host.call(m, 0x434600, {sp + 0x12c, object + 0xc, next});
+                if (prior != transfer_local(m, host)) transfer_request_message(m, host, object, next, prior, sp + 0x90);
+                else host.call(m, 0x42d360, {object + 0xc, short_peer(next)});
+            } else {
+                host.call(m, 0x42d360, {object + 0xc, short_peer(next)});
+            }
+        } else {
+            if (previous != transfer_local(m, host)) transfer_release_message(m, host, object, previous, sp + 0x60);
+            else host.call(m, r32(m, r32(m, object) + 0x24), {object});
+        }
+    }
+    host.call(m, 0x436ba0, {sp + 0x12c, 0xffffffffU});
 }
 
 // 003fbcd0, cNetObj_Clear, runs after the end screens and before the level's

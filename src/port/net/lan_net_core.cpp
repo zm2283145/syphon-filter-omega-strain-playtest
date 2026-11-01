@@ -2906,6 +2906,14 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x43a8b0: { Frame f(sp_); geninfo_send_timer_0043a8b0(m, *this, f.caller); return 0; }
     case 0x42eb20: { Frame f(sp_); net_objects_update_0042eb20(m, *this); return 0; }
     case 0x42cf30: { Frame f(sp_); net_objects_send_0042cf30(m, *this, f.caller); return 0; }
+    // 134lt8: the transfer-object path (NetObjectMgr): AddDeactivate 0042da30 (0042cf30's expired timers), AddActivate
+    // 0042e180 and the transfer timer 0042d1b0; TransferRequest 0042d360 is not hosted (it throws by address).
+    case 0x42da30: { Frame f(sp_); net_object_add_deactivate_0042da30(m, *this, arg(0), arg(1), arg(2), f.caller); return 0; }
+    case 0x42e180: { Frame f(sp_); net_object_add_activate_0042e180(m, *this, arg(0), arg(1), f.caller); return 0; }
+    case 0x42d1b0: { Frame f(sp_); net_transfer_timer_add_0042d1b0(m, *this, arg(0), f.caller); return 0; }
+    case 0x42d910: { Frame f(sp_); return remove_from_terrain_activation_0042d910(m, *this, arg(0)) ? 1U : 0U; }
+    // cDeactivateMsg_SendDeactivated 00429200(msg, id, peer) = 003fb020(id, msg, -1, peer) (134lt7).
+    case 0x429200: return call(m, 0x3fb020, {arg(1), arg(0), 0xffffffffU, arg(2)});
     case 0x438770: { Frame f(sp_); voice_frame_00438770(m, *this); return 0; }
     case 0x438340: { Frame f(sp_); return voice_headset_00438340(m, *this, f.caller); }
     case 0x3241c8:  // PORT-ONLY: lgaud.c's init; LGAUD.IRX is not loaded (003a6710), the voice chat is out of scope
@@ -3167,7 +3175,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x3c9420: {  // an actor message: the locomotion message natively; PORT-ONLY: else an action as a RemoteAction
         if (m.read(arg(0)) == 0x4e0100 || m.read(arg(0)) == 0x4de240 || m.read(arg(0)) == 0x4db600 ||
             m.read(arg(0)) == 0x4de260 || m.read(arg(0)) == 0x4e0ee0 || m.read(arg(0)) == 0x4e08a0 ||
-            m.read(arg(0)) == 0x4e01e0) {  // 132ln5h12 / h13 / h14 / h14c
+            m.read(arg(0)) == 0x4e01e0 || m.read(arg(0)) == 0x4de4d0) {  // 132ln5h12 / h13 / h14 / h14c; 134lt8: cNetNPCMsgs
             Frame f(sp_);
             return actor_message_send_003c9420(m, *this, arg(0), arg(1), arg(2), f.caller);
         }
