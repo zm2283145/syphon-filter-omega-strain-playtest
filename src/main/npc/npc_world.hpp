@@ -273,6 +273,12 @@ public:
     // 134lt6: cNetNPC_IsNodeInActiveTerrain 002d2ab0 (controller +94, asked by 0042eb20): the remote controller's node
     // +1e8 and its association object (+60) present (+2d, +2c, !+2e); false without a node or outside remote mode.
     bool remote_node_in_active_terrain(SoloActorSimulation& actor);
+    // 134lt7: cNetNPC_NetFollow 002d2ca0 (NetNPC.c), from DoNPCMethod 002d63e0's second switch, type 0x32 (the owner's
+    // 001488f0 broadcast): with a target, cNPC_Follow 001488f0 on this controller (its virtual +88 answers 2: no send;
+    // +f4 / +100 / +104 / +108 / +10c and mode 9 at priority 100, npc_follow), then cNPC_Follow(cMessage) 00153870 with
+    // the AI message 004ee550 event 0 (+28 -1), then +214 bit 0 = 1; without one, bit 0 = 0. Remote mode only.
+    void remote_follow_002d2ca0(SoloActorSimulation& actor,std::optional<std::int32_t> target_id,float a,float b);
+    bool remote_following() const{return remote_&&(remote_->flags_214&0x01U)!=0;}
     // 133lt2 (diagnostic): how many times the remote controller's death notice +7c (002d4640) ran.
     std::uint32_t remote_death_cleanups() const{return remote_death_cleanups_;}
     // 132ln5h14c: +54 / +58 / +5c for the damage path: the remote NPC controller's 002d2a90 / 002d2aa0 / 002d2b20

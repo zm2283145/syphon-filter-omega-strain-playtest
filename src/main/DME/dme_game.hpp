@@ -327,6 +327,10 @@ void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host);
 // 134lt6: 0042d790's insert for an object whose +7c answers 0: a TransferReference {object, +c} (0036b180(8)) under +c in
 // 0x00582700 by insert_one (an existing key keeps its node; the new reference is not freed). True when inserted.
 bool terrain_activation_insert_0042d790(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object);
+// 134lt7: cNetObjectMgr_RemoveFromTerrainActivation 0042d910 (NetObjectMgr_3.c): find the object's +c in 0x00582700
+// (find_uintR_2); on a hit free the TransferReference (0036b130, "NetObjectMgr.cc" 0x1a7) and erase the node
+// (erase_tree_4). True on a hit.
+bool remove_from_terrain_activation_0042d910(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object);
 // 00438340 (from 00438770): on the host / solo, once (0x00582cf0 clear): in a level the "HeadsetSemaphore" DME object
 // (002eaf28(sp+0x48, 2, 4, 1000, 0, 0, 0, 0), the class 0x00583868; its handle into 0x00583870, its +0x1c into
 // 0x00582cf0 when 002eb650 finds it), before the level 0x00582cf0 = 0. The first call (0x00497568) runs the headset
@@ -798,6 +802,26 @@ std::uint32_t health_message_serialise_00431bc0(LevelLoadMemory& m, LevelLoadHos
 // +0xc (0040c540) takes the health +0x10 (003cc990(object, hp, 1): no message back); 0x14. Frame 0x30.
 std::uint32_t health_message_receive_00431a70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
                                               std::uint32_t stack);
+
+// ---- the network game's start NetPlayGameMsg (vtable 0x004e0ec0, name 0x00582740, serial type 0x00582738;
+// checkpoint 134eq1, the level-start roster GuiEquipmentSetup) ------------------------------------------------------
+// 00429b30 cDME_SendPlayGame: byte 0x00572400 = 1, then the message (003c9e30(msg, 0x00582740), the vtable) sent to
+// everyone (003fb020(0, msg, -1, -1)) and destroyed (003c9d60). Frame 0x40 below `stack`.
+void play_game_send_00429b30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack);
+// 00429ba0 the destructor, 00431750 the clone (0x24 bytes, "NetPlayGameMsg.hh" line 0x10), 00431900 the serialiser
+// (+0x1c = 0x40 first; the 8-byte header; the serial type *0x00582738).
+std::uint32_t play_game_message_destroy_00429ba0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                 std::uint32_t flag);
+std::uint32_t play_game_message_clone_00431750(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+std::uint32_t play_game_message_serialise_00431900(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                   std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                                   std::uint32_t buf);
+// 00431850 cNetPlayGameMsg_NetPlayGameMsgCallback (registered by 00431890 for type 2 of 0x00582738): under the busy
+// byte 0x005723c8, 0x00572400 = 1 while 0x005721d0 (the networked level) is set. Returns 8.
+std::uint32_t play_game_receive_00431850(LevelLoadMemory& m);
+// 0042b4e0: a level-info send queued for a client (0x00572428 / 0x0057242c / 0x00572430) is due at or past the
+// threshold from the TIM0 count 0x00572538 (v < 0x0ffffffe and v >= threshold).
+bool level_info_pending_0042b4e0(LevelLoadMemory& m);
 
 // ---- the damage message MSGLIB_DAMAGE_REQUEST (vtable 0x004e08a0, type 0x005716f0, serial type 0x005716f8;
 // 132ln5h14c, 4.27). 003ccb00 (the human's +0x100) builds it with 003c9e30: +0x24 the amount (word), +0x28 the

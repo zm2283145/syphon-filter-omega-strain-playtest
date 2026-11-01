@@ -320,6 +320,7 @@ target_sources(omega_core PRIVATE src/main/guiManager/gui_personnel.cpp)
 target_sources(omega_core PRIVATE src/main/guiManager/gui_online_connect.cpp)
 # Checkpoint 132ln3: GuiMissionSetup (MSNSETUP.GUI) and its PORT-ONLY LAN host.
 target_sources(omega_core PRIVATE src/main/guiManager/gui_mission_setup.cpp)
+target_sources(omega_core PRIVATE src/main/guiManager/gui_equipment_setup.cpp)
 target_sources(omega_core PRIVATE src/main/guiManager/gui_account_login.cpp)
 # Checkpoint 132ln4: GuiNetJoinMission / GuiLobbyScreen (JOINMIS.GUI), GuiMissionList, GuiChatWindow; the PORT-ONLY LAN join.
 target_sources(omega_core PRIVATE src/main/guiManager/gui_net_join_mission.cpp)

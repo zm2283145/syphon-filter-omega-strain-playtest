@@ -1450,8 +1450,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                 if (!gobj) throw std::runtime_error("SetDisplayLabel without a GOBJ handle");
                 const auto owner = net_hud_->owner ? net_hud_->owner(*gobj) : std::nullopt;
                 if (!owner)
-                    throw std::runtime_error("unhosted(0x227a90): SetDisplayLabel's GOBJ owner (cNetObj_GetOwner) in a "
-                                             "network game for an object the play does not own-map");
+                    throw std::runtime_error("unhosted(0x227a90): SetDisplayLabel's GOBJ owner (cNetObj_GetOwner 003fb340) "
+                                             "without the network game's NetMap");
                 show = *owner == net_hud_->local_client;
                 m.recipient = *owner;
             }

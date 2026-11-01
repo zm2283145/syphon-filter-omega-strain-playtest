@@ -939,6 +939,7 @@ void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widge
         // 0035bf70: 00373670(00535d20), the light table only the figure
         // render 0035b390 reads (character_display_draw), then 0041e470.
         break;
+    case WidgetClass::eqsetup:   // 134eq1: GuiEquipmentSetup 002a2ec0: cLightMan_BuildVisibleLightSubset 00373670(00535d20), 0041e470
     case WidgetClass::eqmodify:  // GuiEquipmentModify 002c0380: the same 00373670(00535d20), then 0041e470
         // 132ws6: in game state 0x12 after the level load, over the level's pools; the level's first world
         // update reads the last such table.

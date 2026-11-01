@@ -194,6 +194,7 @@ const char* class_id(WidgetClass c) {
     case WidgetClass::netmsgarray: return "GuiNetMessageArray";  // 00349180 (checkpoint 132on2c)
     case WidgetClass::netcontacts: return "GuiNetContacts";      // checkpoint 132on2h
     case WidgetClass::netagencycell: return "GuiNetAgencyCell";  // checkpoint 132on2i
+    case WidgetClass::eqsetup: return "GuiEquipmentSetup";        // checkpoint 134eq1 (002a47e0)
     case WidgetClass::canvas: return "GuiFrontendCanvas";
     }
     return "";
@@ -538,6 +539,25 @@ void GuiHost::eqm_accept(const std::array<std::int32_t, 10>&, std::int32_t) {
 }
 void GuiHost::eqm_start() { unhosted(0x36a0f0, "the level start after the loadout screen"); }
 void GuiHost::eqm_resume() { unhosted(0x12eee0, "the game resume after the loadout screen"); }
+std::optional<GuiHost::NetPlayer> GuiHost::es_player(std::int32_t) { unhosted(0x3fb8d0, "the network game's player map"); }
+void GuiHost::es_set_status(std::int32_t, std::uint8_t) { unhosted(0x184c60, "a network player's status"); }
+std::uint8_t GuiHost::es_local_status() { unhosted(0x184c80, "the local player's status"); }
+void GuiHost::es_set_local_status(std::uint8_t) { unhosted(0x184c60, "the local player's status"); }
+void GuiHost::es_write_headset(std::int32_t) { unhosted(0x2a3314, "the network block's headset byte +33"); }
+std::int32_t GuiHost::es_headset_owner() { unhosted(0x437600, "the headset semaphore's owner"); }
+std::int32_t GuiHost::es_valid_clients() { unhosted(0x2ebec8, "the session's valid client count"); }
+std::int32_t GuiHost::es_player_map_count() { unhosted(0x2a3ba0, "the client map 0055c770's size"); }
+bool GuiHost::es_admission_pending() { unhosted(0x42b4e0, "the pending client world sends"); }
+bool GuiHost::es_play_game() { unhosted(0x572400, "the network game's play flag 00572400"); }
+void GuiHost::es_send_play_game() { unhosted(0x429b30, "cDME_SendPlayGame"); }
+std::uint8_t GuiHost::es_byte_5723f8() { unhosted(0x5723f8, "the byte 005723f8"); }
+void GuiHost::es_set_byte_5723f8(std::uint8_t) { unhosted(0x5723f8, "the byte 005723f8"); }
+void GuiHost::es_lobby_started() { unhosted(0x4294c0, "the lobby's game-started mark +26a0"); }
+std::int32_t GuiHost::es_disguise_count() { unhosted(0x55de94, "the level's DISGUISE_ skeleton count 0055de94"); }
+void GuiHost::es_send_agent_data() { unhosted(0x12eee0, "cGameSystem_SendAgentData"); }
+void GuiHost::es_sound(const std::array<char, 8>&, std::uint32_t) { unhosted(0x1ca210, "the roster's player sound"); }
+std::string GuiHost::es_agent_rank(std::int32_t) { unhosted(0x336110, "a network player's rank text"); }
+void GuiHost::es_clear_pending() { unhosted(0x168844, "the loadout pending byte 004ffc29"); }
 std::int32_t GuiHost::port_cheat_count() { return 0; }
 bool GuiHost::port_cheat_action(std::int32_t) { return false; }
 bool GuiHost::port_cheat_on(std::int32_t) { return false; }
@@ -717,6 +737,7 @@ Widget* GuiRuntime::make_widget(WidgetClass cls) {
     if (cls == WidgetClass::port_cheats) w->pc = std::make_unique<Widget::PortCheats>();
     if (cls == WidgetClass::port_settings) w->port_settings_rows = std::make_unique<Widget::PortSettingsRows>();
     if (cls == WidgetClass::eqmodify) w->em = std::make_unique<Widget::EquipModify>();
+    if (cls == WidgetClass::eqsetup) w->eqs = std::make_unique<Widget::EquipSetup>();  // 002a47e0 (134eq1)
     if (cls == WidgetClass::chardisplay) w->bm = std::make_unique<Widget::Bitmap>();   // PORT-ONLY: the 132cc4b preview texture
     if (cls == WidgetClass::agentsave) {  // 00293fc0: the GuiSaveAgentWidget (+48 -2), +78 10.0f, byte +7c 1
         w->as = std::make_unique<Widget::AgentSave>();
@@ -803,6 +824,7 @@ Widget* GuiRuntime::make_widget(WidgetClass cls) {
     if (cls == WidgetClass::agentmod) am_construct(made);  // 00343e10
     if (cls == WidgetClass::agentcreate) ac_construct(made);  // 0028f760
     if (cls == WidgetClass::eqmodify) em_build(made);  // 002c1100
+    if (cls == WidgetClass::eqsetup) eqs_construct(made);  // 002a47e0
     return made;
 }
 
@@ -848,6 +870,7 @@ Widget* GuiRuntime::new_widget(const std::string& name) {  // 0041f960
     if (id == "GuiEquipmentPane") return make_widget(WidgetClass::equippane);    // vtable 004e12f0 (0041f690)
     if (id == "GuiCharacterDisplay") return make_widget(WidgetClass::chardisplay);  // 00326860
     if (id == "GuiEquipmentModify") return make_widget(WidgetClass::eqmodify);  // 002c1100 (vtable 004ddee0)
+    if (id == "GuiEquipmentSetup") return make_widget(WidgetClass::eqsetup);    // 002a47e0 (vtable 004dd7c0)
     if (id == "GuiScoresEquip") return make_widget(WidgetClass::scoresequip);    // 0035d430
     if (id == "GuiAgentModify") return make_widget(WidgetClass::agentmod);     // 00343e10 (00441d00)
     if (id == "GuiAgentCreate") return make_widget(WidgetClass::agentcreate);  // 0028f760 (0041f690)
@@ -1158,6 +1181,10 @@ void GuiRuntime::v_init(Widget* w) {
         em_init(w);
         return;
     }
+    if (w->cls == WidgetClass::eqsetup) {
+        eqs_init(w);
+        return;
+    }
     if (w->cls == WidgetClass::agentmod) {
         am_init(w);
         return;
@@ -1241,6 +1268,7 @@ void GuiRuntime::v_wake(Widget* w) {
     case WidgetClass::endstats: es_wake(w); break;
     case WidgetClass::endawards: aw_wake(w); break;
     case WidgetClass::autosaver: asv_wake(w); break;
+    case WidgetClass::eqsetup: eqs_wake(w); break;  // 002a3bb0
     default: base_wake(w); break;
     }
 }
@@ -1355,6 +1383,7 @@ std::uint8_t GuiRuntime::v_input(Widget* w, const PadEvent& ev) {
     case WidgetClass::port_cheats: return pc_input(w, ev);
     case WidgetClass::port_settings: return ps_input(w, ev);
     case WidgetClass::eqmodify: return em_input(w, ev);
+    case WidgetClass::eqsetup: return eqs_input(w, ev);  // 002a1d20
     case WidgetClass::agentmod: return am_input(w, ev);
     case WidgetClass::agentcreate: return ac_input(w, ev);
     case WidgetClass::agentsave: return as_input(w, ev);
@@ -1386,8 +1415,9 @@ void GuiRuntime::v_update(Widget* w, float dt) {
     else if (w->cls == WidgetClass::port_settings) ps_update(w, dt);
     else if (w->cls == WidgetClass::eqmodify) {  // 002c03c0: 0041e3b0, then the network game's host wait
         base_update(w, dt);
-        if (g.b_21c8) unhosted(0x2c0400, "EQMODIFY's network countdown (003fb8d0 / *00506518)");
+        if (g.b_21c8) em_net_update(w, dt);  // 134eq1
     }
+    else if (w->cls == WidgetClass::eqsetup) eqs_update(w, dt);  // 002a2f00 (its 0041e3b0 last)
     else if (w->cls == WidgetClass::agentmod) am_update(w, dt);
     else if (w->cls == WidgetClass::agentcreate) ac_update(w, dt);
     else if (w->cls == WidgetClass::agentinfo) ai_update(w, dt);
@@ -1455,6 +1485,7 @@ std::uint8_t GuiRuntime::v_event(Widget* w, Widget* sender, std::uint32_t type, 
     case WidgetClass::port_cheats: return pc_event(w, sender, type, a3, t0);
     case WidgetClass::port_settings: return ps_event(w, sender, type, a3, t0);
     case WidgetClass::eqmodify: return em_event(w, sender, type, a3, t0);
+    case WidgetClass::eqsetup: return eqs_event(w, sender, type, a3, t0);  // 002a2170
     case WidgetClass::startback:  // 00456f40
         if ((type & 0xffff) == 0x10 && (a3 == 2 || a3 == 3)) return 1;
         return base_event(w, sender, type, a3, t0);
@@ -2483,6 +2514,7 @@ void GuiRuntime::destroy(Widget* w) {  // vt +8 (0041f370 / 0041c6a0 / 0041a060 
     if (w->deleted) unhosted(0x36b130, "double free of a widget");
     w->deleted = true;
     if (w->cls == WidgetClass::eqmodify && w->em) em_ring_release(w);  // 002c0f00
+    if (w->cls == WidgetClass::eqsetup && w->eqs) eqs_destroy(w);       // 002a45a0
     for (Widget* c : w->children) destroy(c);
 }
 
@@ -9525,7 +9557,9 @@ void GuiRuntime::em_build(Widget* w) {  // 002c1100 (the player copy)
     e.cat_84 = -1;
     e.point_88 = 2;
     e.fc = 0;
-    e.player = host_.scores_attach(0);  // +48: solo, the game's player 0
+    // +48 = 003fb8d0(*00506500): GuiEquipmentSetup's update stores the local player's index there (134eq1); solo
+    // play never writes it (0, the game's player 0).
+    e.player = host_.scores_attach(g.es_506500);
     e.preview = e.player;               // 0038c920 / 003913d0: the preview copies the player's model
     if (e.player[0] != em_empty) {
         const auto r = host_.weapon_record(e.player[0]);
@@ -9626,8 +9660,8 @@ void GuiRuntime::em_init(Widget* w) {  // 002c0790
     };
     Widget* agent = text("value_agent");
     Widget* rank = text("value_rank");
-    if (host_.scores_agent_b70(0)) {  // 00185c70(+48) +b70
-        put(agent, host_.scores_agent_name(0), 0x2c0a54);  // 00336170
+    if (host_.scores_agent_b70(g.es_506500)) {  // 00185c70(+48) +b70
+        put(agent, host_.scores_agent_name(g.es_506500), 0x2c0a54);  // 00336170
         put(rank, host_.eqm_agent_rank(), 0x2c0a74);       // 00336110
     } else {
         put(agent, std::string("Player"), 0x2c0a94);
@@ -9651,8 +9685,7 @@ void GuiRuntime::em_init(Widget* w) {  // 002c0790
     e.waiting = text("waitingforhost");
     const auto cd = host_.get_string("EQS_COUNTDOWN");
     e.countdown = cd ? *cd : std::string("Starting in %d Seconds...");  // 0048ba80
-    if (g.b_21c8) unhosted(0x2c0e2c, "the network session *00506508 of EQMODIFY's \"waitingforhost\"");
-    if (e.waiting) e.waiting->flags &= ~flag_visible;
+    if ((g.es_506508 == 0 || !g.b_21c8) && e.waiting) e.waiting->flags &= ~flag_visible;  // 002c0e2c
     if (Widget* p = text("previousmenu")) put(p, host_.get_string(g.b_21c8 ? "ExitScreen" : "ExitMission"), 0x2c0edc);
 }
 
@@ -9688,14 +9721,26 @@ std::uint8_t GuiRuntime::em_input(Widget* w, const PadEvent& ev) {  // 002bcb50
             }
         }
         host_.eqm_accept(p, e.fc);  // 00143b60 .. 00142c50 on the player's inventory (+48 +3524)
-        if (g.b_21c8) unhosted(0x418a80, "the network game's GuiEquipmentSetup \"eqsetup\" (002bcd48)");
+        if (g.b_21c8) {  // 002bcd48 (134eq1): the network game goes back to the roster
+            Widget* s = factory("GuiEquipmentSetup", std::string("eqsetup"));  // 00418a80(00414790(), ...)
+            if (!s) unhosted(0x2bcd48, "00418a80 GuiEquipmentSetup \"eqsetup\" failed");
+            switch_screens(w, s);  // 00414ac0(004147a0(), w, eqsetup)
+            host_.eqm_resume();    // 0012eee0(G, 0, 0)
+            return 1;
+        }
         host_.eqm_start();           // byte 004ffc29 = 0; 0036a0f0(0055a300)
         switch_screens(w, nullptr);  // 00414ac0(004147a0(), w, 0)
         host_.eqm_resume();          // 0012eee0(G, 0, 0)
         return 1;
     }
     if (pressed(pad_triangle)) {  // Triangle: quit
-        if (g.b_21c8) unhosted(0x418a80, "the network game's GuiEquipmentSetup \"eqsetup\" (002bce20)");
+        if (g.b_21c8) {  // 002bce20 (134eq1): back to the roster without the Accept
+            Widget* s = factory("GuiEquipmentSetup", std::string("eqsetup"));
+            if (!s) unhosted(0x2bce20, "00418a80 GuiEquipmentSetup \"eqsetup\" failed");
+            switch_screens(w, s);
+            host_.eqm_resume();  // 0012eee0(G, 0, 0)
+            return 1;
+        }
         const auto title = host_.get_string("QuitTitle");
         const auto message = host_.get_string("QuitMessage");
         if (title && message) popup_open(5, title, message, w, 0);  // 002cae30(app, 5, ...)

@@ -1412,6 +1412,18 @@ bool terrain_activation_insert_0042d790(LevelLoadMemory& m, LevelLoadHost& host,
     return true;
 }
 
+// 134lt7 (the header): 0042d910.
+bool remove_from_terrain_activation_0042d910(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object) {
+    constexpr std::uint32_t map = 0x582700;
+    const auto node = rb_map_find(m, map, r32(m, object + 0xc));
+    if (node == map + 4) return false;
+    heap_enter(m, host);
+    host.call(m, 0x36b130, {0, r32(m, node + 0x10), 0x4bfb00, 0x1a7});
+    heap_leave(m, host);
+    rb_map_erase(m, host, map, node, 0x4bfb98);
+    return true;
+}
+
 // 003fbcd0, cNetObj_Clear, runs after the end screens and before the level's
 // GOBJ destruction. The NetObj and client maps own their tree nodes, not the
 // receivers. The NPC/GenInfo constructors make temporary stack objects whose
@@ -3628,6 +3640,69 @@ std::uint32_t health_message_receive_00431a70(LevelLoadMemory& m, LevelLoadHost&
     }
     w8(m, kBusy, 0);
     return 0x14;
+}
+
+// ---- the network game's start NetPlayGameMsg (vtable 0x004e0ec0; checkpoint 134eq1) --------------------------------
+namespace {
+constexpr std::uint32_t kPlayGameMessage = 0x4e0ec0, kPlayGameType = 0x582740, kPlayGameSerialType = 0x582738;
+constexpr std::uint32_t kPlayGame = 0x572400;
+}  // namespace
+
+void play_game_send_00429b30(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t stack) {
+    const auto msg = stack - 0x40 + 0x10;
+    w8(m, kPlayGame, 1);
+    host.call(m, 0x3c9e30, {msg, kPlayGameType});
+    w32(m, msg, kPlayGameMessage);
+    host.call(m, 0x3fb020, {0, msg, 0xffffffffU, 0xffffffffU});
+    w32(m, msg, kPlayGameMessage);
+    host.call(m, 0x3c9d60, {msg, 0});
+}
+
+std::uint32_t play_game_message_destroy_00429ba0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                 std::uint32_t flag) {
+    return generator_message_destroy(m, host, msg, flag, kPlayGameMessage);
+}
+
+std::uint32_t play_game_message_clone_00431750(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x24, 0x4bfbe0, 0x10});  // "NetPlayGameMsg.hh"
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, kPlayGameMessage);
+    }
+    return copy;
+}
+
+std::uint32_t play_game_message_serialise_00431900(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                                   std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                                   std::uint32_t buf) {
+    if (cap < 8 || !buf) return 0xffffffffU;
+    w32(m, msg + 0x1c, 0x40);
+    message_header_003c9ca0(m, host, msg, key, cap, buf);
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, kPlayGameSerialType));
+    return 8;
+}
+
+std::uint32_t play_game_receive_00431850(LevelLoadMemory& m) {
+    if (r8(m, kBusy) == 0) w8(m, kBusy, 1);
+    if (r8(m, kInLevel)) w8(m, kPlayGame, 1);
+    w8(m, kBusy, 0);
+    return 8;
+}
+
+bool level_info_pending_0042b4e0(LevelLoadMemory& m) {
+    const auto ticks = static_cast<std::int32_t>(r32(m, 0x572538));
+    const auto threshold = static_cast<std::uint32_t>(static_cast<std::int64_t>(
+        static_cast<double>(ticks) - 0.0625 * static_cast<double>(static_cast<float>(ticks))));
+    for (const std::uint32_t a : {0x572428U, 0x57242cU, 0x572430U}) {
+        const auto v = r32(m, a);
+        if (!(v >= 0x0ffffffeU || v < threshold)) return true;
+    }
+    return false;
 }
 
 // ---- the damage message MSGLIB_DAMAGE_REQUEST (vtable 0x004e08a0; checkpoint 132ln5h14c; NET_INLEVEL.md 4.27) ------

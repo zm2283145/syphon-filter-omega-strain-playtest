@@ -54,6 +54,8 @@ struct NpcRemoteState {
     std::uint16_t burst_1ec{};          // +1ec: 002d48f0's remaining shots
     std::uint8_t mode_1ee{};            // +1ee: the ramp mode (1 up, 2 down)
     std::uint8_t flags_214{};           // +214: bit 0 follow, bit 1 15f9b0 at activation, bit 2 node teleport
+    std::int32_t node_20c{-1};          // +20c: 0015f9b0's destination node at activation (bit 1; -1: the point +1f0)
+    RootVector point_1f0{};             // +1f0: 0015f9b0's point at activation when +20c < 0
 };
 struct NpcRemoteBurstStep {
     std::uint16_t count{};

@@ -70,6 +70,19 @@ public:
     void activate(Word npc) override;
     bool activate_component(Word npc) override;
     void deactivate_anonymous(Word npc) override;
+    // 134lt7: the network part of DeactivateAnon (cNPC_DeactivateGlobal 00157510 in a network game: 0042d910 and the
+    // peer loop), run after the controller's part with the NPC's actor (the play: LanNetCore). Unset in solo play.
+    void set_deactivate_global_net(std::function<void(std::size_t actor)> net) { deactivate_global_net_ = std::move(net); }
+    // 134lt7: Follow's network part. An AI controller (virtual +88 answers 1) is cNPC_Follow 001488f0: in a network game
+    // the cNetNPCMsgs 0x32 (len 4: every peer) first, then the follow. A remote controller is cNetNPC_Follow 002d2d50: the
+    // follow only when NpcAuth_IsLocal (`authority`: the host role), then 0x32 (len 8: the owner). `send` gets the NPC's
+    // actor, the target and the two floats, and whether the controller is remote.
+    struct FollowNet {
+        std::function<void(std::size_t actor, std::optional<Word> target, float a, float b, bool remote)> send;
+        bool authority = true;
+    };
+    void set_follow_net(FollowNet net) { follow_net_ = std::move(net); }
+    FollowNet follow_net_;
     bool deactivate(Word npc) override;
     // game::ResetNpc (00148600): nothing for a generator-spawned NPC (+3598);
     // otherwise Deactivate (+4c) and the reset host's destructor and rebuild
@@ -83,6 +96,7 @@ public:
     };
     using ResetHost = std::function<ResetActor(Word npc, std::size_t old_actor)>;
     void set_reset_host(ResetHost host) { reset_ = std::move(host); }
+    std::function<void(std::size_t actor)> deactivate_global_net_;
     bool reset_npc(Word npc) override;
     // Checkpoint 132ln5h8 (the play's LAN remote human): the NPC's actor was
     // rebuilt in place (ActorWorld::rebuild_ai) with a new controller; the

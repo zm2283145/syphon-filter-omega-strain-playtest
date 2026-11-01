@@ -215,7 +215,15 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // 134lt6: what 0042eb20 asks of a terrain-activation entry: the remote NPC controller's +0x94 (002d2ab0) and the
     // NPC block's +0x20 (001b4f40), both PORT-ONLY stand-ins answered by the play (NpcTerrainHosts).
     m.write(0x4de2a0 + 0x94, 4, kFnNpcNodeActive);
-    m.write(0x4da690 + 0x20, 4, kFnNpcNetActivate);
+    // 134lt7: the NPC block's +0x20 is cHuman_NetActivate 001b4f40 itself (npc_net_activate_001b4f40) and +0x24
+    // cHuman_NetDeactivate 001b4970 (cDeactivateMsg's receive 00429190 calls it).
+    m.write(0x4da690 + 0x20, 4, 0x1b4f40);
+    m.write(0x4da690 + 0x24, 4, 0x1b4970);
+    // 134lt7: cNetTerrainActivation 0x004e0f00's serialiser +0x10 (00431ea0; 003fb020 calls only that slot, so the
+    // destructor 001576f0 and the clone 00431c50 are not hosted) and its class name 0x00582760 (the type word *0x00582758
+    // is the registration 00431e00's).
+    m.write(0x4e0f00 + 0x10, 4, 0x431ea0);
+    m.write(0x582760, 4, 0x4e0f00);
     m.write(0x4da690 + 0xc0, 4, kFnHumanPosition);
     m.write(kHumanVtable + 0xc0, 4, kFnHumanPosition);
     // 132ln5h12: the spawn message 0x004de240 (+8 the destructor 0021df80, +0xc the clone 002d0ee0, +0x10 the
@@ -239,6 +247,11 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4e0ee0 + 0x8, 4, 0x3cc670);
     m.write(0x4e0ee0 + 0xc, 4, 0x431960);
     m.write(0x4e0ee0 + 0x10, 4, 0x431bc0);
+    // 134eq1: the NetPlayGameMsg vtable 0x004e0ec0 (+8 the destructor 00429ba0, +0xc the clone 00431750, +0x10 the
+    // serialiser 00431900; .data, DME_5.c's D_004E0EC0).
+    m.write(0x4e0ec0 + 0x8, 4, 0x429ba0);
+    m.write(0x4e0ec0 + 0xc, 4, 0x431750);
+    m.write(0x4e0ec0 + 0x10, 4, 0x431900);
     // 132ln5h14c: the damage message MSGLIB_DAMAGE_REQUEST vtable 0x004e08a0 (+8 the destructor 001880e0, +0xc the
     // clone 00407f40, +0x10 the serialiser 004083d0; .data). PORT-ONLY: the damage virtual +0x100 (003ccb00) of the
     // objects 004081e0 reaches (the players, the remote humans, the NPC blocks, the proxy) is kFnDamage (the play's).
@@ -1371,25 +1384,150 @@ void LanNetCore::npc_remote_release_002d4460(std::uint32_t c, bool terrain) {
     auto& m = memory_;
     if (pump_.joinable()) throw std::runtime_error("LAN NPC release during the background load pump");
     const auto block = npc_block(c);
-    // 0042d910 (NetObjectMgr_3.c) finds +c in 0x00582700 and, on a hit, frees the reference and erases the node. The
-    // port never inserts there, so the find misses; a populated map is refused up front (before the NPC info object
-    // is made, so a refusal leaves no pass open).
-    if (terrain && m.read(0x58270c) != 0x582704)
-        unhosted(0x42d910, "a populated terrain-activation map 0x00582700 (0042d790's inserts are not ported)");
     if (terrain && m.read(block + 0xc) != c) unhosted(0x42d910, "an NPC block whose +c is not its key");
     call(m, 0x436c00, {kGeneratorNpcInfo});
     m.write(kGeneratorKey, 4, c);
     call(m, 0x434440, {kGeneratorNpcInfo, kGeneratorKey});
+    // 134lt7: 0042d910 (NetObjectMgr_3.c) natively: a hit frees the reference and erases the node.
+    const bool hit = terrain && remove_from_terrain_activation_0042d910(m, *this, block);
     call(m, 0x436ba0, {kGeneratorNpcInfo, 0xffffffffU});
     ++npc_remote_releases_;
-    log_.push_back("002d4460: NPC +c 0x" + hex8(c) + " released without +150 (00434440" + (terrain ? ", 0042d910 miss)" : ")"));
+    log_.push_back("002d4460: NPC +c 0x" + hex8(c) + " released without +150 (00434440" +
+                   (terrain ? (hit ? ", 0042d910 hit)" : ", 0042d910 miss)") : ")"));
 }
+
+// 134lt7 (the header): 00157510's network part.
+void LanNetCore::npc_deactivate_global_00157510(std::uint32_t c, bool generator_created) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN DeactivateGlobal during the background load pump");
+    const auto block = npc_block(c);
+    const bool hit = remove_from_terrain_activation_0042d910(m, *this, block);   // 0015758c
+    std::string sent;
+    if (!generator_created && m.read(dme::kInLevel, 1)) {   // !body->IsLocal() (+7c: cHuman's +3598)
+        const auto local = generator_net_host().local_slot();
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            if (m.read(0x55c780 + i, 1) != 2 || static_cast<std::int32_t>(i) == local) continue;
+            const auto caller = sp_;
+            sp_ -= 0x100;
+            const auto m1 = sp_ + 0x40, m2 = sp_ + 0x80;
+            try {
+                // cDeactivateMsg: 003c9e30(m1, 0x00572198), vtable 004e0e80, 00429200(m1, +c, i) = 003fb020(+c, m1, -1, i).
+                call(m, 0x3c9e30, {m1, 0x572198});
+                m.write(m1, 4, 0x4e0e80);
+                call(m, 0x3fb020, {m.read(block + 0xc), m1, 0xffffffffU, i});
+                m.write(m1, 4, 0x4e0e80);
+                call(m, 0x3c9d60, {m1, 0});
+                // cNetTerrainActivation: 003c9e30(m2, 0x00582760), vtable 004e0f00, +24 = -1, +28 = 1 (the receiver's
+                // 0042d910), 003fb020(+c, m2, -1, i).
+                call(m, 0x3c9e30, {m2, 0x582760});
+                m.write(m2, 4, 0x4e0f00);
+                m.write(m2 + 0x24, 4, 0xffffffffU);
+                m.write(m2 + 0x28, 1, 1);
+                call(m, 0x3fb020, {m.read(block + 0xc), m2, 0xffffffffU, i});
+                m.write(m2, 4, 0x4e0f00);
+                call(m, 0x3c9d60, {m2, 0});
+            } catch (...) {
+                sp_ = caller;
+                throw;
+            }
+            sp_ = caller;
+            ++npc_deactivate_globals_sent_;
+            sent += " " + std::to_string(i);
+        }
+    }
+    log_.push_back("00157510: NPC +c 0x" + hex8(c) + (hit ? " (0042d910 hit)" : " (0042d910 miss)") +
+                   (generator_created ? ": generator-spawned (+7c answers), no peer messages"
+                                      : ": cDeactivateMsg + cNetTerrainActivation(1) to peers" + (sent.empty() ? std::string(" none") : sent)));
+}
+
+// 134lt7 (the header): cHuman_NetActivate 001b4f40 on an NPC block.
+void LanNetCore::npc_net_activate_001b4f40(std::uint32_t block) {
+    auto& m = memory_;
+    const auto key = m.read(block + 0xc);
+    if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != block)
+        unhosted(0x1b4f40, "the virtual +0x20 of an object that is not an NPC block");
+    if (m.read(block + 0x2d, 1) && m.read(block + 0x2c, 1) && !m.read(block + 0x2e, 1)) return;   // Ready
+    if (!npc_terrain_hosts_.net_activate) unhosted(0x1b4f40, "an NPC's NetActivate without the play's actor");
+    // 001b4fa0..001b50a8: a controller neither the player's (+54) nor already remote (+88 == 2) gets a cNetNPC.
+    const bool built = npc_remote_controller_001b4f40(key);
+    // PORT-ONLY boundary: 001b5560 (InitializationToDoUponActivation), 00392900 (cSKM_GOBJ_NetActivate), 001af460 /
+    // 001af190 and 0022c650 are the play's actor activation (with set_remote when `built`). +2d mirrors 00392900's.
+    npc_terrain_hosts_.net_activate(key, built);
+    m.write(block + 0x2d, 1, 1);
+    const auto caller = sp_;
+    sp_ -= 0x40;
+    const auto loc = sp_ + 0x38;
+    // 001b50d0..: idx = 003fb340(+c) (-1: the local index), 003fb650(+10, idx, the block); +3268 = 1; the NPC info
+    // object's SetActive 004341f0(&loc, &+c).
+    auto idx = call(m, 0x3fb340, {key});
+    if (idx == 0xffffffffU) idx = static_cast<std::uint32_t>(generator_net_host().local_slot());
+    call(m, 0x3fb650, {m.read(block + 0x10), idx, block});
+    m.write(block + 0x3268, 1, 1);
+    call(m, 0x436c00, {loc});
+    call(m, 0x4341f0, {loc, block + 0xc});
+    call(m, 0x436ba0, {loc, 0xffffffffU});
+    sp_ = caller;
+    ++npc_net_activations_;
+    log_.push_back("001b4f40: NPC +c 0x" + hex8(key) + " NetActivate (" + (built ? "cNetNPC built, " : "") + "owner " +
+                   std::to_string(static_cast<std::int32_t>(idx)) + ")");
+}
+
+// 134lt7 (the header): cHuman_NetDeactivate 001b4970's block part, from cDeactivateMsg's receive.
+void LanNetCore::npc_net_deactivate_001b4970(std::uint32_t block) {
+    const auto key = memory_.read(block + 0xc);
+    if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != block)
+        unhosted(0x1b4970, "the virtual +0x24 of an object that is not an NPC block");
+    npc_deactivate_001b4970(key);
+    remote_npc_deactivates_.push_back(key);
+    ++npc_deactivates_received_;
+    log_.push_back("00429190 -> 001b4970: NPC +c 0x" + hex8(key) + " NetDeactivate");
+}
+
+std::vector<std::uint32_t> LanNetCore::take_remote_npc_deactivates() {
+    if (pump_.joinable()) throw std::runtime_error("LAN NetDeactivate access during the background load pump");
+    std::vector<std::uint32_t> out;
+    out.swap(remote_npc_deactivates_);
+    return out;
+}
+
+// 134lt7: cNetTerrainActivation_NetTerrainActivationCallback 00431d60 (NetSetGobjMsg.c): with 0x005721d0,
+// 0040c540(&packet +4); an object gets 0042d790 when the short +a is 0, else 0042d910. Returns 0xc.
+std::uint32_t LanNetCore::receive_terrain_activation_00431d60(std::uint32_t buf) {
+    auto& m = memory_;
+    const bool busy = m.read(dme::kBusy, 1) != 0;
+    if (!busy) m.write(dme::kBusy, 1, 1);
+    try {
+        if (m.read(dme::kInLevel, 1)) {
+            const auto key = m.read(buf + 4);
+            m.write(kGeneratorKey, 4, key);
+            const auto object = npc_blocks_.contains(key) ? npc_blocks_.at(key) : call(m, 0x40c540, {kGeneratorKey});
+            const bool remove = m.read(buf + 0xa, 2) != 0;
+            if (object) {
+                if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != object)
+                    unhosted(0x431d60, "a terrain activation for an object that is not an NPC block");
+                if (remove) {
+                    const bool hit = remove_from_terrain_activation_0042d910(m, *this, object);
+                    log_.push_back("00431d60: cNetTerrainActivation(1) for +c 0x" + hex8(key) + (hit ? ": 0042d910 hit" : ": 0042d910 miss"));
+                } else {
+                    npc_terrain_activation_0042d790(key, npc_generators_.contains(key) && npc_generators_.at(key) != 0, false);
+                }
+                ++terrain_activations_received_;
+            }
+        }
+    } catch (...) {
+        if (!busy) m.write(dme::kBusy, 1, 0);
+        throw;
+    }
+    if (!busy) m.write(dme::kBusy, 1, 0);
+    return 0xc;
+}
+void LanNetCore::set_local_logic_gate_3269(std::uint8_t gate) { memory_.write(kLocalPlayer + 0x3269, 1, gate); }
 void LanNetCore::npc_netmap_insert(std::uint32_t c, std::int32_t owner) {
     call(memory_, 0x3fb650, {c, static_cast<std::uint32_t>(owner), npc_block(c)});
 }
 
 // 134lt6 (the header): 0042d790 for an NPC.
-void LanNetCore::npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created) {
+void LanNetCore::npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created, bool lost_contact) {
     npc_block(c);
     if (generator_created) {
         log_.push_back("0042d790: NPC +c 0x" + hex8(c) + " is generator-spawned (+7c answers): nothing");
@@ -1398,7 +1536,7 @@ void LanNetCore::npc_terrain_activation_0042d790(std::uint32_t c, bool generator
     auto& m = memory_;
     if (pump_.joinable()) throw std::runtime_error("LAN terrain activation during the background load pump");
     const auto block = npc_block(c);
-    m.write(block + 0x2d, 1, 0);  // PORT-ONLY: the actor's +60(1) just before (002d5160)
+    if (lost_contact) m.write(block + 0x2d, 1, 0);  // PORT-ONLY: the actor's +60(1) just before (002d5160)
     const bool inserted = terrain_activation_insert_0042d790(m, *this, block);
     const auto controller = m.read(block + 0x58);
     const bool handled = controller && call(m, m.read(m.read(controller) + 0x5c), {controller}) != 0;
@@ -2189,6 +2327,68 @@ void LanNetCore::record_lower() { net_record_aim_mode_00249420(memory_, kLocalIn
 
 void LanNetCore::record_clear_point() { net_record_clear_point_00249460(memory_, kLocalInput, kLocalPlayer); }
 
+std::uint32_t LanNetCore::human_by_key(std::uint32_t key) const {
+    if (!key) return 0;
+    if (key == local_player_key()) return kLocalPlayer;  // its block +0x3584 is 0 until 001b53d0 links it
+    for (const auto& [k, human] : remote_keys_)
+        if (k == key) return human;
+    return 0;
+}
+
+std::uint8_t LanNetCore::human_status(std::uint32_t key) const {  // 00184c80
+    const auto human = human_by_key(key);
+    if (!human) unhosted(0x184c80, "the status of a human the network game does not have");
+    const auto block = memory_.read(human + 0x3584);
+    return block ? static_cast<std::uint8_t>(memory_.read(block + 0x32, 1)) : 0;
+}
+
+void LanNetCore::set_human_status(std::uint32_t key, std::uint8_t status) {  // 00184c60
+    const auto human = human_by_key(key);
+    if (!human) unhosted(0x184c60, "the status of a human the network game does not have");
+    if (const auto block = memory_.read(human + 0x3584)) memory_.write(block + 0x32, 1, status);
+}
+
+std::uint8_t LanNetCore::human_headset(std::uint32_t key) const {  // 00184ca0
+    const auto human = human_by_key(key);
+    if (!human) unhosted(0x184ca0, "the headset of a human the network game does not have");
+    const auto block = memory_.read(human + 0x3584);
+    return block ? static_cast<std::uint8_t>(memory_.read(block + 0x33, 1)) : 0;
+}
+
+void LanNetCore::write_human_headset(std::uint32_t key) {  // 002a2f00: s->b33 = byte 00582b88
+    const auto human = human_by_key(key);
+    if (!human) unhosted(0x2a3314, "the headset of a human the network game does not have");
+    if (const auto block = memory_.read(human + 0x3584))
+        memory_.write(block + 0x33, 1, memory_.read(0x582b88, 1));
+}
+
+std::int32_t LanNetCore::valid_client_count() const {
+    return static_cast<std::int32_t>(transport_.clients().size()) + 1;  // the connected peers and the local client
+}
+
+std::int32_t LanNetCore::player_map_count() {
+    std::int32_t n = 0;
+    for (std::int32_t c = 0; c < 4; ++c)
+        if (client_player_003fb8d0(c)) ++n;
+    return n;
+}
+
+bool LanNetCore::level_info_pending() { return level_info_pending_0042b4e0(memory_); }
+
+void LanNetCore::send_play_game() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN NetPlayGameMsg send during background load pump; defer until stop_load_pump");
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    try {
+        play_game_send_00429b30(memory_, *this, caller);
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
 std::optional<std::uint8_t> LanNetCore::record_point_flag(std::uint32_t key) const {
     std::uint32_t block = 0;
     if (key == 0 || key == local_player_key()) {
@@ -2814,7 +3014,26 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         return receive_world_message(address, arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);
-    case 0x429190: return receive_objective_active(arg(3), false);
+    case 0x429190: {  // 134lt7: 00429190 calls the NetObj entry's +0x24; an NPC block's is 001b4970
+        if (m.read(dme::kInLevel, 1)) {
+            const auto key = m.read(arg(3) + 4);
+            if (const auto entry = call(m, 0x3fbb10, {key}); entry && m.read(entry) && npc_blocks_.contains(key) &&
+                                                              npc_blocks_.at(key) == m.read(entry)) {
+                const bool busy = m.read(dme::kBusy, 1) != 0;
+                if (!busy) m.write(dme::kBusy, 1, 1);
+                try {
+                    const auto object = m.read(entry);
+                    call(m, m.read(m.read(object) + 0x24), {object});
+                } catch (...) {
+                    if (!busy) m.write(dme::kBusy, 1, 0);
+                    throw;
+                }
+                if (!busy) m.write(dme::kBusy, 1, 0);
+                return 8;
+            }
+        }
+        return receive_objective_active(arg(3), false);
+    }
     case 0x1770f0: { Frame f(sp_); player_net_update_001770f0(m, *this, arg(0), arg(1), f.caller); return 0; }
     case 0x184cc0: return 1;  // the actor's virtual +0x18: networked
     case 0x132280: {  // PORT-ONLY: the player's placement (virtual +0xf4) into a0: the component's +0x10 matrix
@@ -3009,6 +3228,12 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x431960: { Frame f(sp_); return health_message_clone_00431960(m, *this, arg(0)); }
     case 0x431bc0: { Frame f(sp_); return health_message_serialise_00431bc0(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
     case 0x431a70: { Frame f(sp_); ++healths_received_; return health_message_receive_00431a70(m, *this, arg(3), f.caller); }
+    // 134eq1: the network game's start NetPlayGameMsg (vtable 0x004e0ec0) and its receive (00431890 registers 00431850).
+    case 0x429b30: { Frame f(sp_, 0x100); play_game_send_00429b30(m, *this, f.caller); return 0; }
+    case 0x429ba0: { Frame f(sp_); return play_game_message_destroy_00429ba0(m, *this, arg(0), arg(1)); }
+    case 0x431750: { Frame f(sp_); return play_game_message_clone_00431750(m, *this, arg(0)); }
+    case 0x431900: { Frame f(sp_); return play_game_message_serialise_00431900(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x431850: { ++play_games_received_; log_.push_back("00431850: NetPlayGameMsg received (00572400 set while 005721d0)"); return play_game_receive_00431850(m); }
     // 132ln5h14c: the damage message (vtable 0x004e08a0) and its receive (net_registrations: 004081e0 for 0x005716f8).
     case 0x1880e0: { Frame f(sp_); return damage_message_destroy_001880e0(m, *this, arg(0), arg(1)); }
     case 0x407f40: { Frame f(sp_); return damage_message_clone_00407f40(m, *this, arg(0)); }
@@ -3213,16 +3438,21 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         if (!npc_terrain_hosts_.node_active) unhosted(0x2d2ab0, "the remote NPC's node terrain without the play's host");
         return npc_terrain_hosts_.node_active(key) ? 1U : 0U;
     }
-    case kFnNpcNetActivate: {  // PORT-ONLY: cHuman_NetActivate 001b4f40 (virtual +0x20) of an NPC block: the play's
-        const auto key = m.read(arg(0) + 0xc);
-        if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != arg(0))
-            unhosted(0x1b4f40, "the virtual +0x20 of an object that is not an NPC block");
-        if (!npc_terrain_hosts_.net_activate) unhosted(0x1b4f40, "an NPC's NetActivate without the play's host");
-        npc_terrain_hosts_.net_activate(key);
-        m.write(arg(0) + 0x2d, 1, 1);
-        ++npc_net_activations_;
-        log_.push_back("0042eb20 -> 001b4f40: NPC +c 0x" + hex8(key) + " reactivated (its node's terrain is active)");
-        return 0;
+    case 0x1b4f40: { Frame f(sp_); npc_net_activate_001b4f40(arg(0)); return 0; }   // 134lt7: cHuman_NetActivate
+    case 0x1b4970: { Frame f(sp_); npc_net_deactivate_001b4970(arg(0)); return 0; }   // 134lt7: cHuman_NetDeactivate
+    case 0x431d60: return receive_terrain_activation_00431d60(arg(3));   // 134lt7: cNetTerrainActivation's receive
+    case 0x431ea0: {  // 134lt7: cNetTerrainActivation_Pack (00431ea0): header, +8 short = +24, +a short = byte +28; +1c = 0x40
+        if (arg(5) < 8 || !arg(6)) return 0xffffffffU;
+        const auto transport = static_cast<std::int32_t>(m.read(arg(0) + 0x18));
+        m.write(arg(6), 4, call(m, 0x42b1a0, {0}) << 2 |
+                                 (transport < 4 ? static_cast<std::uint32_t>(transport) & 3U : 3U));
+        m.write(arg(6) + 4, 4, arg(1));
+        if (arg(5) < 12) return 0xffffffffU;
+        m.write(arg(6) + 8, 2, m.read(arg(0) + 0x24) & 0xffffU);
+        m.write(arg(6) + 0xa, 2, m.read(arg(0) + 0x28, 1));
+        m.write(arg(0) + 0x1c, 4, 0x40);
+        if (arg(2)) m.write(arg(2), 4, m.read(0x582758));
+        return arg(2) ? 12U : 0xffffffffU;
     }
     case kFnParticleEnable:
     case kFnParticleDisable: {  // PORT-ONLY: the particle's virtual +0x28 (001c5650) / +0x2c (001c5660): the play's
@@ -3323,6 +3553,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     particle_receiver_ = {};
     npc_terrain_hosts_ = {};
     remote_npc_messages_.clear();
+    remote_npc_deactivates_.clear();
     particle_blocks_.clear();
     next_particle_ = kParticles;
     npc_control_handler_ = {};
@@ -3569,10 +3800,15 @@ void LanNetCore::net_frame() {
     }
 }
 
-// 001b1710 from its entry: +0x3269 set takes 001b2650 (not ported); else its network section (the rest, from
-// 001b1bf0, is the play's human update). Frame 0x340.
+// 001b1710 from its entry: +0x3269 set branches to 001b2650, the function's epilogue (134lt7: the disassembly,
+// 001b1730..001b1734 / 001b2650..001b266c): the update returns at once, no network section. +3269 is the revive's
+// gate (Actor_Revive 001898f0 sets it at 00189d3c, Actor_FireRespawnTimer 001ba130 clears it at 001ba228). Else the
+// network section (the rest, from 001b1bf0, is the play's human update). Frame 0x340.
 void LanNetCore::human_update_001b1710(std::uint32_t human) {
-    if (memory_.read(human + 0x3269, 1)) unhosted(0x1b2650, "a human whose +0x3269 is set (001b1710's other update)");
+    if (memory_.read(human + 0x3269, 1)) {
+        ++sections_gated_3269_;
+        return;
+    }
     const auto caller = sp_;
     sp_ -= 0x400;
     section_human_ = human;

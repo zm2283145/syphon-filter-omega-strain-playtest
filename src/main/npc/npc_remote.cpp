@@ -5,6 +5,8 @@
 #include "actor_object_action.hpp"
 #include "npc_attack.hpp"
 #include "npc_death_notice.hpp"
+#include "npc_follow.hpp"
+#include "npc_script_control.hpp"
 #include "npc_route.hpp"
 #include "vu_float.hpp"
 #include <bit>
@@ -239,10 +241,24 @@ void NpcAiController::remote_activate(SoloActorSimulation& actor){
     start_npc_path_follower(c.path,graph_,npc_path_host(h),system_.routes);  // 00160f60
     npc_reroll_burst(c,ops,actor_id_,h.random);                               // 0014fc60
     if(!events.empty())throw std::runtime_error("NPC AI: the remote NPC's Activate made inventory events");
-    if(r.flags_214&0x02U)
-        throw std::runtime_error("NPC AI: the remote NPC's Activate with +214 bit 1 (the route request 0015f9b0 to +208) is not ported");
+    if(r.flags_214&0x02U){                                                     // 002d43f0..: 0015f9b0(+1b0, +208, ...)
+        if(!system_.routes)throw std::runtime_error("NPC AI: the remote NPC's Activate route request 0015f9b0 needs the route manager");
+        if(r.node_20c>=0)npc_route_request_15f9b0(*system_.routes,c.path,route_client_,r.node_208,r.node_20c,nullptr);
+        else npc_route_request_15f9b0(*system_.routes,c.path,route_client_,r.node_208,-1,&r.point_1f0);
+        r.flags_214=static_cast<std::uint8_t>(r.flags_214&~0x02U);
+    }
     r.timer_204=0.0F;
     c.inactive_159=0;
+}
+void NpcAiController::remote_follow_002d2ca0(SoloActorSimulation& actor,std::optional<std::int32_t> target_id,float a,float b){
+    if(!remote_)throw std::runtime_error("NPC AI: cNetNPC_NetFollow 002d2ca0 outside the remote controller");
+    if(!target_id){remote_->flags_214=static_cast<std::uint8_t>(remote_->flags_214&~0x01U);return;}
+    route_actor_=&actor;
+    npc_follow(component_,target_id,a,b);                                      // 001488f0 (+88 = 2: no 0x32 send)
+    auto h=host(actor);
+    NpcAiMessage m;m.kind=NpcAiMessage::Kind::ai;m.event=0;m.value=-1;         // 004ee550, +24 0, +28 -1
+    npc_follow_mode(component_,m,h);                                           // 00153870
+    remote_->flags_214=static_cast<std::uint8_t>(remote_->flags_214|0x01U);
 }
 bool NpcAiController::remote_node_in_active_terrain(SoloActorSimulation& actor){
     if(!remote_||remote_->node_1e8<0)return false;                             // b = +1e8 null: 0
@@ -384,7 +400,10 @@ void NpcAiController::remote_update(SoloActorSimulation& actor,float dt){
             r.flags_214=static_cast<std::uint8_t>(r.flags_214&~0x04U);
         }else if(r.flags_214&0x01U){
             r.mode_1ee=1;
-            throw std::runtime_error("NPC AI: the remote NPC's follow (+214 bit 0: 00153870 with the cNetHuman's target) is not ported");
+            // 002d53f8..: 0040c540(&+f4) (its answer is not read), then 00153870 with the AI message 004ee550 event 2
+            // (the tick; +28 -1) on this controller (134lt7).
+            NpcAiMessage fm;fm.kind=NpcAiMessage::Kind::ai;fm.event=2;fm.value=-1;
+            npc_follow_mode(c,fm,h);
         }else{
             r.mode_1ee=0;
             const std::uint32_t w38=combat_.word_38?combat_.word_38():0x80U;

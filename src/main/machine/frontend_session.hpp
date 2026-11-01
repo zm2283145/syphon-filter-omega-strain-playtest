@@ -570,6 +570,9 @@ public:
     void agent_activate(std::int32_t agent) override;
     std::optional<std::string> profile_name(std::int32_t profile) override;
     std::optional<std::string> profile_rank(std::int32_t profile) override;
+    // Checkpoint 134eq1: 00336110 AgentData_GetRankText on a network client's AgentData (the local agent or a
+    // received one); nullopt without a record for the client.
+    std::optional<std::string> client_rank(std::uint8_t client);
     std::int32_t profile_clp(std::int32_t profile) override;
     std::int32_t level_done(std::int32_t profile, const std::string& key) override;
     std::int32_t level_flag(std::int32_t profile, std::int32_t level, std::int32_t k) override;

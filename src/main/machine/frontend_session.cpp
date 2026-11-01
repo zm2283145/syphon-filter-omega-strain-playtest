@@ -1738,6 +1738,13 @@ std::optional<std::string> FrontendSession::profile_rank(std::int32_t profile) {
                       services_.awards->registries, rank_value);
 }
 
+std::optional<std::string> FrontendSession::client_rank(std::uint8_t client) {
+    const auto record = agent_for_client(client);
+    if (!record) return std::nullopt;
+    return agent_rank(*record, {rt_.g.app_35 != 0, false, rt_.g.app_24c}, services_.strings,
+                      services_.awards->registries, rank_value);
+}
+
 std::int32_t FrontendSession::profile_clp(std::int32_t profile) {
     check_profile(profile);
     return agent_clp(view(), agent_state_, services_.awards->registries);

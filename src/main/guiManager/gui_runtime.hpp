@@ -122,7 +122,7 @@ enum class WidgetClass : std::uint8_t { widget, text, button, title, canvas, edi
                                         missionstatlist, port_settings, dossiers, ranks, ratings, omega, achieve, pmenu,
                                         agentinfo, agentdisplay, onlinecn, msnsetup,
                                         netjoin, missionlist, chatwin, acntlogn, onlinepref, netmess,
-                                        netmsgarray, netcontacts, netagencycell };
+                                        netmsgarray, netcontacts, netagencycell, eqsetup };
 
 // PORT-ONLY (checkpoint 132ln1): the label ONOFFSEL's "lan" button shows with GuiHost::port_lan_play (the
 // disc's text there is the developer placeholder "TEST"; no LAN string exists on the disc). Worded like the disc's
@@ -749,6 +749,37 @@ struct Widget {
                                      3.14159274F};
     };
     std::unique_ptr<EquipModify> em;
+    // Checkpoint 134eq1: GuiEquipmentSetup "eqsetup" (vtable 004dd7c0, ctor 002a47e0 over 0041f690, EQSETUP.GUI;
+    // gui_equipment_setup.cpp), the network game's level-start roster. The ctor's four display actors +48..+54
+    // (cSKM_GOBJ 00393ff0 with MALE.SKEL / FEMALE.SKEL of the default appearance 0055d510[*00493a60], playing
+    // "DATA_ID_CasualStand" from the phases 0048bac0[i & 3]) and its camera object +58 only serve the figure
+    // render 002a2590; the port keeps the state the screen writes into them.
+    struct EquipSetup {
+        struct Figure {
+            std::array<std::int32_t, 10> attach{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};  // +2470 (003927a0's copy)
+            std::uint8_t b2c71 = 1;            // +2c71 (the ctor's default appearance sets it; 003927a0 too)
+            std::uint8_t copied = 0;           // PORT-ONLY: 003927a0 copied a player (the default look is not ported)
+            std::int8_t b2c3a = 0;             // +2c3a (-1: no player for this index; 003870c0 skips the actor)
+        };
+        std::array<Figure, 4> figures{};
+        std::array<float, 4> rot_60{0.0f, 0.0f, 3.14159274f, 0.0f};  // +60 x / y / z turns (+68 the spin angle)
+        std::array<float, 4> cam_70{0.0f, 0.0f, 3.14159274f, 0.0f};  // +70 the camera's angles
+        // +80 + 0x10 s: the figures' translations (002a3bf0 moves them by the session's player count +254).
+        std::array<std::array<float, 4>, 4> pos_80{{{-4.2f, 5.0f, -2.0f, 1.0f},
+                                                    {-1.4f, 5.0f, -2.0f, 1.0f},
+                                                    {1.4f, 5.0f, -2.0f, 1.0f},
+                                                    {4.2f, 5.0f, -2.0f, 1.0f}}};
+        std::int32_t ready_c0 = 0;             // +c0: 002a3a10's start level (0 wait, 1 equipping, 2 all ready)
+        std::int32_t shown_c4 = 0;             // +c4: +c0 when the ready button's text was last set
+        std::int32_t c8 = 0;                   // +c8
+        std::int32_t cc = 0;                   // +cc = *0055de94 (the level's DISGUISE_ skeleton count)
+        Widget* timer = nullptr;               // +d0 "waitingforhost" (GuiTextWidget)
+        std::string timer_fmt;                 // +d4 EQS_COUNTDOWN, else 0048ba80
+        std::uint8_t bd8 = 0;                  // +d8 the lobby's game-started mark was sent
+        float spin_dc = 0.0f;                  // +dc L1 / R1 (+1 / -1 while held)
+        std::int32_t frames_506578 = 0;        // 00506578 (counted by 002a2f00; nothing reads it)
+    };
+    std::unique_ptr<EquipSetup> eqs;
     // GuiAgentModify (ctor 00343e10 over the GuiSaveAgentWidget 00441d00).
     struct AgentMod {
         SaveWidgetFields save;                 // +48..+77 (Square: mode 1, the agent save)
@@ -1780,6 +1811,34 @@ public:
     virtual void eqm_accept(const std::array<std::int32_t, 10>& preview, std::int32_t fc);
     virtual void eqm_start();   // byte 004ffc29 = 0; 0036a0f0(0055a300)
     virtual void eqm_resume();  // 0012eee0(G, 0, 0)
+    // Checkpoint 134eq1: GuiEquipmentSetup's and GuiEquipmentModify's network services (005721c8 set; solo play
+    // never calls them). Player i is 003fb8d0(i) (cNetObj_GetPlayer, the client map 0055c770).
+    struct NetPlayer {
+        std::uint32_t key = 0;        // +c (the top byte: the client + 1)
+        bool local = false;           // +14
+        std::uint8_t status = 0;      // 00184c80 cHuman_GetStatus: +3584 +32 (0 without the block)
+        std::uint8_t headset = 0;     // 00184ca0 cHuman_HasHeadset: +3584 +33 (0 without the block)
+    };
+    virtual std::optional<NetPlayer> es_player(std::int32_t i);
+    virtual void es_set_status(std::int32_t i, std::uint8_t status);  // 00184c60 cHuman_SetStatus on player i
+    virtual std::uint8_t es_local_status();                 // 00184c80 on *004ffc0c +30 (g_LocalPlayer's actor)
+    virtual void es_set_local_status(std::uint8_t status);  // 00184c60 on *004ffc0c +30
+    virtual void es_write_headset(std::int32_t i);          // player i's +3584 +33 = byte 00582b88 (002a2f00)
+    virtual std::int32_t es_headset_owner();                // 00437600 HeadsetSemaphore_GetOwner (*00583870)
+    virtual std::int32_t es_valid_clients();                // 002ebec8 NetGetValidClientCount(&n, *005721a8)
+    virtual std::int32_t es_player_map_count();             // 002a3ba0(0055c770): the client map's word +0
+    virtual bool es_admission_pending();                    // 0042b4e0
+    virtual bool es_play_game();                            // byte 00572400
+    virtual void es_send_play_game();                       // 00429b30 cDME_SendPlayGame
+    virtual std::uint8_t es_byte_5723f8();                  // byte 005723f8
+    virtual void es_set_byte_5723f8(std::uint8_t v);
+    virtual void es_lobby_started();                        // 004294c0 cDME_GetLobby(): when a lobby, its +26a0 = 1
+    virtual std::int32_t es_disguise_count();               // *0055de94 (SKLHog_LoadSKLHog's DISGUISE_ count)
+    virtual void es_send_agent_data();                      // 0012eee0 cGameSystem_SendAgentData(G, 0, 0)
+    // 001ca210(req, 4, name, 0, 0), 0020f190(msg, req, player), msg +20 = 1, 003c9420(msg, G, 0): the roster sound.
+    virtual void es_sound(const std::array<char, 8>& name, std::uint32_t key);
+    virtual std::string es_agent_rank(std::int32_t i);      // 00336110(00185c70(player i))
+    virtual void es_clear_pending();                        // byte 004ffc29 = 0 alone (00168550's network tail)
     // Port-only (checkpoint 132f5): the pause menu's Cheats entry. With
     // port_cheat_menu() false (the default) the start menu is the original's.
     // port_cheat_toggle returns true when the pause menu is to close (End
@@ -2234,6 +2293,17 @@ public:
         // In play (checkpoint 132f)
         std::uint8_t b_bb7 = 0;                        // byte 004ffbb7 = app +67: the world is paused (00131470)
         std::uint8_t b_21c8 = 0;                       // byte 005721c8: a network game
+        // Checkpoint 134eq1: GuiEquipmentSetup.cc's statics (BSS), shared with GuiEquipmentModify's network paths.
+        std::int32_t es_506500 = 0;                    // 00506500: the local player's roster index (002a2f00)
+        std::int32_t es_506508 = 0;                    // 00506508: the start countdown's frame count (0: none)
+        float es_506510 = 0.0f;                        // 00506510: the countdown's elapsed time
+        std::array<std::uint8_t, 4> es_506518{};       // 00506518[slot]: the slot's player was seen
+        std::array<std::int64_t, 4> es_506520{};       // 00506520[slot]: frames the slot's agent data was ready
+        // 0048baa0: the eight-byte sound names "xx_1_1" .. "xx_1_4" that 002a47e0 rewrites (bytes 0, 1 and 3).
+        std::array<std::array<char, 8>, 4> es_48baa0{{{'x', 'x', '_', '1', '_', '1', 0, 0},
+                                                      {'x', 'x', '_', '1', '_', '2', 0, 0},
+                                                      {'x', 'x', '_', '1', '_', '3', 0, 0},
+                                                      {'x', 'x', '_', '1', '_', '4', 0, 0}}};
         std::uint8_t hud_6a9 = 0;                      // *004ffc2c +6a9
         // GuiGameOptions (checkpoint 132f2)
         GameOptionsRecord options;                     // *004ffd2c (the live options record)
@@ -2428,6 +2498,24 @@ public:
     void em_column2(Widget* w);            // 002be380
     // The five value texts of one column ('1' / '2'); nullopt clears them.
     void em_fill(Widget* w, char column, const std::optional<GuiHost::WeaponRecord>& rec, std::uint32_t at);
+    void em_net_update(Widget* w, float dt);  // 002c03c0's network tail (134eq1)
+    // Checkpoint 134eq1: GuiEquipmentSetup (gui_equipment_setup.cpp): ctor 002a47e0, init 002a3bf0, wake
+    // 002a3bb0, input 002a1d20, event 002a2170, update 002a2f00, dtor 002a45a0.
+    void eqs_construct(Widget* w);
+    void eqs_init(Widget* w);
+    void eqs_wake(Widget* w);
+    std::uint8_t eqs_input(Widget* w, const PadEvent& ev);
+    std::uint8_t eqs_event(Widget* w, Widget* sender, std::uint32_t type, std::int32_t a3, std::int32_t t0);
+    void eqs_update(Widget* w, float dt);
+    void eqs_ready_level(Widget* w);           // 002a3a10
+    void eqs_destroy(Widget* w);               // 002a45a0's 00506500 = 0
+    // 00168550's network tail (0x00168838..0x001688d0) while 004ffc29 is set: with 00572400, the pending byte cleared,
+    // eqsetup popped and unloaded, eqmodify popped, the popups closed and the local status 4. True: it ran.
+    bool eqs_level_start_tail();
+    // PORT-ONLY observation: the roster lines (statuses and the start level) when they change.
+    std::vector<std::string> eqs_log;
+    std::string eqs_last_roster;
+    std::string eqs_codename(std::int32_t i);  // 0035cb30 GetCodename
     // Owner (decorator or own) dispatch of the virtual slots.
     void o_init(Widget* w);
     void o_wake(Widget* w);

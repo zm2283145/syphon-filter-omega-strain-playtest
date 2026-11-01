@@ -201,6 +201,10 @@ public:
     void set_part_cache(const AgentPartCache* cache) { part_cache_ = cache; }
     // 132ln5h6: the play's player's appearance block (the human's +0xa0, which 00185a30 gives 002c72a0).
     void set_local_packing(const AgentPacking& packing);
+    // 134lt7 (PORT-ONLY mirror): the play's player's +3269 (the revive's logic gate, SoloActorSimulation::logic_gate_3269)
+    // on the local player 0x00571770, which 001b1710's entry tests: set, the update (and its network section) returns.
+    void set_local_logic_gate_3269(std::uint8_t gate);
+    std::uint32_t sections_gated_3269() const { return sections_gated_3269_; }
     // 132ln5h3 (research/NET_INLEVEL.md 4.14; it replaces 132ln5g's PORT-ONLY channel 0x03): a locomotion message
     // (action 0, kind 0xd) for a remote human. The other console's player controller update 001770f0 sends its
     // player's every 250 ms (003c9420 -> 003fb020 -> the serialiser 003e57b0, a 0x28-byte game message; none while
@@ -356,6 +360,25 @@ public:
     void send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
                        std::uint16_t recipient = kLanAll, const std::vector<std::uint8_t>& contents = {});
     std::vector<RemoteBackpack> take_remote_backpacks() { return dme_->take_backpacks(); }
+    // Checkpoint 134eq1: the level-start roster GuiEquipmentSetup's services on this memory. A human by its key (the
+    // local player or a remote human 002c6b70 created): its network block +0x3584's status byte +0x32 (cHuman_GetStatus
+    // / SetStatus 00184c80 / 00184c60: nothing without the block; the DME library replicates the owner's field) and
+    // headset byte +0x33 (00184ca0).
+    std::uint32_t human_by_key(std::uint32_t key) const;  // 0: none
+    std::uint8_t human_status(std::uint32_t key) const;
+    void set_human_status(std::uint32_t key, std::uint8_t status);
+    std::uint8_t human_headset(std::uint32_t key) const;
+    void write_human_headset(std::uint32_t key);          // block +0x33 = byte 0x00582b88 (002a2f00)
+    // PORT-ONLY stand-in for 002ebec8 NetGetValidClientCount(&n, *0x005721a8) (the DME world's client records below
+    // the library, not ported): the transport's connected clients and the local one.
+    std::int32_t valid_client_count() const;
+    // 002a3ba0(0x0055c770): the client map's word +0 (its size). PORT-ONLY: the map's inserts 003fb9c0 are not ported
+    // (client_player_003fb8d0 stands in for its lookups), so its size is the number of clients 0..3 that lookup finds.
+    std::int32_t player_map_count();
+    bool level_info_pending();                            // 0042b4e0 on this memory
+    void send_play_game();                                // 00429b30 cDME_SendPlayGame
+    bool play_game() const { return memory_.read(0x572400, 1) != 0; }  // byte 0x00572400
+    std::uint32_t play_games_received() const { return play_games_received_; }
     std::uint16_t local_client_index() const { return dme_->local_index(); }
     bool hosting() const { return transport_.is_host(); }
     std::uint16_t session_host() const { return 0; }
@@ -781,21 +804,41 @@ public:
     void send_generator_release(std::uint32_t c, std::uint32_t word_150);
     // 134lt6: 002d4460's release for a remote controller without +150 on the console whose virtual +44 answers: the NPC
     // info object (00436c00), GetOwner 00434440(&c) (its answer unused), 0042d910(the NPC block) when `terrain`, 00436ba0.
-    // 0042d910 finds +c in the terrain-activation map 0x00582700; nothing in the port inserts there (0042d790 is not ported),
-    // so the find misses and nothing is erased; a populated map throws naming 0042d910.
+    // 134lt7: 0042d910 is native (remove_from_terrain_activation_0042d910): a hit frees the reference and erases the node.
     void npc_remote_release_002d4460(std::uint32_t c, bool terrain);
     // 134lt6: cNetObjectMgr_TerrainActivation 0042d790 (NetObjectMgr_3.c) for an NPC: nothing when its virtual +7c answers
     // (cHuman: the generator-spawned byte +3598); otherwise the TransferReference insert into 0x00582700
     // (terrain_activation_insert_0042d790) and, unless the controller's +5c answers (cNetNPC_IsNetNPC 002d2b20: 1), the
     // notice 0x00582730 (not ported: it throws). PORT-ONLY: the block's +2d mirrors the actor's +60(1) that came first.
     // Each network frame 0042eb20 then asks an inactive entry's controller +88 (2), +94 (cNetNPC_IsNodeInActiveTerrain
-    // 002d2ab0: the play's NpcTerrainHosts::node_active) and +44, and calls the object's +20 (cHuman_NetActivate 001b4f40:
-    // NpcTerrainHosts::net_activate, then +2d = 1) before releasing the reference.
-    void npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created);
+    // 002d2ab0: the play's NpcTerrainHosts::node_active) and +44, and calls the object's +20 (cHuman_NetActivate 001b4f40,
+    // npc_net_activate_001b4f40) before releasing the reference.
+    // 134lt7: `lost_contact` false is the cNetTerrainActivation(0) receive (00431d60), which has no +60(1) before it.
+    void npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created, bool lost_contact = true);
     struct NpcTerrainHosts {
         std::function<bool(std::uint32_t c)> node_active;   // 002d2ab0: the remote controller's node +1e8 in active terrain
-        std::function<void(std::uint32_t c)> net_activate;  // 001b4f40 on the NPC's actor (PORT-ONLY stand-in: the play)
+        // 134lt7: the play's part of 001b4f40 (PORT-ONLY boundary: 001b5560, 00392900, 001af460 / 001af190, 0022c650: the
+        // actor's activation); `remote_built`: 001b4f40 installed a cNetNPC (the play's AI takes its remote mode).
+        std::function<void(std::uint32_t c, bool remote_built)> net_activate;
     };
+    // 134lt7: cHuman_NetActivate 001b4f40 (human_119.c) on an NPC block (its virtual +0x20, called by 0042eb20): Ready
+    // (+2d && +2c && !+2e) returns; the controller part (npc_remote_controller_001b4f40); the play's activation
+    // (NpcTerrainHosts::net_activate); 003fb650(+10, 003fb340(+c) or the local index, the block); +3268 = 1; the NPC
+    // info object's SetActive 004341f0(&+c).
+    void npc_net_activate_001b4f40(std::uint32_t block);
+    // 134lt7: cNPC_DeactivateGlobal 00157510 (npc_39.c), its network part after the play's SetEnabled(-1, 0) and +60(1):
+    // 0042d910(body); then, unless the body's +7c answers (cHuman: the generator-spawned +3598), for every other
+    // loaded client (0x0055c780 == 2): cDeactivateMsg (003c9e30 0x00572198, vtable 004e0e80, 00429200 = 003fb020(+c,
+    // msg, -1, i)) and cNetTerrainActivation (0x00582760, vtable 004e0f00, +24 -1, +28 1: the receiver's 0042d910).
+    void npc_deactivate_global_00157510(std::uint32_t c, bool generator_created);
+    std::uint32_t npc_deactivate_globals_sent() const { return npc_deactivate_globals_sent_; }
+    // 134lt7: cDeactivateMsg's receive 00429190 on an NPC block: its +0x24, cHuman_NetDeactivate 001b4970: the NPC info
+    // object's Deactivate (npc_deactivate_001b4970) here, and the key queued for the play's part (cMan_UnDead,
+    // cTargetManager_RemoveGobj, cSKM_GOBJ_NetDeactivate, the collision routine: the actor's deactivation).
+    void npc_net_deactivate_001b4970(std::uint32_t block);
+    std::vector<std::uint32_t> take_remote_npc_deactivates();
+    std::uint32_t npc_deactivates_received() const { return npc_deactivates_received_; }
+    std::uint32_t terrain_activations_received() const { return terrain_activations_received_; }
     void set_npc_terrain_hosts(NpcTerrainHosts hosts) { npc_terrain_hosts_ = std::move(hosts); }
     std::uint32_t npc_terrain_references() const;       // the entries of 0x00582700
     std::uint32_t npc_net_activations() const { return npc_net_activations_; }
@@ -994,6 +1037,7 @@ private:
     std::uint16_t remote_client_ = 0;   // the client of the 002c6b70 running
     std::uint32_t remote_created_ = 0;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> remote_keys_;  // key -> human (0040b6d0)
+    std::uint32_t play_games_received_ = 0;  // 134eq1: NetPlayGameMsg receives (00431850)
     std::map<std::uint32_t, std::pair<std::uint16_t, std::uint32_t>> backpack_bindings_;
     std::vector<RemoteHuman> remote_events_;
     // kPlayerBlocks is the block 001314f0's stand-in returns (001b2e90 clears its +0xb70).
@@ -1047,7 +1091,11 @@ private:
     std::uint32_t npc_remote_releases_ = 0;
     NpcTerrainHosts npc_terrain_hosts_;
     std::uint32_t npc_net_activations_ = 0;
-    static constexpr std::uint32_t kFnNpcNodeActive = 0x1d38f2c, kFnNpcNetActivate = 0x1d38f30;
+    std::vector<std::uint32_t> remote_npc_deactivates_;
+    std::uint32_t sections_gated_3269_ = 0;
+    std::uint32_t npc_deactivate_globals_sent_ = 0, npc_deactivates_received_ = 0, terrain_activations_received_ = 0;
+    std::uint32_t receive_terrain_activation_00431d60(std::uint32_t buf);
+    static constexpr std::uint32_t kFnNpcNodeActive = 0x1d38f2c;
     std::vector<RemoteNpcMessage> remote_npc_messages_;
     std::uint32_t npc_messages_sent_ = 0, npc_messages_received_ = 0;
     std::uint32_t receive_npc_message_002d7190(std::uint32_t buf);

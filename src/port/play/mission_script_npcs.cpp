@@ -153,6 +153,7 @@ bool ActorWorldScriptNpcs::activate_component(Word npc) {
 void ActorWorldScriptNpcs::deactivate_anonymous(Word npc) {
     const auto& e = entry(npc);
     e.controller->deactivate_anonymous(world_.actor(e.actor));
+    if (deactivate_global_net_) deactivate_global_net_(e.actor);   // 134lt7: 00157510's network part
 }
 
 bool ActorWorldScriptNpcs::deactivate(Word npc) {
@@ -539,8 +540,19 @@ std::optional<std::uint8_t> ActorWorldScriptNpcs::carry_body_to_node(Word npc, W
 }
 
 bool ActorWorldScriptNpcs::follow(Word npc, std::optional<Word> target, float a, float b) {
-    npc_follow(entry(npc).controller->component(),
-               target ? std::optional<std::int32_t>(static_cast<std::int32_t>(*target)) : std::nullopt, a, b);
+    const auto& e = entry(npc);
+    const auto id = target ? std::optional<std::int32_t>(static_cast<std::int32_t>(*target)) : std::nullopt;
+    if (!follow_net_.send) {
+        npc_follow(e.controller->component(), id, a, b);
+        return true;
+    }
+    if (!e.controller->is_remote()) {   // 001488f0: the 0x32 broadcast, then the follow
+        follow_net_.send(e.actor, target, a, b, false);
+        npc_follow(e.controller->component(), id, a, b);
+    } else {   // 002d2d50: the follow on the authority, then 0x32 to the owner
+        if (follow_net_.authority) npc_follow(e.controller->component(), id, a, b);
+        follow_net_.send(e.actor, target, a, b, true);
+    }
     return true;
 }
 

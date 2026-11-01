@@ -213,6 +213,11 @@ std::optional<std::uint8_t> npc_route_to_node(NpcRouteManager& m,const NpcPathFo
     std::int32_t node);
 std::optional<std::uint8_t> npc_route_to_point(NpcRouteManager& m,const NpcPathFollower& pf,const std::shared_ptr<NpcRouteClient>& client,
     const RootVector& point,std::int32_t region);
+// 134lt7: cPathNavigator_Request(int, int, const cVector*) 0015f9b0 (path_13.c): 0015efb0(manager, actor, start, -1,
+// +5c, destination, region, point, +74), the region -1 unless a point is given with a destination node (then that
+// node's +7c region: npc_node_region).
+std::optional<std::uint8_t> npc_route_request_15f9b0(NpcRouteManager& m,const NpcPathFollower& pf,
+    const std::shared_ptr<NpcRouteClient>& client,std::int32_t start,std::int32_t destination,const RootVector* point);
 // 00162080(request): true when done. The first call (+d) sets the lists up
 // and opens the start node (and the previous one, which then clears +40)
 // with 00163410: state 3 with a destination node (run to its end in this

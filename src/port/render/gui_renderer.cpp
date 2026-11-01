@@ -269,11 +269,12 @@ std::vector<std::uint8_t> load_frontend_gui(DiscImage& disc, const std::string& 
 namespace {
 // The 3D figures: GuiEquipmentModify's 002bfa90, GuiScoresEquip's 0035b390, and the agent screens'
 // models (GuiAgentCreate 0028d870, GuiAgentModify 00341f00; Checkpoint 132cc6), the HUD map 0026ca70 (132hud),
-// GuiAgentDisplay's 00361e70 (the personnel agent-info figure, Checkpoint 132f14).
+// GuiAgentDisplay's 00361e70 (the personnel agent-info figure, Checkpoint 132f14), GuiEquipmentSetup's 002a2590
+// (the network roster's figures, Checkpoint 134eq1).
 bool is_figure_batch(const GuiDrawBatch& b) {
     return b.flush == 0x2bfa90 || b.flush == 0x35b390 || b.flush == 0x28d870 || b.flush == 0x341f00 ||
            b.flush == 0x26ca70 ||  // the HUD map (GuiMapScreen, checkpoint 132hud)
-           b.flush == 0x361e70;
+           b.flush == 0x361e70 || b.flush == 0x2a2590;
 }
 bool is_line_batch(const GuiDrawBatch& b) { return b.flush == 0x3701b0; }
 bool is_ie_batch(const GuiDrawBatch& b) {

@@ -550,6 +550,10 @@ struct ScriptStep{unsigned frames{};float x{},y{},p10{},p11{},rx{},ry{},cross{},
     std::optional<float> rise;    // 132ws9 "rise H" (port-only soak aid, tools\run_soak.ps1): the test teleport H above the player
     bool wait_peer{},wait_left{},quit{};
     bool wait_timer{};   // 133lt1 "waittimer" (LAN test convenience): no input until the global HUD timer +6c4 expired here
+    // 134lt7 (PORT-ONLY LAN test conveniences): "waitbackpack" gives no input until a backpack lies within 1.5 m of the
+    // other console's human (its pickup-menu drop at its feet); "tobackpack" places the local player on that backpack
+    // (the test teleport, the heading kept) before the next frame.
+    bool wait_backpack{},to_backpack{};
     unsigned wait_peers{};};   // 133lt3 "waitpeers N"
 // --dt-trace: one world dt per frame as the IEEE-754 bits in hex (for example
 // 3d08a4b2, as read from the emulator's 005383d0), '#' comments allowed.
@@ -594,6 +598,8 @@ std::vector<ScriptStep> read_script(const fs::path& path){
         if(line=="waitleft"){s.wait_left=true;steps.push_back(s);continue;}
         if(line=="quit"){s.quit=true;steps.push_back(s);continue;}
         if(line=="waittimer"){s.wait_timer=true;steps.push_back(s);continue;}
+        if(line=="waitbackpack"){s.wait_backpack=true;steps.push_back(s);continue;}
+        if(line=="tobackpack"){s.to_backpack=true;steps.push_back(s);continue;}
         if(!(fields>>s.frames>>s.x>>s.y>>s.p10>>s.p11)||s.frames>100000)throw std::runtime_error("Invalid input script line: "+line);
         if(fields>>s.rx){if(!(fields>>s.ry))throw std::runtime_error("Script right stick needs two values: "+line);
             if(fields>>s.cross){if(!(fields>>s.triangle))throw std::runtime_error("Script buttons need Cross and Triangle: "+line);
@@ -2134,7 +2140,8 @@ struct PlayGuiHost final:GuiStaticHost{
         // The play's Accept (play_loadout.hpp) takes the five category points, point 4 (the dual-wield off hand's
         // holster, Checkpoint 132wp1) and the hand; the other points (the hands 0 / 1, 6, 7) must be the player's
         // table with Accept's step 1 applied.
-        auto table=scores_attach(0);
+        // 134eq1: the screen's +48 is 003fb8d0(*00506500), the local player (solo: player 0).
+        auto table=scores_attach(rt&&rt->g.b_21c8?rt->g.es_506500:0);
         if(table[0]!=-1){
             const auto c=weapon_record(table[0])->class_30;
             if(c>0&&c<10){table[static_cast<std::size_t>(c)]=table[0];table[0]=-1;
@@ -2161,6 +2168,95 @@ struct PlayGuiHost final:GuiStaticHost{
             loadout_network_resume();
             log.push_back("0012eee0(G, 0, 0): full LAN AgentData sent after loadout Accept");
         }else log.push_back("0012eee0(G, 0, 0): solo, returns");
+    }
+    // Checkpoint 134eq1: GuiEquipmentSetup's network services over the LAN game's memory (LanNetCore): the players
+    // are 003fb8d0's (network_score_player: the local player and the placed remote humans).
+    lan::LanNetCore* lan_core=nullptr;
+    std::function<void()> loadout_clear_pending;   // byte 004ffc29 = 0 without the pad read
+    std::optional<std::int32_t> disguise_55de94;   // SKLHog_LoadSKLHog's DISGUISE_ count of the mission's SKL.HOG
+    lan::LanNetCore& es_lan(std::uint32_t address){
+        if(!lan_core)throw std::runtime_error("unhosted(0x"+hex_word(address)+"): the roster without the LAN game's memory");
+        return *lan_core;
+    }
+    std::uint32_t es_key(std::int32_t i,std::uint32_t address){
+        if(!network_score_player)throw std::runtime_error("unhosted(0x"+hex_word(address)+"): the network player map");
+        const auto key=network_score_player(i);
+        if(!key)throw std::runtime_error("unhosted(0x"+hex_word(address)+"): no network player "+std::to_string(i));
+        return *key;
+    }
+    std::optional<NetPlayer> es_player(std::int32_t i) override{
+        auto& l=es_lan(0x3fb8d0);
+        if(!network_score_player)throw std::runtime_error("unhosted(0x3fb8d0): the network player map");
+        const auto key=network_score_player(i);
+        if(!key)return std::nullopt;
+        NetPlayer p;
+        p.key=*key;
+        p.local=*key==l.local_player_key();
+        p.status=l.human_status(*key);
+        p.headset=l.human_headset(*key);
+        return p;
+    }
+    void es_set_status(std::int32_t i,std::uint8_t status) override{
+        const auto key=es_key(i,0x184c60);
+        es_lan(0x184c60).set_human_status(key,status);
+        log.push_back("00184c60 SetStatus("+std::to_string(int(status))+") on player "+std::to_string(i)+" key 0x"+hex_word(key));
+    }
+    std::uint8_t es_local_status() override{auto& l=es_lan(0x184c80);return l.human_status(l.local_player_key());}
+    void es_set_local_status(std::uint8_t status) override{
+        auto& l=es_lan(0x184c60);
+        l.set_human_status(l.local_player_key(),status);
+        log.push_back("00184c60 SetStatus("+std::to_string(int(status))+") on the local player (block +32 now "
+            +std::to_string(int(l.human_status(l.local_player_key())))+")");
+    }
+    void es_write_headset(std::int32_t i) override{es_lan(0x2a3314).write_human_headset(es_key(i,0x2a3314));}
+    std::int32_t es_headset_owner() override{
+        throw std::runtime_error("unhosted(0x437600): HeadsetSemaphore_GetOwner (no headset library: no player has the headset byte)");
+    }
+    std::int32_t es_valid_clients() override{return es_lan(0x2ebec8).valid_client_count();}
+    std::int32_t es_player_map_count() override{return es_lan(0x2a3ba0).player_map_count();}
+    bool es_admission_pending() override{return es_lan(0x42b4e0).level_info_pending();}
+    bool es_play_game() override{return es_lan(0x572400).play_game();}
+    void es_send_play_game() override{
+        es_lan(0x429b30).send_play_game();
+        log.push_back("00429b30 cDME_SendPlayGame: 00572400 = 1, NetPlayGameMsg sent to every client");
+    }
+    std::uint8_t es_byte_5723f8() override{return static_cast<std::uint8_t>(es_lan(0x5723f8).memory().read(0x5723f8,1));}
+    void es_set_byte_5723f8(std::uint8_t v) override{es_lan(0x5723f8).memory().write(0x5723f8,1,v);}
+    void es_lobby_started() override{
+        // PORT-ONLY boundary (the lobby service): 004294c0's lobby session is the Medius lobby object, whose +26a0
+        // marks the game started for the lobby's listing; a LAN game has no lobby object (LanSession's advertisement
+        // stands in for the listing).
+        log.push_back("004294c0 +26a0 = 1: no Medius lobby object on LAN (PORT-ONLY: the LAN advertisement is the listing)");
+    }
+    std::int32_t es_disguise_count() override{
+        if(!disguise_55de94)throw std::runtime_error("unhosted(0x55de94): the mission SKL.HOG's DISGUISE_ count");
+        return *disguise_55de94;
+    }
+    void es_send_agent_data() override{   // 0012eee0(G, 0, 0) from the roster's first sight of a player
+        if(!loadout_network_resume)throw std::runtime_error("unhosted(0x12eee0): the roster's AgentData send without the LAN game");
+        loadout_network_resume();
+        log.push_back("0012eee0(G, 0, 0): full LAN AgentData sent (002a2f00 / 002c03c0: a player first seen)");
+    }
+    void es_sound(const std::array<char,8>& name,std::uint32_t key) override{
+        // 001ca210(req, 4, name, 0, 0) / 0020f190 / 003c9420(msg, G, 0): 002a47e0's rewrite leaves bytes 0 / 1 as
+        // 0x02 / 0x14, so the request names no sound of the bank; the port logs the request and plays nothing.
+        std::string s;
+        for(const char c:name){if(!c)break;const auto u=static_cast<unsigned char>(c);
+            if(u<0x20||u>=0x7f){char b[8];std::snprintf(b,sizeof b,"\\x%02x",u);s+=b;}else s+=c;}
+        log.push_back("001ca210 roster sound \""+s+"\" for key 0x"+hex_word(key)+" (no such bank entry; not played)");
+    }
+    std::string es_agent_rank(std::int32_t i) override{
+        if(!card)throw std::runtime_error("unhosted(0x336110): the network rank without the front end's AgentData");
+        const auto key=es_key(i,0x336110);
+        const auto client=static_cast<std::uint8_t>(((key&0x7f000000U)>>24)-1);
+        const auto r=card->client_rank(client);
+        if(!r)throw std::runtime_error("unhosted(0x336110): no AgentData rank for client "+std::to_string(client));
+        return *r;
+    }
+    void es_clear_pending() override{
+        if(!loadout_clear_pending)throw std::runtime_error("unhosted(0x168844): the loadout pending byte 004ffc29");
+        loadout_clear_pending();
+        log.push_back("00168844: 004ffc29 = 0 (00572400 set: the network game started)");
     }
     // Checkpoint 132f11: the debrief 00134110's services. The agent record 001314f0(G, -1) is the front end's
     // (FrontendSession's profile, which play's statistics were synced into before 00335830); ZEUS.HOG is the
@@ -2323,6 +2419,12 @@ struct PlayGuiOverlay{
     // has the one player, slot 0.
     std::array<std::optional<LoadoutFigure>,4> stats_figures;
     bool stats_figure_logged=false;
+    // Checkpoint 134eq1: the roster GuiEquipmentSetup's four display actors (002a47e0's +48..+54), filled from the
+    // players as the stats screen's (003927a0's copy); built_eqsetup routes build_stats_figure's result here.
+    std::array<std::optional<LoadoutFigure>,4> eqsetup_figures;
+    bool building_eqsetup=false;
+    bool eqsetup_figure_logged=false;
+    static constexpr std::uint32_t eqsetup_figure_slot_base=0x90400000U;
     static constexpr std::uint32_t figure_slot_base=0x90000000U;
     static constexpr std::uint32_t stats_figure_slot_base=0x90100000U;
     // Checkpoint 132hud: the HUD map's models. 0026e070's tail (0x0026e1d8..0x0026e578) opens GAMEDATA\<level>\
@@ -2511,7 +2613,8 @@ struct PlayGuiOverlay{
                                       const AnimationClipBank& clips,const ActorMotionRegistry& registry,
                                       const std::vector<Texture>& images,const std::vector<bool>& textured,
                                       std::uint32_t slot_base,const char* ctor,
-                                      std::shared_ptr<const omega::mods::CharacterModelOverrides> models){
+                                      std::shared_ptr<const omega::mods::CharacterModelOverrides> models,
+                                      float initial_phase=0.0F){
         LoadoutFigure f;
         f.manifest=&manifest;f.clips=&clips;f.textured=textured;
         f.morph.expressions_enabled=false;
@@ -2532,6 +2635,7 @@ struct PlayGuiOverlay{
         if(!reg.node)throw std::runtime_error(std::string(ctor)+": the player's motion set has no \"DATA_ID_CasualStand\" (004ac600)");
         auto request=make_motion_request(*reg.node,manifest.default_crossfade_duration);
         request.selector=reg.selector;
+        request.initial_phase=initial_phase;   // the packet's +9c (134eq1: 002a47e0's per-actor phase)
         character->play(request,MotionInstallMode::reset);
         character->apply_commands(actor_default_channel_commands());
         f.character=std::move(character);
@@ -2548,6 +2652,15 @@ struct PlayGuiOverlay{
                           const std::vector<Texture>& images,const std::vector<bool>& textured,
                           std::shared_ptr<const omega::mods::CharacterModelOverrides> models,std::size_t slot=0){
         if(slot>=stats_figures.size())throw std::runtime_error("0035d430: scores display slot outside four players");
+        if(building_eqsetup){
+            // 002a47e0 (0x002a4e00..0x002a4f2c): the request packet's +9c = clamp(0048bac0[i & 3], 0, 1) (max.s / min.s),
+            // the table {0, 0.6, 0.25, 0.8}: the four actors do not stand in step.
+            static constexpr std::array<float,4> phase_48bac0{0.0F,0.6F,0.25F,0.8F};
+            eqsetup_figures[slot]=make_display_figure(std::move(character),manifest,clips,registry,images,textured,
+                eqsetup_figure_slot_base+static_cast<std::uint32_t>(slot)*0x10000U,"002a47e0",std::move(models),
+                std::clamp(phase_48bac0[slot&3],0.0F,1.0F));
+            return;
+        }
         stats_figures[slot]=make_display_figure(std::move(character),manifest,clips,registry,images,textured,
             stats_figure_slot_base+static_cast<std::uint32_t>(slot)*0x10000U,"0035d430",std::move(models));
     }
@@ -2655,6 +2768,47 @@ struct PlayGuiOverlay{
             std::cout<<"Start menu: GuiScoresEquip figure 0035df30 -> 0035b390 drawn (camera +1d0 ("<<e.cam_1d0[0]<<", "
                      <<e.cam_1d0[1]<<", "<<e.cam_1d0[2]<<"), turns +1c0 ("<<e.rot_1c0[0]<<", "<<e.rot_1c0[1]<<", "<<e.rot_1c0[2]
                      <<"); held guns, 003870c0 / 003855d0 +2470):"<<(drawn.empty()?" no player slot":drawn)<<"\n";
+        }
+    }
+    // Checkpoint 134eq1: GuiEquipmentSetup's figure callback ES_ManRenderWrapper 002a5460 -> 002a2590, the twin of
+    // 0035b390 over the screen's four display actors: the camera record from the eye (0, 5, 1.5) (+y negated) under the
+    // +70 angles (002a47e0: (0, 0, pi)), half fov 0.5236, near 1.0000001, far 40 (figure_camera_clip); per actor the
+    // X / Y / Z turns +60 / +64 / +68 (+68 the spin angle 002a2f00 turns) with row 3 = +80[i] through the camera's rows,
+    // set on the 'flor' anchor (004ab158); every actor's +48(dt) step and the +58 draw (+38 = 2). 003870c0 skips an
+    // actor whose +2c3a is negative (002a2f00 stores -1 for an index without a player).
+    void eqsetup_figures_draw(GuiDrawList& out,const gui::Widget& screen,const PlayGunPreview& guns){
+        if(!screen.eqs)throw std::runtime_error("002a5460: the roster figure callback without its GuiEquipmentSetup screen *00506550");
+        const auto& e=*screen.eqs;
+        const auto camera=figure_camera_rotation(e.cam_70);
+        const auto clip=figure_camera_clip(camera);
+        FrontendLightSet lit=lights.man;
+        for(auto& d:lit.directions)if(d!=std::array<float,3>{})d=figure_camera_direction(camera,d);
+        std::string drawn;
+        for(std::size_t slot=0;slot<4;++slot){
+            const auto& fig=e.figures[slot];
+            if(fig.b2c3a<0)continue;
+            if(!fig.copied)throw std::runtime_error("002a2590: display actor "+std::to_string(slot)
+                +" without 003927a0's player copy (002a47e0's default appearance 0055d510 is not ported)");
+            auto& f=eqsetup_figures[slot];
+            if(!f){
+                if(!build_stats_figure)throw std::runtime_error("002a47e0: the roster display actor cannot be built here");
+                building_eqsetup=true;
+                try{build_stats_figure(slot);}catch(...){building_eqsetup=false;throw;}
+                building_eqsetup=false;
+            }
+            if(!f)throw std::runtime_error("002a2590: missing display actor "+std::to_string(slot));
+            const auto placed=figure_slot_placement(e.rot_60,e.pos_80[slot],camera);
+            const RootParentTransform placement{placed.orientation,placed.position};
+            drawn+=" slot "+std::to_string(slot)+":"+display_figure_draw(out,*f,&placement,clip,lit,fig.attach,guns,0x2a2590);
+            if(!eqsetup_figure_logged)drawn+=figure_replaced_note(*f);
+        }
+        // 002a2590 stores the record's +0x100 = 0x3f060a92 (half fov) and does not restore it, as 002bfa90 (132ws6).
+        gui_camera_theta=std::bit_cast<float>(0x3f060a92U);
+        if(!eqsetup_figure_logged&&!drawn.empty()){
+            eqsetup_figure_logged=true;
+            std::cout<<"Roster: GuiEquipmentSetup figures 002a5460 -> 002a2590 drawn (camera +70 ("<<e.cam_70[0]<<", "
+                     <<e.cam_70[1]<<", "<<e.cam_70[2]<<"), turns +60 ("<<e.rot_60[0]<<", "<<e.rot_60[1]<<", "<<e.rot_60[2]
+                     <<"); held guns, 003870c0 / 003855d0 +2470):"<<drawn<<"\n";
         }
     }
     // The shared draw of one display actor: the anchor's world placement (null: none, the original's dummy root),
@@ -3152,13 +3306,37 @@ struct PlayGuiOverlay{
     // 00168550's first entry (FRONTEND.md section 5): pending = 1, the pad read 0036a0f0(0055a300), then
     // 00418a80(manager, "GuiEquipmentModify", "eqmodify") and the push vcall +64(manager, screen, 0).
     // 00389a50 (the actor byte +2c3b wait) and 00166190's teardown run before it, at the call (checkpoint 132f8).
+    // Checkpoint 134eq1: with 005721c8 set (a LAN game) 00168628 opens GuiEquipmentSetup "eqsetup" instead. PORT-ONLY
+    // timing: the local player's network block +3584 is linked by LanNetCore's first net_frame (its PORT-ONLY caller
+    // of the player update's network tail 001b53d0), so the push waits for that link (network_open_deferred, run by
+    // loadout_network_frame) and 002a47e0's SetStatus(1) lands in the block.
+    bool network_open_deferred=false;
     void loadout_open(){
         loadout_pending=true;
         gui_camera_theta.reset();
         driver.poll();
+        if(rt.g.b_21c8){network_open_deferred=true;return;}
         gui::Widget* s=rt.factory("GuiEquipmentModify",std::string("eqmodify"));
         if(!s)throw std::runtime_error("00168628: 00418a80 GuiEquipmentModify \"eqmodify\" failed");
         rt.push(s,0);
+    }
+    // The network game's part of 00168550 each frame while 004ffc29 is pending: the deferred push (above) once the
+    // local block is linked, then the network tail (GuiRuntime::es_level_start_tail). Returns the lines to print.
+    std::vector<std::string> loadout_network_frame(bool local_block_linked){
+        std::vector<std::string> out;
+        if(!rt.g.b_21c8||!loadout_pending)return out;
+        if(network_open_deferred){
+            if(!local_block_linked)return out;
+            network_open_deferred=false;
+            gui::Widget* s=rt.factory("GuiEquipmentSetup",std::string("eqsetup"));
+            if(!s)throw std::runtime_error("00168628: 00418a80 GuiEquipmentSetup \"eqsetup\" failed");
+            rt.push(s,0);
+            out.push_back("Loadout screen: 00418a80 GuiEquipmentSetup \"eqsetup\" pushed (005721c8 set; 004ffc29 = 1)");
+            return out;
+        }
+        if(rt.eqs_level_start_tail())
+            out.push_back("Loadout screen: 00168844 the network tail: 00572400 set, eqsetup / eqmodify closed, local status 4");
+        return out;
     }
     // 0024b5d0: sp+fd4 = (0055a44c & 0x800) != 0 (0x0024bad0), zeroed at 0x0024be30 when byte 004ffc29
     // (the loadout, accepted before play here), 00241ac0 or game state 0x13; at 0x0024cd30, with input
@@ -3244,6 +3422,8 @@ struct PlayGuiOverlay{
         decor.bridge_step(rt,dt);
         for(;host_log_seen<host.log.size();++host_log_seen)
             std::cout<<"GUI host at frame "<<frame<<": "<<host.log[host_log_seen]<<"\n";
+        for(const auto& line:rt.eqs_log)std::cout<<"GUI at frame "<<frame<<": "<<line<<"\n";   // 134eq1
+        rt.eqs_log.clear();
         upload();
         OMEGA_ZONE_LAP(gui_laps,"gui.update");
         // Port-only (132vf4, research/VITA.md "Front-end speed (132vf4)"): the overlay's list keeps last frame's batches
@@ -3381,6 +3561,10 @@ struct PlayGuiOverlay{
             }
             if(display.cd_callback==0x2c2340){
                 figure_draw(out,screen,guns);
+                return;
+            }
+            if(display.cd_callback==0x2a5460){   // 134eq1: GuiEquipmentSetup's ES_ManRenderWrapper
+                eqsetup_figures_draw(out,screen,guns);
                 return;
             }
             if(display.cd_callback!=0x35df30)
@@ -4072,7 +4256,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<std::pair<std::string,std::string>> part_names;std::vector<std::string> part_textures;
         bool fog_on=true;   // 133pr1: the GS distance fog (--no-fog, a PORT-ONLY comparison switch, draws without it)
     std::optional<float> options_gamma;bool objects=false,hidden=false,textured=false,first_pass=false,no_coronas=false;unsigned max_frames=0;std::set<unsigned> captures;float ledge_survey=0;bool hotbox_survey=false;bool shadows_on=true;unsigned shadow_capture=0;bool shadow_debug=false;std::optional<std::array<float,4>> start_override;bool activate_all=false;std::optional<std::int32_t> npc_serial;bool mission_scripts=false;bool script_start_calls=false;
-        bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
+        bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;bool lan_loadout_direct=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
         std::optional<float> fixed_dt;std::wstring dt_trace_path;
 #if defined(OMEGA_PS5)
         // Port-only (132ps5c hw10): the PS5's GL 4.6 frames take about 60 ms, so 4 catch-up steps a loop (66.7 ms) let
@@ -4121,6 +4305,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         unsigned next_level_frames=0;std::set<unsigned> next_level_captures;std::optional<unsigned> next_level_god;
         for(int i=1;i<argc;++i){const std::wstring arg=argv[i];
             auto value=[&](){if(++i>=argc)throw std::runtime_error("Missing sandbox argument");return std::wstring(argv[i]);};
+            if(arg==L"--lan-loadout-direct"){lan_loadout_direct=true;continue;}   // PORT-ONLY test convenience (134eq1)
             // The port-only test options (132win6 / 132win12), parsed apart: one if-else chain for every option exceeds
             // MSVC's nesting limit (C1061).
             const auto port_test_option=[&]()->bool{
@@ -4374,6 +4559,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             else if(arg==L"--loadout")loadout=parse_equipment_loadout(narrow(value()));
             else if(arg==L"--loadout-screen")loadout_screen=true;
             else if(arg==L"--no-loadout-screen")no_loadout_screen=true;
+
             else if(arg==L"--weapon-models")weapon_models=true;
             else if(arg==L"--npc-perception")npc_perception=true;
             else if(arg==L"--native-flow")native_flow=true;
@@ -4701,6 +4887,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "(EQMODIFY, 002bcb20..002c1dc0) as the state-0x12 block 00168550 does; the world waits until its Accept (Square).\n"
                     "It is the default with --frontend --gui-overlay --combat (the original shows it after every Play Mission);\n"
                     "--no-loadout-screen skips it, and --loadout (headless runs) makes its Accept without the screen.\n"
+                    "In LAN play (005721c8 set) the level start opens the network roster GuiEquipmentSetup (EQSETUP) instead\n"
+                    "(134eq1); the PORT-ONLY test convenience --lan-loadout-direct keeps the earlier direct GuiEquipmentModify.\n"
                     "--weapon-models (with --combat; implied by --loadout and --loadout-screen) loads the records' weapon models (00145710 -> 00147150 on\n"
                     "GAMEDATA/COMMON/WPNHOG.HOG, the level's preload list 001457c0) and draws the attached ones at the actors' attach\n"
                     "points (003870c0 / 003855d0, gun_model_draw.hpp); the shot frames add the model's muzzle offset (00385370).\n"
@@ -8664,6 +8852,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     for(const auto& r:lan_remotes)if(r.figure&&r.figure->actor_id==h.id)return static_cast<std::int32_t>(r.peer);
                     return std::nullopt;};
                 s.player_client=s.owner;   // the same two player GOBJs
+                // 134eq1: 00227a90 (Objective.c) asks cNetObj_GetOwner 003fb340 of the GOBJ's +c for any object: the
+                // NetMap entry's client (an NPC's owner through the NPC info object), -1 without an entry (no notice;
+                // the NetLabelMsg then goes to every peer, 003fb020's a3 -1).
+                s.owner=[&](RuntimeObjectHandle h)->std::optional<std::int32_t>{
+                    if(h.id==mission_host->objects().player)return static_cast<std::int32_t>(lan_net->local_client_index());
+                    for(const auto& r:lan_remotes)if(r.figure&&r.figure->actor_id==h.id)return static_cast<std::int32_t>(r.peer);
+                    return static_cast<std::int32_t>(lan_net->call(lan_net->memory(),0x3fb340,{static_cast<std::uint32_t>(h.id)}));};
                 mission_host->set_net_hud_services(std::move(s));
             }
             if(const auto* set=omega::mods::active();set&&set->has_data())
@@ -12451,6 +12646,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             std::optional<std::array<float,4>> floor_plane;
             if(player.physical().response.physical.e8!=0)floor_plane=player.physical().plane_f0;
             lan_net->set_local_player({p.position[0],p.position[1],p.position[2]},rows,player.health().health_40,floor_plane);
+            lan_net->set_local_logic_gate_3269(player.logic_gate_3269());   // 134lt7: 001b1710's entry test
             // 132ln5h: the player's inventory +3524 (the slots 00185a30 and 002493c0 read; +84 the held slot).
             if(combat_session){
                 const auto& inv=combat_session->player_inventory();
@@ -13116,21 +13312,58 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             return std::nullopt;
         };
         // 134lt6: what 0042eb20 asks of a terrain-activation entry (an authored remote NPC that lost contact, 0042d790):
-        // its remote controller's node in active terrain (002d2ab0) and the actor's NetActivate (001b4f40; PORT-ONLY:
-        // the play's activation, as for the named NPC's activation message above).
+        // its remote controller's node in active terrain (002d2ab0) and the actor's NetActivate (001b4f40).
+        // 134lt7: 001b4f40 runs natively on the NPC block (LanNetCore::npc_net_activate_001b4f40); the play's part is the
+        // actor's activation (PORT-ONLY boundary: 001b5560 / 00392900 / 001af460 / 001af190 / 0022c650), after the
+        // controller's remote mode when 001b4f40 built a cNetNPC (as the spawned NPCs' actor_20).
         if(lan_net)lan_net->set_npc_terrain_hosts({
             [&](std::uint32_t c){
                 const auto a=lan_actor_of_key(c,false);
                 if(!a)return false;
                 for(auto& n:npcs)if(n.actor==*a&&n.ai&&n.ai->is_remote())return n.ai->remote_node_in_active_terrain(actors.actor(n.actor));
                 return false;},
-            [&](std::uint32_t c){
+            [&](std::uint32_t c,bool remote_built){
                 const auto a=lan_actor_of_key(c,false);
                 if(!a)throw std::runtime_error("001b4f40: the NetActivate of an NPC key with no actor here");
                 NpcFigure* npc=nullptr;for(auto& n:npcs)if(n.actor==*a)npc=&n;
-                if(npc&&script_npcs_host)script_npcs_host->activate(npc->actor_id);
-                else actors.activate(*a);
-                std::cout<<"LAN (134lt6): 0042eb20 -> 001b4f40: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<*a<<") reactivated\n";}});
+                if(remote_built){
+                    if(!npc||!npc->ai)throw std::runtime_error("001b4f40: a cNetNPC built for an NPC key without the play's AI controller");
+                    npc->ai->set_remote(actors.actor(*a));
+                }
+                actors.activate(*a);
+                std::cout<<"LAN (134lt7): 001b4f40: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<*a<<") NetActivate"
+                    <<(remote_built?" (cNetNPC built)":"")<<"\n";}});
+        // 134lt7: Follow in a network game (001488f0 / 002d2d50): the cNetNPCMsgs 0x32 {the target's +c or -1, the two
+        // floats' bits}; len 4 (every peer) from an AI controller, len 8 (the owner) from a remote one, whose 002d2d50
+        // reads the target's +c without a null test.
+        if(lan_net&&script_npcs_host)script_npcs_host->set_follow_net({
+            [&](std::size_t actor,std::optional<Word> target,float a,float b,bool remote){
+                const auto key=lan_actor_key(actor);
+                if(!key)throw std::runtime_error("001488f0: Follow of an NPC without a LAN key in a network game");
+                std::uint32_t tkey=0xffffffffU;
+                if(target){
+                    std::optional<std::size_t> ta;
+                    for(std::size_t k=0;k<combat_ids.size();++k)
+                        if(static_cast<Word>(combat_ids[k])==*target&&!actors.destroyed(k))ta=k;
+                    if(!ta)throw std::runtime_error("001488f0: the Follow target "+std::to_string(*target)+" is not an actor here");
+                    tkey=lan_actor_key(*ta);
+                    if(!tkey)throw std::runtime_error("001488f0: the Follow target "+std::to_string(*target)+" has no LAN key");
+                }else if(remote)throw std::runtime_error("002d2d50: cNetNPC_Follow with a null target reads its +c");
+                lan_net->send_npc_message(key,0x32,remote?8:4,tkey,std::bit_cast<std::uint32_t>(a),std::bit_cast<std::uint32_t>(b));
+                std::cout<<"LAN (134lt7): "<<(remote?"002d2d50":"001488f0")<<" Follow of +c 0x"<<std::hex<<key<<": cNetNPCMsgs 0x32 len "
+                    <<(remote?8:4)<<" target 0x"<<tkey<<std::dec<<"\n";},
+            lan_net->host_console()});
+        // 134lt7: DeactivateForAllPlayers in a network game (cNPC_DeactivateGlobal 00157510, after the controller's part):
+        // 0042d910 and, for an authored NPC (+7c 0), cDeactivateMsg + cNetTerrainActivation(1) to every other loaded client.
+        if(lan_net&&script_npcs_host)script_npcs_host->set_deactivate_global_net([&](std::size_t actor){
+            const auto key=lan_actor_key(actor);
+            if(!key)throw std::runtime_error("00157510: DeactivateGlobal of an NPC without a LAN key in a network game");
+            bool generator=false;
+            for(const auto& [k,sp]:spawned_npcs)if(sp.c==key)generator=true;
+            const auto before=lan_net->npc_deactivate_globals_sent();
+            lan_net->npc_deactivate_global_00157510(key,generator);
+            std::cout<<"LAN (134lt7): 00157510 DeactivateGlobal of +c 0x"<<std::hex<<key<<std::dec<<" (actor "<<actor<<"): "
+                <<(lan_net->npc_deactivate_globals_sent()-before)<<" peer(s) sent cDeactivateMsg + cNetTerrainActivation\n";});
         if(lan_net)lan_net->set_named_npc_receiver([&](const lan::LanNetCore::RemoteNamedNpc& msg){
             const auto found=std::find_if(npcs.begin(),npcs.end(),[&](const NpcFigure& f){
                 return f.ai&&f.record<population.npcs.size()&&!lan_remote_slot_of(f.record)&&!coop_partner_index_of(f.record)&&f.actor_id==msg.key;});
@@ -13356,6 +13589,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(target)for(auto& n:npcs)if(n.actor==*target)npc=&n;
                 if(!npc||!npc->ai){std::cout<<": no controller here (002d63e0 does nothing) at frame "<<frame<<"\n";continue;}
                 const bool owner=!npc->ai->is_remote();
+                if(nm.type==0x32){   // 134lt7: the follow (the owner's 001488f0 broadcast, a remote controller's 002d2d50)
+                    if(owner){std::cout<<": the owner's AI (the first switch has no 0x32) at frame "<<frame<<"\n";continue;}
+                    // The second switch: 0040c540(a), cNetNPC_NetFollow 002d2ca0(npc, it, (float)b, (float)c).
+                    std::optional<std::int32_t> id;
+                    if(const auto t=lan_actor_of_key(nm.a,false);t&&*t<combat_ids.size())id=combat_ids[*t];
+                    npc->ai->remote_follow_002d2ca0(actors.actor(npc->actor),id,std::bit_cast<float>(nm.b),std::bit_cast<float>(nm.c));
+                    std::cout<<": cNetNPC_NetFollow 002d2ca0 "<<(id?"follows actor id "+std::to_string(*id):std::string("stops (no target)"))
+                        <<" at frame "<<frame<<"\n";
+                    continue;
+                }
                 if(nm.type!=0x3b){
                     char text[128];std::snprintf(text,sizeof text,"unhosted(0x002d63e0): cNetNPCMsgs type 0x%02x (%s switch) is not ported",
                         int(nm.type),owner?"the owner's":"the remote controller's");
@@ -13368,6 +13611,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 npc->ai->hear(actors.actor(npc->actor),static_cast<std::uint8_t>(nm.a&0xffU),actors.actor(*source).handle(),0.0F);
                 std::cout<<": the owner's AI heard cause "<<(nm.a&0xffU)<<" from actor "<<*source<<" (Hear +d0) at frame "<<frame<<"\n";
 
+            }
+            // 134lt7: cDeactivateMsg from another console's DeactivateGlobal (00429190 -> cHuman_NetDeactivate 001b4970): the
+            // NPC info part ran on the block; the play's part (cMan_UnDead, cTargetManager_RemoveGobj, cSKM_GOBJ_NetDeactivate,
+            // the collision routine's release) is the actor's deactivation without the effect slots, as the generator
+            // prelogic's +24 (the same 001b4970).
+            for(const auto key:lan_net->take_remote_npc_deactivates()){
+                const auto target=lan_actor_of_key(key,false);
+                if(!target){std::cout<<"LAN (134lt7): cDeactivateMsg for +c 0x"<<std::hex<<key<<std::dec<<": no actor here at frame "<<frame<<"\n";continue;}
+                actors.deactivate(*target,false);
+                std::cout<<"LAN (134lt7): cDeactivateMsg for +c 0x"<<std::hex<<key<<std::dec<<" (actor "<<*target
+                    <<"): 001b4970 NetDeactivate at frame "<<frame<<"\n";
             }
             for(const auto& d:lan_net->take_remote_damages()){
                 const auto victim=lan_actor_of_key(d.victim_key,d.local_player);
@@ -13793,6 +14047,24 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(lan_net){
                 const auto local_key=lan_net->local_player_key();
                 o.host.network_game_playing=[&]{return lan_net->memory().read(0x572400,1)!=0;};
+                // Checkpoint 134eq1: the overlay's 005721c8 / 005721c0 as the LAN game's (the original sets them for the
+                // whole network game); the roster's services over the LAN memory.
+                // PORT-ONLY test convenience --lan-loadout-direct (134eq1): the LAN runners written before the roster
+                // (their scripts accept GuiEquipmentModify at once) keep the overlay's 005721c8 at 0 for the level.
+                if(lan_loadout_direct)std::cout<<"PORT-ONLY --lan-loadout-direct: the overlay's 005721c8 stays 0 (no roster)\n";
+                else o.rt.g.b_21c8=1;
+                o.rt.g.b_21c0=static_cast<std::uint8_t>(lan_net->memory().read(0x5721c0,1));
+                if(frontend_app)o.rt.g.app_254=frontend_app->session().runtime().g.app_254;   // *004ffc04 +254
+                o.host.lan_core=lan_net;
+                o.host.loadout_clear_pending=[&o]{o.loadout_pending=false;o.loadout_done_pending=true;};
+                {   // *0055de94: SKLHog_LoadSKLHog's count of the mission SKL.HOG's members named DISGUISE_*
+                    std::int32_t n=0;
+                    for(const auto& name:disc.archive_member_names({"GAMEDATA",mission,"SKL.HOG"}))
+                        if(uppercase_asset(name).rfind("DISGUISE_",0)==0)++n;
+                    o.host.disguise_55de94=n;
+                }
+                std::cout<<"LAN (134eq1): overlay 005721c8 = 1, 005721c0 = "<<int(o.rt.g.b_21c0)<<", +254 = "<<o.rt.g.app_254
+                         <<", 0055de94 = "<<*o.host.disguise_55de94<<"\n";
                 o.host.network_local_slot=lan_net->local_client_index();
                 // PORT-ONLY: the UDP transport has no retail send-capacity
                 // trackers for 0042b320. Hide unavailable connection icons.
@@ -13938,7 +14210,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(!stop_loading_screen())return 0;
                 }
                 o.loadout_open();
-                std::cout<<"Loadout screen: 00418a80 GuiEquipmentModify \"eqmodify\" pushed (004ffc29 = 1; the world waits for its Accept)\n";
+                if(o.network_open_deferred)
+                    std::cout<<"Loadout screen: 004ffc29 = 1; 00418a80 GuiEquipmentSetup \"eqsetup\" (005721c8 set) waits for the local "
+                               "network block (134eq1, PORT-ONLY timing)\n";
+                else std::cout<<"Loadout screen: 00418a80 GuiEquipmentModify \"eqmodify\" pushed (004ffc29 = 1; the world waits for its Accept)\n";
                 // Checkpoint 132f7: the state-0xe block that pushes it moves G to 0x12 (G+51 = 0x0e, G+50 = 0x12),
                 // whose block 00168550 runs each frame until the Accept.
                 sim.apply_game_state(0x12,0x0e);
@@ -14448,6 +14723,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"Coop partner (port-only) rejoin pending at frame "<<frame<<": respawned "<<std::sqrt(dx*dx+dy*dy)<<" from the player (over "
                          <<coop_rejoin_distance<<")\n";
         };
+        // 134lt7 (PORT-ONLY test convenience): a backpack within 1.5 m of the first other console's human (the transform
+        // component's +0x40 translation), the nearest one.
+        const auto script_peer_backpack=[&]()->std::optional<std::array<float,3>>{
+            if(!combat_session||!lan_net)return std::nullopt;
+            std::optional<std::array<float,3>> peer;
+            for(const auto& r:lan_remotes)if(!r.gone&&r.figure){const auto q=actors.actor(r.figure->actor).floor_root_placement().position;
+                peer=std::array<float,3>{q[0],q[1],q[2]};break;}
+            if(!peer)return std::nullopt;
+            std::optional<std::array<float,3>> best;float best_d=1.5F;
+            for(const auto& b:combat_session->backpacks()){
+                const std::array<float,3> p{std::bit_cast<float>(b.transform.word(0x40)),std::bit_cast<float>(b.transform.word(0x44)),
+                    std::bit_cast<float>(b.transform.word(0x48))};
+                const float d=std::hypot(p[0]-(*peer)[0],p[1]-(*peer)[1]);
+                if(std::fabs(p[2]-(*peer)[2])<2.0F&&d<=best_d){best_d=d;best=p;}
+            }
+            return best;
+        };
         auto script_teleport=[&](){
             if(script_index<script.size()&&script[script_index].teleport&&script_teleported!=script_index){
                 script_teleported=script_index;test_teleport(*script[script_index].teleport);
@@ -14457,6 +14749,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 script_teleported=script_index;const auto p=sim.floor_root_placement();
                 const std::array<float,4> t{p.position[0],p.position[1],p.position[2]+*script[script_index].rise,
                     2.0F*std::atan2(p.orientation[2],p.orientation[3])*57.29578F};
+                test_teleport(t);recorder.teleport({t[0],t[1],t[2],t[3]});}
+            if(script_index<script.size()&&script[script_index].to_backpack&&script_teleported!=script_index){
+                script_teleported=script_index;
+                const auto b=script_peer_backpack();
+                if(!b)throw std::runtime_error("Script tobackpack: no backpack within 1.5 m of the other console's human");
+                const auto p=sim.floor_root_placement();
+                const std::array<float,4> t{(*b)[0],(*b)[1],(*b)[2],2.0F*std::atan2(p.orientation[2],p.orientation[3])*57.29578F};
+                std::cout<<"Script tobackpack: the player placed on the backpack at ("<<t[0]<<", "<<t[1]<<", "<<t[2]
+                    <<") (port-only test convenience)\n";
                 test_teleport(t);recorder.teleport({t[0],t[1],t[2],t[3]});}
         };
         std::uint32_t last_found_ledge=0;
@@ -15029,7 +15330,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::array<float,4> dpad{};   // sp+fb0..fbc: Up, Down, Left, Right
                 if(!script.empty()){
                     script_teleport();
-                    const auto waits=[](const ScriptStep& st){return st.wait_peer||st.wait_left||st.quit||st.wait_timer||st.wait_peers!=0;};
+                    const auto waits=[](const ScriptStep& st){return st.wait_peer||st.wait_left||st.quit||st.wait_timer||st.wait_peers!=0||st.wait_backpack;};
                     for(;;){
                         while(script_index<script.size()&&script_left==0&&!waits(script[script_index])){++script_index;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}}
                         if(script_index>=script.size()||!waits(script[script_index]))break;
@@ -15041,6 +15342,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         if(w.wait_timer){   // 133lt1
                             if(!hud_global_timer_expired)break;   // no input this frame
                             std::cout<<"Script waittimer at frame "<<frame<<": the global HUD timer +6c4 expired (port-only test convenience)\n";
+                            ++script_index;script_left=0;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}
+                            continue;
+                        }
+                        if(w.wait_backpack){   // 134lt7
+                            if(!lan_net)throw std::runtime_error("Script waitbackpack needs a LAN game (--lan-host / --lan-join)");
+                            if(!script_peer_backpack())break;   // no input this frame
+                            std::cout<<"Script waitbackpack at frame "<<frame<<": a backpack lies at the other console's human (port-only test convenience)\n";
                             ++script_index;script_left=0;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}
                             continue;
                         }
@@ -16276,6 +16584,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             hud_object->update_screen(step_dt);
                         }
                         gui_overlay_draw->gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
+                        // 134eq1: 00168550's network part (the deferred eqsetup push, then the 00572400 tail).
+                        for(const auto& line:gui_overlay_draw->loadout_network_frame(lan_net&&lan_net->local_block_links()>0))
+                            std::cout<<line<<" at frame "<<frame<<"\n";
                         if(sim.game_end().state_50==0x14&&!native_flow&&finish_level_end())break;
                         sound_step(step_dt);
                         ++frame;hud_frame=frame;gui_elapsed+=double(step_dt);

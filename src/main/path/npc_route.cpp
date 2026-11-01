@@ -262,6 +262,15 @@ std::optional<std::uint8_t> npc_route_to_node(NpcRouteManager& m,const NpcPathFo
     if((bit(pf.flags_60,1)||bit(pf.flags_60,2))&&start<0){start=pf.current_50;previous=pf.previous_54;}
     return npc_route_request(m,client,start,previous,pf.destination_5c,node,-1,nullptr,pf.route_74);
 }
+std::optional<std::uint8_t> npc_route_request_15f9b0(NpcRouteManager& m,const NpcPathFollower& pf,
+    const std::shared_ptr<NpcRouteClient>& client,std::int32_t start,std::int32_t destination,const RootVector* point){
+    std::int32_t region=-1;
+    if(point&&destination>=0){
+        if(!m.graph)throw std::runtime_error("NPC route: 0015f9b0's destination region (cAIPathData_GetNode +7c) needs the node graph");
+        region=m.graph->node(destination).parameter_7c;
+    }
+    return npc_route_request(m,client,start,-1,pf.destination_5c,destination,region,point,pf.route_74);
+}
 std::optional<std::uint8_t> npc_route_to_point(NpcRouteManager& m,const NpcPathFollower& pf,const std::shared_ptr<NpcRouteClient>& client,
     const RootVector& point,std::int32_t region){
     std::int32_t start=pf.hold_4c,previous=-1;
