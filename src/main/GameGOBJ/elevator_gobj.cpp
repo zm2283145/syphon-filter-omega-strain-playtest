@@ -417,7 +417,8 @@ void ElevatorGOBJ::seek(std::int32_t floor, bool ui) {
     open();
 }
 
-bool ElevatorGOBJ::receive_trigger(std::int32_t action, std::int32_t floor, LiftAgent agent, std::uint32_t agent_key) {
+bool ElevatorGOBJ::receive_trigger(std::int32_t action, std::int32_t floor, LiftAgent agent, std::uint32_t agent_key,
+                                   std::uint32_t other_2c) {
     auto& s = state_;
     switch (action) {
     case 10:
@@ -435,18 +436,30 @@ bool ElevatorGOBJ::receive_trigger(std::int32_t action, std::int32_t floor, Lift
     case 6: set_lock(floor, 0); return true;  // 00214908 -> 002156c0(f, 0)
     case 5: set_lock(floor, 1); return true;  // 002148f0 -> 002156c0(f, 1)
     case 1:
-    case 4:
-        // 00214828 (solo).
+    case 4: {
+        // 00214828 (solo); 133lt4 (batch2): with g_IsMultiplayer set (00214700..) the seek's second argument is
+        // whether +30 is this console's player (+14 and the controller's IsPlayer), and the authority (005721c0)
+        // re-queues the message with byte +20 = 4 for the other clients.
         if (floor < 0 || s.busy == 0) {
-            seek(floor, true);
+            seek(floor, network_game_ ? agent == LiftAgent::Player : true);
             if (floor >= 0) s.busy = 1;
-            return true;
+        } else if (s.destination != floor && floor != -1 && s.queue_count < 5) {
+            bool found = false;
+            for (std::int32_t k = 0; k < s.queue_count; ++k)
+                if (s.queue[static_cast<std::size_t>(k)] == floor) found = true;
+            if (!found) s.queue[static_cast<std::size_t>(s.queue_count++)] = floor;
         }
-        if (s.destination == floor || floor == -1 || s.queue_count >= 5) return true;
-        for (std::int32_t k = 0; k < s.queue_count; ++k)
-            if (s.queue[static_cast<std::size_t>(k)] == floor) return true;
-        s.queue[static_cast<std::size_t>(s.queue_count++)] = floor;
+        if (network_game_ && network_host_) {
+            LiftEvent event;
+            event.kind = LiftEvent::Kind::NetworkResend;
+            event.a = floor;
+            event.b = action;
+            event.object = agent_key;
+            event.word = other_2c;
+            events_.push_back(event);
+        }
         return true;
+    }
     default:
         notice(LiftEvent::Kind::Forward, 0, 0);
         return false;

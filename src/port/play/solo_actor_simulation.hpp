@@ -1099,6 +1099,10 @@ public:
     void set_remote_hotbox_actor_sink(RemoteHotboxActorSink sink);
     using RemoteTriggerSink=std::function<void(std::uint32_t who,const HotboxTrigger&)>;
     void set_remote_trigger_sink(RemoteTriggerSink sink);
+    // 133lt4 (batch2): the kind-5 network copies in a network game: 00172598's GOBJTriggerEventMsg to a type-3 box's
+    // links, after the local trigger sink; 001898f0's MSGGAME_NOTIFY_CHECKPOINT of the player.
+    void set_box_trigger_network_sink(std::function<void(const HotboxType3Trigger&)> sink);
+    void set_notify_checkpoint_network_sink(std::function<void()> sink);
     // Port-only (checkpoint 132ob5, omega_play --coop-partner, the partner
     // only): in actor mode 16, 001a80e0 marks the navigation arrived (+30ad,
     // 001a84c8..001a84e8) on every frame its ladder request (00476490: 31 / 32)

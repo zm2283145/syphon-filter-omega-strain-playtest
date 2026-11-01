@@ -109,15 +109,16 @@ void ActorWorldScriptNpcs::route_link_message(const HotboxLinkMessage& message) 
     world_.actor(entry(message.receiver).actor).queue_link_message(message.enable);
 }
 
+void ActorWorldScriptNpcs::route_box_trigger(const HotboxType3Trigger& t) {
+    if (!npcs_.count(t.receiver) && other_trigger_receiver_ && other_trigger_receiver_(t)) return;
+    world_.actor(entry(t.receiver).actor).queue_box_trigger(t);
+}
+
 void ActorWorldScriptNpcs::connect_hotbox_links(SoloActorSimulation& box_owner, OtherLinkReceiver other) {
     other_link_receiver_ = std::move(other);
     box_owner.set_hotbox_link_sink([this](const HotboxLinkMessage& m) { route_link_message(m); });
     // 00172598's GOBJTriggerEventMsg to a type-3 box's link (MakeNPCInteractable: the NPC actor).
-    box_owner.set_hotbox_trigger_sink(
-        [this](const HotboxType3Trigger& t) {
-            if (!npcs_.count(t.receiver) && other_trigger_receiver_ && other_trigger_receiver_(t)) return;
-            world_.actor(entry(t.receiver).actor).queue_box_trigger(t);
-        });
+    box_owner.set_hotbox_trigger_sink([this](const HotboxType3Trigger& t) { route_box_trigger(t); });
     for (const auto& m : box_owner.hotbox_load_link_messages()) route_link_message(m);
 }
 

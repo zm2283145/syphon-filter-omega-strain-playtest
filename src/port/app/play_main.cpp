@@ -925,6 +925,13 @@ struct SimulationScriptWorld final:MissionScriptWorld{
     }
     // 133lt4 (review2 W3): the LAN send of cAddCheckpointMsg (set by the play in a network game).
     std::function<bool(std::optional<Word>,Word,const std::string&)> network_checkpoint;
+    // 133lt4 (batch2): the other kind-5 copies (set by the play in a network game).
+    std::function<bool(Word,Word,Word,Word,Word)> network_trigger;
+    std::function<bool(std::optional<Word>)> network_respawn;
+    bool send_network_trigger(Word target,Word action,Word word_28,Word other_2c,Word source_30) override{
+        return network_trigger?network_trigger(target,action,word_28,other_2c,source_30):false;
+    }
+    bool send_network_respawn(std::optional<Word> remote) override{return network_respawn?network_respawn(remote):false;}
     bool send_network_checkpoint(std::optional<Word> remote,Word node,const std::string& label) override{
         return network_checkpoint?network_checkpoint(remote,node,label):false;
     }
@@ -7789,7 +7796,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // Checkpoint 132fx1: the DespawnedNPCMsgs 00220bb0 sends its generator (transport 0), delivered with the SpawnedNPCMsgs.
         std::vector<std::pair<std::uint32_t,std::uint32_t>> despawned_npc_msgs;
         // The type-1/6/7 boxes' EnableMsg / DisableMsg (transport 0) to generators, queued (005435c0) for the next pump.
-        std::vector<std::pair<std::uint32_t,bool>> generator_link_msgs;
+        // 133lt4 (batch2): with the box event's remote occupant (nullopt: this console's player).
+        std::vector<std::tuple<std::uint32_t,bool,std::optional<std::uint32_t>>> generator_link_msgs;
         // Checkpoint 132vo2: the SND: sound objects (00212ee0; built with the sound manager) and the type-1/6/7
         // boxes' EnableMsg / DisableMsg (transport 0) to them, queued for the next pump.
         std::optional<SoundGobjWorld> sound_world;
@@ -7953,7 +7961,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     boxes.push_back(r.id);
                 }
                 auto& lift=lift_world.add(o.id,ElevatorGOBJ(o,boxes.size()));
-                if(lan_net)lift.set_network_game(lan_net->memory().read(dme::kNetworkGame,1)!=0);   // 133lt4: 005721c8
+                if(lan_net)lift.set_network_game(lan_net->memory().read(dme::kNetworkGame,1)!=0,lan_net->host_console());   // 133lt4: 005721c8 / 005721c0
                 lift_recipients[o.id]=boxes;
                 // The lift's +7c references as 00219070's class-0xb pass reads them (a forwarded trigger).
                 for(const auto& r:o.references)if(r[0]<0x100&&r[1]<0x10000)pathed_references[o.id].push_back((r[0]<<16)|r[1]);
@@ -8600,6 +8608,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             mission_host=std::make_unique<MissionScriptHost>(std::move(modules),population,*script_world,std::move(objective_inputs));
             // 003e1a20: every console runs ClientStartLevel; only solo or the host runs StartLevel.
             // Keep the authority across the loadout's delayed start_level_entries call as well.
+            if(lan_net)mission_host->set_local_client(lan_net->local_client_index());   // 133lt4: cPlayer::Team 00175340
             if(lan_net)mission_host->set_network_context(lan_net->memory().read(dme::kNetworkGame,1)!=0,
                 lan_net->memory().read(dme::kHostRole,1)!=0);
             if(lan_net)mission_host->objectives().set_network_services({
@@ -10748,7 +10757,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(std::find(config.hotbox_link_gobs.begin(),config.hotbox_link_gobs.end(),m.receiver)!=config.hotbox_link_gobs.end()){
                         gob_link_msgs.emplace_back(m.receiver,m.enable);return true;}
                     if(!generator_world->find(m.receiver))return false;
-                    generator_link_msgs.emplace_back(m.receiver,m.enable);return true;
+                    generator_link_msgs.emplace_back(m.receiver,m.enable,m.occupant);return true;
                 });
                 // Checkpoint 132fx4: a type-3 box's enter (00172598) sends each link a GOBJTriggerEventMsg (0, 0, box),
                 // transport 0; an SND: object's receiver 00212c80 takes it in the next pump (TOKYO's two such boxes).
@@ -12781,6 +12790,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"LAN (133lt4): hotbox event code "<<e.code<<" payload "<<int(e.payload)<<" sent to player 0x"<<std::hex<<who<<std::dec
                          <<"'s owner (event byte 8)\n";});
             sim.set_remote_trigger_sink([&](std::uint32_t who,const HotboxTrigger& t){lan_deliver_remote_trigger(who,t,lan_world_frame);});
+            // 133lt4 (batch2): the kind-5 copies to every client.
+            sim.set_box_trigger_network_sink([&](const HotboxType3Trigger& t){
+                lan_net->send_trigger(t.receiver,static_cast<std::uint16_t>(t.action_24),t.word_28,t.key_2c,t.key_30,lan::kLanAll);
+                std::cout<<"LAN (133lt4): 00172598's GOBJTriggerEventMsg to "<<t.receiver<<" sent to every client (byte +20 5)\n";});
+            sim.set_notify_checkpoint_network_sink([&]{
+                lan_net->send_notify_checkpoint(lan_net->local_player_key());
+                std::cout<<"LAN (133lt4): 001898f0's MSGGAME_NOTIFY_CHECKPOINT sent to every client (byte +20 5)\n";});
+            if(script_world)script_world->network_trigger=[&](Word target,Word action,Word word_28,Word other_2c,Word source_30){
+                lan_net->send_trigger(target,static_cast<std::uint16_t>(action),word_28,other_2c,source_30,lan::kLanAll);
+                std::cout<<"LAN (133lt4): Trigger(PathedGOBJ) 00211350's GOBJTriggerEventMsg to "<<target<<" sent to every client (byte +20 5)\n";
+                return true;};
+            if(script_world)script_world->network_respawn=[&](std::optional<Word> remote){
+                const auto key=remote?static_cast<std::uint32_t>(*remote):lan_net->local_player_key();
+                lan_net->send_respawn(key,0);
+                std::cout<<"LAN (133lt4): 0022e1d0's MSGGAME_RESPAWN for player 0x"<<std::hex<<key<<std::dec<<" sent to every client (byte +20 5)\n";
+                return true;};
             if(script_world)script_world->network_checkpoint=[&](std::optional<Word> remote,Word node,const std::string& label){
                 const auto key=remote?static_cast<std::uint32_t>(*remote):lan_net->local_player_key();
                 lan_net->send_checkpoint(key,node,label);
@@ -12816,6 +12841,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 sim.queue_checkpoint(node->first,node->second,c.label);
                 std::cout<<": MSGGAME_ADD_CHECKPOINT queued to the local player\n";
             }
+            for(const auto& p:lan_net->take_remote_player_messages()){
+                std::cout<<"LAN (133lt4): "<<(p.respawn?"0022e320 MSGGAME_RESPAWN":"0022e4f0 MSGGAME_NOTIFY_CHECKPOINT")<<" for 0x"<<std::hex<<p.target_key
+                         <<std::dec<<" from client "<<p.origin<<" at frame "<<frame;
+                if(p.target_key!=local_key){
+                    // 0022e4f0 queues it to the NetMap object of the key: the remote human's cNetPlayer, whose script
+                    // filter takes OnNotifyCheckpointMsg (the co-op levels' checkpoint bookkeeping per player).
+                    if(!p.respawn&&mission_host&&mission_host->remote_player(p.target_key)){
+                        const bool taken=mission_host->deliver_notify_checkpoint(p.target_key);
+                        std::cout<<": the remote player's controller"<<(taken?": script handler\n":": no script handler\n");
+                    }else std::cout<<": another player's controller here (no port state)\n";
+                    continue;
+                }
+                if(p.respawn){sim.queue_respawn();std::cout<<": queued to the local player\n";}
+                else std::cout<<": to the local player's controller (its own respawn already queued one; no network sender targets it)\n";
+            }
             for(const auto& l:lan_net->take_remote_lift_locks()){
                 std::cout<<"LAN (133lt4): 002115e0 lift "<<l.lift_key<<" floor "<<l.floor<<(l.locked?" locked":" unlocked")<<" from client "<<l.origin<<" at frame "<<frame;
                 auto* lift=lift_world.find(l.lift_key);
@@ -12843,6 +12883,17 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }else if(lan_remote_of(r.source_30))lan_deliver_remote_trigger(r.source_30,t,frame);
                 else if(lift_world.find(r.target_key))
                     lift_triggers.push_back({r.target_key,InteractTriggerClone{static_cast<std::int32_t>(r.action),r.word_28,r.other_2c,r.source_30},false});
+                else if(std::find(pathed_order.begin(),pathed_order.end(),r.target_key)!=pathed_order.end()){
+                    // 133lt4 (batch2): Trigger(PathedGOBJ)'s copy (00211350): queued to the object (its script filter, then 00219070).
+                    ObjectMessage om;om.action=static_cast<int>(r.action);om.word_28=r.word_28;om.actor_30=r.source_30;
+                    pathed_objects.send(r.target_key,om);
+                }else if(script_npcs_host){
+                    // 133lt4 (batch2): 00172598's copy to a type-3 box's link (an NPC, or the receivers the box owner's
+                    // trigger sink also routes to; an unhosted receiver throws there).
+                    HotboxType3Trigger bt{};bt.receiver=r.target_key;bt.action_24=r.action;bt.word_28=r.word_28;bt.key_2c=r.other_2c;bt.key_30=r.source_30;
+                    if(const auto b=sim.hotboxes().find(r.source_30))bt.box=*b;
+                    script_npcs_host->route_box_trigger(bt);
+                }
                 else throw std::runtime_error("unhosted(0x00211700): a trigger whose +30 agent is neither a player nor hosted");
             }
         };
@@ -16367,6 +16418,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         if(e.b==1||frame%30==0)std::cout<<"Lift "<<id<<": 00218200 carries link "<<e.object<<(e.b==1?" (004d9360)":" (vt+94)")<<" to ("
                                                          <<e.matrix[12]<<", "<<e.matrix[13]<<", "<<e.matrix[14]<<") at frame "<<frame<<"\n";
                         break;}
+                    case LiftEvent::Kind::NetworkResend:{
+                        // 133lt4 (batch2): 00214640 on the authority: the trigger re-queued with byte +20 = 4 (every
+                        // client). +30 on the wire is a NetObj key: this console's player's LAN key for its agent key.
+                        if(!lan_net)throw std::runtime_error("Lift "+std::to_string(id)+": a network re-send (00214640) outside a LAN game");
+                        const auto agent=e.object==lift_player_key?lan_net->local_player_key():e.object;
+                        lan_net->send_trigger(id,static_cast<std::uint16_t>(e.b),static_cast<std::uint32_t>(e.a),e.word,agent,lan::kLanAll);
+                        std::cout<<"LAN (133lt4): lift "<<id<<" re-sends trigger "<<e.b<<" (floor "<<e.a<<", agent 0x"<<std::hex<<agent<<std::dec
+                                 <<") to every client (00214640, byte +20 4) at frame "<<frame<<"\n";
+                        break;}
                     case LiftEvent::Kind::NetworkLock:
                         // 133lt4 (review2 W4): 002155f0 / 00215530's cNetLockElevatorMsg (byte +20 4) to every client.
                         if(!lan_net)throw std::runtime_error("Lift "+std::to_string(id)+": a network floor lock (002155f0) outside a LAN game");
@@ -16402,6 +16462,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         lift_triggers.back().clone.word_28=static_cast<std::uint32_t>(e.a);
                         lift_triggers.back().clone.actor=e.b?lift_player_key:0;
                         std::cout<<"Lift "<<id<<": 00214aa0 posts GOBJTriggerEventMsg 1 (floor "<<e.a<<") at frame "<<frame<<"\n";
+                        // 133lt4 (batch2): the message keeps the constructor's event byte 5: every client gets a copy.
+                        if(lan_net&&lan_net->memory().read(dme::kInLevel,1)){
+                            lan_net->send_trigger(id,1,static_cast<std::uint32_t>(e.a),0,e.b?lan_net->local_player_key():0U,lan::kLanAll);
+                            std::cout<<"LAN (133lt4): lift "<<id<<": 00214aa0's trigger (floor "<<e.a<<") sent to every client (byte +20 5)\n";
+                        }
                         break;
                     }
                 };
@@ -16439,7 +16504,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // Action 10 (00214920) resolves +30 through 0040c540: the player, another object, or none.
                         const LiftAgent agent=t.clone.actor==0?LiftAgent::None:t.clone.actor==lift_player_key?LiftAgent::Player:LiftAgent::Other;
                         const bool taken=lift.receive_trigger(t.clone.action,static_cast<std::int32_t>(t.clone.word_28),agent,
-                                                              static_cast<std::uint32_t>(t.clone.actor));
+                                                              static_cast<std::uint32_t>(t.clone.actor),static_cast<std::uint32_t>(t.clone.sender_2c));
                         std::cout<<": 00214640, state "<<lift.state().busy<<", floor "<<lift.current_floor()<<" -> "<<lift.destination_floor()<<"\n";
                         if(!taken){
                             // 00214640's default case: PathObj_Receive 00219070 on the lift restarts its motion (+dc 0,
@@ -16474,7 +16539,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // to the generator's script filter first (003c8de0); unhandled, its receiver 00221610 dispatches by authority.
                 if(mission_host&&!generator_link_msgs.empty()){
                     const auto queued=std::move(generator_link_msgs);generator_link_msgs.clear();
-                    for(const auto& [generator,enable]:queued){
+                    for(const auto& [generator,enable,occupant]:queued){
                         const bool load_time=generator_load_links_left>0;
                         if(load_time)--generator_load_links_left;
                         const bool handled=mission_host->deliver_generator_link_message(generator,enable);
@@ -16482,13 +16547,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // 132ln5h11: 00221610 takes the message's +24: the load loop's
                         // DisableMsg carries -1 (001731d4). 132ln5h12: a box event's carries 003fb340 of the occupant's +c
                         // (the enter 00172450..00172460 always, the exit branches 00171f70..00171f90 / 001720c8..001720e8
-                        // with 005721c8 set; -1 without an occupant). PORT-ONLY: the play's box events are the local
-                        // player's (actor 0, its +c the local player key), so the occupant is the local player.
+                        // with 005721c8 set; -1 without an occupant). The occupant is this console's player (actor 0,
+                        // its +c the local player key) or, 133lt4 (batch2), the joiner whose event 00170200 queued.
                         std::int32_t client_24=-1;
                         if(!handled&&generator_world->network_host){
                             const auto net=generator_world->network_host();
                             if(!load_time){
-                                client_24=lan_net->generator_prelogic_host().netmap_client_3fb340(lan_net->local_player_key());
+                                client_24=lan_net->generator_prelogic_host().netmap_client_3fb340(occupant?*occupant:lan_net->local_player_key());
                             }else{
                                 if(enable)throw std::runtime_error("Generator "+std::to_string(generator)+": a load-time EnableMsg (00172ae0 sends only DisableMsgs)");
                             }

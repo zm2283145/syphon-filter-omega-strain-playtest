@@ -581,6 +581,17 @@ public:
     // (003c9e30), so 003c9420 also sends it to every client for a network player (cAddCheckpointMsg 0022e680:
     // the player's key, the node's +c key, the label). remote_player: a remote player's LAN key; nullopt: the
     // local player's. false (the default, single player): nothing sent.
+    // 133lt4 (batch2): the other kind-5 network copies: a GOBJTriggerEventMsg (Trigger(PathedGOBJ) 00211350:
+    // +24 / +28 / +2c / +30 all 0) and MSGGAME_RESPAWN (0022e1d0; remote_player nullopt: the local player's).
+    virtual bool send_network_trigger(Word target, Word action, Word word_28, Word other_2c, Word source_30) {
+        static_cast<void>(target); static_cast<void>(action); static_cast<void>(word_28);
+        static_cast<void>(other_2c); static_cast<void>(source_30);
+        return false;
+    }
+    virtual bool send_network_respawn(std::optional<Word> remote_player) {
+        static_cast<void>(remote_player);
+        return false;
+    }
     virtual bool send_network_checkpoint(std::optional<Word> remote_player, Word node, const std::string& label) {
         static_cast<void>(remote_player); static_cast<void>(node); static_cast<void>(label);
         return false;
@@ -959,6 +970,9 @@ public:
     void register_remote_player(Word key);
     void unregister_remote_player(Word key);
     bool remote_player(Word key) const { return remote_players_.contains(key); }
+    // 133lt4 (batch2): this console's client index in a network game (the local player's LAN key's top byte - 1),
+    // which cPlayer::Team 00175340 answers there.
+    void set_local_client(std::uint32_t client) { local_client_ = client; }
     // 133lt4 (review2 W3): what 001b3b60 reads of a checkpoint node (0022e710's 0040c540 lookup of the received
     // node key): its +80 position and +8c yaw (population_node_yaw); nullopt for a key that is not a node.
     std::optional<std::pair<std::array<float, 3>, float>> checkpoint_node(Word node) const;
@@ -1473,6 +1487,8 @@ private:
     bool run_host_start_level_{true};
     bool multiplayer_{};
     std::set<Word> remote_players_;   // 133lt4: register_remote_player
+    std::optional<std::uint32_t> local_client_;   // 133lt4: set_local_client
+    std::int32_t local_player_team() const;
     bool partner_objectives_{};
     bool freed_ai_resend_skip_{};
     std::size_t freed_ai_resends_skipped_{};

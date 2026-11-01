@@ -190,8 +190,9 @@ std::pair<std::string, ScriptContext::Receiver> PopulationObjects::receiver(Word
     ScriptContext::Receiver receiver;
     receiver.id = id;
     std::string label = section;
-    if (section == "npc") {
-        // The filter's projection: an NPC actor gives its AI or player component.
+    if (section == "npc" || section == "remote_player") {
+        // The filter's projection: an NPC actor gives its AI or player component (133lt4: a remote player its
+        // cNetPlayer, a player controller).
         const auto controller = objects.resolve(id);
         receiver.object = controller;
         const bool is_player = controller.kind == RuntimeObjectHandle::Kind::player;
@@ -663,11 +664,21 @@ void MissionScriptHost::invoke_function(const std::string& name) {
     context_.invoke(name);
 }
 
+// 00175340 cPlayer::Team (DEFINE_PLAYER_CTL_LEVEL, main/player/func_00175340.c): 0 while 005721c8 is clear; in a
+// network game ((+30 owner's +c & 0x7f000000) >> 24) - 1, the local player's LAN key's client index (its controller
+// is active while the player exists).
+std::int32_t MissionScriptHost::local_player_team() const {
+    if (!multiplayer_) return 0;
+    if (!local_client_) throw std::runtime_error("Team of the local player in a network game without its client index (set_local_client)");
+    return static_cast<std::int32_t>(*local_client_);
+}
+
 void MissionScriptHost::register_remote_player(Word key) {
     if (!multiplayer_) throw std::runtime_error("A remote player outside a network game");
     if (remote_players_.contains(key)) return;
     objects_.objects.register_npc(key, 1);
     objects_.objects.attach(key, RuntimeObjectHandle::Kind::player);
+    objects_.sections.emplace(key, "remote_player");   // its messages' receiver (cNetPlayer's script handler)
     remote_players_.insert(key);
 }
 
@@ -681,6 +692,7 @@ std::optional<std::pair<std::array<float, 3>, float>> MissionScriptHost::checkpo
 void MissionScriptHost::unregister_remote_player(Word key) {
     if (!remote_players_.erase(key)) return;
     objects_.objects.remove(key);
+    objects_.sections.erase(key);
 }
 
 bool MissionScriptHost::deliver_hotbox(Word box, Word action, std::optional<Word> who) {
@@ -1988,10 +2000,18 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
     if (name == "game::ReSpawn") {
         require_signature(script, function, 4, {"object:Player"});
         const auto* handle = std::get_if<RuntimeObjectHandle>(&arguments.at(0));
+        // 133lt4 (batch2): 0022e1d0 queues to the player's +30 with event byte 5: for a remote player the copy to its
+        // owner is what acts (the remote human here has no port state); for the local one every client gets a copy.
+        if (handle && handle->kind == RuntimeObjectHandle::Kind::player && remote_players_.contains(handle->id) &&
+            objects_.objects.alive(*handle)) {
+            applied = world_.send_network_respawn(handle->id);
+            return std::nullopt;
+        }
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::player || handle->id != objects_.player ||
             !objects_.objects.alive(*handle))
-            throw std::runtime_error("game::ReSpawn(Player) requires the local player's component");
+            throw std::runtime_error("game::ReSpawn(Player) requires the local or a remote player's component");
         applied = world_.respawn_player();
+        if (multiplayer_) world_.send_network_respawn(std::nullopt);
         return std::nullopt;
     }
     if (name == "game::SetPlayerInvulnerability") {
@@ -3031,6 +3051,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         }
         if (name == "Trigger") {
             paths->script_trigger(handle->id);
+            // 133lt4 (batch2): 00211350's message keeps the constructor's event byte 5: every client gets a copy.
+            if (multiplayer_) world_.send_network_trigger(handle->id, 0, 0, 0, 0);
             return std::nullopt;
         }
         if (motion.moving() && !world_.pathed_objects_ticked())
@@ -3500,7 +3522,7 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         const auto* handle = std::get_if<RuntimeObjectHandle>(&value);
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*handle))
             throw std::runtime_error(what + " without a live GOBJ");
-        if (handle->id == objects_.player) return 0;
+        if (handle->id == objects_.player) return local_player_team();
         // 133lt4: a remote human's +58 is its cNetPlayer (004de530); its Team 002d7c80 (DEFINE_PLAYER_CTL_LEVEL)
         // answers, with 005721c8 set, ((+c & 0x7f000000) >> 24) - 1 of its active controller: the client index.
         if (remote_players_.contains(handle->id)) return static_cast<std::int32_t>(((handle->id & 0x7f000000U) >> 24) - 1U);
@@ -3590,10 +3612,14 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
     if (name == "Team" && function.parameters.size() == 1 && script.type_key(function.parameters[0]) == "object:Player") {
         require_signature(script, function, 1, {"object:Player"});
         const auto* handle = std::get_if<RuntimeObjectHandle>(&arguments.at(0));
+        // 133lt4: a remote player's cNetPlayer Team 002d7c80 answers its client index as well.
+        if (handle && handle->kind == RuntimeObjectHandle::Kind::player && remote_players_.contains(handle->id) &&
+            objects_.objects.alive(*handle))
+            return Word{((handle->id & 0x7f000000U) >> 24) - 1U};
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::player || handle->id != objects_.player ||
             !objects_.objects.alive(*handle))
             throw std::runtime_error("Team(Player) requires the local player's component");
-        return Word{0};
+        return Word{static_cast<std::uint32_t>(local_player_team())};
     }
     // GetActiveWeapon(Player) 00175cd0 (132sx10, YEMEN1): the component's +30
     // actor (null -> -1) of the actor class (key 0049d010, else -1): its +3524

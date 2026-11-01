@@ -418,6 +418,8 @@ struct SoloActorSimulation::Impl {
     SoloActorSimulation::RemoteHotboxScriptFilter remote_hotbox_filter;
     SoloActorSimulation::RemoteHotboxActorSink remote_actor_sink;
     SoloActorSimulation::RemoteTriggerSink remote_trigger_sink;
+    SoloActorSimulation::HotboxTriggerSink box_trigger_network_sink;   // 133lt4 (batch2)
+    std::function<void()> notify_network_sink;                          // 133lt4 (batch2)
     bool joiner() const{return network_game&&!network_host;}   // 005721c8 set, 005721c0 clear
     std::function<bool(const ActorDamageEvent&)> network_damage;   // 132ln5h14c: 003c9420 of a network damage message
     bool port_ladder_arrival_at_end{};                     // port-only: the partner's ladder arrival (132ob5)
@@ -1718,8 +1720,9 @@ void SoloActorSimulation::Impl::deliver_queued(){
             }
             // 00171b60 -> 00172400 / 00171ed0: the type-1/6/7 link messages
             // (transport 0) to their receivers' queues, then the event to the actor.
-            for(const auto& l:hotbox_link_messages(hotbox_world,m.box,m.payload)){
+            for(auto l:hotbox_link_messages(hotbox_world,m.box,m.payload)){
                 if(!link_sink)throw std::runtime_error("Solo actor: hotbox link message to "+std::to_string(l.receiver)+" without a link sink");
+                l.occupant=m.who;                          // 133lt4 (batch2): 00172450 / 00171ed0's +24 owner
                 link_sink(l);
             }
             // 00172598: a type-3 box's enter sends each link a GOBJTriggerEventMsg (transport 0).
@@ -1727,6 +1730,8 @@ void SoloActorSimulation::Impl::deliver_queued(){
                 for(const auto& t:hotbox_type3_enter_triggers(hotbox_world,m.box)){
                     if(!trigger_sink)throw std::runtime_error("Solo actor: GOBJTriggerEventMsg (00172598) to "+std::to_string(t.receiver)+" without a hotbox trigger sink");
                     trigger_sink(t);
+                    // 133lt4 (batch2): the constructor's event byte 5: 003c9420 also sends it to every client.
+                    if(network_game&&box_trigger_network_sink)box_trigger_network_sink(t);
                 }
             // 00172688 / 001721e0: a type-5 box switches the current environment (001781a0, the host's controller).
             if(const auto e=hotbox_environment_action(hotbox_world,m.box,m.payload)){
@@ -3028,6 +3033,9 @@ void SoloActorSimulation::Impl::revive(){
     // both transport 0, so the next pump delivers them in that order.
     if(current){current->revived=true;current->notify_checkpoint=true;current->component_codes.push_back(0x11);}
     {QueuedMessage m;m.kind=QueuedMessage::Kind::notify_checkpoint;queue.push_back(m);}
+    // 133lt4 (batch2): event byte 5: in a network game 003c9420 also sends it to every client (the player's
+    // controller is a network object).
+    if(network_game&&player()&&notify_network_sink)notify_network_sink();
     // The CAS goes to the controller +58: an AI component queues it for its own pump (as the controller requests above).
     if(player())queue_component(0x11);
     else controller.ai->controller_message(*owner,0x11);
@@ -3594,6 +3602,8 @@ void SoloActorSimulation::set_trigger_network_route(TriggerNetworkRoute route){i
 void SoloActorSimulation::set_remote_hotbox_script_filter(RemoteHotboxScriptFilter filter){impl_->remote_hotbox_filter=std::move(filter);}
 void SoloActorSimulation::set_remote_hotbox_actor_sink(RemoteHotboxActorSink sink){impl_->remote_actor_sink=std::move(sink);}
 void SoloActorSimulation::set_remote_trigger_sink(RemoteTriggerSink sink){impl_->remote_trigger_sink=std::move(sink);}
+void SoloActorSimulation::set_box_trigger_network_sink(std::function<void(const HotboxType3Trigger&)> sink){impl_->box_trigger_network_sink=std::move(sink);}
+void SoloActorSimulation::set_notify_checkpoint_network_sink(std::function<void()> sink){impl_->notify_network_sink=std::move(sink);}
 // 00170200 on the host: the rebuilt HotboxMsg (+24 action, +28 code, +2c value, +30 the occupant) queued to the box
 // (003c9350, transport 0), then +98 for actions 0 / 2 (clamped to 0..3) while 005721c8 is clear or 005721c0 set.
 void SoloActorSimulation::queue_actor_hotbox(const HotboxActorEvent& e){

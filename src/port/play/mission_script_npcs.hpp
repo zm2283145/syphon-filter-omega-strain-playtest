@@ -60,6 +60,8 @@ public:
     using OtherLinkReceiver = std::function<bool(const HotboxLinkMessage&)>;
     void route_link_message(const HotboxLinkMessage& message);
     void connect_hotbox_links(SoloActorSimulation& box_owner, OtherLinkReceiver other = {});
+    // 00172598's GOBJTriggerEventMsg to a link (the box owner's trigger sink; 133lt4: also a received network copy).
+    void route_box_trigger(const HotboxType3Trigger& trigger);
     // A type-3 box's GOBJTriggerEventMsg (00172598) to a link that is not a hosted NPC (the play's SND: objects,
     // checkpoint 132fx4): true when the receiver took it; otherwise the NPC lookup throws.
     using OtherTriggerReceiver = std::function<bool(const HotboxType3Trigger&)>;

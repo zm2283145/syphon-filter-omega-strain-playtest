@@ -545,6 +545,21 @@ public:
     std::vector<RemoteTrigger> take_remote_triggers();
     std::uint32_t triggers_sent() const { return triggers_sent_; }
     std::uint32_t triggers_received() const { return triggers_received_; }
+    //  - 133lt4 (batch2): cNotifyCheckpointMsg (0022e490, 8 bytes, type 0x004f7950; receive 0022e4f0) and
+    //    cRespawnMsg (0022e2c0, 12 bytes, type 0x004f7958; receive 0022e320: +8 the RespawnMsg's +24). Both keep the
+    //    cMessage constructor's event byte 5: every client. 0022e2c0's body writes nothing at +8 (the original's
+    //    buffer byte there is whatever it held); the port sends the message's +24 (0 from 0022e1d0).
+    struct RemotePlayerMessage {
+        std::uint16_t origin{};
+        bool respawn{};               // false: NotifyCheckpoint
+        std::uint32_t target_key{};
+        std::uint32_t value{};        // respawn: +8
+    };
+    void send_notify_checkpoint(std::uint32_t target_key);
+    void send_respawn(std::uint32_t target_key, std::uint32_t value);
+    std::vector<RemotePlayerMessage> take_remote_player_messages();
+    std::uint32_t player_messages_sent() const { return player_messages_sent_; }
+    std::uint32_t player_messages_received() const { return player_messages_received_; }
 
     // 132ln5h11 (research/NET_INLEVEL.md 4.21): the level's generators (cGenerator 004db680) in the network game.
     // register_generator gives a generator (its population id: the block's +0xc and +0x10, the key everywhere) a
@@ -1019,6 +1034,8 @@ private:
     std::vector<RemoteCheckpoint> remote_checkpoints_;
     std::vector<RemoteLiftLock> remote_lift_locks_;
     std::vector<RemoteTrigger> remote_triggers_;
+    std::vector<RemotePlayerMessage> remote_player_messages_;
+    std::uint32_t player_messages_sent_ = 0, player_messages_received_ = 0;
     std::uint32_t hotbox_sent_ = 0, hotbox_received_ = 0, checkpoints_sent_ = 0, checkpoints_received_ = 0;
     std::uint32_t lift_locks_sent_ = 0, lift_locks_received_ = 0, triggers_sent_ = 0, triggers_received_ = 0;
 };

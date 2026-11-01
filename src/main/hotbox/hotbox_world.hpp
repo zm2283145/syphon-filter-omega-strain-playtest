@@ -127,6 +127,9 @@ struct HotboxLinkMessage {
     std::size_t box{};
     std::uint32_t receiver{};            // the link's +0x0c key
     bool enable{};
+    // 133lt4 (batch2): a remote occupant's LAN key when the box event was a joiner's (00170200 on the host);
+    // nullopt: this console's player (or the load loop). 00172450 / 00171ed0 put 003fb340 of it at +24.
+    std::optional<std::uint32_t> occupant;
     bool operator==(const HotboxLinkMessage&) const = default;
 };
 // 00172ae0's load loop (00173140..00173200): a DisableMsg to every resolved

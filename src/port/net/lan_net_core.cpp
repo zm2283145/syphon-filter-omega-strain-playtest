@@ -940,6 +940,24 @@ void LanNetCore::send_trigger(std::uint32_t target_key, std::uint16_t action, st
         ++triggers_sent_;
 }
 
+void LanNetCore::send_notify_checkpoint(std::uint32_t target_key) {
+    // 001898f0: 003c9e30 (event byte 5, +1c 0), queued to the controller: 003fb020's flags & 0x15 send to a3 = -1.
+    if (send_world_packet(0x4f7950, 0x22e490, 8, {}, target_key, 0xffffffffU, 0)) ++player_messages_sent_;
+}
+
+void LanNetCore::send_respawn(std::uint32_t target_key, std::uint32_t value) {
+    // 0022e1d0: +1c = 0x40, event byte 5.
+    if (send_world_packet(0x4f7958, 0x22e2c0, 12, {{8, 4, value}}, target_key, 0xffffffffU, 0x40)) ++player_messages_sent_;
+}
+
+std::vector<LanNetCore::RemotePlayerMessage> LanNetCore::take_remote_player_messages() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN checkpoint message access during background load pump; defer until stop_load_pump");
+    std::vector<RemotePlayerMessage> out;
+    out.swap(remote_player_messages_);
+    return out;
+}
+
 std::vector<LanNetCore::RemoteTrigger> LanNetCore::take_remote_triggers() {
     if (pump_.joinable())
         throw std::runtime_error("LAN trigger message access during background load pump; defer until stop_load_pump");
@@ -952,7 +970,8 @@ std::vector<LanNetCore::RemoteTrigger> LanNetCore::take_remote_triggers() {
 // is set and returns its packet size; the object lookups (0040c540, the NetMap 0055c7a0, 003fb4b0) are the play's.
 std::uint32_t LanNetCore::receive_world_message(std::uint32_t callback, std::uint32_t origin, std::uint32_t data) {
     auto& m = memory_;
-    const std::uint32_t size = callback == 0x22e710 ? 0x4cU : callback == 0x2115e0 ? 0x10U : 0x18U;
+    const std::uint32_t size = callback == 0x22e710 ? 0x4cU : callback == 0x2115e0 ? 0x10U : callback == 0x22e4f0 ? 8U
+                               : callback == 0x22e320 ? 0xcU : 0x18U;
     const auto available = dme_->incoming_message_remaining();
     if (available != 0xffffffffU && available < size) unhosted(callback, "a truncated world message");
     m.write(dme::kBusy, 1, 1);
@@ -975,6 +994,10 @@ std::uint32_t LanNetCore::receive_world_message(std::uint32_t callback, std::uin
                 if (i == 0x40) unhosted(0x22e800, "an unterminated cAddCheckpointMsg label (strlen past the packet)");
                 remote_checkpoints_.push_back(std::move(c));
                 ++checkpoints_received_;
+            } else if (callback == 0x22e4f0 || callback == 0x22e320) {
+                const bool respawn = callback == 0x22e320;
+                remote_player_messages_.push_back({o, respawn, key, respawn ? m.read(data + 8) : 0U});
+                ++player_messages_received_;
             } else if (callback == 0x2115e0) {
                 remote_lift_locks_.push_back({o, key, static_cast<std::int32_t>(m.read(data + 8)), m.read(data + 0xc, 1) != 0});
                 ++lift_locks_received_;
@@ -2493,6 +2516,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x20e8b0: return receive_player_sound(arg(2), arg(3), true);
     case 0x20e350: return receive_end_level(arg(2), arg(3));
     case 0x170200: case 0x22e710: case 0x2115e0: case 0x211700:  // 133lt4: the world messages
+    case 0x22e4f0: case 0x22e320:
         return receive_world_message(address, arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);

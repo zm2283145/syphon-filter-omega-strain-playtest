@@ -40,6 +40,8 @@ struct LiftEvent {
         NetworkLock,        // 133lt4 (review2 W4): 002155f0 / 00215530 in a network game, not silent: the
                             // cNetLockElevatorMsg (004daef0, +24 = a the floor, +28 = b the lock, byte +20 = 4) to
                             // cNetObj_SendMessage(+10, msg, -1, -1): every client
+        NetworkResend,      // 133lt4 (batch2): 00214640's multiplayer branch on the authority (005721c0): the trigger
+                            // (+24 = b, +28 = a, +2c = word, +30 = object) re-queued with byte +20 = 4: every client
         NetworkTrigger,     // 00214920 for an agent that is not the player: the trigger (+24 = 1, +28 = -1,
                             // +30 = a, the agent's +c) handed to 003fb020, which does nothing solo
         RiderCarry,         // 00218200's rider pass on a live handle: object = the rider, a = its id (the handle's
@@ -52,6 +54,7 @@ struct LiftEvent {
     std::int32_t a{}, b{};
     std::uint32_t object{};
     std::array<float, 16> matrix{};
+    std::uint32_t word{};   // NetworkResend: the trigger's +2c
 };
 
 // A link (+7c[i]) or door extra (+f0[t]) as the door predicates and 00218200
@@ -123,7 +126,7 @@ public:
     // Returns false when the message was forwarded to 00219070 (a Forward
     // event; the caller runs the PathedGOBJ receiver).
     bool receive_trigger(std::int32_t action, std::int32_t floor, LiftAgent agent = LiftAgent::None,
-                         std::uint32_t agent_key = 0);
+                         std::uint32_t agent_key = 0, std::uint32_t other_2c = 0);
     // 00214640 with any other message type: forwarded to 00219070 (a Forward
     // event).
     void receive_other();
@@ -148,7 +151,8 @@ public:
     // change is also a NetworkLock event.
     void lock_floor(std::int32_t floor, bool silent = false);
     void unlock_floor(std::int32_t floor, bool silent = false);
-    void set_network_game(bool network) { network_game_ = network; }   // 133lt4: g_IsMultiplayer (005721c8)
+    // 133lt4: g_IsMultiplayer (005721c8) and the authority byte 005721c0.
+    void set_network_game(bool network, bool host = false) { network_game_ = network; network_host_ = host; }
     void set_floor_name(std::int32_t floor, std::string name); // SetFloorName 00210e30 -> 00215010
     void set_sound(LiftSound sound, std::string name);     // Set{Ding,Loop,Start,Stop}Sound 00210df0/d30/db0/d70
     std::int32_t current_floor() const { return state_.index; }      // GetCurrentFloor 00211020
@@ -200,7 +204,7 @@ private:
     LiftState state_;
     std::array<float, 16> matrix_{};
     std::vector<LiftEvent> events_;
-    bool network_game_{};
+    bool network_game_{}, network_host_{};
     // +84 (count +88, data +8c): 8-byte handles (object, id at object +c).
     std::vector<LiftRider> riders_;
     std::string script_;
