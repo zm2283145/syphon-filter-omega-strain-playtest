@@ -522,6 +522,7 @@ void NpcAiController::activated(SoloActorSimulation& actor){
         }
     }
     act.random=combat_.random;
+    act.network_peers=network_hooks_.activated;                              // 134lt8
     const auto skipped=activate_npc_ai(component_,system_,h,act);
     if(ops&&combat_.inventory_changed)combat_.inventory_changed();
     frame_.inventory_events.insert(frame_.inventory_events.end(),inventory_events.begin(),inventory_events.end());

@@ -167,6 +167,8 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4da690 + 0xf4, 4, 0x132280);
     m.write(0x4da690 + 0xf8, 4, 0x14d3d0);
     m.write(0x4da690 + 0x110, 4, 0x13e020);
+    m.write(kFloorRecord + 0x64, 4, kFloorSource);  // PORT-ONLY (134lt5): no floor GOB until the play names one
+    m.write(kFloorSource, 4, 0);
     m.write(0x4da690 + 0x18, 4, 0x184cc0);
     // 132ln5h: the remote human's controller (the header). The vtable 0x004de530's entries 002d83c0 reads or
     // 002c6b70's callees call (.data), the shot latch 0x0048c0c0 (.data: 1; 002c4f20 clears it).
@@ -1552,6 +1554,39 @@ void LanNetCore::npc_deactivate_global_00157510(std::uint32_t c, bool generator_
                                       : ": cDeactivateMsg + cNetTerrainActivation(1) to peers" + (sent.empty() ? std::string(" none") : sent)));
 }
 
+// 134lt8 (the header): 00157df0's peer loop.
+void LanNetCore::npc_activate_peers_00157df0(std::uint32_t c, bool generator_created) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN 00157df0 peer loop during the background load pump");
+    if (generator_created) return;   // a3->s29(): the body's +7c answers (cHuman's +3598)
+    const auto block = npc_block(c);
+    std::string sent;
+    for (std::uint32_t j = 0; j < 4; ++j) {
+        if (m.read(0x55c780 + j, 1) != 2) continue;
+        const auto local = static_cast<std::uint32_t>(generator_net_host().local_slot());
+        if (j == local) continue;
+        const auto caller = sp_;
+        sp_ -= 0x100;
+        const auto msg = sp_ + 0x40;
+        try {
+            call(m, 0x3c9e30, {msg, 0x582760});
+            m.write(msg, 4, 0x4e0f00);
+            m.write(msg + 0x24, 4, static_cast<std::uint32_t>(generator_net_host().local_slot()));
+            m.write(msg + 0x28, 1, 0);
+            call(m, 0x3fb020, {m.read(block + 0xc), msg, 0xffffffffU, j});
+            m.write(msg, 4, 0x4e0f00);
+            call(m, 0x3c9d60, {msg, 0});
+        } catch (...) {
+            sp_ = caller;
+            throw;
+        }
+        sp_ = caller;
+        ++npc_activate_peers_sent_;
+        sent += " " + std::to_string(j);
+    }
+    log_.push_back("00157df0: NPC +c 0x" + hex8(c) + ": cNetTerrainActivation(0) to peers" + (sent.empty() ? std::string(" none") : sent));
+}
+
 // 134lt7 (the header): cHuman_NetActivate 001b4f40 on an NPC block.
 void LanNetCore::npc_net_activate_001b4f40(std::uint32_t block) {
     auto& m = memory_;
@@ -1877,7 +1912,10 @@ void LanNetCore::register_npc(std::uint32_t c, std::uint32_t generator) {
         block = free_npc_blocks_.back();
         free_npc_blocks_.pop_back();
     } else {
-        if (next_npc_block_ >= kNpcBlocks + kNpcBlockCount * kNpcBlockSize) unhosted(0x21e620, "more NPCs than the port's blocks hold");
+        // PORT-ONLY (134lt5): past the first region (BELARUS2 registers more than 0x60), the second one above the
+        // EE's 32 MB (this memory is sparse); the original allocates each from its heap.
+        if (next_npc_block_ == kNpcBlocks + kNpcBlockCount * kNpcBlockSize) next_npc_block_ = kNpcBlocks2;
+        if (next_npc_block_ >= kNpcBlocks2 + kNpcBlockCount2 * kNpcBlockSize) unhosted(0x21e620, "more NPCs than the port's blocks hold");
         block = next_npc_block_;
         next_npc_block_ += kNpcBlockSize;
     }
@@ -2226,9 +2264,15 @@ bool LanNetCore::send_damage_message(const DamageSend& d) {
         if (key == d.victim_key) victim = human;
     if (!victim) {
         const auto npc = npc_blocks_.find(d.victim_key);
-        if (npc == npc_blocks_.end()) unhosted(0x3ccb00, "a DamageMsg to an object of no LAN key (0x" + hex8(d.victim_key) + ")");
-        victim = npc->second;
+        if (npc != npc_blocks_.end()) victim = npc->second;
     }
+    if (!victim && floor_lookup_) {  // 134lt5: a placed GOB (003ccb00's network branch): its mirror (+0xc / +0x10 the id)
+        if (const auto x = floor_lookup_(d.victim_key)) {
+            write_floor_gob(kLookupGob, d.victim_key, *x);
+            victim = kLookupGob;
+        }
+    }
+    if (!victim) unhosted(0x3ccb00, "a DamageMsg to an object of no LAN key (0x" + hex8(d.victim_key) + ")");
     // PORT-ONLY: the message's +0x28 is the source object; the serialiser sends its +0xc (the LAN key here).
     m.write(kDamageSource + 0xc, 4, d.source_key);
     const auto caller = sp_;
@@ -2409,6 +2453,40 @@ void LanNetCore::set_local_player(const std::array<float, 3>& position, const st
     m.write(kPlayerController + 0x30, 4, p);  // the controller's human (001770f0 reads it)
     local_floor_plane_ = floor_plane;
     local_set_ = true;
+}
+
+// PORT-ONLY (134lt5): the floor GOB mirrors 001770f0 / 003e57b0 / 003e4430 read: the GOB's +0xc id, +0x50 its
+// transform node (+0x10 the matrix, byte +0x50 clear: the play writes the matrix whole), +0x54 nonzero (003e57b0's
+// test), the proxy's vtable and +0x2c..+0x2e as 0040c540's other objects.
+void LanNetCore::write_floor_gob(std::uint32_t gob, std::uint32_t id, const std::array<float, 16>& matrix) {
+    auto& m = memory_;
+    const auto node = gob + 0x80;
+    if (!m.read(kGobVtable + 0x18)) {  // the proxy's entries (written by the constructor), then the GOB's +0x18
+        for (std::uint32_t k = 0; k < 0x200; k += 4) m.write(kGobVtable + k, 4, m.read(kProxyVtable + k));
+        m.write(kGobVtable + 0x18, 4, 0x21be50);
+    }
+    m.write(gob, 4, kGobVtable);
+    m.write(gob + 0xc, 4, id);
+    m.write(gob + 0x10, 4, id);  // 003c9420's network key (+0x10)
+    m.write(gob + 0x2c, 1, 1);
+    m.write(gob + 0x2d, 1, 1);
+    m.write(gob + 0x2e, 1, 0);
+    m.write(gob + 0x50, 4, node);
+    m.write(gob + 0x54, 4, 1);
+    m.write(node, 4, kProxyVtable);
+    for (std::uint32_t k = 0; k < 16; ++k) m.write(node + 0x10 + k * 4, 4, std::bit_cast<std::uint32_t>(matrix[k]));
+    m.write(node + 0x50, 1, 0);
+}
+
+void LanNetCore::set_local_floor_object(const std::optional<FloorObject>& floor) {
+    auto& m = memory_;
+    m.write(kFloorRecord + 0x64, 4, kFloorSource);
+    if (floor) {
+        write_floor_gob(kFloorGob, floor->id, floor->matrix);
+        m.write(kFloorSource, 4, kFloorGob);
+    } else {
+        m.write(kFloorSource, 4, 0);
+    }
 }
 
 void LanNetCore::set_local_packing(const AgentPacking& packing) {
@@ -3046,6 +3124,12 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
             const auto npc = npc_blocks_.find(id);
             return npc == npc_blocks_.end() ? 0U : npc->second;
         }
+        if (floor_lookup_) {  // PORT-ONLY (134lt5): a placed GOB the play has a transform for (003e4520's lookup)
+            if (const auto x = floor_lookup_(id)) {
+                write_floor_gob(kLookupGob, id, *x);
+                return kLookupGob;
+            }
+        }
         m.write(kNpcProxy, 4, kProxyVtable);
         m.write(kNpcProxy + 0xc, 4, id);
         m.write(kNpcProxy + 0x2c, 1, 1);
@@ -3156,6 +3240,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     }
     case 0x1770f0: { Frame f(sp_); player_net_update_001770f0(m, *this, arg(0), arg(1), f.caller); return 0; }
     case 0x184cc0: return 1;  // the actor's virtual +0x18: networked
+    case 0x21be50: return 1;  // 134lt5: the GOB's virtual +0x18 (jr ra; v0 = 1): networked
     case 0x132280: {  // PORT-ONLY: the player's placement (virtual +0xf4) into a0: the component's +0x10 matrix
         if (arg(1) != kLocalPlayer) unhosted(address, "the placement of an actor other than the local player");
         for (std::uint32_t k = 0; k < 0x40; k += 4) m.write(arg(0) + k, 4, m.read(kPlayerComponent + 0x10 + k));
@@ -3167,8 +3252,12 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         for (std::uint32_t c = 0; c < 4; ++c) m.write(arg(1) + c * 4, 4, std::bit_cast<std::uint32_t>((*local_floor_plane_)[c]));
         return 1;
     }
-    case 0x13e020:  // PORT-ONLY: the player's flagged floor object (virtual +0x110): none (the play's floor records)
-        return 0;
+    case 0x13e020: {  // cHuman_GetFloorPoly (0013e020, scene_6.c): the physical's floor record (+0x100) while +0xe8
+        // PORT-ONLY (134lt5): the record is a mirror; its +0x64 source's first word is the floor GOB (001770f0 reads
+        // **(+0x64)): the play's floor-contact owner when it is a placed GOB (set_local_floor_object), else 0.
+        if (arg(0) != kLocalPlayer) unhosted(address, "the floor record of an actor other than the local player");
+        return local_floor_plane_ ? kFloorRecord : 0U;
+    }
     case 0x24b5d0: case 0x24aaf0: case 0x261540:  // PORT-ONLY: 001770f0's tail (the weapon / aim updates): the play's
         return 0;
     case 0x3ca0e0: return queue_message_003ca0e0(m, arg(3));
@@ -3565,6 +3654,24 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x1b4f40: { Frame f(sp_); npc_net_activate_001b4f40(arg(0)); return 0; }   // 134lt7: cHuman_NetActivate
     case 0x1b4970: { Frame f(sp_); npc_net_deactivate_001b4970(arg(0)); return 0; }   // 134lt7: cHuman_NetDeactivate
     case 0x431d60: return receive_terrain_activation_00431d60(arg(3));   // 134lt7: cNetTerrainActivation's receive
+    case 0x4320f0: {  // 134lt8: cNetTransferMsg_TransferMsgCallback (NetTransferMsg.c): 0x10 bytes, +8 the id, short +c
+        // the peer; under the receive guard (set when clear, cleared at the end), in a level: TransferRequest
+        // 0042d360(&id, peer). 0042d360 is not hosted yet (it throws naming its address).
+        const auto buf = arg(3);
+        if (!m.read(dme::kBusy, 1)) m.write(dme::kBusy, 1, 1);
+        try {
+            if (m.read(dme::kInLevel, 1)) {
+                m.write(kGeneratorKey, 4, m.read(buf + 8));
+                const auto peer = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int16_t>(m.read(buf + 0xc, 2))));
+                call(m, 0x42d360, {kGeneratorKey, peer});
+            }
+        } catch (...) {
+            m.write(dme::kBusy, 1, 0);
+            throw;
+        }
+        m.write(dme::kBusy, 1, 0);
+        return 0x10;
+    }
     case 0x431ea0: {  // 134lt7: cNetTerrainActivation_Pack (00431ea0): header, +8 short = +24, +a short = byte +28; +1c = 0x40
         if (arg(5) < 8 || !arg(6)) return 0xffffffffU;
         const auto transport = static_cast<std::int32_t>(m.read(arg(0) + 0x18));
@@ -4206,6 +4313,7 @@ std::uint32_t LanNetCore::queue_message_003ca0e0(LevelLoadMemory& m, std::uint32
             }
             move.heading = f(0x50);
             move.speed = f(0x54);
+            if (const auto ground = m.read(clone + 0x58)) move.ground = m.read(ground + 0xc);  // 134lt5: 003e4520's
             remote_positions_[target] = {move.position[0], move.position[1], move.position[2]};  // 132ln5h11, PORT-ONLY
             remote_moves_.push_back(move);
         }

@@ -40,6 +40,9 @@ struct ObjectDamageMessage {
 };
 struct ObjectDamageOutcome {
     std::optional<ObjectDamageMessage> message;   // queued to the object itself
+    // 134lt5: a network game's DamageMsg (+20 2) that 003c9420 sends to the session host instead (a client's).
+    std::optional<ObjectDamageMessage> network;
+    std::uint8_t byte_2e{1};                      // the message's +2e (0 for 003ccb00's flag 0 in a network game)
     bool destroyed{};                             // +40 stored as 0 and +10c called
     bool result{};                                // +108 == 3
 };
@@ -50,6 +53,13 @@ std::uint8_t object_life_state(float health_40);
 // throw.
 ObjectDamageOutcome object_base_damage(float& health_40, std::uint64_t source, std::uint8_t category,
                                        std::uint8_t type, float amount);
+// 134lt5: 003ccb00 in a network game (*005721c8 set; gobj_5.c cGOBJ_ReceiveDamage) on an object without a controller
+// (+58 = 0, so never god): `host` is *005721c0, `flag` the a3/t1 argument (004081e0 passes 1, a bullet 0). With +40 > 0:
+// +40 -= amount, the DamageMsg with +20 2 (+2e 0 for flag 0) queued to the object, which 003c9420 keeps on the host
+// (`message`) and sends to the host from a client (`network`); then the destruction as above. With +40 <= 0: a client's
+// flag-0 call sends the DamageMsg (+20 2, +2e 0) to the host all the same; nothing else.
+ObjectDamageOutcome object_network_damage(float& health_40, std::uint64_t source, std::uint8_t category,
+                                          std::uint8_t type, float amount, bool host, bool flag);
 
 using ObjectMatrix = std::array<RootVector, 4>;
 // 0021b038..0021b158 + 00131e90 / 00131e70: the GOB record's matrix.

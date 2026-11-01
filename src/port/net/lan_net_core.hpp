@@ -183,6 +183,19 @@ public:
     // the locomotion message carries (+0x40).
     void set_local_player(const std::array<float, 3>& position, const std::array<std::array<float, 3>, 3>& rows,
                           float health, const std::optional<std::array<float, 4>>& floor_plane = std::nullopt);
+    // PORT-ONLY (134lt5): the placed GOB the player stands on (the play's floor-contact owner: its object id and
+    // its transform, rows 0..2 the rotation, row 3 the translation), or none (terrain, or no floor). 0013e020's
+    // record names it (001770f0: the locomotion message's ground +0x58), so 003e57b0 sends the position relative to
+    // it (003e5a48). Call it with set_local_player.
+    struct FloorObject {
+        std::uint32_t id = 0;
+        std::array<float, 16> matrix{};
+    };
+    void set_local_floor_object(const std::optional<FloorObject>& floor);
+    // PORT-ONLY (134lt5): this console's transform of a placed GOB by object id (none: not a GOB the play moves or
+    // places), for 003e4520's nGobjManager_LookupGOBJ (0040c540): the record's position is relative to it.
+    using FloorLookup = std::function<std::optional<std::array<float, 16>>(std::uint32_t id)>;
+    void set_floor_lookup(FloorLookup lookup) { floor_lookup_ = std::move(lookup); }
     // A remote human 002c6b70 created (its 001b8130 stand-in): the sender, the key (+0x10), the 4x4 matrix 002c6b70
     // built from the message (rows 0..2 the rotation, row 3 the position), the health and (132ln5h6) the appearance
     // 00406ec0 expanded (none: no part cache, or a message without one).
@@ -222,6 +235,7 @@ public:
         std::array<float, 4> floor_plane{};    // +0x40 (the human's +0x3570)
         float heading = 0;                     // +0x50
         float speed = 0;                       // +0x54
+        std::uint32_t ground = 0;              // +0x58's object id (003e4520: a ground-relative record), else 0
     };
     std::vector<RemoteMove> take_remote_moves();
     std::uint32_t moves_sent() const { return moves_sent_; }
@@ -854,6 +868,12 @@ public:
     // loaded client (0x0055c780 == 2): cDeactivateMsg (003c9e30 0x00572198, vtable 004e0e80, 00429200 = 003fb020(+c,
     // msg, -1, i)) and cNetTerrainActivation (0x00582760, vtable 004e0f00, +24 -1, +28 1: the receiver's 0042d910).
     void npc_deactivate_global_00157510(std::uint32_t c, bool generator_created);
+    // 134lt8: cNPC_Activate_void 00157df0's peer loop (npc_49.c), at the end of the AI's activation: for an NPC whose
+    // body +7c answers 0 (an authored NPC; a generator-spawned one sends nothing) and every client i != local with
+    // 0x0055c780[i] == 2: cNetTerrainActivation (003c9e30 0x00582760, vtable 004e0f00, +24 the local index, +28 0)
+    // through 003fb020(+c, msg, -1, i). The receiver's 00431d60 runs 0042d790 for +28 0.
+    void npc_activate_peers_00157df0(std::uint32_t c, bool generator_created);
+    std::uint32_t npc_activate_peers_sent() const { return npc_activate_peers_sent_; }
     std::uint32_t npc_deactivate_globals_sent() const { return npc_deactivate_globals_sent_; }
     // 134lt7: cDeactivateMsg's receive 00429190 on an NPC block: its +0x24, cHuman_NetDeactivate 001b4970: the NPC info
     // object's Deactivate (npc_deactivate_001b4970) here, and the key queued for the play's part (cMan_UnDead,
@@ -1056,6 +1076,14 @@ private:
     static constexpr std::uint32_t kRemoteControllerVtable = kFakes + 0x200, kPlayerControllerVtable = kFakes + 0x300;
     static constexpr std::uint32_t kRemoteComponent = kFakes + 0x400, kCharacters = kFakes + 0x500;
     static constexpr std::uint32_t kPlayerComponent = kLocalPlayer + 0x3600, kPlayerController = kLocalPlayer + 0x3700;
+    // PORT-ONLY (134lt5): 0013e020's floor record (+0x64 the source), the source (word 0 the GOB), the local floor
+    // GOB and the GOB 0040c540 answers for 003e4520 (each 0x100 bytes: the GOB, its node at +0x80).
+    static constexpr std::uint32_t kFloorRecord = kLocalPlayer + 0x4000, kFloorSource = kLocalPlayer + 0x4080;
+    static constexpr std::uint32_t kFloorGob = kLocalPlayer + 0x4100, kLookupGob = kLocalPlayer + 0x4200;
+    // 134lt5: the GOB mirrors' vtable: the NPC proxy's entries, +0x18 the GOB's 0021be50 (networked: 1).
+    static constexpr std::uint32_t kGobVtable = kFakes + 0xc00;
+    void write_floor_gob(std::uint32_t gob, std::uint32_t id, const std::array<float, 16>& matrix);
+    FloorLookup floor_lookup_;
     std::uint32_t human_constructor_001b8130(LevelLoadMemory& memory, const std::vector<std::uint32_t>& a, std::uint32_t sp);
     std::uint16_t remote_client_ = 0;   // the client of the 002c6b70 running
     std::uint32_t remote_created_ = 0;
@@ -1117,6 +1145,7 @@ private:
     std::vector<std::uint32_t> remote_npc_deactivates_;
     std::uint32_t sections_gated_3269_ = 0;
     std::uint32_t npc_deactivate_globals_sent_ = 0, npc_deactivates_received_ = 0, terrain_activations_received_ = 0;
+    std::uint32_t npc_activate_peers_sent_ = 0;   // 134lt8: 00157df0's cNetTerrainActivation(0) sends
     std::uint32_t receive_terrain_activation_00431d60(std::uint32_t buf);
     static constexpr std::uint32_t kFnNpcNodeActive = 0x1d38f2c;
     std::vector<RemoteNpcMessage> remote_npc_messages_;
@@ -1141,6 +1170,7 @@ private:
     void pathed_removed_002128a0(std::uint32_t handle);
     std::uint32_t particle_sent_ = 0, particle_received_ = 0;    // 132ln5h12: the NPC blocks (register_npc; 0x4000 bytes each from kNpcBlocks, below the stack), key -> block.
     static constexpr std::uint32_t kNpcBlocks = 0x1d50000, kNpcBlockSize = 0x4000, kNpcBlockCount = 0x60;
+    static constexpr std::uint32_t kNpcBlocks2 = 0x2000000, kNpcBlockCount2 = 0x100;   // 134lt5: the second region
     static constexpr std::uint32_t kNpcController = 0x3800, kNpcInventory = 0x3c00;   // 132ln5h14b: +0x3524's
     std::map<std::uint32_t, std::uint32_t> npc_blocks_, npc_generators_;
     std::set<std::uint32_t> named_npc_registered_;

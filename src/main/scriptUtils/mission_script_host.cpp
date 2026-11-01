@@ -2922,6 +2922,14 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             if (!object || object->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*object))
                 throw std::runtime_error(name + " without a live GOBJ");
             if (object->id == objects_.player) return std::nullopt;
+            if (remote_players_.contains(object->id)) {
+                // 134lt5: another console's human (133lt4's remote-player object): this console's copy of it, the
+                // play's figure for the key (yemen_palace::CheckViewCone's InViewCone of the joiner).
+                const auto figure = remote_player_figures_.find(object->id);
+                if (figure == remote_player_figures_.end())
+                    throw std::runtime_error(name + " of a remote player without a figure: " + std::to_string(object->id));
+                return figure->second;
+            }
             const auto section = objects_.sections.find(object->id);
             if (section == objects_.sections.end() || section->second != "npc")
                 throw std::runtime_error(name + " of a GOBJ that is not an actor (not hosted): " + std::to_string(object->id));
@@ -4255,7 +4263,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             const auto figure = remote_player_figures_.find(actor->id);
             if (figure == remote_player_figures_.end())
                 throw std::runtime_error("game::PerformAction_WithObject to a remote player without a figure: " + std::to_string(actor->id));
-            npc = figure->second;        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object && actor->id != objects_.player) {
+            npc = figure->second;
+        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object && actor->id != objects_.player) {
             const auto section = objects_.sections.find(actor->id);
             if (section == objects_.sections.end() || section->second != "npc")
                 throw std::runtime_error("game::PerformAction_WithObject to a GOBJ that is not an actor (its CAS receiver is not hosted): " +
@@ -4322,7 +4331,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             const auto figure = remote_player_figures_.find(actor->id);
             if (figure == remote_player_figures_.end())
                 throw std::runtime_error(native + " to a remote player without a figure: " + std::to_string(actor->id));
-            npc = figure->second;        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object) {
+            npc = figure->second;
+        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object) {
             const auto section = objects_.sections.find(actor->id);
             if (section == objects_.sections.end() || section->second != "npc")
                 throw std::runtime_error(native + " to a GOBJ that is not an actor (its CAS receiver is not hosted): " +

@@ -769,9 +769,9 @@ std::vector<PilotCommand> read_pilot(const fs::path& path){
             if(used!=token.size())throw std::runtime_error("Pilot command arguments: "+line);
         }
         if((!c.generators.empty()||c.cover||c.up!=0||c.spacing||c.kill_hold!=300||c.ids_done||c.lock_only||c.level_only||c.anchor||c.generator_range>0||c.until_active>0||c.near_first>0)&&c.op!="aim"&&c.op!="hunt")throw std::runtime_error("Pilot command arguments: "+line);
-        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch"&&c.op!="strike"&&c.op!="waitbeam"&&c.op!="waitbeamrise"&&c.op!="waitbeamoff"&&c.op!="waitbeamend")throw std::runtime_error("Unknown pilot command: "+line);
+        if(c.op!="goto"&&c.op!="face"&&c.op!="hold"&&c.op!="wait"&&c.op!="seek"&&c.op!="teleport"&&c.op!="aim"&&c.op!="hunt"&&c.op!="aimat"&&c.op!="pickup"&&c.op!="waitcommand"&&c.op!="waitactive"&&c.op!="clear"&&c.op!="waitnear"&&c.op!="stalk"&&c.op!="waitnpc"&&c.op!="npcwatch"&&c.op!="strike"&&c.op!="waitbeam"&&c.op!="waitbeamrise"&&c.op!="waitbeamoff"&&c.op!="waitbeamend"&&c.op!="waitpathed")throw std::runtime_error("Unknown pilot command: "+line);
         if(c.op=="clear"){c.cover=20;if(c.args.size()<4||std::any_of(c.args.begin()+4,c.args.end(),[](float v){return v>=0;}))throw std::runtime_error("Pilot command arguments: "+line);}
-        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18&&c.args.size()!=19)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
+        if((c.op=="goto"&&c.args.size()<2)||(c.op=="aim"&&c.args.size()+c.generators.size()<4)||(c.op=="hunt"&&c.args.size()+c.generators.size()<5)||(c.op=="aimat"&&c.args.size()!=6)||(c.op=="waitnear"&&c.args.size()!=5)||(c.op=="waitpathed"&&c.args.size()!=2)||((c.op=="waitbeam"||c.op=="waitbeamrise")&&c.args.size()!=3)||(c.op=="waitbeamoff"&&c.args.size()!=2)||(c.op=="waitbeamend"&&c.args.size()!=5)||(c.op=="face"&&c.args.size()<1)||(c.op=="hold"&&c.args.size()!=12&&c.args.size()!=13&&c.args.size()!=17&&c.args.size()!=18&&c.args.size()!=19)||((c.op=="wait"||c.op=="waitcommand")&&c.args.size()!=1)||(c.op=="waitactive"&&c.args.size()!=2)||
             (c.op=="seek"&&c.args.size()<3)||(c.op=="teleport"&&c.args.size()!=4)||(c.op=="pickup"&&c.args.empty())||(c.op=="stalk"&&c.args.size()!=3&&c.args.size()!=4)||(c.op=="waitnpc"&&c.args.size()!=6)||(c.op=="npcwatch"&&(c.args.size()!=2||c.args[1]<0))||(c.op=="strike"&&c.args.size()!=3&&c.args.size()!=4))
             throw std::runtime_error("Pilot command arguments: "+line);
         out.push_back(std::move(c));
@@ -5770,6 +5770,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // (virtual +b8 the COL, +50 refreshed through +58 when dirty, matrix +10), the component the pathed
         // update 00216c60 publishes its pose into (+10..+4c), so their collision moves with them.
         std::map<std::uint32_t,std::uint64_t> pathed_collision;
+        // 134lt5: every placed GOB's COL handle by object ID and back: the floor-contact owner (physical +164) the
+        // locomotion message names as its ground (0013e020 -> 001770f0 +0x58) and 003e4520's lookup by ID.
+        std::map<std::uint64_t,std::uint32_t> gob_collision_id;
+        std::map<std::uint32_t,std::uint64_t> gob_collision_handle;
         // The pathed objects' drawn models: the GOB's model draw takes the same +50 component matrix as its
         // COL, so each pose update re-places the model's vertices (the unposed VUM, its range in the scene mesh)
         // and its culler placement (scene_models).
@@ -5872,6 +5876,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 declared,ShadowMatrix{{ShadowVector{b[0],b[1],b[2],0},ShadowVector{b[3],b[4],b[5],0},ShadowVector{b[6],b[7],b[8],0},ShadowVector{t.x,t.y,t.z,1}}}));
             world.add({col.begin(),col.end()},name,CollisionMatrix{b[0],b[1],b[2],0,b[3],b[4],b[5],0,b[6],b[7],b[8],0,t.x,t.y,t.z,1});
             world.set_game_object(world.cols.size(),gob_host_handle(k));   // GOB +b8 0021bd90: the model's COL
+            gob_collision_id[world.cols.size()]=static_cast<std::uint32_t>(object.id);
+            gob_collision_handle[static_cast<std::uint32_t>(object.id)]=world.cols.size();
             if(object.kind==2||object.kind==3||lift_linked.count(object.id))pathed_collision[object.id]=world.cols.size();
             ++object_count;
         }
@@ -12631,6 +12637,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(;lan_log_printed<log.size();++lan_log_printed)std::cout<<"LAN log: "<<log[lan_log_printed]<<"\n";
         };
         std::optional<omega::AgentPacking> lan_sent_packing;
+        std::uint32_t lan_floor_logged=0;
         const auto lan_set_local_player=[&]{
             // 132ln5h6: the player's packing (+0xa0) 002c72a0 compacts with 004073c0 (a body switch's, once one is made).
             if(lan_part_cache){
@@ -12647,6 +12654,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(player.physical().response.physical.e8!=0)floor_plane=player.physical().plane_f0;
             lan_net->set_local_player({p.position[0],p.position[1],p.position[2]},rows,player.health().health_40,floor_plane);
             lan_net->set_local_logic_gate_3269(player.logic_gate_3269());   // 134lt7: 001b1710's entry test
+            // 134lt5: 0013e020's record: the floor-contact owner (physical +164, the COL handle) when it is a placed GOB
+            // (its +50 transform, the owner matrix the COL gather moves it by); terrain has none.
+            std::optional<lan::LanNetCore::FloorObject> floor_object;
+            if(floor_plane){
+                const auto h=player.physical().floor_contact_object_164;
+                if(const auto id=gob_collision_id.find(h);id!=gob_collision_id.end()){
+                    if(const auto x=player.world().owner(h))floor_object=lan::LanNetCore::FloorObject{id->second,*x};
+                }
+            }
+            if(lan_floor_logged!=(floor_object?floor_object->id:0U)){
+                lan_floor_logged=floor_object?floor_object->id:0U;
+                std::cout<<"LAN (134lt5): the player's floor GOB "<<lan_floor_logged<<(lan_floor_logged?" (003e5a48: ground-relative locomotion)":" (none)")<<"\n";
+            }
+            lan_net->set_local_floor_object(floor_object);
             // 132ln5h: the player's inventory +3524 (the slots 00185a30 and 002493c0 read; +84 the held slot).
             if(combat_session){
                 const auto& inv=combat_session->player_inventory();
@@ -12678,6 +12699,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         [net,key](std::uint8_t contact,const RootVector& p){net->npc_contact_0014c510(key,contact,{p[0],p[1],p[2]});},
                         [net,key](float speed){net->npc_speed_0014c6e0(key,speed);},
                         [net,key](float yaw){net->npc_heading_001a99a4(key,yaw);}});
+                    // 134lt8: the fourth hook (activated: 00157df0's peer loop, LanNetCore::npc_activate_peers_00157df0) is
+                    // not set yet. A joiner can receive the cNetTerrainActivation(0) of an authored NPC before 002c6690 has
+                    // bound that NPC's block, and its 00431d60 then finds a GOBJ that is not an NPC block (it throws there).
                     std::cout<<"LAN (132ln5h15): authored "<<npc.label<<" uses stable key 0x"<<std::hex<<key<<std::dec
                              <<" on actor "<<npc.actor<<"\n";
                 }
@@ -13430,6 +13454,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const auto lan_network_actors=[&](unsigned frame){
             const bool host=lan_net->host_console();
             lan_hook_frame=frame;
+            if(blast_objects)blast_objects->set_network_role(host);   // 134lt5: 003ccb00's network branch on the GOBs
             for(std::size_t i=0;i<actors.size();++i){
                 if(actors.destroyed(i)||actors.actor(i).network_game())continue;
                 actors.actor(i).set_network_game(true,host,[&,i](const ActorDamageEvent& e)->bool{
@@ -13629,6 +13654,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::ostringstream line;   // one line: the damage below may log the network messages it sends
                 line<<"LAN (132ln5h14c): damage message 0x004e08a0 received for +c 0x"<<std::hex<<d.victim_key<<" (source 0x"
                     <<d.source_key<<std::dec<<", category "<<int(d.category)<<", type "<<int(d.type)<<", "<<d.amount<<")";
+                if(!victim&&blast_objects){
+                    // 134lt5: a placed GOB's key: its +100 (003ccb00, flag 1) on the host object of that ID.
+                    std::optional<std::size_t> gob;
+                    for(std::size_t k=0;k<blast_objects->host_object_count();++k)
+                        if(static_cast<std::uint32_t>(blast_objects->host_object(k).id_c)==d.victim_key)gob=k;
+                    if(gob){
+                        std::uint64_t source=0;
+                        if(d.source_key)if(const auto src=lan_actor_of_key(d.source_key,false))source=actors.actor(*src).handle();
+                        if(!source)source=blast_objects->host_object(*gob).object;   // PORT-ONLY: a source of no actor here
+                        blast_objects->object_damage(blast_objects->host_object(*gob).object,source,d.category,d.type,d.amount,true);
+                        std::cout<<line.str()<<": 004081e0 -> the virtual +100 of GOB "<<d.victim_key<<" at frame "<<frame<<"\n";
+                        continue;
+                    }
+                }
                 if(!victim){
                     std::cout<<line.str()<<": no actor of the key here (PORT-ONLY: dropped) at frame "<<frame<<"\n";
                     continue;
@@ -13754,6 +13793,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // a joiner keeps its local block, and the host's objects' +8 updates reach it through 00212540 (the receiver).
             // PORT-ONLY order: the objects were built with the population load; their network parts run here, beside the
             // generators'.
+            // 134lt5: 003e4520's nGobjManager_LookupGOBJ: this console's transform of the placed GOB a ground-relative
+            // locomotion record names (the owner matrix of its COL).
+            lan_net->set_floor_lookup([&](std::uint32_t id)->std::optional<std::array<float,16>>{
+                const auto h=gob_collision_handle.find(id);
+                if(h==gob_collision_handle.end())return std::nullopt;
+                return actors.actor(0).world().owner(h->second);
+            });
             if(mission_host)level.pathed=[&]{
                 lan_net->clear_pathed();
                 lan_pathed_sent.clear();
@@ -15508,6 +15554,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 if(within){finish();continue;}
                                 if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitnear timed out: "+c.text);
                                 ++pilot_frames;done=true;
+                            }else if(c.op=="waitpathed"){
+                                // PORT-ONLY (134lt5, LAN test convenience): waitpathed BUDGET ID: no input until the
+                                // PathedGOBJ ID has left its first waypoint or is moving (a door the other console's
+                                // script opens: TORONTO1's subway door 140513 after the keypad 140462 is shot).
+                                const auto id=static_cast<std::uint32_t>(c.wide[1]);
+                                if(std::find(pathed_order.begin(),pathed_order.end(),id)==pathed_order.end())
+                                    throw std::runtime_error("Pilot: waitpathed names no PathedGOBJ: "+c.text);
+                                const auto s=pathed_objects.motion(id).state();
+                                if(s.index!=0||!s.stopped){
+                                    std::cout<<"Pilot: waitpathed "<<id<<" met at frame "<<frame<<" (index "<<s.index<<(s.stopped?", stopped)":", moving)")<<"\n";
+                                    finish();continue;
+                                }
+                                if(pilot_frames>=static_cast<unsigned>(c.args[0]))throw std::runtime_error("Pilot: waitpathed timed out: "+c.text);
+                                ++pilot_frames;done=true;
                             }else if(c.op=="waitbeam"||c.op=="waitbeamrise"){
                                 // waitbeam BUDGET ID HEIGHT: a sweeping laser's crossing, timed as a player watches it.
                                 if(!ni_events)throw std::runtime_error("Pilot: waitbeam needs --mission-scripts: "+c.text);
@@ -16911,6 +16971,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     std::cout<<"Object damage at frame "<<frame<<": "<<id<<" type "<<int(d.call.type)<<" amount "<<d.call.amount
                         <<" health "<<d.health_40<<(d.outcome.destroyed?" (destroyed: +40 = 0, +10c without a controller)":"")
                         <<(d.outcome.message?"":", no DamageMsg (+40 was <= 0)")<<"\n"<<std::flush;
+                    if(d.outcome.network&&lan_net){
+                        // 134lt5: 003ccb00's network branch on a client: the DamageMsg (+20 2) goes to the session host,
+                        // whose 004081e0 runs the GOB's +100 (its script's DamageMsg is the host's).
+                        const auto& m=*d.outcome.network;
+                        std::uint32_t source_key=0;
+                        for(std::size_t s=0;s<actors.size();++s)
+                            if(!actors.destroyed(s)&&actors.actor(s).handle()==m.source_28){source_key=lan_actor_key(s);break;}
+                        lan::LanNetCore::DamageSend send;
+                        send.victim_key=id;send.source_key=source_key;send.flags_20=2;send.type_2c=m.type_2c;
+                        send.category_2d=m.category_2d;send.byte_2e=d.outcome.byte_2e;send.value=m.damage_24;
+                        const bool queued=lan_net->send_damage_message(send);
+                        std::cout<<"LAN (134lt5): 003ccb00 network DamageMsg "<<m.damage_24<<" of object "<<id<<" (source 0x"<<std::hex
+                            <<source_key<<std::dec<<", +20 2, +2e "<<int(d.outcome.byte_2e)<<"): "<<(queued?"queued here":"sent to the host")
+                            <<" at frame "<<frame<<"\n";
+                    }
                     if(!d.outcome.message)continue;
                     const auto& m=*d.outcome.message;
                     // Attacker: 003cc800(+28), the source's record.

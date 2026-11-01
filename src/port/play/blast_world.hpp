@@ -107,7 +107,11 @@ public:
     // A host object's damage virtual +100 called outside a blast (a bullet's
     // 00278xxx static damage: category 1, no point): 003ccb00 on its +40, the
     // result recorded as take_object_damage() reports a blast victim's.
-    void object_damage(std::uint64_t object,std::uint64_t source,std::uint8_t category,std::uint8_t type,float amount);
+    void object_damage(std::uint64_t object,std::uint64_t source,std::uint8_t category,std::uint8_t type,float amount,
+        bool flag=false);
+    // 134lt5: a network game (005721c8 set): the host objects take 003ccb00's network branch (object_network_damage),
+    // `host` the console's 005721c0.
+    void set_network_role(bool host){network_host_=host;}
     std::vector<BlastDamageRecord> take_damage();
     // The host objects' 003ccb00 results since the last call (every call,
     // with or without a message), in order.
@@ -121,6 +125,7 @@ public:
         return std::nullopt;
     }
     const BlastHostObject& host_object(std::size_t index) const { return config_.host_objects.objects.at(index); }
+    std::size_t host_object_count() const { return config_.host_objects.objects.size(); }
 private:
     std::optional<std::size_t> actor_index(std::uint64_t object) const;
     BlastSource host_source(std::size_t index) const;
@@ -129,6 +134,7 @@ private:
     std::vector<std::pair<std::uint32_t,BlastSource>> script_objects_;   // non-actor sources by record
     std::vector<BlastDamageRecord> damage_;
     std::vector<BlastObjectDamageRecord> object_damage_;
+    std::optional<bool> network_host_;
 };
 
 }

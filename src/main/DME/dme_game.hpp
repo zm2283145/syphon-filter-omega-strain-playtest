@@ -695,8 +695,9 @@ std::uint32_t move_message_destroy_0014d270(LevelLoadMemory& m, LevelLoadHost& h
 std::uint32_t move_message_clone_003e5d70(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
 // 003e57b0(msg, key, typeptr, clock, t0, cap, buf): its serialiser (+0x10): nothing (-1) when the position equals
 // the last one sent (0x0055a228, created on first use); else the 0x28-byte record: 003ff330's header, the
-// position, the velocity, s16 heading * 8192 (+0x24), u16 speed * 32768 (+0x26). The ground-relative position
-// (+0x58 with +0x50 / +0x54) throws 003e5a48. The last message is replaced by the clone.
+// position, the velocity, s16 heading * 8192 (+0x24), u16 speed * 32768 (+0x26). With a ground object (+0x58 with
+// +0x50 / +0x54) the branch 003e5a48 (134lt5): the position and plane relative to the ground's node matrix, its id
+// at +0x14, the plane's x / y as 2.14 values, u16 +0x26 0xffff. The last message is replaced by the clone.
 std::uint32_t move_message_serialise_003e57b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
                                               std::uint32_t key, std::uint32_t typeptr, std::uint32_t clock,
                                               std::uint32_t t0, std::uint32_t cap, std::uint32_t buf);
@@ -714,7 +715,8 @@ std::uint32_t actor_message_send_003c9420(LevelLoadMemory& m, LevelLoadHost& hos
 std::uint32_t actor_message_deliver_003c9350(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
                                              std::uint32_t target, std::uint32_t transport, std::uint32_t stack);
 // 003e4430(.., buf): the locomotion receive: the message rebuilt from the 0x28-byte record and delivered to the
-// key's object (003fbb10, 003c9350). A ground-relative record (u16 +0x26 = 0xffff) throws 003e4520. Frame 0x130.
+// key's object (003fbb10, 003c9350). A ground-relative record (u16 +0x26 = 0xffff) goes through 003e4520 (134lt5):
+// the plane decoded, both moved by the receiver's copy of the object (0040c540) and +0x58 that object. Frame 0x130.
 std::uint32_t move_message_receive_003e4430(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
                                             std::uint32_t stack);
 // 001770f0(controller, dt): the player controller's network update: every 250 ms (+0x1c0) the locomotion message

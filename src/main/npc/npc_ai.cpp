@@ -835,6 +835,7 @@ std::vector<std::string> activate_npc_ai(NpcAiComponent& c,NpcAiSystem& system,N
         }
         burst();c.field_a8=0;
     }
+    if(activation.network_peers)activation.network_peers();                  // 0015820c..00158320 (134lt8)
     c.inactive_159=0;
     return skipped;
 }

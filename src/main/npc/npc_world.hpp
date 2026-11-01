@@ -252,6 +252,7 @@ public:
         std::function<void(std::uint8_t contact_158,const RootVector& position)> contact;
         std::function<void(float speed)> speed;
         std::function<void(float yaw)> heading;
+        std::function<void()> activated;   // 134lt8: 00157df0's peer loop (LanNetCore::npc_activate_peers_00157df0)
     };
     void set_network_hooks(NetworkHooks hooks){network_hooks_=std::move(hooks);}
     // 132ln5h13 (npc_remote.hpp): the remote NPC controller 0x004de2a0 as this controller's remote mode.

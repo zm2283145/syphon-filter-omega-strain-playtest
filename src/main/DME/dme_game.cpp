@@ -2,6 +2,7 @@
 
 #include "game_libm.hpp"
 
+#include <array>
 #include <bit>
 #include <cmath>
 #include <stdexcept>
@@ -3063,6 +3064,110 @@ std::uint32_t cvt_w_s(float v) {
 void copy16(LevelLoadMemory& m, std::uint32_t to, std::uint32_t from) {
     for (std::uint32_t k = 0; k < 16; k += 4) w32(m, to + k, r32(m, from + k));
 }
+
+// ---- the ground-relative locomotion (003e5a48 / 003e4520; checkpoint 134lt5) ------------------------------------
+// The VU0 forms, row-vector convention (v' = v.x row0 + v.y row1 + v.z row2 [+ v.w row3]), in the ACC order.
+using Quad = std::array<float, 4>;
+using Matrix16 = std::array<float, 16>;
+Quad read_quad(const LevelLoadMemory& m, std::uint32_t a) { return {rf(m, a), rf(m, a + 4), rf(m, a + 8), rf(m, a + 12)}; }
+// 00171b30 cVector_Transform_cMatrixR: vmulax / vmadday / vmaddaz / vmaddw .xyzw.
+Quad transform_00171b30(const Quad& v, const Matrix16& x) {
+    Quad o{};
+    for (int c = 0; c < 4; ++c) o[c] = ((x[c] * v[0] + x[4 + c] * v[1]) + x[8 + c] * v[2]) + x[12 + c] * v[3];
+    return o;
+}
+// 0013ed60 cVector_Rotate_cMatrixR: .xyz only (w kept).
+Quad rotate_0013ed60(const Quad& v, const Matrix16& x) {
+    Quad o = v;
+    for (int c = 0; c < 3; ++c) o[c] = (x[c] * v[0] + x[4 + c] * v[1]) + x[8 + c] * v[2];
+    return o;
+}
+// 00133200 cMatrix_InvertRotTrans: transpose the 3x3; a nonzero translation becomes R^T(-t) (.xyz, w kept).
+void invert_rot_trans_00133200(Matrix16& x) {
+    std::swap(x[1], x[4]);
+    std::swap(x[2], x[8]);
+    std::swap(x[6], x[9]);
+    if (!(x[12] == 0.0F && x[13] == 0.0F && x[14] == 0.0F)) {
+        const Quad t{0.0F - x[12], 0.0F - x[13], 0.0F - x[14], x[15]};  // vsub.xyz vf0 - t: +0 for a zero lane
+        const auto r = rotate_0013ed60(t, x);
+        x[12] = r[0];
+        x[13] = r[1];
+        x[14] = r[2];
+    }
+}
+// A plane (normal, d) moved by a rigid transform: the normal (w 0) rotated, the point normal * -d (0017dc00) plus the
+// translation row (00133ec0 / 001bc490), d = -(normal . point) (003e5e80's Dot3: xyz). 003e5a48's sequence and
+// 003e4720's are the same.
+Quad plane_transform(const Quad& plane, const Matrix16& x) {
+    const auto n = rotate_0013ed60({plane[0], plane[1], plane[2], 0.0F}, x);  // 003e5ef0 / 003e4720: w = 0
+    Quad point{};
+    for (int c = 0; c < 4; ++c) point[c] = n[c] * -plane[3];
+    for (int c = 0; c < 3; ++c) point[c] = point[c] + x[12 + c];
+    const float d = (n[0] * point[0] + n[1] * point[1]) + n[2] * point[2];
+    return {n[0], n[1], n[2], -d};
+}
+// cXform_GetMatrix (001831b0): the node's +0x10 matrix after its virtual +0x58 when the byte +0x50 is set.
+Matrix16 xform_matrix_001831b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t node) {
+    if (r8(m, node + 0x50)) host.call(m, r32(m, r32(m, node) + 0x58), {node});
+    Matrix16 x{};
+    for (std::uint32_t k = 0; k < 16; ++k) x[k] = rf(m, node + 0x10 + k * 4);
+    return x;
+}
+// 003e5a48..003e5c34 (003e57b0's branch for a ground object with +0x50 / +0x54): the position (w 1) through the
+// inverse of the ground's +0x50 node matrix (00133300 copies, 00133200 inverts), the floor plane moved by the same
+// inverse; +0x14 the ground's object id (+0xc), +0x18 the plane's x / y as s16 2.14 values (low / high half,
+// cvt.w.s of x * 16384), +0x1c / +0x20 its z / d, u16 +0x26 0xffff (the marker; no speed).
+void move_ground_relative_003e5a48(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t ground,
+                                   std::uint32_t buf) {
+    Quad position = read_quad(m, msg + 0x30);
+    position[3] = 1.0F;
+    const auto plane = read_quad(m, msg + 0x40);
+    auto inverse = xform_matrix_001831b0(m, host, r32(m, ground + 0x50));
+    invert_rot_trans_00133200(inverse);
+    const auto local = transform_00171b30(position, inverse);
+    const auto local_plane = plane_transform(plane, inverse);
+    wf(m, buf + 8, local[0]);
+    wf(m, buf + 0xc, local[1]);
+    wf(m, buf + 0x10, local[2]);
+    w32(m, buf + 0x14, r32(m, ground + 0xc));
+    const auto x = cvt_w_s(16384.0F * local_plane[0]) & 0xffffU;
+    const auto y = cvt_w_s(16384.0F * local_plane[1]) & 0xffffU;
+    w32(m, buf + 0x18, x | (y << 16));
+    wf(m, buf + 0x1c, local_plane[2]);
+    wf(m, buf + 0x20, local_plane[3]);
+    m.write(buf + 0x26, 2, 0xffffU);
+}
+// 003e4520..003e4668 (matched: character_4.c func_003E4430): the normal from the two 2.14 values (Fixed14ToFloat)
+// and z, normalised (cVector_Normalize_void: xyz by vrsqrt), the plane (normal, +0x20); for an object id other than
+// -1 (003e4830) found by nGobjManager_LookupGOBJ (0040c540 through cObjectId 0015ac90, the handle at `handle`) with
+// a transform node (00133330: +0x50), the position and the plane through that node's matrix, and the message's
+// ground (+0x58, 003e4710) the object. Then +0x30 the position, +0x40 the plane, +0x54 speed 1 (003e46e0).
+void move_ground_relative_003e4520(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t buf,
+                                   std::uint32_t handle) {
+    const auto w = r32(m, buf + 0x18);
+    Quad d{(1.0F / 16384.0F) * static_cast<float>(static_cast<std::int16_t>(w & 0xffffU)),
+           (1.0F / 16384.0F) * static_cast<float>(static_cast<std::int16_t>(w >> 16)), rf(m, buf + 0x1c), 0.0F};
+    const float length = (d[0] * d[0] + d[1] * d[1]) + d[2] * d[2];
+    const float q = 1.0F / std::sqrt(length);
+    for (int c = 0; c < 3; ++c) d[c] = d[c] * q;
+    Quad plane{d[0], d[1], d[2], rf(m, buf + 0x20)};
+    Quad position = read_quad(m, msg + 0x30);
+    const auto id = r32(m, buf + 0x14);
+    if (id != 0xffffffffU) {
+        w32(m, handle, id);  // 0015ac90 cObjectId(uint): the word
+        if (const auto object = host.call(m, 0x40c540, {handle})) {
+            if (const auto node = r32(m, object + 0x50)) {
+                const auto x = xform_matrix_001831b0(m, host, node);
+                position = transform_00171b30(position, x);
+                plane = plane_transform(plane, x);
+            }
+            w32(m, msg + 0x58, object);
+        }
+    }
+    for (int c = 0; c < 4; ++c) wf(m, msg + 0x30 + c * 4, position[c]);
+    for (int c = 0; c < 4; ++c) wf(m, msg + 0x40 + c * 4, plane[c]);
+    wf(m, msg + 0x54, 1.0F);
+}
 // The message queue 003ca0e0(out, 0x005435c0, &0x005435c4, {transport, clone, target}) at the frame's slots.
 void queue_message(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t out, std::uint32_t at, std::uint32_t entry,
                    std::uint32_t transport, std::uint32_t clone, std::uint32_t target) {
@@ -3188,11 +3293,13 @@ std::uint32_t move_message_serialise_003e57b0(LevelLoadMemory& m, LevelLoadHost&
         return size;
     if (cap < 0x28 || !buf) return size;
     action_header_003ff330(m, host, msg, key, 0, cap, buf);
-    if (const auto ground = r32(m, msg + 0x58); ground && r32(m, ground + 0x50) && r32(m, ground + 0x54))
-        throw std::runtime_error("003e5a48: the locomotion message's ground-relative position is not ported");
-    for (std::uint32_t k = 0; k < 12; k += 4) w32(m, buf + 8 + k, r32(m, msg + 0x30 + k));
-    for (std::uint32_t k = 0; k < 16; k += 4) w32(m, buf + 0x14 + k, r32(m, msg + 0x40 + k));
-    m.write(buf + 0x26, 2, cvt_w_s(32768.0F * rf(m, msg + 0x54)) & 0xffffU);
+    if (const auto ground = r32(m, msg + 0x58); ground && r32(m, ground + 0x50) && r32(m, ground + 0x54)) {
+        move_ground_relative_003e5a48(m, host, msg, ground, buf);
+    } else {
+        for (std::uint32_t k = 0; k < 12; k += 4) w32(m, buf + 8 + k, r32(m, msg + 0x30 + k));
+        for (std::uint32_t k = 0; k < 16; k += 4) w32(m, buf + 0x14 + k, r32(m, msg + 0x40 + k));
+        m.write(buf + 0x26, 2, cvt_w_s(32768.0F * rf(m, msg + 0x54)) & 0xffffU);
+    }
     m.write(buf + 0x24, 2, cvt_w_s(8192.0F * rf(m, msg + 0x50)) & 0xffffU);
     if (typeptr) {
         w32(m, typeptr, r32(m, 0x55a210));
@@ -3357,8 +3464,7 @@ std::uint32_t move_message_receive_003e4430(LevelLoadMemory& m, LevelLoadHost& h
         wf(m, msg + 0x54, speed < 1.0F ? speed : 1.0F);
         w32(m, msg + 0x58, 0);
         w32(m, msg, kMoveMessage);
-        if (m.read(buf + 0x26, 2) == 0xffffU)
-            throw std::runtime_error("003e4520: the locomotion message's ground-relative position is not ported");
+        if (m.read(buf + 0x26, 2) == 0xffffU) move_ground_relative_003e4520(m, host, msg, buf, sp + 0x128);
         if (const auto entry = host.call(m, 0x3fbb10, {r32(m, buf + 4)}))
             host.call(m, 0x3c9350, {msg, r32(m, entry), 0, 0});
         w32(m, msg, kActionMessage);

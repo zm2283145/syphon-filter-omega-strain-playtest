@@ -73,7 +73,9 @@ void ActorWorldBlastObjects::damage(const ExplosionDamageCall& call){
         auto& h=config_.host_objects;
         if(!h.set_health_40)fail("host objects without the +40 setter");
         float health=h.health_40(*i);
-        const auto outcome=object_base_damage(health,call.source,call.category,static_cast<std::uint8_t>(call.type),call.amount);
+        const auto outcome=network_host_
+            ?object_network_damage(health,call.source,call.category,static_cast<std::uint8_t>(call.type),call.amount,*network_host_,false)
+            :object_base_damage(health,call.source,call.category,static_cast<std::uint8_t>(call.type),call.amount);
         h.set_health_40(*i,health);
         object_damage_.push_back({*i,call,health,outcome});
         return;
@@ -139,7 +141,8 @@ std::uint64_t ActorWorldBlastObjects::set_host_source(std::uint32_t record,const
     return source.handle.object;
 }
 
-void ActorWorldBlastObjects::object_damage(std::uint64_t object,std::uint64_t source,std::uint8_t category,std::uint8_t type,float amount){
+void ActorWorldBlastObjects::object_damage(std::uint64_t object,std::uint64_t source,std::uint8_t category,std::uint8_t type,float amount,
+    bool flag){
     const auto i=host_object_index(object);
     if(!i)fail("003ccb00 on an object that is not a host object");
     ExplosionDamageCall call;
@@ -147,7 +150,8 @@ void ActorWorldBlastObjects::object_damage(std::uint64_t object,std::uint64_t so
     auto& h=config_.host_objects;
     if(!h.health_40||!h.set_health_40)fail("host objects without their +40 services");
     float health=h.health_40(*i);
-    const auto outcome=object_base_damage(health,source,category,type,amount);
+    const auto outcome=network_host_?object_network_damage(health,source,category,type,amount,*network_host_,flag)
+                                    :object_base_damage(health,source,category,type,amount);
     h.set_health_40(*i,health);
     object_damage_.push_back({*i,call,health,outcome});
 }

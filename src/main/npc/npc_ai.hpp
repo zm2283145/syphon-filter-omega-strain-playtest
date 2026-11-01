@@ -662,6 +662,9 @@ struct NpcAiActivationHost {
     std::uint32_t actor_id{};                                 // actor +c
     WeaponInventoryOps* inventory{};                          // actor +3524 (required when armed)
     std::function<std::uint32_t()> random;                    // 00127dd0 (required when armed)
+    // 134lt8: 00157df0's network peer loop (the cNetTerrainActivation(+28 0) sends), after the first-activation
+    // block and before +159 = 0. Null in single player.
+    std::function<void()> network_peers;
 };
 std::vector<std::string> activate_npc_ai(NpcAiComponent& c,NpcAiSystem& system,NpcAiHost& host,const NpcAiActivationHost& activation);
 // 00158bc0's +141: bits 2, 4 and 5 set, 6 (with +64 = 0) and 7 cleared, bits
