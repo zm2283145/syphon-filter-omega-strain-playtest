@@ -2978,7 +2978,9 @@ struct PlayGuiOverlay{
             sweep_preview_records.insert(guns.library->attached(handle).item_40a);   // PORT-ONLY count (132wp1)
         }
     }
-    PlayGuiOverlay(DiscImage& disc,SceneRenderer& scene,GuiDecorAssets& shared_assets,WeaponModelLibrary* models,bool coop_hud=false)
+    // 134on3: network_quickchat hosts GAMEGUI's quickchat as the retail GuiQuickChat (a LAN game); coop_hud as the port's partner menu.
+    PlayGuiOverlay(DiscImage& disc,SceneRenderer& scene,GuiDecorAssets& shared_assets,WeaponModelLibrary* models,bool coop_hud=false,
+                   bool network_quickchat=false)
         :strings(decode_string_pool(disc.read(disc.file({"GAMEDATA","COMMON","STRINGS.DAT"})))),fonts(load_gui_fonts(disc)),
          host(fonts,[this](const std::string& key)->std::optional<std::string>{
              if(auto p=port_cheat_string(key))   // port-only (132f5; 132win11 the Port Settings entry's StartMenu8 / StartMenuOpt8)
@@ -3019,7 +3021,7 @@ struct PlayGuiOverlay{
             if(c.name=="interact"||c.name=="weaponselect"||timer||c.name=="subtitles"||c.name=="choosemenu"||
                c.name=="value_codename"||c.name=="headset_playing")
                 root.children.push_back(c);
-            else if(coop_hud&&c.name=="quickchat"&&c.class_name=="GuiQuickChat"){
+            else if((coop_hud||network_quickchat)&&c.name=="quickchat"&&c.class_name=="GuiQuickChat"){
                 // Port-only (checkpoint 132pw3, coop_command_menu.hpp): the CPU partners' command menu shows on the quick
                 // chat's widgets. GuiQuickChat's own code (002b1b30 / 002b1350) is the network game's; the port hosts the
                 // node as a plain GuiWidget and its four GuiTextWidget children dpad0..dpad3 (Up, Down, Left, Right).
@@ -3062,7 +3064,7 @@ struct PlayGuiOverlay{
                 t->flags=static_cast<std::uint16_t>(t->flags&~gui::flag_visible);   // 0045dfd0: +118 / +11c visible cleared
                 timer_widgets.emplace_back(name,t);
             }
-        if(coop_hud){
+        if(coop_hud||network_quickchat){
             quickchat=rt.find(w,"quickchat");
             if(!quickchat)throw std::runtime_error("GAMEGUI.GUI: 0041db80 found no \"quickchat\" (the port's partner command menu)");
             for(std::size_t k=0;k<4;++k){
@@ -3070,7 +3072,8 @@ struct PlayGuiOverlay{
                 if(!quickchat_dpad[k])throw std::runtime_error("GAMEGUI.GUI: the quickchat has no \"dpad"+std::to_string(k)+"\"");
             }
             quickchat->flags=static_cast<std::uint16_t>(quickchat->flags&~gui::flag_visible);
-            std::cout<<"GAMEGUI quickchat hosted (port-only partner command menu, 132pw3): dpad0..dpad3 found, hidden until the menu opens\n";
+            std::cout<<(network_quickchat?"GAMEGUI quickchat hosted (GuiQuickChat 002b1b30, a network game, 134on3)"
+                :"GAMEGUI quickchat hosted (port-only partner command menu, 132pw3)")<<": dpad0..dpad3 found, hidden until the menu opens\n";
         }
         for(const auto& [slot,image]:fonts.images)renderer.set_texture(slot,image);
         drawer.set_decor(&decor,&draw_state);
@@ -7410,6 +7413,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             return coop_team&&(coop_team->state.phase==CoopTeamPhase::moving||coop_team->state.phase==CoopTeamPhase::running)
                 &&k<3&&coop_team->posts[k].has_value()&&!coop_team->released[k];};
         CoopCommandMenu coop_menu;std::array<bool,5> coop_menu_held{};   // D-pad Up, Down, Left, Right, Triangle last frame
+        // 134on3: the network game's quick chat (GuiQuickChat +48 the menu; the game canvas's +6c / +6d / +70 Up tap).
+        struct LanQuickChat{bool open=false;std::int32_t sel=0;std::optional<double> up_since;std::array<bool,5> held{};};
+        LanQuickChat lan_quick_chat;
         // Checkpoint 132pw3 (port-only, research/COOP.md "Up to 3 CPU partners"): every per-partner driver variable above.
         // Partner 1 keeps them in place; partners 2 and 3 keep theirs in coop_extra, swapped in while their driver runs
         // (coop_with / CoopPartnerScope), so the one driver above and below serves each partner in turn.
@@ -8617,6 +8623,46 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 [&](Word id,bool success){objective_network_call([&,id,success]{lan_net->send_objective_outcome(id,success);});},
                 [&](Word id,bool active){objective_network_call([&,id,active]{lan_net->send_objective_active(id,active);});},
                 lan_net->memory().read(dme::kHostRole,1)!=0});
+            // 134on3: the HUD's network messages (NetLabelMsg 002d2920 / NetCalloutMsg 002c53a0): the keys become
+            // 003fdb40 indices over the same common + mission pools on every console (the level's STRINGS.DAT).
+            if(lan_net&&lan_net->memory().read(dme::kNetworkGame,1)){
+                MissionScriptHost::NetHudServices s;
+                s.local_client=static_cast<std::int32_t>(lan_net->local_client_index());
+                s.send=[&](const MissionScriptHost::NetHudMessage& m){
+                    const auto& loc=mission_host->objectives().inputs().localization;
+                    const auto index=[&](const std::optional<std::string>& k){return loc?loc->lookup(k):-1;};   // 003fdb40
+                    const auto i0=index(m.key0),i1=index(m.key1);
+                    objective_network_call([&,m,i0,i1]{
+                        if(m.kind==MissionScriptHost::NetHudMessage::Kind::quick_chat){
+                            // 002b0f00's location update: queued on the player GOBJ (its NetMap key), to its owner.
+                            std::uint32_t key=0;
+                            if(m.object==mission_host->objects().player)key=lan_net->local_player_key();
+                            else for(const auto& r:lan_remotes)if(r.figure&&r.figure->actor_id==m.object)key=r.key;
+                            if(!key)throw std::runtime_error("unhosted(0x2b0f00): a location update for an object without a NetMap key");
+                            lan_net->send_quick_chat(key,m.a,m.b,static_cast<std::uint32_t>(m.recipient));
+                            std::cout<<"LAN (134on3): cNetQuickChatMsg sent: {"<<m.a<<", "<<m.b<<"} key 0x"<<std::hex<<key<<std::dec
+                                <<" to "<<m.recipient<<"\n";
+                        }else if(m.kind==MissionScriptHost::NetHudMessage::Kind::label){
+                            lan_net->send_label(m.label_kind,static_cast<std::int32_t>(m.object),i0,i1,static_cast<std::uint32_t>(m.recipient));
+                            std::cout<<"LAN (134on3): NetLabelMsg sent: kind "<<int(m.label_kind)<<" object "<<m.object<<" keys "
+                                <<(m.key0?*m.key0:"(null)")<<" = "<<i0<<", "<<(m.key1?*m.key1:"(null)")<<" = "<<i1
+                                <<" to "<<m.recipient<<"\n";
+                        }else{
+                            lan::LanNetCore::RemoteCallout c;
+                            c.clear=m.clear;c.byte_48=m.byte_48;c.byte_49=m.byte_49;c.key_index=i0;
+                            c.object=static_cast<std::int32_t>(m.object);c.slot=m.slot;c.value=m.value;c.colour=m.colour;
+                            lan_net->send_callout(c);
+                            std::cout<<"LAN (134on3): NetCalloutMsg sent: "<<(m.clear?"clear":"set")<<" object "<<m.object
+                                <<" key "<<(m.key0?*m.key0:"(null)")<<" = "<<i0<<"\n";
+                        }});};
+                // 00227a90's cNetObj_GetOwner for a GOBJ: the local player is this client; a LAN remote human its peer.
+                s.owner=[&](RuntimeObjectHandle h)->std::optional<std::int32_t>{
+                    if(h.id==mission_host->objects().player)return static_cast<std::int32_t>(lan_net->local_client_index());
+                    for(const auto& r:lan_remotes)if(r.figure&&r.figure->actor_id==h.id)return static_cast<std::int32_t>(r.peer);
+                    return std::nullopt;};
+                s.player_client=s.owner;   // the same two player GOBJs
+                mission_host->set_net_hud_services(std::move(s));
+            }
             if(const auto* set=omega::mods::active();set&&set->has_data())
                 for(const auto& [name,value]:omega::mods::tohit_overrides(*set))
                     mission_host->to_hit().set_field(name,Word{std::bit_cast<std::uint32_t>(value)});   // 132md16: [tohit]
@@ -9410,6 +9456,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         lan_net->send_kill_statistics(victim,killer,type,category);
                         std::cout<<"LAN (A8): 00186f30 sent cNetUpdateStatsMsg for victim +c 0x"<<std::hex<<victim<<" to killer 0x"
                                  <<killer<<std::dec<<" (type "<<int(type)<<", category "<<int(category)<<"); no local credit\n";};
+                    // 133on2: 001992b0's cEquipGogglesMsg, to every peer under the human's NetMap key.
+                    cc.net_goggles=[&,key_of=cc.net_actor_key](std::size_t a,std::uint8_t value){
+                        lan_net->send_goggles(key_of(a),value);};
                     cc.net_backpack_bind=[&](std::uint32_t id,std::uint32_t owner,std::uint32_t address){
                         lan_net->bind_backpack(id,static_cast<std::uint16_t>(owner),address);};
                     cc.net_backpack_send=[&](std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
@@ -9938,14 +9987,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 // EquipGoggles 001992b0(actor, on, 0) (actor_goggles.hpp): 0013fb50 is inventory +68 (slot 6's item) != -1
                 // (00147840's record is then non-null: the weapon database's record table is loaded); *005721c8 (the
-                // network flag) is 0 in single player. The one-shot's "switch_on_ir" phase then reaches 00199590 (combat_throw_play's item triggers).
-                if(script_npcs_host)script_npcs_host->set_goggles_host([&combat_session,&actors](std::size_t a,bool on){
-                    auto& actor=actors.actor(a);
+                // network flag) is 0 in single player; in a LAN game an accepted switch sends cEquipGogglesMsg (133on2,
+                // CombatPlayConfig::net_goggles). The one-shot's "switch_on_ir" phase then reaches 00199590 (combat_throw_play's item triggers).
+                if(script_npcs_host)script_npcs_host->set_goggles_host([&combat_session](std::size_t a,bool on){
                     const bool record=combat_session->combat().inventory(a).slots.at(6).item!=-1;
-                    SecondaryComponent* secondary=actor.eligible()?&combat_session->actors().secondary(a):nullptr;
-                    const auto r=switch_actor_goggles(actor.item_actions(),on?1:0,false,record,secondary,actor.handle(),false);
+                    const auto r=combat_session->switch_goggles(a,on?1:0,false);
                     std::cout<<"EquipGoggles: actor "<<a<<" value "<<on<<", slot 6 "<<(record?"held":"empty")
-                             <<(r.requested?(r.accepted?", switch_on_ir accepted":", switch_on_ir refused"):"")<<"\n";
+                             <<(r.requested?(r.accepted?", switch_on_ir accepted":", switch_on_ir refused"):"")
+                             <<(r.replicate?", cEquipGogglesMsg sent (003c9420)":"")<<"\n";
                 });
                 for(auto& npc:npcs)if(npc.ai){
                     npc.ai->set_combat_link(combat_session->npc_combat_link(npc.actor));
@@ -10515,7 +10564,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 timer_host->fields.timer_6ac.description=timer_host->fields.timer_6c4.description=d.value_or(0);
                 timer_host->fields.timer_6ac.value=timer_host->fields.timer_6c4.value=v.value_or(0);
             }
-            mission_host->set_global_timer([t=timer_host.get(),&mission_clock_6dc,&mission_host,lan_net](float seconds,const std::string* key){
+            mission_host->set_global_timer([t=timer_host.get(),&mission_clock_6dc,&mission_host,lan_net,&objective_network_call](float seconds,const std::string* key){
                 if(lan_net&&!lan_net->hosting()){
                     std::cout<<"StartGlobalTimer at frame "<<t->frame
                         <<": client script copy leaves the authoritative LAN timer unchanged"
@@ -10531,7 +10580,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(const auto r=loc->resolve(*key))label=std::string(*r);
                 }
                 const float end=hud_global_timer_start(t->fields,seconds,label?label->c_str():nullptr,*t,*t);
-                if(lan_net)lan_net->send_global_timer(end,key?std::string_view(*key):std::string_view{});
+                // 134on3: a StartLevel timer (TORONTO2's sewer::StartDALevel) runs during the level load's pump; the send
+                // waits for the pump's end like the objective registrations (the message goes out once the level runs).
+                if(lan_net){
+                    const std::optional<std::string> k=key?std::optional<std::string>(*key):std::nullopt;
+                    objective_network_call([lan_net,end,k]{lan_net->send_global_timer(end,k?std::string_view(*k):std::string_view{});});
+                }
                 std::cout<<"StartGlobalTimer at frame "<<t->frame<<": HUD timer +6c4 "<<seconds<<" s"
                     <<(key?", label "+*key+" -> "+(label?"\""+*label+"\"":std::string("(null)")):std::string())<<", clock "<<mission_clock_6dc
                     <<" -> end "<<end<<" (00245560"<<(t->fields.timer_6c4.value?"; drawn in GAMEGUI value_timer)\n":"; no timer widgets, nothing drawn)\n");
@@ -13204,6 +13258,67 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<": 00187230 -> 00186f30 on actor "<<*victim<<" added "<<added
                     <<" statistic event(s) at frame "<<frame<<"\n";
             }
+            // 133on2: the cEquipGogglesMsgs the other consoles sent: 00199500 resolves the header's key (0040c540) and
+            // runs 001992b0(object, byte != 0, 1) on it; a key of no object here does nothing.
+            for(const auto& g:lan_net->take_goggles()){
+                const auto actor=lan_actor_of_key(g.target_key,false);
+                std::cout<<"LAN (133on2): cEquipGogglesMsg received for +c 0x"<<std::hex<<g.target_key<<std::dec
+                    <<" value "<<int(g.value)<<" from client "<<g.origin;
+                if(!actor||!combat_session){
+                    std::cout<<": no actor of the key here (00199500's null object: nothing) at frame "<<frame<<"\n";
+                    continue;
+                }
+                const auto r=combat_session->receive_goggles_network(*actor,g.value);
+                std::cout<<": 001992b0(actor "<<*actor<<", "<<int(g.value!=0)<<", 1)"
+                    <<(r.requested?(r.accepted?", switch_on_ir accepted":", switch_on_ir refused"):", no request")
+                    <<" at frame "<<frame<<"\n";
+            }
+            // 134on3: NetLabelMsg 002d2650 / NetCalloutMsg 002c50e0 from the other consoles: 003fdae0 turns the
+            // indices back into keys (-1: null), then the quiet / silent HUD call (no message back).
+            for(const auto& lb:lan_net->take_labels()){
+                MissionScriptHost::NetHudMessage m;
+                std::string done="not applied (no mission scripts)";
+                if(mission_host){
+                    const auto& loc=mission_host->objectives().inputs().localization;
+                    const auto tag=[&](std::int32_t i)->std::optional<std::string>{
+                        if(i==-1)return std::nullopt;
+                        return loc?std::optional<std::string>(loc->tag(i)):std::nullopt;};
+                    m.label_kind=lb.kind;m.object=static_cast<Word>(lb.object);m.key0=tag(lb.key0);m.key1=tag(lb.key1);
+                    done=mission_host->receive_net_hud(m);
+                }
+                std::cout<<"LAN (134on3): NetLabelMsg received from client "<<lb.origin<<": kind "<<int(lb.kind)<<" object "
+                    <<lb.object<<" keys "<<lb.key0<<" ("<<(m.key0?*m.key0:"null")<<"), "<<lb.key1<<" ("<<(m.key1?*m.key1:"null")
+                    <<"): "<<done<<" at frame "<<frame<<"\n";
+            }
+            // 134on3: cNetQuickChatMsg 00323ad0: the header key's object (0040c540; none: nothing) and, for a player
+            // controller, its client ((key & 0x7f000000) >> 24) - 1 (else -1).
+            for(const auto& q:lan_net->take_quick_chats()){
+                bool player=q.key==lan_net->local_player_key();
+                for(const auto& r:lan_remotes)if(!r.gone&&r.key==q.key)player=true;
+                std::string done="no object of the key here (00323ad0: nothing)";
+                if(player&&mission_host){
+                    MissionScriptHost::NetHudMessage m;
+                    m.kind=MissionScriptHost::NetHudMessage::Kind::quick_chat;
+                    m.object=static_cast<Word>(((q.key&0x7f000000U)>>24)-1);m.a=q.a;m.b=q.b;
+                    done=mission_host->receive_net_hud(m);
+                }else if(player)done="not applied (no mission scripts)";
+                std::cout<<"LAN (134on3): cNetQuickChatMsg received from client "<<q.origin<<": {"<<q.a<<", "<<q.b<<"} key 0x"
+                    <<std::hex<<q.key<<std::dec<<": "<<done<<" at frame "<<frame<<"\n";
+            }
+            for(const auto& co:lan_net->take_callouts()){
+                MissionScriptHost::NetHudMessage m;
+                m.kind=MissionScriptHost::NetHudMessage::Kind::callout;
+                std::string done="not applied (no mission scripts)";
+                if(mission_host){
+                    const auto& loc=mission_host->objectives().inputs().localization;
+                    m.clear=co.clear;m.object=static_cast<Word>(co.object);m.slot=co.slot;m.value=co.value;m.colour=co.colour;
+                    m.byte_48=co.byte_48;m.byte_49=co.byte_49;
+                    if(co.key_index!=-1&&loc)m.key0=loc->tag(co.key_index);   // strncpy(003fdae0(id)): "" for other negatives
+                    done=mission_host->receive_net_hud(m);
+                }
+                std::cout<<"LAN (134on3): NetCalloutMsg received from client "<<co.origin<<": "<<(co.clear?"clear":"set")
+                    <<" object "<<co.object<<" key "<<co.key_index<<": "<<done<<" at frame "<<frame<<"\n";
+            }
             for(const auto& d:lan_net->take_remote_damages()){
                 const auto victim=lan_actor_of_key(d.victim_key,d.local_player);
                 std::ostringstream line;   // one line: the damage below may log the network messages it sends
@@ -13465,7 +13580,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 <<", cue "<<mission_host->objectives().inputs().mission_cue<<")\n";
         }else std::cout<<"Mission time cues: not run (00244fa0's head reads the objective manager 00225cd0; needs --mission-scripts)\n";
         std::unique_ptr<PlayGuiOverlay> gui_overlay_draw;
-        if(gui_overlay){if(!gui_assets)gui_assets=std::make_unique<GuiDecorAssets>(disc);gui_overlay_draw=std::make_unique<PlayGuiOverlay>(disc,*state.renderer,*gui_assets,weapon_library.get(),coop_partner_figure&&!no_coop_hud);}
+        if(gui_overlay){if(!gui_assets)gui_assets=std::make_unique<GuiDecorAssets>(disc);gui_overlay_draw=std::make_unique<PlayGuiOverlay>(disc,*state.renderer,*gui_assets,weapon_library.get(),coop_partner_figure&&!no_coop_hud,
+            !coop_partner_figure&&lan_net&&lan_net->memory().read(dme::kNetworkGame,1)!=0);}
         if(gui_overlay_draw&&hud_object){
             // Checkpoint 130e: the callout natives go to 00242fa0 / 00242b40, whose fade needs the text's line
             // count 003d04c0 (the overlay's fonts, as its HUD text draw).
@@ -15503,6 +15619,75 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(was_open||coop_menu.open){
                         dpad={0.0F,0.0F,0.0F,0.0F};dpad_right=0.0F;dpad_left=0.0F;triangle=0.0F;
                         if(!coop_menu.open){
+                            pad_reset_masked[1]=now[4];
+                            for(std::size_t d=0;d<4;++d)pad_reset_masked[6+d]=now[d];
+                        }
+                    }
+                }
+                // 134on3: the quick chat in a network game (no CPU partner). GuiGameCanvas_DispatchInput 004650c0: a plain D-pad
+                // Up press (0x1000) sets the canvas's +6c while 004651f0 allows it (the game screen on top, no choose menu, the
+                // quick chat closed); 00464d20 then times it (+70 = now + 200 ms) and, on the release before that, opens the quick
+                // chat (00242740 -> 0045dd90: 002b1970 resets +48 to menu 0 and relabels dpad0..dpad3). GuiQuickChat_onInput
+                // 002b1350: the D-pad picks entry 0..3 of menu +48 (0048bd10): a submenu row moves +48 and relabels, an item row
+                // posts its line to the ticker and, networked, queues cNetQuickChatMsg {item, location} on the local player
+                // (+20 = 4: every peer), then closes (002426e0); Triangle (0x10) closes.
+                if(coop_partner_figures.empty()&&lan_net&&lan_net->memory().read(dme::kNetworkGame,1)&&mission_host&&!state.paused){
+                    auto& qc=lan_quick_chat;
+                    const std::array<bool,5> now{dpad[0]>0.0F,dpad[1]>0.0F,dpad[2]>0.0F,dpad[3]>0.0F,triangle>0.0F};
+                    std::array<bool,5> pressed{},released{};
+                    for(std::size_t b=0;b<now.size();++b){pressed[b]=now[b]&&!qc.held[b];released[b]=!now[b]&&qc.held[b];}
+                    qc.held=now;
+                    const double now_ms=static_cast<double>(frame)*static_cast<double>(dt)*1000.0;
+                    const auto& loc=mission_host->objectives().inputs().localization;
+                    const auto local=static_cast<std::int32_t>(lan_net->local_client_index());
+                    const auto labels=[&]{
+                        std::array<std::string,4> t{};
+                        const auto& row=quick_chat_menus.at(static_cast<std::size_t>(qc.sel));
+                        for(std::size_t k=0;k<4;++k){   // sprintf(QC_MENU_%d / QC_ITEM_%d) then 003fdb50 and 0041beb0
+                            const auto key=std::string(row.submenu?"QC_MENU_":"QC_ITEM_")+std::to_string(row.entries[k]);
+                            const auto s=loc?loc->resolve(key):std::nullopt;
+                            t[k]=s?std::string(*s):std::string();
+                        }
+                        return t;};
+                    const auto show=[&](bool on){
+                        if(gui_overlay_draw)gui_overlay_draw->quickchat_show(on,on?labels():std::array<std::string,4>{});};
+                    const bool was_open=qc.open;
+                    if(!qc.open){
+                        const bool allowed=!(combat_session&&combat_session->pickup_menu())&&
+                            !(gui_overlay_draw&&(gui_overlay_draw->rt.gs_choose_shown_bd00()||gui_overlay_draw->world_paused()));
+                        if(pressed[0]&&allowed)qc.up_since=now_ms;                      // +6c = 1, then +6d / +70 = now + 200
+                        else if(released[0]&&qc.up_since){
+                            if(allowed&&now_ms<=*qc.up_since+200.0){                   // released before +70: 00242740
+                                qc.open=true;qc.sel=0;show(true);
+                                const auto t=labels();
+                                std::cout<<"Quick chat (002b1970) opened at frame "<<frame<<": "<<t[0]<<" / "<<t[1]<<" / "<<t[2]<<" / "<<t[3]<<"\n";
+                            }
+                            qc.up_since.reset();
+                        }
+                    }else if(pressed[4]){
+                        qc.open=false;show(false);
+                        std::cout<<"Quick chat closed (Triangle, 002426e0) at frame "<<frame<<"\n";
+                    }else for(std::size_t d=0;d<4;++d)if(pressed[d]){
+                        const auto& row=quick_chat_menus.at(static_cast<std::size_t>(qc.sel));
+                        const auto entry=row.entries[d];
+                        if(row.submenu){
+                            qc.sel=entry;show(true);
+                            const auto t=labels();
+                            std::cout<<"Quick chat menu "<<entry<<" (002b1350) at frame "<<frame<<": "<<t[0]<<" / "<<t[1]<<" / "<<t[2]<<" / "<<t[3]<<"\n";
+                        }else{
+                            const auto place=mission_host->hud().location(static_cast<std::size_t>(local)).value_or(-1);   // 002b1280
+                            const auto text=loc?quick_chat_line(*loc,entry,local+1,place):std::string();
+                            if(hud_object)hud_object->ticker_add(text,quick_chat_colour,1,false);
+                            lan_net->send_quick_chat(lan_net->local_player_key(),entry,place);
+                            std::cout<<"Quick chat item "<<entry<<" (002b1350) at frame "<<frame<<": ticker \""<<text
+                                <<"\"; cNetQuickChatMsg {"<<entry<<", "<<place<<"} sent to every peer\n";
+                            qc.open=false;show(false);
+                        }
+                        break;
+                    }
+                    if(was_open||qc.open){   // the quick chat has the focus (0041e2b0): the D-pad and Triangle are its
+                        dpad={0.0F,0.0F,0.0F,0.0F};dpad_right=0.0F;dpad_left=0.0F;triangle=0.0F;
+                        if(!qc.open){
                             pad_reset_masked[1]=now[4];
                             for(std::size_t d=0;d<4;++d)pad_reset_masked[6+d]=now[d];
                         }

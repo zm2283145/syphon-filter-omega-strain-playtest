@@ -349,15 +349,16 @@ void HudObject::add_pda(std::string_view name, std::string_view text) {
     pda_.push_back(std::move(rec));
 }
 
-void HudObject::add_pda_quip(const std::optional<std::string>& name, const std::optional<std::string>& text,
-                             const std::function<std::optional<std::string>(const std::string&)>& get_string,
-                             bool multiplayer) {
-    if (!name) return;                                  // 001c63d8
+std::optional<HudObject::PdaQuipSend> HudObject::add_pda_quip(
+    const std::optional<std::string>& name, const std::optional<std::string>& text,
+    const std::function<std::optional<std::string>(const std::string&)>& get_string, bool multiplayer) {
+    if (!name) return std::nullopt;                     // 001c63d8
     const std::string body = text && !text->empty() ? *text : std::string("PDAMsg");
     add_pda(*name, body);
     record("3fdb50 PDAMsg");
     notice(get_string("PDAMsg"));
-    if (multiplayer) fail("001c6444", "the multiplayer PDA quip message is not hosted");
+    if (!multiplayer) return std::nullopt;
+    return PdaQuipSend{*name, body};                    // 001c6444: NetLabelMsg kind 2 (134on3)
 }
 
 void HudObject::select_colours(bool a1) {

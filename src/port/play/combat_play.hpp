@@ -68,6 +68,7 @@
 #include "combat_actor_world.hpp"
 #include "combat_throw_play.hpp"
 #include "coop_partner_kit.hpp"
+#include "actor_goggles.hpp"
 #include "flashlight.hpp"
 #include "hud_callouts.hpp"
 #include "hud_markers.hpp"
@@ -305,6 +306,9 @@ struct CombatPlayConfig {
     // 133lt2: contents = cBackpack_Pack 002539b0 for types 0 and 3 (00281b40), empty for the other types.
     std::function<void(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
                        std::uint16_t recipient,const std::vector<std::uint8_t>& contents)> net_backpack_send;
+    // 133on2: 001992b0's replication message cEquipGogglesMsg (003c9420 to every peer) for actor `actor` with
+    // the goggles value. Set: a network game (005721c8; 001992b0 then sends); unset: single player.
+    std::function<void(std::size_t actor,std::uint8_t value)> net_goggles;
     // 003fdb50 (common pool, then the mission pool) for the reload's
     // TransferAmmo notice (0013fdb8); nullptr: a notice throws.
     const Localization* localization{};
@@ -716,6 +720,12 @@ public:
     // Applies one received cNetBackpackMsg after LanNetCore's network frame.
     void receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
                                   const std::vector<std::uint8_t>& contents);
+    // 133on2: 001992b0(actor, value, a2) on actor `actor` (actor_goggles.hpp): 0013fb50 is inventory +68 != -1,
+    // +3314 the actor's secondary component when eligible, 005721c8 = net_goggles being set; a replication
+    // message (accepted, networked, a2 clear) goes to net_goggles.
+    ActorGogglesResult switch_goggles(std::size_t actor,std::uint8_t value,bool a2);
+    // 133on2: a received cEquipGogglesMsg (00199500): 001992b0(actor, byte != 0, 1).
+    ActorGogglesResult receive_goggles_network(std::size_t actor,std::uint8_t value);
     // Checkpoint 132bp: the population's INV: crates at load (001c2a10 ->
     // 00257480: cBackpack_ctor 00257f30, then the list append 00257620),
     // with CombatPlayConfig::backpack_world; `find_collision` answers

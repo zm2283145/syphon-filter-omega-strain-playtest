@@ -1863,18 +1863,26 @@ struct CombatPlaySession::Impl {
                 break;
             case K::goggle_mode:{
                 // 001992b0(actor, value, 0) as the EquipGoggles host runs it (actor_goggles.hpp).
-                auto& actor=world.actor(a);
-                const bool record=combat->inventory(a).slots.at(6).item!=-1;
-                SecondaryComponent* secondary=actor.eligible()?&actors->secondary(a):nullptr;
-                const auto r=switch_actor_goggles(actor.item_actions(),static_cast<std::uint8_t>(e.value),false,record,secondary,actor.handle(),false);
+                const auto r=switch_goggles(a,static_cast<std::uint8_t>(e.value),false);
                 frame.notes.push_back("001992b0 (flashlight toggle) actor "+std::to_string(a)+" value "+std::to_string(e.value)
-                    +(r.requested?(r.accepted?": switch_on_ir accepted":": switch_on_ir refused"):""));
+                    +(r.requested?(r.accepted?": switch_on_ir accepted":": switch_on_ir refused"):"")
+                    +(r.replicate?", cEquipGogglesMsg sent":""));
                 break;}
             case K::spot_deleted:fail("0045b990 (the flashlight's destructor) is not reached in play");
             case K::light_byte:combat->write_slot_render_byte(a,7,static_cast<std::uint8_t>(e.value));break;   // 00142e00(inv, 7, on)
             default:break;   // click sound (the play's gameSound post), set-state call and HUD calls: recorded
             }
         }
+    }
+    // 001992b0(actor, value, a2) (actor_goggles.hpp); 005721c8 is net_goggles being set (133on2).
+    ActorGogglesResult switch_goggles(std::size_t a,std::uint8_t value,bool a2){
+        auto& actor=world.actor(a);
+        const bool record=combat->inventory(a).slots.at(6).item!=-1;
+        SecondaryComponent* secondary=actor.eligible()?&actors->secondary(a):nullptr;
+        const auto r=switch_actor_goggles(actor.item_actions(),value,a2,record,secondary,actor.handle(),
+                                          static_cast<bool>(config.net_goggles));
+        if(r.replicate)config.net_goggles(a,r.value);   // 003c9420(cEquipGogglesMsg, actor, 0)
+        return r;
     }
     // 00199770 (tap) / 00199860 (hold) on actor a's +33ec.
     void toggle_flashlight_of(std::size_t a,bool goggles){
@@ -3204,6 +3212,12 @@ void CombatPlaySession::carry_backpack(std::uint32_t address,bool message,const 
 void CombatPlaySession::receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
                                                  const std::vector<std::uint8_t>& contents){
     impl_->receive_backpack(type,owner,id,target,contents);
+}
+ActorGogglesResult CombatPlaySession::switch_goggles(std::size_t actor,std::uint8_t value,bool a2){
+    return impl_->switch_goggles(actor,value,a2);
+}
+ActorGogglesResult CombatPlaySession::receive_goggles_network(std::size_t actor,std::uint8_t value){
+    return impl_->switch_goggles(actor,value!=0?1:0,true);   // 00199500: 001992b0(object, byte != 0, 1)
 }
 bool CombatPlaySession::reset_level_statistics(){
     if(!impl_->config.agent_statistics)return false;

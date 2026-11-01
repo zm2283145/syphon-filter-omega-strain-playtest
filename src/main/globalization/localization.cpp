@@ -41,6 +41,22 @@ std::optional<std::string_view> Localization::resolve(std::optional<std::string_
     return text(lookup(key));
 }
 
+std::string Localization::tag(std::int32_t id) const {
+    if (id < 0) return {};
+    auto index = static_cast<std::size_t>(id);
+    const StringPool* pool = &base_;
+    if (index >= base_count()) {
+        index -= base_count();
+        if (!mission_ || index >= mission_count())
+            throw std::runtime_error("unhosted(0x3fdae0): a string tag id outside the loaded pools");
+        pool = &*mission_;
+    }
+    const auto& key = pool->entries()[index].key;
+    const auto end = std::find(key.begin(), key.end(), std::uint8_t{0});
+    if (end == key.end()) throw std::runtime_error("unhosted(0x3fdae0): a pool key with no NUL");
+    return std::string(key.begin(), end);
+}
+
 void write_localization_probe(std::ostream& out, const StringPool& base, const StringPool& mission) {
     Localization localization(base);
     localization.replace_mission(mission);

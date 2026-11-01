@@ -619,6 +619,69 @@ void MissionScriptHost::set_network_context(bool multiplayer, bool host) {
     run_host_start_level_ = !multiplayer || host;
 }
 
+std::string MissionScriptHost::receive_net_hud(const NetHudMessage& m) {
+    const auto& localization = objectives_.inputs().localization;
+    if (!localization) return "not applied (no localization)";
+    const auto get_string = [&](const std::string& key) -> std::optional<std::string> {   // 003fdb50
+        if (const auto resolved = localization->resolve(key)) return std::string(*resolved);
+        return std::nullopt;
+    };
+    if (m.kind == NetHudMessage::Kind::quick_chat) {
+        // 00323ad0: the sender's index ((key & 0x7f000000) >> 24) - 1 is in object.
+        const auto index = static_cast<std::int32_t>(m.object);
+        if (m.a == -1) {   // 0012f5c0(G, index, b)
+            if (index < 0 || index >= 4) return "0012f5c0: client index " + std::to_string(index) + " outside the table";
+            hud_.set_location(static_cast<std::size_t>(index), m.b);
+            return "0012f5c0 location of client " + std::to_string(index) + " = " + std::to_string(m.b);
+        }
+        // 002b1190(a, index + 1, b): sprintf("%s %s", 003fdb50("30_<a>_<index + 1>"), b > 0 ? 003fdb80(b) : ""),
+        // then 003fa3f0(hud + 100, text, 00587c90, 1, 0).
+        const auto text = quick_chat_line(*localization, m.a, index + 1, m.b);
+        if (hud_object_) hud_object_->ticker_add(text, quick_chat_colour, 1, false);
+        return "002b1190 ticker \"" + text + "\"";
+    }
+    if (m.kind == NetHudMessage::Kind::callout) {
+        if (m.clear) {   // 00242b40(hud, &object, slot, a3, 0): no send back
+            hud_.clear_callout(m.object, static_cast<std::uint32_t>(m.slot));
+            if (hud_object_ && hud_object_->callouts_hosted)
+                hud_object_->callout_clear(static_cast<std::int32_t>(m.object), m.slot, m.byte_48 != 0, false);
+            return "00242b40 callout cleared";
+        }
+        // 00242e40(hud, &object, value, colour, tag, slot, t0, t1, 0): nothing for a key without text.
+        const auto text = m.key0 ? get_string(*m.key0) : std::nullopt;
+        if (!text) return "00242e40: no text for the tag, nothing";
+        hud_.set_callout(m.object, static_cast<std::uint32_t>(m.slot), *text, m.value, m.byte_49 != 0);
+        if (hud_object_ && hud_object_->callouts_hosted)
+            hud_object_->callout_set(static_cast<std::int32_t>(m.object), *text, m.slot, m.byte_48 != 0,
+                                     m.byte_49 != 0, m.value, m.colour);
+        return "00242e40 callout set: " + *text;
+    }
+    switch (m.label_kind) {
+    case 0: {   // 00227a90(manager, tag, 0, quiet 1): multiplayer, no GOBJ: the notice, no message
+        const auto text = m.key0 ? get_string(*m.key0) : std::nullopt;
+        if (hud_object_) hud_object_->notice(text);
+        return "00227a90 display label notice: " + (text ? *text : std::string("(null)"));
+    }
+    case 1: {   // 0040c540(&object), then 002750e0(GOBJ, tag0, tag1, quiet 1)
+        const auto gobj = objects_.objects.resolve(m.object);
+        if (!objects_.objects.alive(gobj)) return "0040c540: no object " + std::to_string(m.object) + ", nothing";
+        if (!m.key0) return "002750e0: a null label, nothing";
+        const auto text = localization->resolve(*m.key0);
+        if (!text || text->empty()) return "002750e0: no text for the label, nothing";
+        objectives_.add_hud_objective(m.object, *m.key0, m.key1);
+        return "002750e0 HUD objective on " + std::to_string(m.object) + ": " + std::string(*text);
+    }
+    case 2: {   // 001c6200(tag0, tag1, silent 1)
+        if (!m.key0) return "001c6200: a null name, nothing";
+        if (!hud_object_) return "001c6200: not applied (no HUD object)";
+        hud_object_->add_pda_quip(m.key0, m.key1, get_string, false);
+        return "001c6200 PDA quip " + *m.key0 + " / " + (m.key1 ? *m.key1 : std::string("(null)"));
+    }
+    default:
+        return "002d2650: kind " + std::to_string(m.label_kind) + " does nothing";
+    }
+}
+
 bool MissionScriptHost::receive_objective_outcome(Word objective, bool success) {
     if (!started_ || !multiplayer_)
         throw std::runtime_error("Network objective delivery requires a started multiplayer mission");
@@ -1363,7 +1426,28 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         applied = objectives_.display_label(script, function, arguments);
         // Solo (005721c8 clear): 0x00227c18 hands the label 003fdb50 resolved
         // to 00242b00(*004ffc2c, text), the HUD ticker notice (null skipped).
-        if (applied && hud_object_) hud_object_->notice(objectives_.display_labels().back().text);
+        if (applied && !net_hud_) {
+            if (hud_object_) hud_object_->notice(objectives_.display_labels().back().text);
+        } else if (applied) {
+            // 134on3: 00227a90 in a network game: with a GOBJ the notice only when its owner is this client and
+            // the NetLabelMsg kind 0 to that owner; without one the notice and the message to every peer.
+            NetHudMessage m;
+            m.label_kind = 0;
+            m.key0 = objectives_.display_labels().back().key;
+            bool show = true;
+            if (arguments.size() == 3 && !null_handle(arguments[2])) {
+                const auto* gobj = std::get_if<RuntimeObjectHandle>(&arguments[2]);
+                if (!gobj) throw std::runtime_error("SetDisplayLabel without a GOBJ handle");
+                const auto owner = net_hud_->owner ? net_hud_->owner(*gobj) : std::nullopt;
+                if (!owner)
+                    throw std::runtime_error("unhosted(0x227a90): SetDisplayLabel's GOBJ owner (cNetObj_GetOwner) in a "
+                                             "network game for an object the play does not own-map");
+                show = *owner == net_hud_->local_client;
+                m.recipient = *owner;
+            }
+            if (show && hud_object_) hud_object_->notice(objectives_.display_labels().back().text);
+            net_hud_->send(m);
+        }
         return std::nullopt;
     }
     if (name == "SetDisplayString") {
@@ -1395,6 +1479,19 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             const auto* text = std::get_if<std::string>(&arguments[2]);
             if (!text) throw std::runtime_error(name + " without a cue string");
             cue = *text;
+        }
+        // 134on3: 002750e0 in a network game: a label that resolves (non-empty) first sends NetLabelMsg kind 1
+        // (object = the GOBJ +c, key1 the cue, every peer), then files the marker.
+        if (net_hud_ && objectives_.inputs().localization) {
+            const auto text = objectives_.inputs().localization->resolve(*key);
+            if (text && !text->empty()) {
+                NetHudMessage m;
+                m.label_kind = 1;
+                m.object = handle->id;
+                m.key0 = *key;
+                m.key1 = cue;
+                net_hud_->send(m);
+            }
         }
         applied = objectives_.add_hud_objective(handle->id, *key, std::move(cue));
         return std::nullopt;
@@ -1498,6 +1595,15 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         // reach 00242fa0 / 00242b40 on it.
         const bool hosted = hud_object_ && hud_object_->callouts_hosted;
         if (clear) {
+            // 134on3: 00242b40 with t0 1 in a network game sends NetCalloutMsg clear (+48 = a3 0, +49 0) first.
+            // Its +2c / +30 floats and +34 key are not written there (stack bytes): sent as 0, 0 and -1 (PORT-ONLY).
+            if (net_hud_) {
+                NetHudMessage m;
+                m.kind = NetHudMessage::Kind::callout;
+                m.clear = true;
+                m.object = key;
+                net_hud_->send(m);
+            }
             hud_.clear_callout(key, 0);
             if (hosted) hud_object_->callout_clear(static_cast<std::int32_t>(key), 0, false, true);
             return std::nullopt;
@@ -1521,6 +1627,16 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             if (hosted)
                 hud_object_->callout_set(static_cast<std::int32_t>(key), std::string(*resolved), 0, false, t1,
                                          value, 0.0F);
+            // 134on3: 00242e40's send in a network game: NetCalloutMsg (clear 0) with the label key.
+            if (net_hud_) {
+                NetHudMessage m;
+                m.kind = NetHudMessage::Kind::callout;
+                m.object = key;
+                m.key0 = *text;
+                m.value = value;
+                m.byte_49 = t1 ? 1 : 0;
+                net_hud_->send(m);
+            }
         }
         return std::nullopt;
     }
@@ -1550,7 +1666,26 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             applied = false;
             return std::nullopt;
         }
-        hud_.set_location(localization->lookup(*key));
+        if (!net_hud_) {
+            hud_.set_location(localization->lookup(*key));
+            return std::nullopt;
+        }
+        // 134on3: 002b0f00 in a network game: LocalId(GOBJ) is its player client (else -1: return); 0012f5c0 stores
+        // the id under that index and cNetQuickChatMsg {-1, id} (+20 = 8) goes to the GOBJ's owner through
+        // 003c9420 (nothing is sent when this console owns it).
+        const auto index = net_hud_->player_client ? net_hud_->player_client(*handle) : std::nullopt;
+        if (!index || *index < 0 || *index >= 4) return std::nullopt;
+        const auto id = localization->lookup(*key);
+        hud_.set_location(static_cast<std::size_t>(*index), id);
+        if (*index != net_hud_->local_client) {
+            NetHudMessage m;
+            m.kind = NetHudMessage::Kind::quick_chat;
+            m.object = handle->id;
+            m.recipient = *index;
+            m.a = -1;
+            m.b = id;
+            net_hud_->send(m);
+        }
         return std::nullopt;
     }
     // game::AddPDAQuip(name, text) 001c63b0 on *004ffc2c (hud_object.hpp):
@@ -1567,10 +1702,18 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             applied = false;
             return std::nullopt;
         }
-        hud_object_->add_pda_quip(*quip, *text, [&](const std::string& key) -> std::optional<std::string> {
+        const auto send = hud_object_->add_pda_quip(*quip, *text, [&](const std::string& key) -> std::optional<std::string> {
             if (const auto resolved = localization->resolve(key)) return std::string(*resolved);
             return std::nullopt;
-        }, false);
+        }, net_hud_.has_value());
+        // 134on3: 001c6444, NetLabelMsg kind 2 (object 0, every peer) in a network game.
+        if (send) {
+            NetHudMessage m;
+            m.label_kind = 2;
+            m.key0 = send->name;
+            m.key1 = send->text;
+            net_hud_->send(m);
+        }
         return std::nullopt;
     }
     // game::DisplayInteract(GOBJ, key, button) 0045e640 and

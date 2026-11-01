@@ -10,8 +10,14 @@
 //   kind 1, event) with an event built by 003c9e30(ev, 00542b60), vtable
 //   004da930, +24 = 3, +28 = 0, +2c = the actor, +30 = 0, +34 = 0; then
 //   003c9d60(ev, 0). When accepted: +33e5 = 1, and with 005721c8 set and a2
-//   clear the replication message 004eee80 (003c9420) - not hosted (throws).
+//   clear the replication message cEquipGogglesMsg 004eee80 (vtable 004da8b0,
+//   +1c = 0x40, +20 = 4: 003c9420 sends it to every peer through 003fb020 and
+//   keeps no local copy; its body is the one byte +24 = value, 001b97b0):
+//   returned as `replicate` for the caller's network (133on2).
 //   Finally +33e6 = value.
+// The receive cEquipGogglesMsg_NetReceive 00199500 (generic cNetMsg inner ID
+// *004eee88 = 2) calls 001992b0(object of the key, byte != 0, 1): a2 set, so
+// nothing is sent back.
 // The one-shot's end posts code 3 to the actor (+33e5 = 0, the receiver);
 // its "switch_on_ir" phase reaching the trigger (00197e00 at 001984bc) calls
 // 00199590(actor, +33e6) and sets +33e5 = 2.
@@ -25,6 +31,10 @@ namespace omega {
 struct ActorGogglesResult {
     bool requested{};    // 001cae20 was called
     bool accepted{};     // its result
+    // 133on2: 001993e8..00199440, the replication message cEquipGogglesMsg
+    // (accepted, `networked` and a2 clear); its body byte is `value`.
+    bool replicate{};
+    std::uint8_t value{};
 };
 // `slot6_item`: inventory +68 != -1 (0013fb50 returns a record); `secondary`:
 // actor +3314 (null: no component); `actor`: the event's receiver +2c;

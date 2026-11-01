@@ -1,6 +1,5 @@
 #include "actor_goggles.hpp"
 #include "secondary_playback.hpp"
-#include <stdexcept>
 
 namespace omega {
 ActorGogglesResult switch_actor_goggles(ActorAnimationReceiverState& state,std::uint8_t value,bool a2,bool slot6_item,
@@ -14,8 +13,10 @@ ActorGogglesResult switch_actor_goggles(ActorAnimationReceiverState& state,std::
         r.accepted=request_secondary_one_shot(*secondary,secondary_motion_name("switch_on_ir"),1,event);   // 001993b4
         if(r.accepted){
             state.byte_33e5=1;                                              // 001993e4
-            if(networked&&!a2)                                              // 001993e8..001993f4
-                throw std::runtime_error("001992b0: the goggles' replication message 004eee80 (003c9420, 005721c8 set) is not hosted");
+            if(networked&&!a2){                                             // 001993e8..001993f4
+                r.replicate=true;                                           // 001993f8..00199440: 004eee80 to 003c9420
+                r.value=value;                                              // +24 (001b97b0 packs this byte)
+            }
         }
     }
     state.byte_33e6=value;                                                  // 00199460

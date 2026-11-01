@@ -329,11 +329,18 @@ public:
     // The AddPDAQuip native 001c63b0(name, text) on *004ffc2c: nothing for a
     // null name; a null or empty text is "PDAMsg" (0049f490); 00241da0, then
     // the notice 00242b00 of get_string("PDAMsg") (003fdb50, nullopt = NULL).
-    // In multiplayer (byte 005721c8) the network message built from 001c6440
-    // is not hosted: throws after the local effects.
-    void add_pda_quip(const std::optional<std::string>& name, const std::optional<std::string>& text,
-                      const std::function<std::optional<std::string>(const std::string&)>& get_string,
-                      bool multiplayer);
+    // In multiplayer (byte 005721c8, and not silent: nGameSound_AddPDAQuip
+    // 001c6200's third argument) the caller sends NetLabelMsg kind 2 (001c6440:
+    // object 0, key0 = 003fdb40(name), key1 = 003fdb40(text), +20 = 4, every
+    // peer): returned as the name and the text actually shown (134on3).
+    struct PdaQuipSend {
+        std::string name;
+        std::string text;
+    };
+    std::optional<PdaQuipSend> add_pda_quip(const std::optional<std::string>& name,
+                                            const std::optional<std::string>& text,
+                                            const std::function<std::optional<std::string>(const std::string&)>& get_string,
+                                            bool multiplayer);
     // 00241e30(hud, a1).
     void select_colours(bool a1);
     // 00246740 (table a) / 00246690 (table b).

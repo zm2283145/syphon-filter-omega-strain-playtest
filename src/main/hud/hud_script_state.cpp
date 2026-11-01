@@ -40,4 +40,13 @@ std::string transfer_ammo_notice(const Localization& localization, std::string_v
     return std::string(*name) + " " + std::string(*suffix);
 }
 
+std::string quick_chat_line(const Localization& localization, std::int32_t a, std::int32_t n, std::int32_t location) {
+    const std::string key = "30_" + std::to_string(a) + "_" + std::to_string(n);   // "%d_%d_%d", 0x1e
+    const auto format = localization.resolve(key);
+    if (!format) throw std::runtime_error("unhosted(0x2b1190): quick-chat string " + key + " is NULL (sprintf of NULL)");
+    std::optional<std::string_view> place;
+    if (location > 0) place = localization.text(location);   // 003fdb80
+    return std::string(*format) + " " + (place ? std::string(*place) : std::string());
+}
+
 } // namespace omega

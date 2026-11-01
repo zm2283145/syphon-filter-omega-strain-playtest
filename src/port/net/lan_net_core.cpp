@@ -104,6 +104,9 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // registered cNetAgentUpdateMsg as ID 32. These static constructors are
     // outside this network core.
     m.write(0x4ef010, 4, 6);
+    m.write(0x4eee88, 4, 2);  // 133on2: StaticInit_human's cEquipGogglesMsg, generic ID 2 (the savestate's word)
+    m.write(0x52ace0, 4, 27);  // 134on3: cNetQuickChatMsg's generic ID 27 (*0052ace0 = *0052ace8, the savestate's words)
+    m.write(0x52ace8, 4, 27);
     m.write(0x4f7dc8, 4, 16);
     m.write(0x4f8588, 4, 19);
     m.write(0x4ea0a0, 4, 32);
@@ -590,6 +593,188 @@ void LanNetCore::send_kill_statistics(std::uint32_t victim_key,std::uint32_t kil
     sp_ = caller;
 }
 
+void LanNetCore::send_goggles(std::uint32_t target_key, std::uint8_t value) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN goggles send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    // 003c9420: the network branch needs 005721c8 and 005721d0 (in the level).
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto envelope = m.read(0x5061c8);
+    const auto id = m.read(0x4eee88);
+    if (!envelope || id != 2) unhosted(0x1992b0, "the cEquipGogglesMsg registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        // 003fb020 -> 002823e0: Event_PackHeader (clock, key), the body length, the inner ID, then 001b97b0's byte.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, target_key);
+        m.write(packet + 8, 2, 1);
+        m.write(packet + 0xa, 2, id);
+        m.write(packet + 0xc, 1, value);
+        if (call(m, 0x3fad50, {envelope, 13, packet, 0xffffffffU, 0x40U})) ++goggles_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+void LanNetCore::send_label(std::uint8_t kind, std::int32_t object, std::int32_t key0, std::int32_t key1,
+                            std::uint32_t recipient) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN label send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    // 003fb020 returns before the send outside the level (005721d0); 003fad50 needs it too.
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto type = m.read(0x51f090);
+    if (!type || type >= 0x100) unhosted(0x2d2920, "the NetLabelMsg registration (*0051f090) is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        // 002d2920: Event_PackHeader (the clock and NetObj key 0), then +8 kind, +c object, +10 / +14 keys.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, 0);
+        m.write(packet + 8, 1, kind);
+        for (std::uint32_t k = 9; k < 0xc; ++k) m.write(packet + k, 1, 0);
+        m.write(packet + 0xc, 4, static_cast<std::uint32_t>(object));
+        m.write(packet + 0x10, 4, static_cast<std::uint32_t>(key0));
+        m.write(packet + 0x14, 4, static_cast<std::uint32_t>(key1));
+        if (call(m, 0x3fad50, {type, 0x18, packet, recipient, 0x40U})) ++labels_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemoteLabel> LanNetCore::take_labels() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN label access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteLabel> out;
+    out.swap(labels_);
+    return out;
+}
+
+std::uint32_t LanNetCore::receive_label(std::uint32_t origin, std::uint32_t data) {
+    auto& m = memory_;
+    const auto available = dme_->incoming_message_remaining();
+    if (available != 0xffffffffU && available < 0x18) unhosted(0x2d2650, "a truncated NetLabelMsg");
+    if (!m.read(dme::kInLevel, 1)) return 0x18;  // 002d2650: nothing outside the level
+    RemoteLabel label;
+    label.origin = static_cast<std::uint16_t>(origin);
+    label.kind = static_cast<std::uint8_t>(m.read(data + 8, 1));
+    label.object = static_cast<std::int32_t>(m.read(data + 0xc));
+    label.key0 = static_cast<std::int32_t>(m.read(data + 0x10));
+    label.key1 = static_cast<std::int32_t>(m.read(data + 0x14));
+    labels_.push_back(label);
+    ++labels_received_;
+    return 0x18;
+}
+
+void LanNetCore::send_callout(const RemoteCallout& c) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN callout send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto type = m.read(0x51ee40);
+    if (!type || type >= 0x100) unhosted(0x2c53a0, "the NetCalloutMsg registration (*0051ee40) is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        // 002c53a0 (DEFINE_MESSAGE_PACK, size 0x20): the header, then the body fields.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, 0);
+        m.write(packet + 8, 1, c.clear ? 1U : 0U);
+        m.write(packet + 9, 1, c.byte_48);
+        m.write(packet + 0xa, 1, c.byte_49);
+        m.write(packet + 0xb, 1, 0);
+        m.write(packet + 0xc, 4, static_cast<std::uint32_t>(c.key_index));
+        m.write(packet + 0x10, 4, static_cast<std::uint32_t>(c.object));
+        m.write(packet + 0x14, 4, std::bit_cast<std::uint32_t>(c.value));
+        m.write(packet + 0x18, 4, std::bit_cast<std::uint32_t>(c.colour));
+        m.write(packet + 0x1c, 4, static_cast<std::uint32_t>(c.slot));
+        if (call(m, 0x3fad50, {type, 0x20, packet, 0xffffffffU, 0x40U})) ++callouts_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemoteCallout> LanNetCore::take_callouts() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN callout access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteCallout> out;
+    out.swap(callouts_);
+    return out;
+}
+
+std::uint32_t LanNetCore::receive_callout(std::uint32_t origin, std::uint32_t data) {
+    auto& m = memory_;
+    const auto available = dme_->incoming_message_remaining();
+    if (available != 0xffffffffU && available < 0x20) unhosted(0x2c50e0, "a truncated NetCalloutMsg");
+    if (!m.read(dme::kInLevel, 1)) return 0x20;  // 002c50e0: nothing outside the level
+    RemoteCallout c;
+    c.origin = static_cast<std::uint16_t>(origin);
+    c.clear = static_cast<std::int8_t>(m.read(data + 8, 1)) != 0;
+    c.byte_48 = static_cast<std::uint8_t>(m.read(data + 9, 1));
+    c.byte_49 = static_cast<std::uint8_t>(m.read(data + 0xa, 1));
+    c.key_index = static_cast<std::int32_t>(m.read(data + 0xc));
+    c.object = static_cast<std::int32_t>(m.read(data + 0x10));
+    c.value = std::bit_cast<float>(m.read(data + 0x14));
+    c.colour = std::bit_cast<float>(m.read(data + 0x18));
+    c.slot = static_cast<std::int32_t>(m.read(data + 0x1c));
+    callouts_.push_back(c);
+    ++callouts_received_;
+    return 0x20;
+}
+
+void LanNetCore::send_quick_chat(std::uint32_t key, std::int32_t a, std::int32_t b, std::uint32_t recipient) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN quick chat send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return;
+    const auto envelope = m.read(0x5061c8);
+    const auto id = m.read(0x52ace0);
+    if (!envelope || id != 27) unhosted(0x323d40, "the cNetQuickChatMsg registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto packet = sp_ + 0x20;
+    try {
+        // 003fb020 -> 002823e0: Event_PackHeader (clock, key), the body length, the inner ID, then 00323d40's words.
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);
+        m.write(packet + 4, 4, key);
+        m.write(packet + 8, 2, 8);
+        m.write(packet + 0xa, 2, id);
+        m.write(packet + 0xc, 4, static_cast<std::uint32_t>(a));
+        m.write(packet + 0x10, 4, static_cast<std::uint32_t>(b));
+        if (call(m, 0x3fad50, {envelope, 20, packet, recipient, 0x40U})) ++quick_chats_sent_;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+std::vector<LanNetCore::RemoteQuickChat> LanNetCore::take_quick_chats() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN quick chat access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteQuickChat> out;
+    out.swap(quick_chats_);
+    return out;
+}
+
+std::vector<LanNetCore::RemoteGoggles> LanNetCore::take_goggles() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN goggles access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteGoggles> out;
+    out.swap(goggles_);
+    return out;
+}
+
 std::vector<LanNetCore::RemoteKillStatistics> LanNetCore::take_kill_statistics() {
     if (pump_.joinable())
         throw std::runtime_error("LAN kill statistics access during background load pump; defer until stop_load_pump");
@@ -785,6 +970,27 @@ std::uint32_t LanNetCore::receive_generic_message(std::uint32_t origin, std::uin
                     unhosted(0x2679f0, "a cNetLocalTimerMsg for a non-local NetMap key");
                 personal_timers_.push_back(timer);
                 ++personal_timers_received_;
+            } else if (id == static_cast<std::int32_t>(m.read(0x4eee88))) {
+                // 00199500: one byte; 0040c540 of the header's key, then 001992b0(object, byte != 0, 1) when it
+                // exists (the play resolves the key: an unknown key does nothing, as a null object).
+                if (len != 1) unhosted(0x199500, "an invalid cEquipGogglesMsg payload size");
+                RemoteGoggles goggles;
+                goggles.origin = static_cast<std::uint16_t>(origin);
+                goggles.timestamp = m.read(data) >> 2;
+                goggles.target_key = m.read(data + 4);
+                goggles.value = static_cast<std::uint8_t>(m.read(data + 0xc, 1));
+                goggles_.push_back(goggles);
+                ++goggles_received_;
+            } else if (id == static_cast<std::int32_t>(m.read(0x52ace0))) {
+                // 00323ad0: two words; the play resolves the header key's object (0040c540) and its client.
+                if (len != 8) unhosted(0x323ad0, "an invalid cNetQuickChatMsg payload size");
+                RemoteQuickChat chat;
+                chat.origin = static_cast<std::uint16_t>(origin);
+                chat.key = m.read(data + 4);
+                chat.a = static_cast<std::int32_t>(m.read(data + 0xc));
+                chat.b = static_cast<std::int32_t>(m.read(data + 0x10));
+                quick_chats_.push_back(chat);
+                ++quick_chats_received_;
             } else {
                 unhosted(0x2822f0, "an unsupported generic cNetMsg inner ID");
             }
@@ -2514,6 +2720,8 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x2822f0: return receive_generic_message(arg(2), arg(3));
     case 0x20edd0: return receive_player_sound(arg(2), arg(3), false);
     case 0x20e8b0: return receive_player_sound(arg(2), arg(3), true);
+    case 0x2d2650: return receive_label(arg(2), arg(3));    // 134on3: cNetLabelMsg_NetLabelMsgCallback
+    case 0x2c50e0: return receive_callout(arg(2), arg(3));  // 134on3: cNetCalloutMsg_NetCalloutMsgCallback
     case 0x20e350: return receive_end_level(arg(2), arg(3));
     case 0x170200: case 0x22e710: case 0x2115e0: case 0x211700:  // 133lt4: the world messages
     case 0x22e4f0: case 0x22e320:
@@ -3041,6 +3249,10 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     agent_updates_.clear();
     global_timers_.clear();
     personal_timers_.clear();
+    goggles_.clear();
+    labels_.clear();
+    quick_chats_.clear();
+    callouts_.clear();
     player_sounds_.clear();
     end_levels_.clear();
     (void)dme_->take_backpacks();

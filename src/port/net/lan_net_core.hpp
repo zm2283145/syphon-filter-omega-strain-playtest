@@ -406,6 +406,66 @@ public:
     std::vector<RemoteKillStatistics> take_kill_statistics();
     std::uint32_t kill_statistics_sent() const { return kill_statistics_sent_; }
     std::uint32_t kill_statistics_received() const { return kill_statistics_received_; }
+    // 133on2: 001992b0 / 00199500 / 001b97b0: cEquipGogglesMsg is generic
+    // cNetMsg inner ID 2 (*004eee88, read from the retail savestate). Kind
+    // +20 = 4: 003c9420 sends it to every peer (recipient -1, +1c = 0x40) with
+    // the switching human's NetMap key in the header; the body is one byte,
+    // the goggles value. The receiver runs 001992b0(object, byte != 0, 1).
+    struct RemoteGoggles {
+        std::uint16_t origin{};
+        std::uint32_t timestamp{}, target_key{};
+        std::uint8_t value{};
+    };
+    void send_goggles(std::uint32_t target_key, std::uint8_t value);
+    std::vector<RemoteGoggles> take_goggles();
+    std::uint32_t goggles_sent() const { return goggles_sent_; }
+    std::uint32_t goggles_received() const { return goggles_received_; }
+    // 134on3: NetLabelMsg (NetLabelMsg.c), its own DME message *0051f090 on channel 2 (InitNet 002d2850),
+    // size 0x18 (Pack 002d2920: Event_PackHeader, +8 kind, +c object, +10 / +14 string-pool indices from
+    // 003fdb40, +1c = 0x40). cNetObj_SendMessage 003fb020(0, msg, 0, recipient): +20 = 4 or the constructor's
+    // 5, so 003fad50(type, 0x18, packet, recipient, 0x40) with recipient -1 (every peer) or a client.
+    // Senders: kind 0 cObjectiveMan_SetDisplayLabel 00227a90, kind 1 nHudTargets_AddHudObjective 002750e0,
+    // kind 2 the PDA quips 001c63b0 / 001c6500 / 001c6200. The receive 002d2650 (guarded by 005721d0)
+    // returns 0x18; the play resolves the indices with 003fdae0 and runs the quiet / silent call.
+    struct RemoteLabel {
+        std::uint16_t origin{};
+        std::uint8_t kind{};
+        std::int32_t object{}, key0{-1}, key1{-1};
+    };
+    void send_label(std::uint8_t kind, std::int32_t object, std::int32_t key0, std::int32_t key1,
+                    std::uint32_t recipient = 0xffffffffU);
+    std::vector<RemoteLabel> take_labels();
+    std::uint32_t labels_sent() const { return labels_sent_; }
+    std::uint32_t labels_received() const { return labels_received_; }
+    // 134on3: NetCalloutMsg (NetCalloutMsg.c), DME message *0051ee40 (InitNet 002c5270), size 0x20 (Pack
+    // 002c53a0: +8 the clear byte (+24), +9 / +a the bytes +48 / +49, +c 003fdb40 of the 16-byte key +34,
+    // +10 the object key +28, +14 / +18 the floats +2c / +30, +1c the slot +44). Senders:
+    // cHud_SetCalloutLabel 00242e40 (clear 0) and cHud_ClearCallout 00242b40 (clear 1) with their send
+    // argument in a network game, every peer (+20 = 4, +1c = 0x40). The receive 002c50e0 returns 0x20.
+    struct RemoteCallout {
+        std::uint16_t origin{};
+        bool clear{};
+        std::uint8_t byte_48{}, byte_49{};
+        std::int32_t key_index{-1}, object{}, slot{};
+        float value{}, colour{};
+    };
+    void send_callout(const RemoteCallout& callout);
+    std::vector<RemoteCallout> take_callouts();
+    std::uint32_t callouts_sent() const { return callouts_sent_; }
+    std::uint32_t callouts_received() const { return callouts_received_; }
+    // 134on3: cNetQuickChatMsg, generic cNetMsg inner ID 27 (*0052ace0 = *0052ace8 = 27, the retail savestate's
+    // words), +1c = 0x40 (Pack 00323d40: the two words a, b). The header key is the object it is queued on:
+    // the local player for GuiQuickChat's line (002b1350, +20 = 4: every peer), the player GOBJ for a location
+    // update (002b0f00, a = -1, +20 = 8: its owner). The receive 00323ad0 reads both words.
+    struct RemoteQuickChat {
+        std::uint16_t origin{};
+        std::uint32_t key{};
+        std::int32_t a{}, b{};
+    };
+    void send_quick_chat(std::uint32_t key, std::int32_t a, std::int32_t b, std::uint32_t recipient = 0xffffffffU);
+    std::vector<RemoteQuickChat> take_quick_chats();
+    std::uint32_t quick_chats_sent() const { return quick_chats_sent_; }
+    std::uint32_t quick_chats_received() const { return quick_chats_received_; }
     struct RemotePlayerSound {
         std::uint16_t origin = 0;
         bool stop = false;
@@ -1012,6 +1072,16 @@ private:
     std::vector<RemoteGlobalTimer> global_timers_;
     std::uint32_t global_timers_sent_ = 0, global_timers_received_ = 0;
     std::vector<RemotePersonalTimer> personal_timers_;
+    std::vector<RemoteGoggles> goggles_;
+    std::uint32_t goggles_sent_ = 0, goggles_received_ = 0;
+    std::vector<RemoteLabel> labels_;
+    std::uint32_t labels_sent_ = 0, labels_received_ = 0;
+    std::vector<RemoteCallout> callouts_;
+    std::uint32_t callouts_sent_ = 0, callouts_received_ = 0;
+    std::vector<RemoteQuickChat> quick_chats_;
+    std::uint32_t quick_chats_sent_ = 0, quick_chats_received_ = 0;
+    std::uint32_t receive_label(std::uint32_t origin, std::uint32_t data);
+    std::uint32_t receive_callout(std::uint32_t origin, std::uint32_t data);
     std::uint32_t personal_timers_sent_ = 0, personal_timers_received_ = 0;
     std::uint32_t summary_updates_ = 0;   // 133lt1: 00134110's cMachine_NetUpdate calls
     std::vector<RemoteKillStatistics> kill_statistics_;

@@ -1284,6 +1284,42 @@ public:
     // is deferred. SetDisplayLabel also posts its resolved label to the
     // ticker notice 00242b00 (0x00227c18, solo) when one is set. Not owned.
     void set_hud_object(HudObject* hud) { hud_object_ = hud; }
+    // 134on3: the HUD's network messages in a network game (005721c8; LAN play installs the sender, solo
+    // leaves it unset). NetLabelMsg (002d2920): kind 0 SetDisplayLabel 00227a90, kind 1 AddHudObjective
+    // 002750e0, kind 2 the PDA quip 001c63b0 / 001c6200; NetCalloutMsg (002c53a0): SetCalloutLabel
+    // 00242e40 (clear 0) and ClearCallout 00242b40 (clear 1). Keys travel as strings here; the sender turns
+    // them into 003fdb40 pool indices (nullopt: -1).
+    struct NetHudMessage {
+        // quick_chat (134on3): cNetQuickChatMsg, generic inner ID 27 (*0052ace0), body {a, b}: a = -1 a location
+        // update (002b0f00: object = the player GOBJ, b its location id, to that player's owner), else a quick-chat
+        // entry from GuiQuickChat 002b1350 (b the sender's location). On receive object is the sender's client.
+        enum class Kind { label, callout, quick_chat } kind = Kind::label;
+        std::int32_t a = -1, b = -1;
+        std::uint8_t label_kind{};               // NetLabelMsg +8
+        Word object{};                           // NetLabelMsg +c (kind 1: the GOBJ +c) / NetCalloutMsg +10
+        std::optional<std::string> key0, key1;   // NetLabelMsg +10 / +14; NetCalloutMsg +c is key0
+        std::int32_t recipient = -1;             // 003fb020's a3: -1 every peer, else the GOBJ's owner client
+        bool clear{};                            // NetCalloutMsg +8
+        std::int32_t slot{};                     // NetCalloutMsg +1c (+44)
+        float value{}, colour{};                 // NetCalloutMsg +14 / +18 (+2c / +30)
+        std::uint8_t byte_48{}, byte_49{};       // NetCalloutMsg +9 / +a: the t0 / t1 bytes (clear: a3, 0)
+    };
+    struct NetHudServices {
+        std::function<void(const NetHudMessage&)> send;
+        // 00227a90's GOBJ case: cNetObj_GetOwner(GOBJ +owner) and the local client (NetGetMyClientIndex);
+        // nullopt (an owner the play does not know) throws naming 00227a90.
+        std::function<std::optional<std::int32_t>(RuntimeObjectHandle)> owner;
+        // 134on3: 002b0f00's LocalId: the client index of a GOBJ with a player controller (the local player or a
+        // remote human), nullopt for any other object (002b0f00 then returns).
+        std::function<std::optional<std::int32_t>(RuntimeObjectHandle)> player_client;
+        std::int32_t local_client{};
+    };
+    void set_net_hud_services(NetHudServices services) { net_hud_ = std::move(services); }
+    // The receives (guarded by 005721d0 in LanNetCore): 002d2650 kind 0 00227a90(manager, tag, 0, quiet 1),
+    // kind 1 0040c540(object) then 002750e0(GOBJ, tag0, tag1, quiet 1), kind 2 001c6200(tag0, tag1, silent 1);
+    // 002c50e0 00242e40(hud, &object, tag, slot, value, colour, t0, t1, 0) or 00242b40(hud, &object, slot,
+    // byte_48, 0). The tags are 003fdae0's (nullopt for -1). Returns what was done, for the play's log.
+    std::string receive_net_hud(const NetHudMessage& message);
     // The HUD's game screen (*004ffc2c +6a4, pad_interact_prompt.hpp) the
     // DisplayInteract / ClearInteract natives 0045e640 / 0045e5f0 act on;
     // without one the calls are deferred. Not owned.
@@ -1467,6 +1503,7 @@ private:
     std::set<Word> gob_entities_;
     HudScriptState hud_;
     HudObject* hud_object_{};
+    std::optional<NetHudServices> net_hud_;   // 134on3: set in a network game
     GameScreenInteract* game_screen_interact_{};
     GameSoundManager* game_sound_{};
     std::function<void(float, const std::string*)> global_timer_;
