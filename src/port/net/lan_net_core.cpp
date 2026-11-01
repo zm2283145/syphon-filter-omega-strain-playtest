@@ -208,6 +208,10 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     // 004daa10's +0x1c, cSystem_SendCreated 0012ed00 (returns 1): 003fa940 calls it for the host's placements (+0x14 set)
     // when a client finishes loading into the running level.
     m.write(kParticleVtable + 0x1c, 4, 0x12ed00);
+    // 134lt6: cNetNPCMsgs 0x004de4d0 (+8 the destructor 002d6380, +0xc the clone 002d6250, +0x10 the serialiser 002d7100).
+    m.write(0x4de4d0 + 0x8, 4, 0x2d6380);
+    m.write(0x4de4d0 + 0xc, 4, 0x2d6250);
+    m.write(0x4de4d0 + 0x10, 4, 0x2d7100);
     m.write(0x4da690 + 0xc0, 4, kFnHumanPosition);
     m.write(kHumanVtable + 0xc0, 4, kFnHumanPosition);
     // 132ln5h12: the spawn message 0x004de240 (+8 the destructor 0021df80, +0xc the clone 002d0ee0, +0x10 the
@@ -1375,6 +1379,73 @@ void LanNetCore::npc_remote_release_002d4460(std::uint32_t c, bool terrain) {
     call(m, 0x436ba0, {kGeneratorNpcInfo, 0xffffffffU});
     ++npc_remote_releases_;
     log_.push_back("002d4460: NPC +c 0x" + hex8(c) + " released without +150 (00434440" + (terrain ? ", 0042d910 miss)" : ")"));
+}
+void LanNetCore::npc_netmap_insert(std::uint32_t c, std::int32_t owner) {
+    call(memory_, 0x3fb650, {c, static_cast<std::uint32_t>(owner), npc_block(c)});
+}
+
+// 134lt6 (the header): 0042d790 for an NPC.
+void LanNetCore::npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created) {
+    npc_block(c);
+    if (generator_created) {
+        log_.push_back("0042d790: NPC +c 0x" + hex8(c) + " is generator-spawned (+7c answers): nothing");
+        return;
+    }
+    unhosted(0x42d790, "the transfer-reference insert (0x00582700) for an authored NPC 0x" + hex8(c) +
+                           " (0042eb20's +94 / +20 on the NPC block are not hosted)");
+}
+
+// 134lt6 (the header): 002d7290.
+void LanNetCore::send_npc_message(std::uint32_t c, std::uint8_t type, std::uint8_t len, std::uint32_t a, std::uint32_t b,
+                                  std::uint32_t cc) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN cNetNPCMsgs send during the background load pump");
+    const auto block = npc_block(c);
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto msg = sp_ + 0x40;
+    call(m, 0x3c9e30, {msg, 0x51f0a8});
+    m.write(msg, 4, 0x4de4d0);
+    m.write(msg + 0x2c, 1, type);
+    m.write(msg + 0x1c, 4, 0x40);
+    m.write(msg + 0x30, 4, a);
+    m.write(msg + 0x34, 4, b);
+    m.write(msg + 0x38, 4, cc);
+    m.write(msg + 0x20, 1, len);
+    const auto queued = call(m, 0x3c9420, {msg, block, 0});
+    m.write(msg, 4, 0x4de4d0);
+    call(m, 0x3c9d60, {msg, 0});
+    sp_ = caller;
+    ++npc_messages_sent_;
+    log_.push_back("002d7290: cNetNPCMsgs type 0x" + hex8(type) + " for +c 0x" + hex8(c) + " (003c9420 " + std::to_string(queued) + ", owner " +
+                   std::to_string(static_cast<std::int32_t>(call(m, 0x3fb340, {c}))) + ")");
+}
+
+// 002d7190 (NetNPCMsgs_3.c): with 0x005721d0 (and the game state not 0x14: PORT-ONLY, the play is in its level),
+// 003fbb10(packet +4); a live object gets 002d63e0(object, s8 +8, +c, +10, +14), run by the play. Returns 0x18.
+std::uint32_t LanNetCore::receive_npc_message_002d7190(std::uint32_t buf) {
+    auto& m = memory_;
+    const bool busy = m.read(dme::kBusy, 1) != 0;
+    if (!busy) m.write(dme::kBusy, 1, 1);
+    if (m.read(dme::kInLevel, 1)) {
+        const auto key = m.read(buf + 4);
+        const auto entry = call(m, 0x3fbb10, {key});
+        log_.push_back("002d7190: cNetNPCMsgs type 0x" + hex8(m.read(buf + 8, 1)) + " for +c 0x" + hex8(key) + (entry && m.read(entry) ? "" : " (no object here)"));
+        if (entry && m.read(entry)) {
+            remote_npc_messages_.push_back({key, static_cast<std::uint8_t>(m.read(buf + 8, 1)), m.read(buf + 0xc),
+                                            m.read(buf + 0x10), m.read(buf + 0x14)});
+            ++npc_messages_received_;
+        }
+    }
+    if (!busy) m.write(dme::kBusy, 1, 0);
+    return 0x18;
+}
+
+std::vector<LanNetCore::RemoteNpcMessage> LanNetCore::take_remote_npc_messages() {
+    if (pump_.joinable()) throw std::runtime_error("LAN cNetNPCMsgs access during the background load pump");
+    std::vector<RemoteNpcMessage> out;
+    out.swap(remote_npc_messages_);
+    return out;
 }
 GeneratorNetHost LanNetCore::generator_net_host() {
     auto& m = memory_;
@@ -3069,6 +3140,11 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     // 003fb020's serialiser call (msg, key, typeptr, clock, t0, cap, buf).
     case 0x3ff570: { Frame f(sp_); return disable_message_serialise_003ff570(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
     case 0x3ff850: { Frame f(sp_); return enable_message_serialise_003ff850(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    // 134lt6: cNetNPCMsgs.
+    case 0x2d6380: { Frame f(sp_); return npc_message_destroy_002d6380(m, *this, arg(0), arg(1)); }
+    case 0x2d6250: { Frame f(sp_); return npc_message_clone_002d6250(m, *this, arg(0)); }
+    case 0x2d7100: { Frame f(sp_); return npc_message_serialise_002d7100(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x2d7190: { Frame f(sp_); return receive_npc_message_002d7190(arg(3)); }
     case 0x3ff5d0: { Frame f(sp_); ++generator_received_; return disable_message_receive_003ff5d0(m, *this, arg(3)); }
     case 0x3ff8b0: { Frame f(sp_); ++generator_received_; return enable_message_receive_003ff8b0(m, *this, arg(3)); }
     case 0x3ff650: { Frame f(sp_); disable_message_send_003ff650(m, *this, arg(0), arg(1), arg(2)); return 0; }
@@ -3214,6 +3290,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     lobby_exit_ = {};
     generator_receiver_ = {};
     particle_receiver_ = {};
+    remote_npc_messages_.clear();
     particle_blocks_.clear();
     next_particle_ = kParticles;
     npc_control_handler_ = {};

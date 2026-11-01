@@ -408,9 +408,16 @@ void NpcAiController::remote_update(SoloActorSimulation& actor,float dt){
     else if(c.contact_158)r.timer_204=0.0F;
     else if(r.node_1e8>=0&&npc_node_association_eligible(graph_.node(r.node_1e8),h))r.timer_204=0.0F;
     else{
-        if(!(r.timer_204<=1.0F))
-            throw std::runtime_error("NPC AI: the remote NPC's lost-contact deactivation (actor +60(1), then 0042d790) is not ported");
+        bool lost=false;
+        if(!(r.timer_204<=1.0F)){                                              // 002d5bxx: +204 > 1.0
+            actor.deactivate();                                                // self->obj->f60(1)
+            lost=true;                                                         // done = 1: no cNPC_UpdateMovement
+            if(!remote_link_.terrain_activation)
+                throw std::runtime_error("NPC AI: the remote NPC's lost contact needs NpcRemoteLink::terrain_activation (0042d790)");
+            remote_link_.terrain_activation();
+        }
         r.timer_204+=dt;
+        if(lost){h.remote->speed_200=r.speed_200;return;}
     }
     h.remote->speed_200=r.speed_200;
     run_npc_locomotion(c,h);                                                   // 0014bff0

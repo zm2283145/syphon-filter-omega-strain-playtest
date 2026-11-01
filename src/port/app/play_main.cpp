@@ -831,6 +831,8 @@ struct SimulationScriptWorld final:MissionScriptWorld{
     std::optional<RootVector> player_position_e4() override{return sim.position_e4();}   // actor 0, 00132860
     std::function<std::optional<RootVector>(Word)> object_e4;
     std::optional<RootVector> object_position_e4(Word id) override{return object_e4?object_e4(id):std::nullopt;}   // 003cd260
+    std::function<std::optional<RootVector>(Word)> remote_player_e4;   // 134lt6: a LAN remote human's +e4 (00132860)
+    std::optional<RootVector> remote_player_position_e4(Word key) override{return remote_player_e4?remote_player_e4(key):std::nullopt;}
     PathWorld* pathed_objects() override{return paths;}
     bool pathed_objects_ticked() const override{return paths!=nullptr;}
     ElevatorWorld* lifts{};             // the GOB kind-3 lifts (002135c0 runs every frame)
@@ -8221,6 +8223,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
                         link.generator_message=[net,c](std::uint32_t word){net->send_generator_release(c,word);};
                         link.local_release=[net,c](bool terrain){net->npc_remote_release_002d4460(c,terrain);};
+                        link.terrain_activation=[net,c]{net->npc_terrain_activation_0042d790(c,true);};   // generator-spawned: +3598 1
                         // 0040c540 of the cNetHuman's target key: the local player, a spawned NPC or a remote human.
                         link.object_by_key=[net,&actors,&spawned_npcs,&lan_remotes](std::uint32_t key)->std::uint64_t{
                             if(key==0||key==0xffffffffU)return 0;   // 0040c540: no object (the none word *004bdd00)
@@ -10121,6 +10124,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // game::Distance of a population GOB (00267ee0: its virtual +e4, 003cd260).
                     // Checkpoint 132el8: an NIE: object's vtable 004dc050 has the same +e4 (003cd260; TOKYO's helicopter
                     // 1453573 in tokyo::TargetHelicopterCheck), NiEventWorld::position.
+                    script_world->remote_player_e4=[&](Word key)->std::optional<RootVector>{   // 134lt6
+                        for(const auto& r:lan_remotes)if(!r.gone&&r.key==key&&r.figure)return actors.actor(r.figure->actor).position_e4();
+                        return std::nullopt;};
                     script_world->object_e4=[&population,&ni_events,position_e4=bc.host_objects.position_e4](Word id)->std::optional<RootVector>{
                         for(std::size_t k=0;k<population.objects.size();++k)
                             if(population.objects[k].id==id)return position_e4(k);
@@ -13151,6 +13157,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
             link.generator_message=[](std::uint32_t){};
             link.local_release=[net,key](bool terrain){net->npc_remote_release_002d4460(key,terrain);};
+            link.terrain_activation=[net,key]{net->npc_terrain_activation_0042d790(key,false);};   // authored: +3598 0
             link.object_by_key=[&,net](std::uint32_t target)->std::uint64_t{
                 if(target==0||target==0xffffffffU)return 0;
                 if(target==net->local_player_key())return actors.actor(0).handle();
@@ -13258,6 +13265,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<": 00187230 -> 00186f30 on actor "<<*victim<<" added "<<added
                     <<" statistic event(s) at frame "<<frame<<"\n";
             }
+
             // 133on2: the cEquipGogglesMsgs the other consoles sent: 00199500 resolves the header's key (0040c540) and
             // runs 001992b0(object, byte != 0, 1) on it; a key of no object here does nothing.
             for(const auto& g:lan_net->take_goggles()){
@@ -13318,6 +13326,32 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 std::cout<<"LAN (134on3): NetCalloutMsg received from client "<<co.origin<<": "<<(co.clear?"clear":"set")
                     <<" object "<<co.object<<" key "<<co.key_index<<": "<<done<<" at frame "<<frame<<"\n";
+            }
+            // 134lt6: cNetNPCMsgs from another console (002d7190 -> cNetNPCMsgs_DoNPCMethod 002d63e0, NetNPCMsgs_2.c):
+            // nothing without the object's controller +58; a controller whose IsNPC (+58) answers (this console's AI, the
+            // owner) takes the first switch, a remote controller (cNetNPC_IsNPC 0) the second. Only type 0x3b (the
+            // directed sound 002d4680 forwards) is hosted: on the owner, b != -1 and a live 0040c540(b) give
+            // Hear(+d0)(0.0, (u8)a, it); the second switch has no 0x3b. Other types throw naming 002d63e0.
+            for(const auto& nm:lan_net->take_remote_npc_messages()){
+                std::cout<<"LAN (134lt6): cNetNPCMsgs type 0x"<<std::hex<<int(nm.type)<<" for +c 0x"<<nm.key<<" (a 0x"<<nm.a
+                    <<", b 0x"<<nm.b<<")"<<std::dec;
+                const auto target=lan_actor_of_key(nm.key,false);
+                NpcFigure* npc=nullptr;
+                if(target)for(auto& n:npcs)if(n.actor==*target)npc=&n;
+                if(!npc||!npc->ai){std::cout<<": no controller here (002d63e0 does nothing) at frame "<<frame<<"\n";continue;}
+                const bool owner=!npc->ai->is_remote();
+                if(nm.type!=0x3b){
+                    char text[128];std::snprintf(text,sizeof text,"unhosted(0x002d63e0): cNetNPCMsgs type 0x%02x (%s switch) is not ported",
+                        int(nm.type),owner?"the owner's":"the remote controller's");
+                    throw std::runtime_error(text);
+                }
+                if(!owner){std::cout<<": a remote controller (the second switch has no 0x3b) at frame "<<frame<<"\n";continue;}
+                if(nm.b==0xffffffffU){std::cout<<": b -1, nothing at frame "<<frame<<"\n";continue;}
+                const auto source=lan_actor_of_key(nm.b,false);
+                if(!source){std::cout<<": 0040c540 of b finds nothing at frame "<<frame<<"\n";continue;}
+                npc->ai->hear(actors.actor(npc->actor),static_cast<std::uint8_t>(nm.a&0xffU),actors.actor(*source).handle(),0.0F);
+                std::cout<<": the owner's AI heard cause "<<(nm.a&0xffU)<<" from actor "<<*source<<" (Hear +d0) at frame "<<frame<<"\n";
+
             }
             for(const auto& d:lan_net->take_remote_damages()){
                 const auto victim=lan_actor_of_key(d.victim_key,d.local_player);
@@ -16450,10 +16484,31 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // PORT: a LAN remote NPC (another console's) is not heard here; its owner console runs its AI.
                     sound.ai_controlled=[&](std::uint64_t q){
                         const auto* npc=npc_of_handle(q);
+                        // 134lt6: IsOther (+5c): a LAN remote NPC's controller is cNetNPC, whose IsNetNPC 002d2b20 answers 1.
+                        if(lan_net&&npc&&npc->ai&&npc->ai->is_remote())return true;
                         return npc&&npc->ai&&!npc->ai->is_remote()&&!npc->ai->port_is_remote_controlled()&&npc->ai->perception_hosted();};
                     sound.hear_directed=[&](std::uint64_t q,std::uint8_t cause,std::uint64_t source,float value){
                         auto* npc=npc_of_handle(q);
                         if(!npc||!npc->ai)throw std::runtime_error("0016adb0: a directed sound to an object without an AI controller");
+                        if(lan_net&&npc->ai->is_remote()){
+                            // 134lt6: the remote controller's Hear is cNetNPC_Sound 002d4680: while +154 <= 0 it sends
+                            // cNetNPCMsgs 0x3b (len 8: to the owner) with the cause and the source's +c, then +154 = 2.0.
+                            if(!npc->ai->remote_sound_002d4680()){std::cout<<"AI sound: 002d4680 held by +154 for actor "<<npc->actor<<"\n";return;}
+                            const auto key_of=[&](std::size_t a)->std::optional<std::uint32_t>{
+                                if(a==0)return lan_net->local_player_key();
+                                for(const auto& r:lan_remotes)if(!r.gone&&r.key&&r.figure&&r.figure->actor==a)return r.key;
+                                if(const auto n=lan_named_npcs.find(a);n!=lan_named_npcs.end())return npcs.at(n->second).actor_id;
+                                if(const auto s=spawned_npcs.find(static_cast<std::uint32_t>(a));s!=spawned_npcs.end())return s->second.c;
+                                return std::nullopt;};
+                            const auto from=actor_of_handle(source);
+                            const auto to=key_of(npc->actor);
+                            const auto from_key=from?key_of(*from):std::nullopt;
+                            if(!to||!from_key)throw std::runtime_error("002d4680: the +c of a directed sound's NPC or source is not a LAN key");
+                            lan_net->send_npc_message(*to,0x3b,8,cause,*from_key,0);
+                            std::cout<<"LAN (134lt6): 002d4680 cNetNPCMsgs 0x3b to the owner of +c 0x"<<std::hex<<*to<<" (cause "<<std::dec
+                                <<int(cause)<<", source +c 0x"<<std::hex<<*from_key<<std::dec<<")\n";
+                            return;
+                        }
                         npc->ai->hear(actors.actor(npc->actor),cause,source,value);};
                     sound.listeners=[&]{
                         std::vector<std::optional<NpcSoundListener>> out;

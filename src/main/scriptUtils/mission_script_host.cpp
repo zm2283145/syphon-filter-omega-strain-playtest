@@ -739,6 +739,7 @@ std::int32_t MissionScriptHost::local_player_team() const {
 void MissionScriptHost::register_remote_player(Word key) {
     if (!multiplayer_) throw std::runtime_error("A remote player outside a network game");
     if (remote_players_.contains(key)) return;
+    departed_players_.erase(key);   // 134lt6: a client back in the slot
     objects_.objects.register_npc(key, 1);
     objects_.objects.attach(key, RuntimeObjectHandle::Kind::player);
     objects_.sections.emplace(key, "remote_player");   // its messages' receiver (cNetPlayer's script handler)
@@ -754,6 +755,7 @@ std::optional<std::pair<std::array<float, 3>, float>> MissionScriptHost::checkpo
 
 void MissionScriptHost::unregister_remote_player(Word key) {
     if (!remote_players_.erase(key)) return;
+    departed_players_.insert(key);   // 134lt6: natives given it are skipped (a null object)
     objects_.objects.remove(key);
     objects_.sections.erase(key);
 }
@@ -1382,6 +1384,14 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                                                     const std::vector<Value>& arguments, bool& applied) {
     const auto& name = function.name;
     applied = true;
+    // 134lt6: a departed LAN client's human (unregister_remote_player after 001b2e90 released it) no longer resolves:
+    // the interpreter's object lookup gives null and it skips the call (003de464: non-void gives 0), as for any null
+    // object argument.
+    for (const auto& argument : arguments)
+        if (const auto* object = std::get_if<RuntimeObjectHandle>(&argument); object && departed_players_.contains(object->id)) {
+            applied = false;
+            return function.return_type == 4 ? std::nullopt : std::optional<Value>(Word{0});
+        }
     if (name == "game::IsMultiplayer" && partner_objectives_ && !multiplayer_) {
         // Port-only (132ob8): the partner is the second player at the allow-listed objective call sites only.
         const auto site = context_.native_call_site(script);
@@ -3985,6 +3995,12 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                 if (node == nodes_.end()) throw std::runtime_error("game::Distance of an unknown node: " + std::to_string(object->id));
                 const auto& p = node->second.position;
                 return RootVector{p.x, p.y, p.z, 1.0F};
+            }
+            // 134lt6: a LAN remote human (its cNetPlayer section, register_remote_player): cHuman's +e4 00132860.
+            if (section != objects_.sections.end() && section->second == "remote_player") {
+                const auto p = world_.remote_player_position_e4(object->id);
+                if (!p) throw std::runtime_error("game::Distance of a remote player the world does not host: " + std::to_string(object->id));
+                return *p;
             }
             if (section == objects_.sections.end() || section->second != "npc")
                 throw std::runtime_error("game::Distance of a GOBJ that is not an actor (+e4 not hosted): " +

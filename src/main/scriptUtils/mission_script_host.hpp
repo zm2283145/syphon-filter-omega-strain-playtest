@@ -762,6 +762,9 @@ public:
     // kinds 1 / 14, 004db280 kind 2, 004db160 kind 5, 004db3a0 kind 6), for
     // game::Distance; nullopt when the world does not host it (Distance throws).
     virtual std::optional<RootVector> object_position_e4(Word) { return std::nullopt; }
+    // 134lt6: a LAN remote human's virtual +e4 (cHuman 004da690: 00132860, as the local player's), by its key;
+    // nullopt when the world does not host it (Distance throws).
+    virtual std::optional<RootVector> remote_player_position_e4(Word) { return std::nullopt; }
     // game::LoadAnimation (001bfd30 -> 001bff40) while SKALEVEL.HOG is open:
     // load_level_animation on the world's models; nullopt when the world hosts
     // no models (the call is then deferred).
@@ -970,6 +973,8 @@ public:
     void register_remote_player(Word key);
     void unregister_remote_player(Word key);
     bool remote_player(Word key) const { return remote_players_.contains(key); }
+    // 134lt6: a remote player that left (unregistered and not back): native calls given it are skipped (003de464).
+    bool departed_player(Word key) const { return departed_players_.contains(key); }
     // 133lt4 (batch2): this console's client index in a network game (the local player's LAN key's top byte - 1),
     // which cPlayer::Team 00175340 answers there.
     void set_local_client(std::uint32_t client) { local_client_ = client; }
@@ -1524,6 +1529,7 @@ private:
     bool run_host_start_level_{true};
     bool multiplayer_{};
     std::set<Word> remote_players_;   // 133lt4: register_remote_player
+    std::set<Word> departed_players_;   // 134lt6: unregistered remote players
     std::optional<std::uint32_t> local_client_;   // 133lt4: set_local_client
     std::int32_t local_player_team() const;
     bool partner_objectives_{};

@@ -3328,6 +3328,38 @@ void enable_message_send_003ff930(LevelLoadMemory& m, LevelLoadHost& host, std::
     if (r8(m, kNetworkGame)) host.call(m, 0x3fb020, {key, msg, 0xffffffffU, 0xffffffffU});
 }
 
+// ---- cNetNPCMsgs (134lt6): the NPC command channel 002d7290 (key 0x0051f0a8, vtable 0x004de4d0, type *0x0051f0a0) ----
+std::uint32_t npc_message_destroy_002d6380(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag) {
+    return generator_message_destroy(m, host, msg, flag, 0x4de4d0);  // DEFINE_VTABLE_BASE_DTOR(cNetNPCMsgs_dtor, 004de4d0)
+}
+std::uint32_t npc_message_clone_002d6250(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    // NetNPC_18.c: 0x3c bytes ("NetNPCMsgs.hh" 0x26): +4..+1c, byte +20, then the 16 bytes at +24 and the 8 at +34.
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x3c, 0, 0x26});  // PORT-ONLY: no file-name pointer (debug only)
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, 0x4de4d0);
+        for (std::uint32_t o = 0x24; o < 0x3c; o += 4) w32(m, copy + o, r32(m, msg + o));
+    }
+    return copy;
+}
+std::uint32_t npc_message_serialise_002d7100(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg,
+                                             std::uint32_t key, std::uint32_t typeptr, std::uint32_t cap,
+                                             std::uint32_t buf) {
+    // DEFINE_MESSAGE_PACK(cNetNPCMsgs_Pack, 0x18, D_0051F0A0): +8 the type byte (s8 +2c), +c / +10 / +14 = +30 / +34 / +38.
+    if (cap < 0x18 || !buf) return 0xffffffffU;
+    message_header_003c9ca0(m, host, msg, key, cap, buf);
+    w8(m, buf + 8, r8(m, msg + 0x2c));
+    w32(m, buf + 0xc, r32(m, msg + 0x30));
+    w32(m, buf + 0x10, r32(m, msg + 0x34));
+    w32(m, buf + 0x14, r32(m, msg + 0x38));
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, 0x51f0a0));
+    return 0x18;
+}
 std::uint32_t nearest_player_003ce850(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object,
                                       std::uint32_t outdist, std::uint32_t stack) {
     const auto sp = stack - 0x90;

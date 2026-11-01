@@ -267,6 +267,9 @@ public:
     void set_remote(SoloActorSimulation& actor);
     void make_fresh_ai(SoloActorSimulation& actor);
     bool is_remote() const{return remote_.has_value();}
+    // 134lt6: cNetNPC_Sound 002d4680, the remote controller's Hear (+d0): only while +154 <= 0, which it then sets to
+    // 2.0 (002d5160 never counts +154 down); true: the caller sends cNetNPCMsgs 0x3b to the owner.
+    bool remote_sound_002d4680(){if(!(component_.timer_154<=0.0F))return false;component_.timer_154=2.0F;return true;}
     // 133lt2 (diagnostic): how many times the remote controller's death notice +7c (002d4640) ran.
     std::uint32_t remote_death_cleanups() const{return remote_death_cleanups_;}
     // 132ln5h14c: +54 / +58 / +5c for the damage path: the remote NPC controller's 002d2a90 / 002d2aa0 / 002d2b20

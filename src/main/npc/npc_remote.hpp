@@ -41,6 +41,8 @@ struct NpcRemoteLink {
     // 134lt6: 002d4460's branch for a controller without +150 whose virtual +44 answers (NetNPC_13.c): cNPCInfoObject
     // 00436c00, GetOwner 00434440(&actor +c) (its answer unused), 0042d910(actor) when +141 bit 7, then 00436ba0(-1).
     std::function<void(bool terrain_141)> local_release;
+    // 134lt6: 002d5160's lost contact, after the actor's +60(1): cNetObjectMgr_TerrainActivation 0042d790(actor).
+    std::function<void()> terrain_activation;
 };
 // The remote controller's own fields.
 struct NpcRemoteState {

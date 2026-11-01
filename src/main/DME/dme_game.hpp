@@ -721,6 +721,12 @@ std::uint32_t enable_message_serialise_003ff850(LevelLoadMemory& m, LevelLoadHos
 // (enable)(object, buf +8); 0xc.
 std::uint32_t disable_message_receive_003ff5d0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf);
 std::uint32_t enable_message_receive_003ff8b0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf);
+// 134lt6: cNetNPCMsgs (002d7290's message, vtable 0x004de4d0): the destructor 002d6380, the clone 002d6250 (0x3c bytes)
+// and the serialiser 002d7100 (0x18 bytes: header, s8 type, three words; type *0x0051f0a0).
+std::uint32_t npc_message_destroy_002d6380(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag);
+std::uint32_t npc_message_clone_002d6250(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+std::uint32_t npc_message_serialise_002d7100(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                             std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf);
 // Sends: in a network game 003fb020(key, msg, -1, a2) / 003fb020(key, msg, -1, -1).
 void disable_message_send_003ff650(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
                                    std::uint32_t a2);

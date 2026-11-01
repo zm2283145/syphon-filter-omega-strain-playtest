@@ -681,6 +681,8 @@ public:
     // 0021e740..0021e7bc on the spawning console: the actor's virtual +0xfc (001856d0) and its NPC info entry
     // (00436c00, 00435f30(obj, &+c, the local slot), 00436ba0(obj, -1)).
     void npc_network_register(std::uint32_t c);
+    // 134lt6 (tests): 003fb650(c, owner, the NPC block), the NetMap insert a received spawn makes for another console's NPC.
+    void npc_netmap_insert(std::uint32_t c, std::int32_t owner);
     // 0021e968..0021ea70: the spawn message (003c9e30 type 0x0051f058, vtable 0x004de240; +0x30 the position, +0x40
     // 001bd590 of the actor's matrix rows, +0x50 / +0x54 its +c / +10, +0x58 the generator's health, +0x5c the draw,
     // +0x60 the node, +0x1c 0x40, byte +0x20 4) to the generator: 003c9420(msg, gen, 0) (clone 002d0ee0, 003fb020,
@@ -782,7 +784,24 @@ public:
     // 0042d910 finds +c in the terrain-activation map 0x00582700; nothing in the port inserts there (0042d790 is not ported),
     // so the find misses and nothing is erased; a populated map throws naming 0042d910.
     void npc_remote_release_002d4460(std::uint32_t c, bool terrain);
-    std::uint32_t npc_remote_releases() const { return npc_remote_releases_; }
+    // 134lt6: cNetObjectMgr_TerrainActivation 0042d790 (NetObjectMgr_3.c) for an NPC: nothing when its virtual +7c answers
+    // (cHuman: the generator-spawned byte +3598); otherwise the TransferReference insert into 0x00582700 and, unless the
+    // controller's +5c answers, the notice 0x00582730: not ported (0042eb20 would call the block's +94 / +20), it throws.
+    void npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created);
+    // 134lt6: the cNetNPCMsgs channel. send_npc_message is 002d7290(target, type, len, a, b, c, 0) for the NPC of key c:
+    // 003c9e30(msg, 0x0051f0a8), vtable 0x004de4d0, +2c type, +1c 0x40, +30 / +34 / +38 a / b / c, +20 len (8: to the
+    // object's owner), 003c9420(msg, the NPC block, 0), 003c9d60. The receive 002d7190 (registered by 002d7020 as
+    // *0x0051f0a0) finds the object (003fbb10) and queues {key, type, a, b, c}; the play runs DoNPCMethod 002d63e0 on it.
+    void send_npc_message(std::uint32_t c, std::uint8_t type, std::uint8_t len, std::uint32_t a, std::uint32_t b,
+                          std::uint32_t cc);
+    struct RemoteNpcMessage {
+        std::uint32_t key = 0;
+        std::uint8_t type = 0;
+        std::uint32_t a = 0, b = 0, c = 0;
+    };
+    std::vector<RemoteNpcMessage> take_remote_npc_messages();
+    std::uint32_t npc_messages_sent() const { return npc_messages_sent_; }
+    std::uint32_t npc_messages_received() const { return npc_messages_received_; }    std::uint32_t npc_remote_releases() const { return npc_remote_releases_; }
     struct GeneratorRelease {
         std::uint32_t generator = 0, c = 0;
     };
@@ -1014,6 +1033,9 @@ private:
     GeneratorReceiver generator_receiver_;
     std::uint32_t generator_sent_ = 0, generator_received_ = 0;
     std::uint32_t npc_remote_releases_ = 0;
+    std::vector<RemoteNpcMessage> remote_npc_messages_;
+    std::uint32_t npc_messages_sent_ = 0, npc_messages_received_ = 0;
+    std::uint32_t receive_npc_message_002d7190(std::uint32_t buf);
     std::map<std::uint32_t, std::array<float, 3>> remote_positions_;  // human -> its last position
     std::uint32_t generator_block(std::uint32_t id) const;
     std::uint32_t client_player_003fb8d0(std::int32_t client);
