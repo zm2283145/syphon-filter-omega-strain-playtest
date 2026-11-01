@@ -912,6 +912,35 @@ public:
     std::uint32_t npc_deactivates_received() const { return npc_deactivates_received_; }
     std::uint32_t terrain_activations_received() const { return terrain_activations_received_; }
     void set_npc_terrain_hosts(NpcTerrainHosts hosts) { npc_terrain_hosts_ = std::move(hosts); }
+    // 134lt11: the NPC ownership transfer's copy message. The NPC controllers' transfer slots on the block are the
+    // original's: +50 0015b820 (nothing), +90 cNPC::GetCopyMsg 00158350 (both), +98 0015b810 (both: +5d = a1), +9c
+    // 0015b850 on the AI controller (nothing) and 002d29c0 on the cNetNPC (cNetNPC_ConvertToNpc's body with the
+    // message's +30). The cNetCopyMsg (vtable 0x004de110: 002c5460 / 002c54c0 / 002c5c80) is built and received here
+    // (dme_game: copy_message_*; the receive 002c5b80 is registered for the type 0x0051ee50).
+    // PORT-ONLY boundary: the payload's bytes come from and go to the play's NpcAiController (npc_remote.hpp:
+    // pack_transfer_00148b50, set_transferring_0015b810, convert_to_npc_002d5ee0); they keep cNetworkTransferNpc's
+    // 0x2e0-byte layout in this memory.
+    using NpcCopyPayload = std::array<std::uint8_t, 0x2e0>;
+    struct NpcTransferHosts {
+        // 00148b50 into the payload (it holds the message constructor's bytes and keeps those 00148b50 does not write).
+        std::function<void(std::uint32_t c, NpcCopyPayload& payload)> pack;
+        std::function<void(std::uint32_t c, bool on)> set_transferring;   // 0015b810's +5d on the play's controller
+        // 002d5ee0's play part after 0015ad70 (the think list), cHuman_CreateGobjController(a, 2, ..), +14 = 1 and
+        // 00148cd0: NpcAiController::convert_to_npc_002d5ee0.
+        std::function<void(std::uint32_t c, const NpcCopyPayload& payload)> convert;
+    };
+    void set_npc_transfer_hosts(NpcTransferHosts hosts) { npc_transfer_hosts_ = std::move(hosts); }
+    // cNPC::GetCopyMsg 00158350(controller): the controller's +50; outside a network game 0; else a 0x310 cNetCopyMsg
+    // from the game heap (0036b180(0, 0x310, 0x0049b670, 0x80c)): 003c9e30(p, 0x0051ee58), vtable 0x004de110,
+    // cNetworkTransferNpc_ctor 001584b0, +24 the NPC's +c, 00148b50 (the play), +1c = 0x40.
+    std::uint32_t npc_get_copy_msg_00158350(std::uint32_t controller);
+    // cNetNPC_ConvertToNpc 002d5ee0(controller, payload) (002d29c0 passes the message's +30): 0015ad70 and
+    // cHuman_CreateGobjController(actor, 2, ..) on the block (the AI controller 0x004d9380, as 001b3b60's fresh AI,
+    // without the play's swap), +14 = 1, then the play's part (NpcTransferHosts::convert).
+    void npc_convert_to_npc_002d5ee0(std::uint32_t controller, std::uint32_t payload);
+    std::uint32_t npc_copy_messages_built() const { return npc_copy_messages_built_; }
+    std::uint32_t npc_conversions() const { return npc_conversions_; }
+    std::uint32_t copy_messages_received() const { return copy_messages_received_; }
     std::uint32_t npc_terrain_references() const;       // the entries of 0x00582700
     std::uint32_t npc_net_activations() const { return npc_net_activations_; }
     std::uint32_t npc_block_address(std::uint32_t c) const { return npc_block(c); }   // tests
@@ -1170,6 +1199,8 @@ private:
     std::uint32_t generator_sent_ = 0, generator_received_ = 0;
     std::uint32_t npc_remote_releases_ = 0;
     NpcTerrainHosts npc_terrain_hosts_;
+    NpcTransferHosts npc_transfer_hosts_;
+    std::uint32_t npc_copy_messages_built_ = 0, npc_conversions_ = 0, copy_messages_received_ = 0;
     std::uint32_t npc_net_activations_ = 0;
     std::vector<std::uint32_t> remote_npc_deactivates_;
     std::uint32_t sections_gated_3269_ = 0;

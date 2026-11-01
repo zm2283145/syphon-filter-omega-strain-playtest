@@ -3910,6 +3910,94 @@ std::uint32_t despawn_message_receive_002d1810(LevelLoadMemory& m, LevelLoadHost
     return 0x10;
 }
 
+// ---- the NPC copy message cNetCopyMsg (vtable 0x004de110; 134lt11; NET_INLEVEL.md "The NPC ownership transfer") --
+namespace {
+constexpr std::uint32_t kCopyMessage = 0x4de110, kCopyType = 0x51ee58, kCopySerialType = 0x51ee50;
+// cNetCopyMsg_Pack's members after the header: {message offset, wire offset, bytes}. The member-wise copies
+// (cNpcTransfer, cAiTargetTransfer, cPathNavigatorTransfer, cPathTransfer, cTargetAwareness opAssign) are taken
+// whole here (PORT-ONLY: their padding bytes travel too; no receiver reads them).
+constexpr std::array<std::array<std::uint32_t, 3>, 11> kCopyFields{{{0x30, 0x10, 0xf0},
+                                                                     {0x120, 0x100, 0x10},
+                                                                     {0x130, 0x110, 4},
+                                                                     {0x140, 0x120, 0x30},
+                                                                     {0x170, 0x150, 0x70},
+                                                                     {0x1e0, 0x1c0, 0x20},
+                                                                     {0x200, 0x1e0, 4},
+                                                                     {0x210, 0x1f0, 0x40},
+                                                                     {0x250, 0x230, 0x40},
+                                                                     {0x290, 0x270, 0x40},
+                                                                     {0x2d0, 0x2b0, 0x40}}};
+}  // namespace
+
+std::uint32_t copy_message_destroy_002c5460(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag) {
+    if (!msg) return msg;
+    w32(m, msg, kCopyMessage);
+    host.call(m, 0x3c9d60, {msg, 0});
+    if (static_cast<std::int16_t>(flag & 0xffffU) > 0) host.call(m, 0x100740, {msg, 0});
+    return msg;
+}
+
+std::uint32_t copy_message_clone_002c54c0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg) {
+    heap_enter(m, host);
+    const auto copy = host.call(m, 0x36b180, {0, 0x310, 0x4ac8e8, 0x16});   // "NetCopyMsg.hh" (0x004ac8e8), line 0x16
+    heap_leave(m, host);
+    if (copy) {
+        w32(m, copy, kMessageBase);                                            // cMessage_ctor_cMessageR
+        for (std::uint32_t o = 4; o < 0x20; o += 4) w32(m, copy + o, r32(m, msg + o));
+        w8(m, copy + 0x20, r8(m, msg + 0x20));
+        w32(m, copy, kCopyMessage);
+        w32(m, copy + 0x24, r32(m, msg + 0x24));
+        for (std::uint32_t o = 0x30; o < 0x310; o += 4) w32(m, copy + o, r32(m, msg + o));   // 002c5590
+    }
+    return copy;
+}
+
+std::uint32_t copy_message_serialise_002c5c80(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                              std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf) {
+    if (cap < 0x2f0 || !buf) return 0xffffffffU;
+    message_header_003c9ca0(m, host, msg, key, cap, buf);
+    w32(m, buf + 8, r32(m, msg + 0x24));
+    for (const auto& [from, to, n] : kCopyFields)
+        for (std::uint32_t o = 0; o < n; o += 4) w32(m, buf + to + o, r32(m, msg + from + o));
+    if (!typeptr) return 0xffffffffU;
+    w32(m, typeptr, r32(m, kCopySerialType));
+    return 0x2f0;
+}
+
+void copy_message_build_002c60f0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t buf) {
+    host.call(m, 0x3c9e30, {msg, kCopyType});
+    w32(m, msg, kCopyMessage);
+    for (std::uint32_t o = 0x30; o < 0x310; o += 4) w32(m, msg + o, 0);         // PORT-ONLY: the stack's bytes
+    // The member constructors (001584b0's): +f0 / +f8 0, +1d0 -1, each awareness +0 0, +4 -2, +8 -1.
+    w32(m, msg + 0x30 + 0x1d0, 0xffffffffU);
+    for (std::uint32_t a = 0x30 + 0x1e0; a < 0x30 + 0x2e0; a += 0x40) {
+        w32(m, a, 0);
+        w32(m, a + 4, 0xfffffffeU);
+        w32(m, a + 8, 0xffffffffU);
+    }
+    w32(m, msg + 0x24, r32(m, buf + 8));
+    for (const auto& [from, to, n] : kCopyFields)
+        for (std::uint32_t o = 0; o < n; o += 4) w32(m, msg + from + o, r32(m, buf + to + o));
+}
+
+std::uint32_t copy_message_receive_002c5b80(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack) {
+    const auto sp = stack - 0x360, msg = sp + 0x20, id = sp + 0x340;
+    busy_enter(m);
+    if (r8(m, kInLevel)) {
+        w32(m, id, r32(m, buf + 8));
+        copy_message_build_002c60f0(m, host, msg, buf);
+        const auto object = host.call(m, 0x40c540, {id});
+        const auto ctl = object ? r32(m, object + 0x58) : 0U;
+        if (ctl && host.call(m, r32(m, r32(m, ctl) + 0x44), {ctl}) && (host.call(m, r32(m, r32(m, ctl) + 0x88), {ctl}) & 0xffU) == 2)
+            host.call(m, 0x2d5ee0, {ctl, msg + 0x30});                       // cNetNPC_ConvertToNpc
+        host.call(m, 0x42ce10, {id});
+        w32(m, msg, kCopyMessage);
+        host.call(m, 0x3c9d60, {msg, 0});
+    }
+    w8(m, kBusy, 0);
+    return 0x2f0;
+}
+
 // ---- the health message (vtable 0x004e0ee0; checkpoint 132ln5h14c; NET_INLEVEL.md 4.26) ------------------------
 namespace {
 constexpr std::uint32_t kHealthMessage = 0x4e0ee0, kHealthType = 0x582750, kHealthSerialType = 0x582748;

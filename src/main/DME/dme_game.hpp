@@ -813,6 +813,24 @@ std::uint32_t despawn_message_serialise_002d1790(LevelLoadMemory& m, LevelLoadHo
 std::uint32_t despawn_message_receive_002d1810(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf,
                                                std::uint32_t stack);
 
+// ---- the NPC copy message cNetCopyMsg (vtable 0x004de110, type 0x0051ee58, serial type 0x0051ee50; 134lt11) ------
+// cNPC::GetCopyMsg 00158350 builds it (0x310 bytes; +24 the NPC's ID, +30 the cNetworkTransferNpc payload).
+// 002c5460(msg, flag): the destructor (+8). 002c54c0(msg): the clone (+0xc; 0x310 bytes, 0x004ac8e8 line 0x16).
+std::uint32_t copy_message_destroy_002c5460(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t flag);
+std::uint32_t copy_message_clone_002c54c0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg);
+// 002c5c80(msg, key, typeptr, .., cap t1, buf t2): 0x2f0 bytes: 003c9ca0's header, +8 the message's +24, then
+// cNpcTransfer at +10, cAiTransfer at +100 / +110, cAiTargetTransfer +120, cPathNavigatorTransfer +150, cPathTransfer
+// +1c0, the target ID +1e0, the four awareness records +1f0; type *0x0051ee50. -1 for cap < 0x2f0 or no buf.
+std::uint32_t copy_message_serialise_002c5c80(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t key,
+                                              std::uint32_t typeptr, std::uint32_t cap, std::uint32_t buf);
+// 002c60f0(msg, buf): the message from a received record (003c9e30 type 0x0051ee58, the member constructors, the
+// copies).
+void copy_message_build_002c60f0(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t msg, std::uint32_t buf);
+// cNetCopyMsg_CopyMsgCallback 002c5b80(.., buf a3): in the level the message (002c60f0 at sp+0x20); the object of
+// buf +8 (0040c540) whose controller answers +44 and whose +88 is 2 gets cNetNPC_ConvertToNpc 002d5ee0(controller,
+// msg + 0x30); then 0042ce10(&id) and 003c9d60; 0x2f0.
+std::uint32_t copy_message_receive_002c5b80(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t buf, std::uint32_t stack);
+
 // ---- the health message (vtable 0x004e0ee0, type 0x00582750, serial type 0x00582748; 132ln5h14c, 4.26) ----------
 // 003cc990(human, hp, a2): +0x40 = cvt.s.w(hp); in a network game with a2 == 0 the message (003c9e30 type 0x00582750
 // at sp+0x30, the vtable, byte +0x24 = 0, +0x28 the human's +0xc, byte +0x20 = 4, +0x2c hp) to the human

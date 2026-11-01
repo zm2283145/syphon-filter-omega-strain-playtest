@@ -280,6 +280,21 @@ public:
     // the AI message 004ee550 event 0 (+28 -1), then +214 bit 0 = 1; without one, bit 0 = 0. Remote mode only.
     void remote_follow_002d2ca0(SoloActorSimulation& actor,std::optional<std::int32_t> target_id,float a,float b);
     bool remote_following() const{return remote_&&(remote_->flags_214&0x01U)!=0;}
+    // 134lt11 (npc_remote.hpp; PORT-ONLY boundary, the original's byte layout): the NPC ownership transfer.
+    void set_transfer_link(NpcTransferLink link){transfer_link_=std::move(link);}
+    // cNPC::GetCopyMsg 00158350's payload (both NPC controllers' +90): 00148b50 of this component into `out` (the
+    // controller's +50, 0015b820, does nothing on either controller).
+    void pack_transfer_00148b50(NpcTransferBytes& out);
+    // 0015b810 (both controllers' +98, set_transferring): +5d = v, so the deactivation TransferRequest 0042d360
+    // makes next sends no Deactivated notification (0016f0e0).
+    void set_transferring_0015b810(bool v){component_.quiet_5d=v?1:0;}
+    // 00148cd0 on this AI controller: 001489d0, +5c = the actor present (+2d, +2c, !+2e), virtual +48 (00157df0),
+    // +5c = 0. Throws in remote mode.
+    void apply_copy_00148cd0(SoloActorSimulation& actor,const NpcTransferBytes& in);
+    // cNetNPC_ConvertToNpc 002d5ee0 (the copy message's receive 002c5b80) and cNetNPC +9c 002d29c0 (the same body with
+    // the message's +30) on the remote controller: 0015ad70 (the actor off the think list), cHuman_CreateGobjController
+    // (actor, 2, ..) (make_fresh_ai; the generator argument +150 stays on LanNetCore's block), +30 -> +14 = 1, 00148cd0.
+    void convert_to_npc_002d5ee0(SoloActorSimulation& actor,const NpcTransferBytes& in);
     // 133lt2 (diagnostic): how many times the remote controller's death notice +7c (002d4640) ran.
     std::uint32_t remote_death_cleanups() const{return remote_death_cleanups_;}
     // 132ln5h14c: +54 / +58 / +5c for the damage path: the remote NPC controller's 002d2a90 / 002d2aa0 / 002d2b20
@@ -547,6 +562,7 @@ private:
     std::optional<NpcRemoteState> remote_;
     std::uint32_t remote_death_cleanups_{};
     NpcRemoteLink remote_link_;
+    NpcTransferLink transfer_link_;
     NpcAiSystem& system_;
     const NpcNodeGraph& graph_;
     std::uint32_t actor_id_;

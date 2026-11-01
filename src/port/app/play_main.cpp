@@ -13411,6 +13411,27 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 if(!a)throw std::runtime_error("001b3b60: the Activate(0) of an NPC key with no actor here");
                 actors.activate(*a);
                 std::cout<<"LAN (134lt9): 001b3b60: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<*a<<") Activate(0)\n";}});
+        // 134lt11: the NPC ownership transfer's copy message (LanNetCore::NpcTransferHosts; npc_remote.hpp's PORT-ONLY
+        // bridge, the original's 0x2e0-byte cNetworkTransferNpc): GetCopyMsg 00158350's 00148b50, 0015b810's +5d and
+        // cNetNPC_ConvertToNpc 002d5ee0's AI controller with 00148cd0. The controllers' NpcTransferLink (the target and
+        // awareness lookups) is not set yet: a copy with a live target or awareness record throws naming it.
+        if(lan_net){
+            const auto transfer_figure=[&](std::uint32_t c,const char* what)->NpcFigure&{
+                const auto a=lan_actor_of_key(c,false);
+                if(!a)throw std::runtime_error(std::string(what)+": an NPC key with no actor here");
+                for(auto& n:npcs)if(n.actor==*a&&n.ai)return n;
+                throw std::runtime_error(std::string(what)+": an NPC key without the play's AI controller");
+            };
+            lan_net->set_npc_transfer_hosts({
+                [transfer_figure](std::uint32_t c,lan::LanNetCore::NpcCopyPayload& p){
+                    transfer_figure(c,"00158350").ai->pack_transfer_00148b50(p);},
+                [transfer_figure](std::uint32_t c,bool on){transfer_figure(c,"0015b810").ai->set_transferring_0015b810(on);},
+                [&,transfer_figure](std::uint32_t c,const lan::LanNetCore::NpcCopyPayload& p){
+                    auto& n=transfer_figure(c,"002d5ee0");
+                    n.ai->convert_to_npc_002d5ee0(actors.actor(n.actor),p);
+                    std::cout<<"LAN (134lt11): 002d5ee0: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<n.actor
+                        <<") is this console's AI again (00148cd0)\n";}});
+        }
         // 134lt7: Follow in a network game (001488f0 / 002d2d50): the cNetNPCMsgs 0x32 {the target's +c or -1, the two
         // floats' bits}; len 4 (every peer) from an AI controller, len 8 (the owner) from a remote one, whose 002d2d50
         // reads the target's +c without a null test.
@@ -15796,6 +15817,11 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                                         }
                                         continue;
                                     }
+                                    // 134lt10 (PORT-ONLY pilot): another console's NPC that is not active here (a puppet of
+                                    // 0021e0c0 whose generator this console never enabled: not drawn, not hit by a shot) is
+                                    // not a target; the joiner-led TORONTO1 route spent all its rounds on the scan defence's.
+                                    if(k<combat_figures.size()&&combat_figures[k]&&combat_figures[k]->ai&&combat_figures[k]->ai->is_remote()
+                                       &&!actors.actor(k).eligible())continue;
                                     const auto p=actors.actor(k).published_position();
                                     const float d=std::hypot(p[0]-here.position[0],p[1]-here.position[1]);
                                     if(clear){const auto cc=pilot_clear_covered.find(combat_ids[k]);
@@ -17121,7 +17147,12 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                         if(a==actors.size())throw std::runtime_error("Object DamageMsg: a source that is neither an actor nor a host object");
                         // The object-registry key: a spawned NPC's +c without its high byte (00393760 registers
                         // id, +c = id | 1 << 24), as ActorWorldScriptNpcs::record_of_actor answers for actor damage.
-                        attacker=static_cast<Word>(combat_ids.at(a))&0x00ffffffU;
+                        // 134lt10: only a spawned NPC drops the byte (its script word is the generator's ID). 004081e0
+                        // resolves a client's source key to that human's object (0040c540), whose script word here is
+                        // its full ID (002c6b70's figure: (peer + 1) << 24 | the player's ID), not the host player's.
+                        const auto spawned=spawned_npcs.find(static_cast<std::uint32_t>(a));
+                        attacker=spawned!=spawned_npcs.end()?static_cast<Word>(spawned->second.id)
+                                                             :static_cast<Word>(combat_ids.at(a));
                     }
                     const bool handled=mission_host->deliver_object_damage(id,attacker,m.damage_24,m.type_2c,m.category_2d);
                     std::cout<<"DamageMsg "<<m.damage_24<<" from "<<*attacker<<" -> object "<<id<<" at frame "<<frame

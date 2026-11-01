@@ -10,7 +10,9 @@
 #include "npc_route.hpp"
 #include "vu_float.hpp"
 #include <bit>
+#include <cstring>
 #include <stdexcept>
+#include <type_traits>
 
 namespace omega {
 namespace {
@@ -445,5 +447,175 @@ void NpcAiController::remote_update(SoloActorSimulation& actor,float dt){
     }
     h.remote->speed_200=r.speed_200;
     run_npc_locomotion(c,h);                                                   // 0014bff0
+}
+
+// 134lt11: cNetworkTransferNpc (npc_remote.hpp).
+namespace {
+template<class T> void transfer_store(NpcTransferBytes& b,std::size_t off,const T& v){
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::memcpy(b.data()+off,&v,sizeof v);
+}
+template<class T> void transfer_load(const NpcTransferBytes& b,std::size_t off,T& v){
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::memcpy(&v,b.data()+off,sizeof v);
+}
+void transfer_zero(NpcTransferBytes& b,std::size_t off,std::size_t n){std::memset(b.data()+off,0,n);}
+// The component's fields at their cNetworkTransferNpc offsets: cNpcTransfer (controller +60 at +000), cAiTransfer
+// (controller +44 at +0f0), the cAITarget's flag byte +20 (component perception_flags_20 at +130) and
+// cPathNavigatorTransfer (the follower +1b0 at +140).
+template<class F> void transfer_component_fields(NpcAiComponent& c,F&& f){
+    f(0x000,c.travel_speed_60);f(0x004,c.speed_priority_64);f(0x008,c.flags_68);f(0x00c,c.aggressiveness_6c);
+    f(0x010,c.query_70);f(0x014,c.query_74);f(0x018,c.firing_threshold_78);f(0x01c,c.stop_timer_7c);
+    f(0x020,c.look_timer_80);f(0x024,c.field_84);f(0x028,c.field_88);f(0x02c,c.fire_delay_8c);
+    f(0x030,c.throw_scatter_90);f(0x034,c.throw_angle_94);f(0x038,c.radius_squared_98);f(0x03c,c.field_9c);
+    f(0x040,c.movement_priority_a0);f(0x044,c.ammo_a4);f(0x048,c.field_a8);f(0x04c,c.query_priority_ac);
+    f(0x050,c.held_item_b0);f(0x054,c.held_item_b4);f(0x058,c.switch_distance_b8);
+    for(std::size_t i=0;i<c.allowed_regions_bc.size();++i)f(0x05c+4*i,c.allowed_regions_bc[i]);   // +bc..+df
+    f(0x080,c.firing_node_e0);f(0x084,c.cover_node_e4);f(0x088,c.timer_e8);f(0x08c,c.mode_counter_ec);
+    f(0x090,c.carry_node_f0);f(0x094,c.object_f4);
+    f(0x0a0,c.follow_100);f(0x0a4,c.follow_104);f(0x0a8,c.follow_108);f(0x0ac,c.follow_10c);
+    f(0x0b0,c.pending_tag_110);f(0x0b2,c.pending_mode_112);f(0x0b4,c.action_114);f(0x0b8,c.fire_priority_118);
+    f(0x0bc,c.subtarget_11c);f(0x0c0,c.draw_priority_120);f(0x0c4,c.flags_124);f(0x0c8,c.timer_128);
+    f(0x0cc,c.force_item_12c);f(0x0d0,c.force_count_130);f(0x0d4,c.force_delay_134);f(0x0d8,c.pending_node_138);
+    f(0x0dc,c.state_13c);f(0x0dd,c.draw_13d);f(0x0de,c.byte_13e);f(0x0df,c.byte_13f);f(0x0e0,c.byte_140);
+    f(0x0e1,c.flags_141);
+    f(0x0f0,c.mode_44);f(0x0f4,c.requested_48);f(0x0f8,c.priority_4c);f(0x0fc,c.pending_50);f(0x100,c.team_54);
+    f(0x130,c.perception_flags_20);
+    auto& pf=c.path;
+    for(std::size_t i=0;i<4;++i){f(0x140+4*i,pf.target_00[i]);f(0x150+4*i,pf.direction_10[i]);f(0x160+4*i,pf.saved_20[i]);}
+    f(0x180,pf.remaining_40);f(0x184,pf.segment_44);f(0x188,pf.index_48);f(0x18c,pf.hold_4c);f(0x190,pf.current_50);
+    f(0x194,pf.previous_54);f(0x198,pf.field_58);f(0x19c,pf.destination_5c);f(0x1a0,pf.flags_60);
+}
+// The cAITarget's first 0x30 bytes (but +20, the component's) at +110.
+template<class P,class F> void transfer_perception_fields(P& p,F&& f){
+    for(std::size_t i=0;i<4;++i)f(0x110+4*i,p.last_known_00[i]);
+    f(0x120,p.radius_10);f(0x124,p.half_angle_14);f(0x128,p.region_18);f(0x12c,p.priority_1c);f(0x131,p.flags_21);
+}
+// A cTargetAwareness (0x40; +0 the handle's object, +4 its ID) relative to its slot.
+template<class R,class F> void transfer_record_fields(R& r,F&& f){
+    f(0x04,r.id_4);f(0x08,r.id_8);
+    for(std::size_t i=0;i<4;++i)f(0x10+4*i,r.position_10[i]);
+    f(0x20,r.cause_20);f(0x24,r.level_24);f(0x28,r.time_28);f(0x2c,r.score_2c);f(0x30,r.score_30);f(0x34,r.score_34);
+    f(0x38,r.byte_38);f(0x39,r.byte_39);f(0x3a,r.byte_3a);f(0x3b,r.dead_notice_3b);f(0x3c,r.byte_3c);
+}
+// 00148b50 / 001489d0's `new (0x30) cPath(+78)` (cPath_ctor 00161930: +20 / +28 0, +14 / +10 -1, +24 the capacity).
+void transfer_construct_path(NpcPathFollower& pf){
+    auto b=std::make_shared<NpcRouteBuffer>();
+    b->capacity_24=pf.capacity_78;b->start_14=-1;b->destination_10=-1;
+    pf.route_74=std::move(b);
+}
+}
+
+void npc_transfer_get_00148b50(NpcTransferBytes& out,NpcAiComponent& c,const NpcPerception& p,const NpcTransferLink& link){
+    // The quadword copies (controller +60 0xf0, +44 0x14, cAITarget 0x30, the follower 0x70) also move the padding
+    // the port does not model; it is packed as zero.
+    transfer_zero(out,0x000,0xf0);transfer_zero(out,0x0f0,0x14);transfer_zero(out,0x110,0x30);transfer_zero(out,0x140,0x70);
+    transfer_component_fields(c,[&](std::size_t off,const auto& v){transfer_store(out,off,v);});
+    transfer_perception_fields(p,[&](std::size_t off,const auto& v){transfer_store(out,off,v);});
+    // 0016ecc0: the target's ID (-1 when the handle is null or stale), then the first four awareness records.
+    std::int32_t id=-1;
+    if(p.target_40){
+        if(!link.handle_live)throw std::runtime_error("NPC transfer: 0016ecc0 reads the target handle +40 (NpcTransferLink::handle_live)");
+        if(link.handle_live(p.target_40,p.target_id_44))id=p.target_id_44;
+    }
+    transfer_store(out,0x1d0,id);
+    for(std::size_t i=0;i<4;++i){
+        const std::size_t base=0x1e0+0x40*i;
+        if(i<p.records.size()){
+            const auto& r=p.records[i];
+            transfer_zero(out,base,0x40);
+            transfer_store(out,base,static_cast<std::uint32_t>(r.object));   // PORT-ONLY: the handle's low word
+            transfer_record_fields(r,[&](std::size_t off,const auto& v){transfer_store(out,base+off,v);});
+        }else{
+            transfer_store(out,base+8,std::int32_t{-1});                     // 0049c588
+        }
+    }
+    auto& pf=c.path;
+    if(!pf.route_74)transfer_construct_path(pf);
+    // 00161610 cPathTransfer::Get.
+    const auto& b=*pf.route_74;
+    if(b.point_00)for(std::size_t i=0;i<4;++i)transfer_store(out,0x1b0+4*i,(*b.point_00)[i]);
+    else transfer_zero(out,0x1b0,0x10);
+    transfer_store(out,0x1c0,b.destination_10);
+    if(!b.array_20){
+        transfer_store(out,0x1c4,b.start_14);
+        transfer_store(out,0x1c8,b.end_18);
+    }else if(!b.nodes.empty()){
+        transfer_store(out,0x1c4,b.nodes.back());
+        transfer_store(out,0x1c8,b.nodes.front());
+    }else{
+        transfer_store(out,0x1c4,std::int32_t{-1});
+    }
+}
+
+void npc_transfer_put_001489d0(const NpcTransferBytes& in,NpcAiComponent& c,NpcPerception& p,const NpcTransferLink& link,
+    NpcRouteManager* routes){
+    transfer_component_fields(c,[&](std::size_t off,auto& v){transfer_load(in,off,v);});
+    transfer_perception_fields(p,[&](std::size_t off,auto& v){transfer_load(in,off,v);});
+    const auto need_lookup=[&]{
+        if(!link.lookup)throw std::runtime_error("NPC transfer: 0016e890 looks objects up by ID (0040c540; NpcTransferLink::lookup)");
+    };
+    // 0016e890: the target from its ID, registered for visibility when it has no controller.
+    std::int32_t id{};transfer_load(in,0x1d0,id);
+    if(id!=-1){
+        need_lookup();
+        const std::uint64_t o=link.lookup(id);
+        p.target_40=o;p.target_id_44=o?id:-1;
+        if(o){
+            if(!link.has_controller||!link.add_target)
+                throw std::runtime_error("NPC transfer: 0016e890 reads the target's controller +58 and cTargetManager_AddGobj (NpcTransferLink)");
+            if(!link.has_controller(o))link.add_target(o);
+        }
+    }else{
+        p.target_40=0;p.target_id_44=-1;
+    }
+    for(std::size_t i=0;i<4;++i){
+        const std::size_t base=0x1e0+0x40*i;
+        std::int32_t rid{};transfer_load(in,base+8,rid);
+        if(rid==-1)continue;
+        need_lookup();
+        const std::uint64_t o=link.lookup(rid);
+        if(!o)continue;
+        AwarenessRecord r;                                                     // new (0x40), then *e = recs[i]
+        transfer_record_fields(r,[&](std::size_t off,auto& v){transfer_load(in,base+off,v);});
+        r.object=o;r.id_4=rid;                                                 // Set(&e->h, o)
+        p.records.insert(p.records.begin(),r);                                 // push_front
+    }
+    // 001613e0 is in transfer_component_fields; then the cPath and 001614c0.
+    auto& pf=c.path;
+    if(!pf.route_74)transfer_construct_path(pf);
+    auto& b=*pf.route_74;
+    RootVector point{};
+    for(std::size_t i=0;i<4;++i)transfer_load(in,0x1b0+4*i,point[i]);
+    b.point_00=point;
+    transfer_load(in,0x1c0,b.destination_10);
+    transfer_load(in,0x1c4,b.start_14);
+    transfer_load(in,0x1c8,b.end_18);
+    if(!b.array_20){b.array_20=true;b.nodes.clear();}                          // cMemMan_Allocate(+24 * 4)
+    if(b.start_14>=0){
+        if(!routes)throw std::runtime_error("NPC transfer: 001614c0 restores the route (0015f3d0) without the route manager");
+        npc_route_rebuild(*routes,b.start_14,b.end_18,pf.route_74);
+    }
+}
+
+void NpcAiController::pack_transfer_00148b50(NpcTransferBytes& out){
+    npc_transfer_get_00148b50(out,component_,perception_,transfer_link_);
+}
+void NpcAiController::apply_copy_00148cd0(SoloActorSimulation& actor,const NpcTransferBytes& in){
+    if(remote_)throw std::runtime_error("NPC AI: 00148cd0 on the remote NPC controller (002d5ee0 makes the AI controller first)");
+    route_actor_=&actor;
+    npc_transfer_put_001489d0(in,component_,perception_,transfer_link_,system_.routes);
+    aggressiveness_6c_=component_.aggressiveness_6c;
+    component_.quiet_5c=actor.eligible()?1:0;                                  // +5c = the owner present
+    activated(actor);                                                          // virtual +48 (00157df0)
+    component_.quiet_5c=0;
+}
+void NpcAiController::convert_to_npc_002d5ee0(SoloActorSimulation& actor,const NpcTransferBytes& in){
+    if(!remote_)throw std::runtime_error("NPC AI: cNetNPC_ConvertToNpc 002d5ee0 outside the remote NPC controller");
+    auto& think=system_.think_list;                                            // 0015ad70(actor)
+    for(auto i=think.begin();i!=think.end();){if(i->actor_id==actor_id_)i=think.erase(i);else ++i;}
+    make_fresh_ai(actor);                                                      // cHuman_CreateGobjController(a, 2, ..)
+    actor.set_byte_14(1);                                                      // +30 -> +14 = 1
+    apply_copy_00148cd0(actor,in);
 }
 }

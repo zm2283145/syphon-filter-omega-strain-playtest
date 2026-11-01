@@ -8,6 +8,9 @@
 // NpcAiController (npc_world.hpp) carries it as its remote mode (set_remote / make_fresh_ai); this header has its
 // state and the pure parts of the update 002d5160.
 #include "npc_ai.hpp"
+#include "npc_perception.hpp"
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -91,4 +94,43 @@ RootVector npc_remote_no_fire_point(const NpcRemoteAim& aim,const std::array<Roo
     const RootVector& target_eye);
 // 002c4f20: one process-wide initial reset, then increment current while it is below max.
 bool npc_remote_fire_gate(std::uint16_t maximum,std::uint16_t& current,bool& reset);
+
+// 134lt11 (research/NET_INLEVEL.md, "The NPC ownership transfer"): cNetworkTransferNpc (0x2e0 bytes, DWARF
+// types\cNetworkTransferNpc.h), the payload at +30 of cNPC::GetCopyMsg 00158350's 0x310 cNetCopyMsg (vtable 004de110).
+// PORT-ONLY boundary: the port's AI component is not a byte block, so these two functions read and write its named
+// fields at the original's offsets. Everything else keeps the original's byte layout:
+//   +000 cNpcTransfer (0xf0)            controller +60..+14f (a raw quadword copy; +f8 / +fc and +142..+14f are
+//                                       padding, +144 reportToHitThreshold is read by no ported code: packed 0)
+//   +0f0 cAiTransfer (0x14)             controller +44..+57 (state machine +44 / +48 / +4c / +50, team +54)
+//   +110 cAiTargetTransfer (0x30)       the cAITarget +1ac: +00 last seen, +10 / +14 the view cone, +18 the node
+//                                       group, +1c the priority, +20 / +21 the flag bytes (+22..+2f padding)
+//   +140 cPathNavigatorTransfer (0x70)  the path follower +1b0: +00 / +10 / +20 vectors, +30 pathSaveDestination
+//                                       (written by no ported code: packed 0), +40..+5c, +60 the flag byte
+//   +1b0 cPathTransfer (0x20)           the follower's +74 cPath: +00 the destination, +10 its node, +14 / +18 the
+//                                       first and last node (00161610 takes them from the node list when it has one)
+//   +1d0 targetGobjId                   the cAITarget's +40 handle's ID (-1 when null or stale)
+//   +1e0 cTargetAwareness[4]            the first four 0x40-byte awareness records (+30 list, front first); a missing
+//                                       one gets only +8 = -1 (the static 0049c588)
+inline constexpr std::size_t npc_transfer_size=0x2e0;
+using NpcTransferBytes=std::array<std::uint8_t,npc_transfer_size>;
+// What the transfer reads outside the component (the play links it; an empty member throws when it is needed).
+struct NpcTransferLink {
+    // The weak handle (object, id) resolves (0016ecc0's WGet: the object is non-null and its +c is id).
+    std::function<bool(std::uint64_t object,std::int32_t id)> handle_live;
+    // nGobjManager_LookupGOBJ 0040c540 of an ID: the object handle, or 0 when there is none.
+    std::function<std::uint64_t(std::int32_t id)> lookup;
+    // The object's controller +58 is set (0016e890: a target without one is cTargetManager_AddGobj'd to 004ef4c0).
+    std::function<bool(std::uint64_t object)> has_controller;
+    std::function<void(std::uint64_t object)> add_target;
+};
+// 00148b50 (npc_8.c): the sender's Get. A follower without a cPath first gets one (0x30, cPath_ctor 00161930 with
+// its +78), as the original does; a buffer whose +0 no route has written is packed as zero (PORT-ONLY: the original
+// copies the heap block's bytes). The bytes not listed above keep `out`'s content (the message constructor's).
+void npc_transfer_get_00148b50(NpcTransferBytes& out,NpcAiComponent& c,const NpcPerception& p,const NpcTransferLink& link);
+// 001489d0 (npc_8.c): the receiver's Put: cNpcTransfer, 0016efe0, 0016e890 (+40 from the ID, then each live
+// awareness record pushed to the front of +30, so their order reverses), 001613e0, the cPath (0x30) when missing,
+// then 001614c0: the 0x20 copy, the node array (+24 * 4) when missing and, with +14 >= 0, cPathSystem_RestorePath
+// 0015f3d0(the route manager, +14, +18, path) (npc_route_rebuild; a null manager throws).
+void npc_transfer_put_001489d0(const NpcTransferBytes& in,NpcAiComponent& c,NpcPerception& p,const NpcTransferLink& link,
+    NpcRouteManager* routes);
 }

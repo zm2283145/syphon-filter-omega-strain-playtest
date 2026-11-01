@@ -291,7 +291,18 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
         m.write(vtable + 0x5c, 4, entries[2]);
         m.write(vtable + 0x88, 4, entries[3]);
         m.write(vtable + 0x44, 4, entries[4]);
+        // 134lt11: the transfer slots (.data): +50 0015b820, +90 00158350, +98 0015b810.
+        m.write(vtable + 0x50, 4, 0x15b820);
+        m.write(vtable + 0x90, 4, 0x158350);
+        m.write(vtable + 0x98, 4, 0x15b810);
     }
+    m.write(0x4d9380 + 0x9c, 4, 0x15b850);   // the AI's apply_message: nothing
+    m.write(0x4de2a0 + 0x9c, 4, 0x2d29c0);   // the cNetNPC's: 002d29c0
+    // 134lt11: the cNetCopyMsg vtable 0x004de110 (+8 the destructor 002c5460, +0xc the clone 002c54c0, +0x10 the
+    // serialiser 002c5c80; .data).
+    m.write(0x4de110 + 0x8, 4, 0x2c5460);
+    m.write(0x4de110 + 0xc, 4, 0x2c54c0);
+    m.write(0x4de110 + 0x10, 4, 0x2c5c80);
 }
 
 std::uint32_t LanNetCore::local_player_key() const {
@@ -1804,6 +1815,58 @@ std::uint32_t LanNetCore::npc_notice_001b3b60(std::uint32_t b, std::uint32_t msg
         return 0;
     }
     return 0;   // other actions: the switch has no case
+}
+
+// 134lt11 (the header): cNPC::GetCopyMsg 00158350 (npc_49.c).
+std::uint32_t LanNetCore::npc_get_copy_msg_00158350(std::uint32_t self) {
+    auto& m = memory_;
+    const auto actor = m.read(self + 0x30);
+    const auto ctl = m.read(actor + 0x58);
+    if (ctl) call(m, m.read(m.read(ctl) + 0x50), {ctl});
+    if (!m.read(dme::kNetworkGame, 1)) return 0;
+    const auto p = call(m, 0x36b180, {0, 0x310, 0x49b670, 0x80c});
+    if (!p) return 0;
+    call(m, 0x3c9e30, {p, 0x51ee58});
+    m.write(p, 4, 0x4de110);
+    // cNetworkTransferNpc_ctor 001584b0: +5c..+7f 0, +f0 / +f8 0 (then 00168e40(+f0, 0, 0), which 00148b50's +f0
+    // copy overwrites), +1d0 -1, each awareness +0 0, +4 -2, +8 -1. PORT-ONLY: the other bytes, the heap block's, are 0.
+    for (std::uint32_t k = 0x30; k < 0x310; k += 4) m.write(p + k, 4, 0);
+    m.write(p + 0x30 + 0x1d0, 4, 0xffffffffU);
+    for (std::uint32_t a = p + 0x30 + 0x1e0; a < p + 0x310; a += 0x40) m.write(a + 4, 4, 0xfffffffeU), m.write(a + 8, 4, 0xffffffffU);
+    const auto key = m.read(actor + 0xc);
+    m.write(p + 0x24, 4, key);   // cObjectId_GetEncodedValue(cSystem_GetObjectID(actor))
+    if (!npc_transfer_hosts_.pack) unhosted(0x148b50, "the NPC copy message's payload without the play's NPC");
+    NpcCopyPayload payload{};
+    for (std::uint32_t k = 0; k < payload.size(); ++k) payload[k] = static_cast<std::uint8_t>(m.read(p + 0x30 + k, 1));
+    npc_transfer_hosts_.pack(key, payload);
+    for (std::uint32_t k = 0; k < payload.size(); ++k) m.write(p + 0x30 + k, 1, payload[k]);
+    m.write(p + 0x1c, 4, 0x40);   // 00158490
+    ++npc_copy_messages_built_;
+    log_.push_back("00158350: cNetCopyMsg 0x" + hex8(p) + " for +c 0x" + hex8(key) + " (00148b50 by the play)");
+    return p;
+}
+
+// 134lt11 (the header): cNetNPC_ConvertToNpc 002d5ee0 (NetNPC_18.c) / 002d29c0 (NetLabelMsg.c).
+void LanNetCore::npc_convert_to_npc_002d5ee0(std::uint32_t self, std::uint32_t payload_address) {
+    auto& m = memory_;
+    const auto b = m.read(self + 0x30);
+    const auto key = m.read(b + 0xc);
+    if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != b) unhosted(0x2d5ee0, "a controller whose actor is not an NPC block");
+    if (!npc_transfer_hosts_.convert) unhosted(0x2d5ee0, "the copy message's conversion without the play's NPC");
+    NpcCopyPayload payload{};
+    for (std::uint32_t k = 0; k < payload.size(); ++k) payload[k] = static_cast<std::uint8_t>(m.read(payload_address + k, 1));
+    // cHuman_CreateGobjController(a, 2, ..): the AI controller 0x004d9380 on the block (00158800 keeps +0x150), the
+    // remote's link words cleared, +5c / +5d 0 (00158bc0's).
+    m.write(b + kNpcController, 4, 0x4d9380U);
+    m.write(b + kNpcController + 0x1e0, 4, 0);
+    m.write(b + kNpcController + 0x1e4, 4, 0);
+    m.write(b + kNpcController + 0x5c, 1, 0);
+    m.write(b + kNpcController + 0x5d, 1, 0);
+    m.write(b + 0x58, 4, b + kNpcController);
+    m.write(b + 0x14, 1, 1);   // m->x30->b14 = 1
+    npc_transfer_hosts_.convert(key, payload);   // 0015ad70, the AI, 00148cd0 on the play's controller
+    ++npc_conversions_;
+    log_.push_back("002d5ee0: +c 0x" + hex8(key) + " is this console's AI again (00148cd0 by the play)");
 }
 
 // 134lt6 (the header): 002d7290.
@@ -3780,6 +3843,30 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         const auto key = m.read(m.read(arg(0) + 0x30) + 0xc);
         if (!npc_terrain_hosts_.node_active) unhosted(0x2d2ab0, "the remote NPC's node terrain without the play's host");
         return npc_terrain_hosts_.node_active(key) ? 1U : 0U;
+    }
+    // 134lt11: the NPC ownership transfer's copy message (lan_net_core.hpp, NpcTransferHosts).
+    case 0x15b820: case 0x15b850: return 0;   // jr ra; nop
+    case 0x15b810: {                          // sb a1, 0x5d(a0)
+        m.write(arg(0) + 0x5d, 1, arg(1) & 0xffU);
+        if (!npc_transfer_hosts_.set_transferring) unhosted(0x15b810, "the controller's +5d without the play's NPC");
+        npc_transfer_hosts_.set_transferring(m.read(m.read(arg(0) + 0x30) + 0xc), (arg(1) & 0xffU) != 0);
+        return 0;
+    }
+    case 0x158350: { Frame f(sp_); return npc_get_copy_msg_00158350(arg(0)); }
+    case 0x2d29c0: { Frame f(sp_); npc_convert_to_npc_002d5ee0(arg(0), arg(1) + 0x30); return 0; }
+    case 0x2d5ee0: { Frame f(sp_); npc_convert_to_npc_002d5ee0(arg(0), arg(1)); return 0; }
+    case 0x2c5460: { Frame f(sp_); return copy_message_destroy_002c5460(m, *this, arg(0), arg(1)); }
+    case 0x2c54c0: { Frame f(sp_); return copy_message_clone_002c54c0(m, *this, arg(0)); }
+    case 0x2c5c80: { Frame f(sp_); return copy_message_serialise_002c5c80(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
+    case 0x2c5b80: {
+        Frame f(sp_, 0x400);
+        ++copy_messages_received_;
+        try {
+            return copy_message_receive_002c5b80(m, *this, arg(3), f.caller);
+        } catch (...) {
+            m.write(dme::kBusy, 1, 0);
+            throw;
+        }
     }
     case 0x1b4f40: { Frame f(sp_); npc_net_activate_001b4f40(arg(0)); return 0; }   // 134lt7: cHuman_NetActivate
     case 0x1b4970: { Frame f(sp_); npc_net_deactivate_001b4970(arg(0)); return 0; }   // 134lt7: cHuman_NetDeactivate
