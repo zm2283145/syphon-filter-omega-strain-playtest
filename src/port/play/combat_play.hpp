@@ -220,6 +220,8 @@ struct CombatPlayConfig {
     std::function<float()> player_aim_time_pct,global_npc_skill,npc_dmg_aim_thresh;
     // 132fx2: an actor target's stealth +44 for 0022FA8C (k = (1 + s/100)^2 on the aim time and accuracy), from
     // the stealth pass 00133ab0. Unset (no stealth pass hosted): 0, the constructor's value (003cf0e0).
+    // Checkpoint 133gp1: the player's picks read it too (ChooseTarget 0022ad30 / ChooseAutoTarget 0022b660:
+    // +44 >= 100 skips the candidate, else d^2 x (100 / (100 - s))^2), TargetPickHost::stealth_44.
     std::function<std::int32_t(std::size_t actor)> stealth_44;
     bool effects_not_drawn{};                                    // ActorWorldCombatConfig::effects_not_drawn
     std::function<std::int32_t(std::int32_t index)> effect_table;   // ActorWorldCombatConfig::effect_table (Checkpoint 131b)

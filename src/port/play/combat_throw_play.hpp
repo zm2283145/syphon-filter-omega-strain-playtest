@@ -369,6 +369,9 @@ public:
     std::uint64_t smoke_blocker(const RootVector& a,const RootVector& b) const;
     // Checkpoint 132fx1: the thrown-projectile view used by cause-5 NPC hearing and mode 10.
     std::optional<NpcProjectileView> projectile_view(std::uint64_t object) const;
+    // Checkpoint 133gp1: 0040c540 over the live thrown projectiles: the object whose +c is `id` (the AI Sound
+    // System's sender lookup); nullopt when none.
+    std::optional<std::uint64_t> projectile_by_id(std::int32_t id) const;
     // A FIR: zone of the level (make_level_fire_zone): the loader 001c0b00
     // registers each (0040c9d0) in record order at level load, before any
     // actor's effect object; its key is the record ID. The traversal updates

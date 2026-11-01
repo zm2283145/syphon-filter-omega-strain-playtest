@@ -1390,7 +1390,9 @@ struct CombatPlaySession::Impl {
         h.position_e4=[this](std::uint64_t o){return world.actor(index(o)).published_position();};
         h.eye_c0=[this](std::uint64_t o){return actors->eye_c0(index(o),-1);};
         h.kind_c4=[this](std::uint64_t o){return kind_c4(o);};
-        h.stealth_44=[this](std::uint64_t o)->std::int32_t{(void)index(o);return 0;};
+        // Checkpoint 133gp1: the candidate's +44 darkness (0022ad30 targetManager_3.c:317, 0022b660 :640), the same
+        // live value the shot's aim reads (0022FA8C, aim_update); both picks call it after pick_candidate.
+        h.stealth_44=[this](std::uint64_t o)->std::int32_t{const auto t=index(o);return config.stealth_44?config.stealth_44(t):0;};
         h.actor_flag_346c=[this](std::uint64_t o){(void)index(o);return false;};
         h.controller=[this](std::uint64_t o)->std::optional<TargetPickThreat>{
             const auto& aim=combat->aim(index(o));

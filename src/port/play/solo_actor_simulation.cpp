@@ -372,6 +372,7 @@ struct SoloActorSimulation::Impl {
         ActorJumpZoneMessage jump_zone;
         RootVector point{};                                // kind running_jump: the payload +30 (code 0x15 / 0x16)
         HotboxTrackerEvent tracker_event;                  // kind box
+        std::optional<std::uint32_t> who;                  // kind box: 133lt4 a remote occupant's key (00170200, +30)
         HotboxTrigger trigger;                             // kind trigger
         std::array<float,3> node_position{};float node_yaw{};std::string label;   // kind checkpoint
         SoloActorSimulation::ObjectAction object_action;   // kind object_action
@@ -411,6 +412,13 @@ struct SoloActorSimulation::Impl {
     bool multiplayer_host{};                               // port-only: 005721c8 / 005721c0 (132ob3)
     std::function<void()> network_clear_point;             // 00249460 in a LAN network game (set: 005721c8)
     bool network_game{},network_host{};                    // 132ln5h14c: 005721c8 / 005721c0 for 003ccb00
+    // 133lt4 (review2 W1/W2/W5): a LAN game's 003c9420 routing of the box messages and interaction triggers.
+    SoloActorSimulation::HotboxNetworkSink hotbox_network_sink;
+    SoloActorSimulation::TriggerNetworkRoute trigger_network_route;
+    SoloActorSimulation::RemoteHotboxScriptFilter remote_hotbox_filter;
+    SoloActorSimulation::RemoteHotboxActorSink remote_actor_sink;
+    SoloActorSimulation::RemoteTriggerSink remote_trigger_sink;
+    bool joiner() const{return network_game&&!network_host;}   // 005721c8 set, 005721c0 clear
     std::function<bool(const ActorDamageEvent&)> network_damage;   // 132ln5h14c: 003c9420 of a network damage message
     bool port_ladder_arrival_at_end{};                     // port-only: the partner's ladder arrival (132ob5)
     SoloActorSimulation::AiNotificationScriptFilter ai_notification_filter;
@@ -1683,15 +1691,29 @@ void SoloActorSimulation::Impl::deliver_queued(){
             continue;
         }
         if(m.kind==K::box){                                // 003c8de0: filter +0x38 first
-            if(hotbox_filter&&hotbox_filter(m.box,m.payload)){
+            if(m.who){
+                // 133lt4: a remote occupant's message (00170200 queued it): Who / WhoPlayer are its player.
+                if(!remote_hotbox_filter)throw std::runtime_error("unhosted(0x00170200): a remote occupant's HotboxMsg without the remote script filter");
+                if(remote_hotbox_filter(m.box,m.payload,*m.who)){
+                    if(current)current->hotbox_script_events.push_back(m.tracker_event);
+                    continue;
+                }
+            }else if(hotbox_filter&&hotbox_filter(m.box,m.payload)){
                 if(current)current->hotbox_script_events.push_back(m.tracker_event);
                 continue;
             }
             if(m.payload==3){                              // 001717a0 action 3 -> +0x114 (00171880)
-                if(!multiplayer_host)throw std::runtime_error("Solo actor: HotboxMsg action 3 outside a multiplayer game");
-                QueuedMessage t;t.kind=K::trigger;t.trigger=hotbox_multiplayer_interaction_trigger(hotbox_world,m.box);
+                if(!multiplayer_host&&!(network_game&&network_host))
+                    throw std::runtime_error("Solo actor: HotboxMsg action 3 outside a multiplayer game's host");
+                const auto trigger=hotbox_multiplayer_interaction_trigger(hotbox_world,m.box);
+                if(current)current->triggers.push_back(trigger);
+                if(m.who){                                 // 133lt4: +30 is the remote occupant (kind 1 on the host)
+                    if(!remote_trigger_sink)throw std::runtime_error("unhosted(0x00171880): a remote occupant's trigger without the remote trigger sink");
+                    remote_trigger_sink(*m.who,trigger);
+                    continue;
+                }
+                QueuedMessage t;t.kind=K::trigger;t.trigger=trigger;
                 queue.push_back(t);                        // transport 0
-                if(current)current->triggers.push_back(t.trigger);
                 continue;
             }
             // 00171b60 -> 00172400 / 00171ed0: the type-1/6/7 link messages
@@ -1719,6 +1741,12 @@ void SoloActorSimulation::Impl::deliver_queued(){
                 if(current)current->hotbox_cameras.push_back(*c);
             }
             if(const auto e=receive_hotbox_event(hotbox_world,m.box,m.payload)){
+                if(m.who){
+                    // 133lt4: the event to a remote occupant (event byte 8: 003c9420 sends it to the owner).
+                    if(!remote_actor_sink)throw std::runtime_error("unhosted(0x00172400): a remote occupant's actor event without the remote actor sink");
+                    remote_actor_sink(*m.who,*e);
+                    continue;
+                }
                 QueuedMessage a;a.kind=K::actor_hotbox;a.code=static_cast<std::int32_t>(e->code);a.payload=e->payload;a.word=e->word_2c;
                 queue.push_back(a);                        // transport 0: the next pump delivers it
             }
@@ -2187,13 +2215,22 @@ void SoloActorSimulation::Impl::deliver_actor_hotbox(const HotboxActorEvent& e){
 // 001714c0(tracker, actor, 1, 0) for the Triangle edge: the selection
 // 00171260, the box's +0x114 (00171c90 queues a trigger to each link with
 // transport 0) and the tracker timer 10.0 when a box was taken.
+// 133lt4: in a LAN game (005721c8 set) 001714c0 takes the multiplayer branch on every console; on a joiner the
+// type-12 HotboxMsg (event byte 2) goes to the host, and 00171c90's type-8 triggers are kind 2 (to the host) unless
+// the trigger_network_route keeps them local (a lift's InteractGOBJ with the parameter -1).
 bool SoloActorSimulation::Impl::interact(){
-    const auto r=interact_with_hotbox(hotbox_world,tracker,button_actor().mode_320c,multiplayer_host);
+    const auto r=interact_with_hotbox(hotbox_world,tracker,button_actor().mode_320c,multiplayer_host||network_game);
+    const bool type8=r.box&&hotbox_world.boxes[*r.box].record.type==8;
     for(const auto& t:r.triggers){
+        if(joiner()&&type8&&trigger_network_route&&trigger_network_route(t))continue;   // 00171c90: kind 2, sent
         QueuedMessage q;q.kind=QueuedMessage::Kind::trigger;q.trigger=t;queue.push_back(q);
     }
     if(r.box_message){                                     // 0017155c: HotboxMsg action 3 to the box, transport 0
-        QueuedMessage q;q.kind=QueuedMessage::Kind::box;q.box=*r.box;q.payload=3;queue.push_back(q);
+        if(joiner()){                                      // 003c9420 kind 2 with 005721c0 clear: to the host only
+            if(hotbox_network_sink)hotbox_network_sink(*r.box,3,hotbox_world.boxes[*r.box].record.type);
+        }else{
+            QueuedMessage q;q.kind=QueuedMessage::Kind::box;q.box=*r.box;q.payload=3;queue.push_back(q);
+        }
     }
     if(current){
         if(r.box)current->interaction_box=r.box;
@@ -2399,8 +2436,10 @@ void SoloActorSimulation::Impl::logic(const SoloActorFrameInput& input){
                 // An AI component's receiver 00151d30 (key 0055a1d8 -> 00151a90).
                 if(!player())controller.ai->controller_message_immediate(*owner,static_cast<std::int32_t>(event.action));
                 else apply_component_code(static_cast<std::int32_t>(event.action));
-            }else ++result.running_events;
+            }else{++result.running_events;result.running_world.push_back(event);}
         };
+        // The running-world message goes to the AI Sound System (cSystemContainer_GetSystem(g_Game, 004ee5c0)), not
+        // to an object: the play takes it from SoloActorFrame::running_world (Checkpoint 133gp1).
         ah.resolve_running_receiver=[]{return std::uint64_t{0};};
         // 001a80e0 for an AI component (0019a048..0019a0a0).
         if(!player())ah.navigation_body=[&](float){navigation_body();};
@@ -2861,11 +2900,19 @@ void SoloActorSimulation::Impl::frame_event(){
     // the actor +50 translation is the component the physical response
     // published this step (the model component otherwise; actor +50 is taken
     // as the model component, see HANGING.md). Its events are queued.
+    // 133lt4 (review2 W1/W2): on a LAN joiner +98 is not counted (00170660 counts in single player or on the host)
+    // and a kind-2 event (byte 2: types other than 5 / 0x12) goes to the session host instead of the local queue
+    // (003c9420's kind-2 branch; without a sink it is freed, as with 005721d0 clear).
     if(!hotbox_world.boxes.empty()){
         const RootVector p=published_set?published:component;
-        for(const auto& e:update_hotbox_tracker(hotbox_world,tracker,p)){
+        for(const auto& e:update_hotbox_tracker(hotbox_world,tracker,p,!joiner())){
+            result.hotbox_events.push_back(e);
+            if(joiner()&&e.event_byte==2){
+                if(hotbox_network_sink)hotbox_network_sink(e.box,e.payload,e.code);
+                continue;
+            }
             QueuedMessage q;q.kind=QueuedMessage::Kind::box;q.box=e.box;q.payload=e.payload;q.tracker_event=e;
-            queue.push_back(q);result.hotbox_events.push_back(e);
+            queue.push_back(q);
         }
     }
 }
@@ -3542,6 +3589,31 @@ void SoloActorSimulation::set_native_trigger_receiver(NativeTriggerReceiver rece
 void SoloActorSimulation::set_object_code_receiver(ObjectCodeReceiver receiver){impl_->object_code_receiver=std::move(receiver);}
 void SoloActorSimulation::set_multiplayer_host(bool host){impl_->multiplayer_host=host;}
 void SoloActorSimulation::set_network_clear_point(std::function<void()> clear){impl_->network_clear_point=std::move(clear);}
+void SoloActorSimulation::set_hotbox_network_sink(HotboxNetworkSink sink){impl_->hotbox_network_sink=std::move(sink);}
+void SoloActorSimulation::set_trigger_network_route(TriggerNetworkRoute route){impl_->trigger_network_route=std::move(route);}
+void SoloActorSimulation::set_remote_hotbox_script_filter(RemoteHotboxScriptFilter filter){impl_->remote_hotbox_filter=std::move(filter);}
+void SoloActorSimulation::set_remote_hotbox_actor_sink(RemoteHotboxActorSink sink){impl_->remote_actor_sink=std::move(sink);}
+void SoloActorSimulation::set_remote_trigger_sink(RemoteTriggerSink sink){impl_->remote_trigger_sink=std::move(sink);}
+// 00170200 on the host: the rebuilt HotboxMsg (+24 action, +28 code, +2c value, +30 the occupant) queued to the box
+// (003c9350, transport 0), then +98 for actions 0 / 2 (clamped to 0..3) while 005721c8 is clear or 005721c0 set.
+void SoloActorSimulation::queue_actor_hotbox(const HotboxActorEvent& e){
+    Impl::QueuedMessage a;a.kind=Impl::QueuedMessage::Kind::actor_hotbox;a.code=static_cast<std::int32_t>(e.code);
+    a.payload=e.payload;a.word=e.word_2c;
+    impl_->queue.push_back(std::move(a));
+}
+void SoloActorSimulation::queue_remote_hotbox(std::size_t box,std::uint8_t action,std::uint32_t who){
+    auto& w=impl_->hotbox_world;
+    if(box>=w.boxes.size())throw std::runtime_error("Solo actor: remote HotboxMsg to box index "+std::to_string(box)+" outside the world");
+    const auto type=w.boxes[box].record.type;
+    Impl::QueuedMessage m;m.kind=Impl::QueuedMessage::Kind::box;m.box=box;m.payload=action;m.who=who;
+    m.tracker_event={box,action,type,static_cast<std::uint8_t>(type==5||type==0x12?1:2)};
+    impl_->queue.push_back(std::move(m));
+    if(!impl_->network_game||impl_->network_host){
+        auto& b=w.boxes[box];
+        if(action==0)b.occupancy_98=std::min(3,b.occupancy_98+1);
+        else if(action==2)b.occupancy_98=std::max(0,b.occupancy_98-1);
+    }
+}
 void SoloActorSimulation::set_port_ladder_arrival_at_end(bool on){impl_->port_ladder_arrival_at_end=on;}
 void SoloActorSimulation::queue_trigger(const HotboxTrigger& trigger){
     if(!trigger.receiver)throw std::runtime_error("Solo actor: trigger without a receiver");

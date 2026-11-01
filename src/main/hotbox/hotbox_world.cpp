@@ -224,7 +224,7 @@ bool hotbox_contains(const Hotbox& box,const RootVector& point){
     return true;
 }
 
-std::vector<HotboxTrackerEvent> update_hotbox_tracker(HotboxWorld& w,HotboxTracker& t,const RootVector& p){
+std::vector<HotboxTrackerEvent> update_hotbox_tracker(HotboxWorld& w,HotboxTracker& t,const RootVector& p,bool count_occupancy){
     std::vector<HotboxTrackerEvent> out;
     const float timer=sub(t.timer_24,std::bit_cast<float>(0x3e99999aU));  // 001706ac
     t.timer_24=timer<0.0F?0.0F:timer;
@@ -236,7 +236,7 @@ std::vector<HotboxTrackerEvent> update_hotbox_tracker(HotboxWorld& w,HotboxTrack
     for(std::size_t k=0;k<t.inside_28.size();){
         const auto i=t.inside_28[k];auto& b=w.boxes[i];
         if(hotbox_contains(b,p)&&b.eligible()){++k;continue;}
-        b.occupancy_98=std::max(0,b.occupancy_98-1);                      // 001707e8 (005721c8 clear)
+        if(count_occupancy)b.occupancy_98=std::max(0,b.occupancy_98-1);   // 001707e8 (005721c8 clear or 005721c0 set)
         event(i,2);
         t.inside_28.erase(t.inside_28.begin()+static_cast<std::ptrdiff_t>(k));
     }
@@ -247,7 +247,7 @@ std::vector<HotboxTrackerEvent> update_hotbox_tracker(HotboxWorld& w,HotboxTrack
         bool inside=false;
         for(auto j:t.inside_28)if(j==i)inside=true;
         if(inside)continue;
-        b.occupancy_98=std::min(3,b.occupancy_98+1);                      // 00170ad8
+        if(count_occupancy)b.occupancy_98=std::min(3,b.occupancy_98+1);   // 00170ad8
         t.inside_28.push_back(i);                                          // 00170c10
         event(i,0);
     }

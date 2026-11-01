@@ -37,6 +37,9 @@ struct LiftEvent {
                             // 004daf10 (*004f5440), transport 0, +24 = +28 = +2c = +30 = 0, byte +20 = 1
         Carry,              // 00218200's link pass: a = the link index, object = its ID, matrix = its root x M;
                             // b = 0: the link's vt+94; b = 1: a 004d9360 message (*0055d4e0, +24 = 2) with transport 1
+        NetworkLock,        // 133lt4 (review2 W4): 002155f0 / 00215530 in a network game, not silent: the
+                            // cNetLockElevatorMsg (004daef0, +24 = a the floor, +28 = b the lock, byte +20 = 4) to
+                            // cNetObj_SendMessage(+10, msg, -1, -1): every client
         NetworkTrigger,     // 00214920 for an agent that is not the player: the trigger (+24 = 1, +28 = -1,
                             // +30 = a, the agent's +c) handed to 003fb020, which does nothing solo
         RiderCarry,         // 00218200's rider pass on a live handle: object = the rider, a = its id (the handle's
@@ -140,8 +143,12 @@ public:
     bool open_doors();                                     // OpenDoors 002110c0 -> 00213dc0
     bool close_doors();                                    // CloseDoors 002110a0 -> 00213ee0
     std::int32_t get_state() const;                        // GetState 00211080 -> 00214fa0
-    void lock_floor(std::int32_t floor);                   // LockFloor 00210d00 -> 002155f0
-    void unlock_floor(std::int32_t floor);                 // UnlockFloor 00210cd0 -> 00215530
+    // LockFloor 00210d00 -> 002155f0(f, 0) / UnlockFloor 00210cd0 -> 00215530(f, 0); silent 1 is the network
+    // receive 002115e0. A floor in [0, +108) is stored; in a network game (005721c8, set_network_game) a non-silent
+    // change is also a NetworkLock event.
+    void lock_floor(std::int32_t floor, bool silent = false);
+    void unlock_floor(std::int32_t floor, bool silent = false);
+    void set_network_game(bool network) { network_game_ = network; }   // 133lt4: g_IsMultiplayer (005721c8)
     void set_floor_name(std::int32_t floor, std::string name); // SetFloorName 00210e30 -> 00215010
     void set_sound(LiftSound sound, std::string name);     // Set{Ding,Loop,Start,Stop}Sound 00210df0/d30/db0/d70
     std::int32_t current_floor() const { return state_.index; }      // GetCurrentFloor 00211020
@@ -193,6 +200,7 @@ private:
     LiftState state_;
     std::array<float, 16> matrix_{};
     std::vector<LiftEvent> events_;
+    bool network_game_{};
     // +84 (count +88, data +8c): 8-byte handles (object, id at object +c).
     std::vector<LiftRider> riders_;
     std::string script_;

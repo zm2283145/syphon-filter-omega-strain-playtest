@@ -833,6 +833,159 @@ void LanNetCore::send_end_level(std::uint8_t kind, bool quit) {
     sp_ = caller;
 }
 
+// 133lt4: 002ebba0(world, &out): the session host's client index (003fb020's kind-2 recipient).
+std::uint16_t LanNetCore::session_host_client() {
+    auto& m = memory_;
+    const auto out = kScratch + 0x88;
+    constexpr std::uint32_t sentinel = 0x5eed5eedU;
+    m.write(out, 4, sentinel);
+    call(m, 0x2ebba0, {m.read(dme::kWorld), out});
+    const auto v = m.read(out);
+    if (v == sentinel || v >= 4) unhosted(0x2ebba0, "the session host's client index is unavailable");
+    return static_cast<std::uint16_t>(v);
+}
+
+bool LanNetCore::send_world_packet(std::uint32_t type_address, std::uint32_t pack, std::uint32_t size,
+                                   const std::vector<std::array<std::uint32_t, 3>>& fields, std::uint32_t target_key,
+                                   std::uint32_t recipient, std::uint32_t flags, std::optional<std::string_view> text) {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN world message send during background load pump; defer until stop_load_pump");
+    auto& m = memory_;
+    // 003fb020 serializes and returns before 003fad50 while 005721d0 is clear.
+    if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return false;
+    const auto type = m.read(type_address);
+    if (!type || type >= 0x100) unhosted(pack, "the message's DME registration is unavailable");
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto packet = sp_ + 0x20;
+    bool sent = false;
+    try {
+        // The original's stack padding is undefined and ignored by the receives: zero for synthetic packets.
+        for (std::uint32_t k = 0; k < size; ++k) m.write(packet + k, 1, 0);
+        m.write(packet, 4, call(m, 0x42b1a0, {0}) << 2);  // Event_PackHeader 003c9ca0: transport +18 = 0
+        m.write(packet + 4, 4, target_key);
+        for (const auto& f : fields) m.write(packet + f[0], f[1], f[2]);
+        if (text) {
+            if (text->size() >= 0x40)
+                unhosted(pack, "a label of 0x40 bytes or more (strncpy leaves it unterminated for the receive's strlen)");
+            for (std::size_t i = 0; i < text->size(); ++i)
+                m.write(packet + 0xc + static_cast<std::uint32_t>(i), 1, static_cast<std::uint8_t>((*text)[i]));
+        }
+        sent = call(m, 0x3fad50, {type, size, packet, recipient, flags}) != 0;
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+    return sent;
+}
+
+void LanNetCore::send_hotbox_message(std::uint32_t target_key, std::uint8_t action, std::uint32_t code,
+                                     std::uint32_t value, std::uint32_t who_key, std::optional<std::uint16_t> recipient,
+                                     std::uint32_t flags) {
+    const auto to = recipient ? (*recipient == kLanAll ? 0xffffffffU : *recipient) : session_host_client();
+    if (send_world_packet(0x4ee6a0, 0x170160, 0x18, {{8, 4, action}, {0xc, 4, code}, {0x10, 4, value}, {0x14, 4, who_key}},
+                          target_key, to, flags))
+        ++hotbox_sent_;
+}
+
+std::vector<LanNetCore::RemoteHotbox> LanNetCore::take_remote_hotboxes() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN hotbox message access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteHotbox> out;
+    out.swap(remote_hotboxes_);
+    return out;
+}
+
+void LanNetCore::send_checkpoint(std::uint32_t target_key, std::uint32_t node_key, std::string_view label) {
+    // 0022ded0 / 0022e080: the constructor's event byte 5 and +1c 0; 003fb020's flags & 0x15 send to a3 = -1.
+    if (send_world_packet(0x4f7948, 0x22e680, 0x4c, {{8, 4, node_key}}, target_key, 0xffffffffU, 0, label))
+        ++checkpoints_sent_;
+}
+
+std::vector<LanNetCore::RemoteCheckpoint> LanNetCore::take_remote_checkpoints() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN checkpoint message access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteCheckpoint> out;
+    out.swap(remote_checkpoints_);
+    return out;
+}
+
+void LanNetCore::send_lift_lock(std::uint32_t lift_key, std::int32_t floor, bool locked) {
+    // 002155f0 / 00215530: event byte 4, +1c 0, cNetObj_SendMessage(+10, msg, -1, -1).
+    if (send_world_packet(0x4f54c0, 0x211680, 0x10, {{8, 4, static_cast<std::uint32_t>(floor)}, {0xc, 1, locked ? 1U : 0U}},
+                          lift_key, 0xffffffffU, 0))
+        ++lift_locks_sent_;
+}
+
+std::vector<LanNetCore::RemoteLiftLock> LanNetCore::take_remote_lift_locks() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN lift lock access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteLiftLock> out;
+    out.swap(remote_lift_locks_);
+    return out;
+}
+
+void LanNetCore::send_trigger(std::uint32_t target_key, std::uint16_t action, std::uint32_t word_28, std::uint32_t other_2c,
+                              std::uint32_t source_30, std::optional<std::uint16_t> recipient) {
+    const auto to = recipient ? (*recipient == kLanAll ? 0xffffffffU : *recipient) : session_host_client();
+    if (send_world_packet(0x4f5470, 0x2118d0, 0x18, {{8, 2, action}, {0xc, 4, word_28}, {0x10, 4, source_30}, {0x14, 4, other_2c}},
+                          target_key, to, 0x40))
+        ++triggers_sent_;
+}
+
+std::vector<LanNetCore::RemoteTrigger> LanNetCore::take_remote_triggers() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN trigger message access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteTrigger> out;
+    out.swap(remote_triggers_);
+    return out;
+}
+
+// 00170200 / 0022e710 / 002115e0 / 00211700: each runs under the receive guard (005723c8), acts only while 005721d0
+// is set and returns its packet size; the object lookups (0040c540, the NetMap 0055c7a0, 003fb4b0) are the play's.
+std::uint32_t LanNetCore::receive_world_message(std::uint32_t callback, std::uint32_t origin, std::uint32_t data) {
+    auto& m = memory_;
+    const std::uint32_t size = callback == 0x22e710 ? 0x4cU : callback == 0x2115e0 ? 0x10U : 0x18U;
+    const auto available = dme_->incoming_message_remaining();
+    if (available != 0xffffffffU && available < size) unhosted(callback, "a truncated world message");
+    m.write(dme::kBusy, 1, 1);
+    try {
+        if (m.read(dme::kInLevel, 1)) {
+            const auto o = static_cast<std::uint16_t>(origin);
+            const auto key = m.read(data + 4);
+            if (callback == 0x170200) {
+                remote_hotboxes_.push_back({o, key, m.read(data + 0x14), m.read(data + 0xc), m.read(data + 0x10),
+                                            static_cast<std::uint8_t>(m.read(data + 8))});
+                ++hotbox_received_;
+            } else if (callback == 0x22e710) {
+                RemoteCheckpoint c{o, key, m.read(data + 8), {}};
+                std::uint32_t i = 0;
+                for (; i < 0x40; ++i) {
+                    const auto byte = static_cast<char>(m.read(data + 0xc + i, 1));
+                    if (!byte) break;
+                    c.label.push_back(byte);
+                }
+                if (i == 0x40) unhosted(0x22e800, "an unterminated cAddCheckpointMsg label (strlen past the packet)");
+                remote_checkpoints_.push_back(std::move(c));
+                ++checkpoints_received_;
+            } else if (callback == 0x2115e0) {
+                remote_lift_locks_.push_back({o, key, static_cast<std::int32_t>(m.read(data + 8)), m.read(data + 0xc, 1) != 0});
+                ++lift_locks_received_;
+            } else {
+                remote_triggers_.push_back({o, key, m.read(data + 0xc), m.read(data + 0x10), m.read(data + 0x14),
+                                            static_cast<std::uint16_t>(m.read(data + 8, 2))});
+                ++triggers_received_;
+            }
+        }
+    } catch (...) {
+        m.write(dme::kBusy, 1, 0);
+        throw;
+    }
+    m.write(dme::kBusy, 1, 0);
+    return size;
+}
+
 std::uint32_t LanNetCore::receive_end_level(std::uint32_t origin, std::uint32_t data) {
     auto& m = memory_;
     const auto available = dme_->incoming_message_remaining();
@@ -2265,6 +2418,8 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x20edd0: return receive_player_sound(arg(2), arg(3), false);
     case 0x20e8b0: return receive_player_sound(arg(2), arg(3), true);
     case 0x20e350: return receive_end_level(arg(2), arg(3));
+    case 0x170200: case 0x22e710: case 0x2115e0: case 0x211700:  // 133lt4: the world messages
+        return receive_world_message(address, arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);
     case 0x429190: return receive_objective_active(arg(3), false);

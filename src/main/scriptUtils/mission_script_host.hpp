@@ -577,6 +577,14 @@ public:
     // world has no player actor to send it to.
     virtual bool add_checkpoint(Word node, const std::array<float, 3>& position, float yaw,
                                 const std::string& label) = 0;
+    // 133lt4 (review2 W3): in a network game MSGGAME_ADD_CHECKPOINT keeps the cMessage constructor's event byte 5
+    // (003c9e30), so 003c9420 also sends it to every client for a network player (cAddCheckpointMsg 0022e680:
+    // the player's key, the node's +c key, the label). remote_player: a remote player's LAN key; nullopt: the
+    // local player's. false (the default, single player): nothing sent.
+    virtual bool send_network_checkpoint(std::optional<Word> remote_player, Word node, const std::string& label) {
+        static_cast<void>(remote_player); static_cast<void>(node); static_cast<void>(label);
+        return false;
+    }
     // The CAS action game::PerformAction_WithObject (003e67c0) queues with
     // transport 0 to the player's actor: the action byte, the InteractGOBJ by
     // its key, its +a8 node (position +80, yaw +8c) and its +ac world object
@@ -941,7 +949,19 @@ public:
     // payload: Enter 0, Occupy 1, Exit 2; Who = the player actor; WhoPlayer =
     // its player component) through 003e1aa0; true when a handler was
     // selected (the native receiver is then skipped, 003c8de0).
-    bool deliver_hotbox(Word box, Word action);
+    // 133lt4 (review2 W1): who = a remote player's LAN key (register_remote_player): the host's 00170200 queued
+    // a joiner's message, so Who is that player's GOBJ and WhoPlayer its player controller (cNetPlayer
+    // 004de530, whose IsPlayer answers 1).
+    bool deliver_hotbox(Word box, Word action, std::optional<Word> who = std::nullopt);
+    // 133lt4 (PORT-ONLY identity): another console's player as a script object, keyed by its LAN key (the NetMap
+    // key 003fb650 gives the human 002c6b70 builds): an object with a player controller in the root scope, so
+    // Who / WhoPlayer / SetCheckpoint can name it. unregister when its client leaves (001b2e90).
+    void register_remote_player(Word key);
+    void unregister_remote_player(Word key);
+    bool remote_player(Word key) const { return remote_players_.contains(key); }
+    // 133lt4 (review2 W3): what 001b3b60 reads of a checkpoint node (0022e710's 0040c540 lookup of the received
+    // node key): its +80 position and +8c yaw (population_node_yaw); nullopt for a key that is not a node.
+    std::optional<std::pair<std::array<float, 3>, float>> checkpoint_node(Word node) const;
     // A GOBJTriggerEventMsg (0021b790, vtable 004daf10) for the object with
     // this population ID: Action = the +0x24 byte (Interact 4 from a type-8
     // box, GOBJTriggerEventMsg_ActionTypes member[3]); Who = the player actor
@@ -1452,6 +1472,7 @@ private:
     bool init_run_{};
     bool run_host_start_level_{true};
     bool multiplayer_{};
+    std::set<Word> remote_players_;   // 133lt4: register_remote_player
     bool partner_objectives_{};
     bool freed_ai_resend_skip_{};
     std::size_t freed_ai_resends_skipped_{};

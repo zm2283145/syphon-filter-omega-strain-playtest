@@ -516,8 +516,18 @@ void ElevatorGOBJ::set_lock(std::int32_t floor, std::uint8_t value) {
     if (floor < 0 || floor >= static_cast<std::int32_t>(locks_.size())) return;
     locks_[static_cast<std::size_t>(floor)] = value;
 }
-void ElevatorGOBJ::lock_floor(std::int32_t floor) { set_lock(floor, 1); }
-void ElevatorGOBJ::unlock_floor(std::int32_t floor) { set_lock(floor, 0); }
+// 002155f0 / 00215530 (GameGOBJ_29.c): the store and, with g_IsMultiplayer set and silent clear, the broadcast,
+// both only for a floor in range.
+void ElevatorGOBJ::lock_floor(std::int32_t floor, bool silent) {
+    if (floor < 0 || floor >= static_cast<std::int32_t>(locks_.size())) return;
+    set_lock(floor, 1);
+    if (network_game_ && !silent) notice(LiftEvent::Kind::NetworkLock, floor, 1);
+}
+void ElevatorGOBJ::unlock_floor(std::int32_t floor, bool silent) {
+    if (floor < 0 || floor >= static_cast<std::int32_t>(locks_.size())) return;
+    set_lock(floor, 0);
+    if (network_game_ && !silent) notice(LiftEvent::Kind::NetworkLock, floor, 0);
+}
 
 // 00215010: a floor in [0, +fc) replaces its name; others are ignored.
 void ElevatorGOBJ::set_floor_name(std::int32_t floor, std::string name) {

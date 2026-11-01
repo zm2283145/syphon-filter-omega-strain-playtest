@@ -408,8 +408,13 @@ struct SoloActorFrame {
     ActorPhysicalFrameTrace trace;
     // Synchronous actor events sent this frame: stance messages (applied to
     // the player component at once, also listed in component_codes) and
-    // running-world messages (no receiver here, counted only).
+    // running-world messages (counted). Checkpoint 133gp1: the running-world
+    // messages themselves (00199f30 FireNoise, human_62.c:404: 0016b4f0(msg,
+    // actor +c, cause 3 = action, 1.0, +31f8 = value) to the AI Sound System
+    // 004ee5c0, transport 0), in send order; the play queues them for its
+    // next message pump (0016adb0).
     int stance_events{},running_events{};
+    std::vector<ActorAnimationEvent> running_world;
     std::array<float,18> channels{};
     std::optional<PlayerMoveCommand> pad;
     // Quick-turn detector 00249d00 sent the action-14 message this frame; the
@@ -1068,6 +1073,32 @@ public:
     // 0024a850 in a network game (byte 005721c8): leaving the manual aim view calls 00249460 on the local player's
     // network record block (LanNetCore::record_clear_point). Unset: solo (no call).
     void set_network_clear_point(std::function<void()> clear);
+    // 133lt4 (review2 W1/W2/W5, research/NET_INLEVEL.md "World message routing"): a LAN game's QueueMessage 003c9420 routing of the
+    // world messages. On a joiner (set_network_game(true, false)) the tracker's kind-2 HotboxMsg (00170660, box
+    // types other than 5 / 0x12) and 001714c0's type-12 action 3 go to the session host through the sink (box
+    // index, action, box type); nothing is queued here and +98 is not counted (00170660 counts in single player or
+    // on the host). Unset: dropped, as 003c9420 frees it while 005721d0 is clear.
+    using HotboxNetworkSink=std::function<void(std::size_t box,std::uint8_t action,std::uint32_t code)>;
+    void set_hotbox_network_sink(HotboxNetworkSink sink);
+    // 00171c90 on a joiner: a type-8 box's Interact trigger is kind 2 (to the host) unless its link is a lift's
+    // InteractGOBJ and the parameter is -1. The route answers true when it sent the trigger (nothing queued here),
+    // false to keep it local (kind 1).
+    using TriggerNetworkRoute=std::function<bool(const HotboxTrigger&)>;
+    void set_trigger_network_route(TriggerNetworkRoute route);
+    // 00170200 on the host: a remote occupant's HotboxMsg (its LAN key as +30) queued to the box with transport 0,
+    // and +98 updated at once for actions 0 / 2. Its pump step offers it to the remote script filter (Who = the
+    // occupant), then the native receiver: 00171880's trigger (action 3) goes to the remote trigger sink and the
+    // event 00172400 / 00171ed0 send the occupant (event byte 8: to its owner) to the remote actor sink.
+    void queue_remote_hotbox(std::size_t box,std::uint8_t action,std::uint32_t who);
+    // 00170200 on a joiner: the host's event for this console's occupant (+4 the local player's key) queued to the
+    // player with transport 0: the actor's hotbox event (00177380 / 001a92a0), as a local box would send it.
+    void queue_actor_hotbox(const HotboxActorEvent& event);
+    using RemoteHotboxScriptFilter=std::function<bool(std::size_t box,std::uint8_t payload,std::uint32_t who)>;
+    void set_remote_hotbox_script_filter(RemoteHotboxScriptFilter filter);
+    using RemoteHotboxActorSink=std::function<void(std::uint32_t who,const HotboxActorEvent&)>;
+    void set_remote_hotbox_actor_sink(RemoteHotboxActorSink sink);
+    using RemoteTriggerSink=std::function<void(std::uint32_t who,const HotboxTrigger&)>;
+    void set_remote_trigger_sink(RemoteTriggerSink sink);
     // Port-only (checkpoint 132ob5, omega_play --coop-partner, the partner
     // only): in actor mode 16, 001a80e0 marks the navigation arrived (+30ad,
     // 001a84c8..001a84e8) on every frame its ladder request (00476490: 31 / 32)

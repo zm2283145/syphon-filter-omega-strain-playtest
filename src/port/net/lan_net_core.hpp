@@ -481,6 +481,68 @@ public:
     std::uint32_t end_levels_sent() const { return end_levels_sent_; }
     std::uint32_t end_levels_received() const { return end_levels_received_; }
 
+    // 133lt4 (review2 W1-W5, research/NET_INLEVEL.md "World message routing"): the world messages QueueMessage 003c9420 routes to the
+    // session host or to an object's owner. Each is the matched Pack's packet (Event_PackHeader 003c9ca0: +0 the
+    // clock << 2 | transport (0), +4 the target NetObj key) sent with 003fad50 under the registration's type; the
+    // receives are the registered callbacks (net_registrations.inl), queued for the play while 005721d0 is set.
+    // The level objects' NetObj keys are their population IDs (the +0x10 their constructors give cNetObj_AddSystem:
+    // the hotbox 00172ae0, the GameGOBJ 0021add0), the players' their LAN keys.
+    //  - cHotboxMsg (00170160, 0x18 bytes, type 0x004ee6a0): +8 the action (+24), +c the code (+28), +10 the value
+    //    (+2c), +14 the occupant's +c key (+30). recipient: nullopt = the session host (003fb020's kind-2 branch,
+    //    002ebba0) for a joiner's box event; a player's owner (kind 8) for the host's event to a remote occupant.
+    //    Receive 00170200 (hotbox_7.c): the box or player of +4 and the occupant of +14.
+    struct RemoteHotbox {
+        std::uint16_t origin{};
+        std::uint32_t target_key{}, who_key{}, code{}, value{};
+        std::uint8_t action{};
+    };
+    // flags: the message's +1c (00170660's enter / exit 0x40; 001714c0's action 3 and 001726b0's actor events 0).
+    void send_hotbox_message(std::uint32_t target_key, std::uint8_t action, std::uint32_t code, std::uint32_t value,
+                             std::uint32_t who_key, std::optional<std::uint16_t> recipient, std::uint32_t flags);
+    std::vector<RemoteHotbox> take_remote_hotboxes();
+    std::uint32_t hotbox_messages_sent() const { return hotbox_sent_; }
+    std::uint32_t hotbox_messages_received() const { return hotbox_received_; }
+    //  - cAddCheckpointMsg (0022e680, 76 bytes, type 0x004f7948): +8 the node's +c key (+24's), +c the label
+    //    (strncpy 0x40). MSGGAME_ADD_CHECKPOINT keeps the cMessage constructor's event byte 5 (003c9e30): queued
+    //    locally and, for a network player, sent to every client (003fb020's flags & 0x15, recipient -1). Receive
+    //    0022e710 (Checkpoint_10.c): 0022e800 rebuilds it and queues it to the NetMap object of +4.
+    struct RemoteCheckpoint {
+        std::uint16_t origin{};
+        std::uint32_t target_key{}, node_key{};
+        std::string label;
+    };
+    void send_checkpoint(std::uint32_t target_key, std::uint32_t node_key, std::string_view label);
+    std::vector<RemoteCheckpoint> take_remote_checkpoints();
+    std::uint32_t checkpoints_sent() const { return checkpoints_sent_; }
+    std::uint32_t checkpoints_received() const { return checkpoints_received_; }
+    //  - cNetLockElevatorMsg (00211680, 16 bytes, type 0x004f54c0): +8 the floor (+24), byte +c the lock (+28);
+    //    002155f0 / 00215530 send it (event byte 4: every client) unless silent. Receive 002115e0 (GameGOBJ_9.c):
+    //    LockFloor / UnlockFloor(the NetObj of +4, floor, 1).
+    struct RemoteLiftLock {
+        std::uint16_t origin{};
+        std::uint32_t lift_key{};
+        std::int32_t floor{};
+        bool locked{};
+    };
+    void send_lift_lock(std::uint32_t lift_key, std::int32_t floor, bool locked);
+    std::vector<RemoteLiftLock> take_remote_lift_locks();
+    std::uint32_t lift_locks_sent() const { return lift_locks_sent_; }
+    std::uint32_t lift_locks_received() const { return lift_locks_received_; }
+    //  - cGOBJTriggerEventMsg (002118d0, 24 bytes, type 0x004f5470; the Pack sets +1c = 0x40): u16 +8 the action
+    //    (+24), +c (+28), +10 the source (+30), +14 the other (+2c). Receive 00211700 (GameGOBJ_9.c): the message for
+    //    the NetObj of +4 when the +2c object is absent or its IsDeliverable (vt+30) accepts it.
+    //    recipient: nullopt = the session host (a joiner's kind 2), kLanAll = every client (kind 4 / 5).
+    struct RemoteTrigger {
+        std::uint16_t origin{};
+        std::uint32_t target_key{}, word_28{}, source_30{}, other_2c{};
+        std::uint16_t action{};
+    };
+    void send_trigger(std::uint32_t target_key, std::uint16_t action, std::uint32_t word_28, std::uint32_t other_2c,
+                      std::uint32_t source_30, std::optional<std::uint16_t> recipient);
+    std::vector<RemoteTrigger> take_remote_triggers();
+    std::uint32_t triggers_sent() const { return triggers_sent_; }
+    std::uint32_t triggers_received() const { return triggers_received_; }
+
     // 132ln5h11 (research/NET_INLEVEL.md 4.21): the level's generators (cGenerator 004db680) in the network game.
     // register_generator gives a generator (its population id: the block's +0xc and +0x10, the key everywhere) a
     // PORT-ONLY block in this memory (vtable: +0x28 the remote enable 00220e60, +0x2c the remote disable 00220d00,
@@ -910,6 +972,19 @@ private:
     std::vector<RemoteEndLevel> end_levels_;
     std::uint32_t end_levels_sent_ = 0, end_levels_received_ = 0;
     std::uint32_t receive_end_level(std::uint32_t origin, std::uint32_t data);
+    // 133lt4: the world messages (above).
+    std::uint16_t session_host_client();
+    // fields: {offset, size, value} after the header; text: the checkpoint label at +0xc (strncpy 0x40).
+    bool send_world_packet(std::uint32_t type_address, std::uint32_t pack, std::uint32_t size,
+                           const std::vector<std::array<std::uint32_t, 3>>& fields, std::uint32_t target_key,
+                           std::uint32_t recipient, std::uint32_t flags, std::optional<std::string_view> text = {});
+    std::uint32_t receive_world_message(std::uint32_t callback, std::uint32_t origin, std::uint32_t data);
+    std::vector<RemoteHotbox> remote_hotboxes_;
+    std::vector<RemoteCheckpoint> remote_checkpoints_;
+    std::vector<RemoteLiftLock> remote_lift_locks_;
+    std::vector<RemoteTrigger> remote_triggers_;
+    std::uint32_t hotbox_sent_ = 0, hotbox_received_ = 0, checkpoints_sent_ = 0, checkpoints_received_ = 0;
+    std::uint32_t lift_locks_sent_ = 0, lift_locks_received_ = 0, triggers_sent_ = 0, triggers_received_ = 0;
 };
 
 }  // namespace omega::lan

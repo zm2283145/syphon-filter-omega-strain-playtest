@@ -1343,6 +1343,11 @@ std::optional<NpcProjectileView> CombatThrows::projectile_view(std::uint64_t obj
     }
     return std::nullopt;
 }
+std::optional<std::uint64_t> CombatThrows::projectile_by_id(std::int32_t id) const{
+    if(!impl_->world)return std::nullopt;
+    for(const auto& item:impl_->world->projectiles())if(item.projectile.id_c==id)return item.projectile.object;
+    return std::nullopt;
+}
 void CombatThrows::air_taser_release(std::size_t actor){impl_->taser_release(actor);}
 
 bool CombatThrows::shock_to_death(std::size_t actor){

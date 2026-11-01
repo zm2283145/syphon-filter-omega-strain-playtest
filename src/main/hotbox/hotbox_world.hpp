@@ -239,7 +239,10 @@ struct HotboxTrackerEvent {
 // no longer containing p (containment is evaluated first), +0x98 decremented
 // (clamped at 0); then enters in global order for eligible boxes containing p
 // that are not inside yet, +0x98 incremented (clamped at 3), appended.
-std::vector<HotboxTrackerEvent> update_hotbox_tracker(HotboxWorld& world, HotboxTracker& tracker, const RootVector& p);
+// 133lt4 (review2 W2): count_occupancy false is a LAN joiner (005721c8 set, 005721c0 clear): +0x98 is left alone
+// (00170660 changes it only when `g_IsMultiplayer ? 005721c0 : 1`; the host counts a remote occupant in 00170200).
+std::vector<HotboxTrackerEvent> update_hotbox_tracker(HotboxWorld& world, HotboxTracker& tracker, const RootVector& p,
+                                                      bool count_occupancy = true);
 
 // The event a box sends to the actor (class 004ee698, transport 0): +0x24
 // payload, +0x28 code (the box type), +0x2c word, event byte +0x20 = 8,

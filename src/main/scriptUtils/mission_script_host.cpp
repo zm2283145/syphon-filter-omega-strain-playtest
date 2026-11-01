@@ -663,12 +663,34 @@ void MissionScriptHost::invoke_function(const std::string& name) {
     context_.invoke(name);
 }
 
-bool MissionScriptHost::deliver_hotbox(Word box, Word action) {
+void MissionScriptHost::register_remote_player(Word key) {
+    if (!multiplayer_) throw std::runtime_error("A remote player outside a network game");
+    if (remote_players_.contains(key)) return;
+    objects_.objects.register_npc(key, 1);
+    objects_.objects.attach(key, RuntimeObjectHandle::Kind::player);
+    remote_players_.insert(key);
+}
+
+std::optional<std::pair<std::array<float, 3>, float>> MissionScriptHost::checkpoint_node(Word node) const {
+    const auto record = nodes_.find(node);
+    if (record == nodes_.end()) return std::nullopt;
+    const auto& p = record->second.position;
+    return std::pair{std::array<float, 3>{p.x, p.y, p.z}, population_node_yaw(record->second)};
+}
+
+void MissionScriptHost::unregister_remote_player(Word key) {
+    if (!remote_players_.erase(key)) return;
+    objects_.objects.remove(key);
+}
+
+bool MissionScriptHost::deliver_hotbox(Word box, Word action, std::optional<Word> who) {
     if (!started_) throw std::runtime_error("HotboxMsg before the mission scripts started");
     const auto [label, receiver] = objects_.receiver(box);
     if (label != "hotbox") throw std::runtime_error("HotboxMsg to a non-hotbox record: " + std::to_string(box));
+    if (who && !remote_players_.contains(*who))
+        throw std::runtime_error("HotboxMsg from an unregistered remote player: " + std::to_string(*who));
     const StageScope scope(stage_, "HotboxMsg " + std::to_string(action) + " -> " + std::to_string(box));
-    const auto player = objects_.player;
+    const auto player = who ? *who : objects_.player;
     ScriptContext::Message message{"HotboxMsg", {{"Action", Value(Word{action})},
                                                  {"Who", Value(objects_.objects.resolve(player | 0x80000000U))},
                                                  {"WhoPlayer", Value(objects_.objects.resolve(player))}}};
@@ -677,7 +699,8 @@ bool MissionScriptHost::deliver_hotbox(Word box, Word action) {
 
 bool MissionScriptHost::deliver_trigger(Word id, Word action, std::optional<Word> who, Word data) {
     if (!started_) throw std::runtime_error("GOBJTriggerEventMsg before the mission scripts started");
-    if (who && objects_.receiver(*who).first != "ai")
+    // 133lt4: or a remote player (00211700 on the host: a joiner's trigger, +30 its LAN key).
+    if (who && !remote_players_.contains(*who) && objects_.receiver(*who).first != "ai")
         throw std::runtime_error("GOBJTriggerEventMsg from a record that is not an NPC: " + std::to_string(*who));
     const auto [label, receiver] = objects_.receiver(id);
     const StageScope scope(stage_, "GOBJTriggerEventMsg " + std::to_string(action) + " -> " + std::to_string(id) + " (" + label + ")");
@@ -3478,6 +3501,9 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*handle))
             throw std::runtime_error(what + " without a live GOBJ");
         if (handle->id == objects_.player) return 0;
+        // 133lt4: a remote human's +58 is its cNetPlayer (004de530); its Team 002d7c80 (DEFINE_PLAYER_CTL_LEVEL)
+        // answers, with 005721c8 set, ((+c & 0x7f000000) >> 24) - 1 of its active controller: the client index.
+        if (remote_players_.contains(handle->id)) return static_cast<std::int32_t>(((handle->id & 0x7f000000U) >> 24) - 1U);
         const auto section = objects_.sections.find(handle->id);
         // A node (constructor 0015c880, vtable 004d95b0) never writes +58 after the GOBJ base 003cf0e0 zeroes it.
         if (section != objects_.sections.end() && section->second == "node") return std::nullopt;
@@ -3505,7 +3531,8 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*handle))
             throw std::runtime_error(name + " without a live GOBJ (the original reads +58 of null)");
         bool npc = false;
-        if (handle->id != objects_.player) {
+        // 133lt4: a remote human's cNetPlayer (004de530) has the base cGobjController_IsNPC: not an NPC.
+        if (handle->id != objects_.player && !remote_players_.contains(handle->id)) {
             const auto section = objects_.sections.find(handle->id);
             if (section == objects_.sections.end() || (section->second != "npc" && section->second != "node"))
                 throw std::runtime_error(name + " of a GOBJ that is not an actor (+58 not hosted): " + std::to_string(handle->id));
@@ -3549,7 +3576,7 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         const auto* handle = std::get_if<RuntimeObjectHandle>(&arguments.at(0));
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*handle))
             throw std::runtime_error("game::CastNPC (00169ac0) without a live GOBJ");
-        if (handle->id == objects_.player) return Value(RuntimeObjectHandle{});
+        if (handle->id == objects_.player || remote_players_.contains(handle->id)) return Value(RuntimeObjectHandle{});
         const auto section = objects_.sections.find(handle->id);
         if (section != objects_.sections.end() && section->second == "node") return Value(RuntimeObjectHandle{});
         if (section == objects_.sections.end() || section->second != "npc")
@@ -3595,6 +3622,7 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (!handle || handle->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*handle))
             throw std::runtime_error("IsPlayer(GOBJ) without a live GOBJ");
         if (handle->id == objects_.player) return Word{1};
+        if (remote_players_.contains(handle->id)) return Word{1};   // 133lt4: cNetPlayer_IsPlayer (004de530 +54)
         const auto section = objects_.sections.find(handle->id);
         // Fire zones (002624a0, vtable 004dc970) and nodes (0015c880, vtable 004d95b0) never write +58 after the
         // GOBJ base 003cf0e0 zeroes it (003cf164): null controller -> 0.
@@ -3928,6 +3956,12 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (!label) throw std::runtime_error(name + " without a label string");
         const auto& p = record->second.position;
         applied = world_.add_checkpoint(node->id, {p.x, p.y, p.z}, population_node_yaw(record->second), *label);
+        // 133lt4 (review2 W3): in a network game every set slot 003fb8d0 gives (the local and each remote
+        // player) gets its own message, sent to every client (event byte 5).
+        if (multiplayer_) {
+            world_.send_network_checkpoint(std::nullopt, node->id, *label);
+            for (const auto key : remote_players_) world_.send_network_checkpoint(key, node->id, *label);
+        }
         return std::nullopt;
     }
     // 0022e030 -> 0022e080: the label is copied (strlen + 1 bytes, 0036b180,
@@ -3938,9 +3972,13 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
     if (name == "game::SetCheckpoint") {
         require_signature(script, function, 4, {"object:Player", "object:GOBJ", "primitive:3"});
         const auto* player = std::get_if<RuntimeObjectHandle>(&arguments.at(0));
-        if (!player || player->kind != RuntimeObjectHandle::Kind::player || player->id != objects_.player ||
-            !objects_.objects.alive(*player))
-            throw std::runtime_error("game::SetCheckpoint is hosted only for the local player");
+        // 133lt4 (review2 W3): or a remote player's controller (register_remote_player): 0022e080 queues the
+        // message to its +30, the remote human, and 003c9420 sends it to every client (event byte 5).
+        const bool remote = player && player->kind == RuntimeObjectHandle::Kind::player &&
+                            remote_players_.contains(player->id) && objects_.objects.alive(*player);
+        if (!remote && (!player || player->kind != RuntimeObjectHandle::Kind::player || player->id != objects_.player ||
+                        !objects_.objects.alive(*player)))
+            throw std::runtime_error("game::SetCheckpoint is hosted only for the local player and the remote players");
         const auto* node = std::get_if<RuntimeObjectHandle>(&arguments.at(1));
         if (!node || node->kind != RuntimeObjectHandle::Kind::world_object || !objects_.objects.alive(*node))
             throw std::runtime_error("game::SetCheckpoint without a live node object");
@@ -3949,8 +3987,14 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             throw std::runtime_error("game::SetCheckpoint on a non-node record: " + std::to_string(node->id));
         const auto* label = std::get_if<std::string>(&arguments.at(2));
         if (!label) throw std::runtime_error("game::SetCheckpoint without a label string");
+        if (remote) {
+            // The remote human's own copy (001b3b60 on it) has no port state: only the network send applies.
+            applied = world_.send_network_checkpoint(player->id, node->id, *label);
+            return std::nullopt;
+        }
         const auto& p = record->second.position;
         applied = world_.add_checkpoint(node->id, {p.x, p.y, p.z}, population_node_yaw(record->second), *label);
+        if (multiplayer_) world_.send_network_checkpoint(std::nullopt, node->id, *label);
         return std::nullopt;
     }
     // 003e6540 (the three-argument variant): actor 003cb1c0(argument 0), the

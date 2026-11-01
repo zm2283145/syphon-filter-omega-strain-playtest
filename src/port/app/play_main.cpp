@@ -923,6 +923,11 @@ struct SimulationScriptWorld final:MissionScriptWorld{
     bool add_checkpoint(Word,const std::array<float,3>& position,float yaw,const std::string& label) override{
         sim.queue_checkpoint(position,yaw,label);return true;
     }
+    // 133lt4 (review2 W3): the LAN send of cAddCheckpointMsg (set by the play in a network game).
+    std::function<bool(std::optional<Word>,Word,const std::string&)> network_checkpoint;
+    bool send_network_checkpoint(std::optional<Word> remote,Word node,const std::string& label) override{
+        return network_checkpoint?network_checkpoint(remote,node,label):false;
+    }
     bool perform_object_action(std::int32_t action,Word object,const ObjectActionNode& node,Word world_object) override{
         SoloActorSimulation::ObjectAction a;a.action=action;a.object=object;
         a.node=ActorObjectActionNode{node.position,node.yaw};a.world_object=world_object;
@@ -3523,7 +3528,7 @@ void print_combat_frame(const CombatPlayFrame& f,CombatPlaySession& session,Acto
     for(const auto& w:f.water_hits)
         std::cout<<"Bullet crossed water at frame "<<frame<<" ("<<w.point[0]<<", "<<w.point[1]<<", "<<w.point[2]<<") terrain resource "<<w.geometry
                  <<" triangle "<<w.triangle<<": point splash 002b2b70 radius "<<w.radius<<" (the world water manager, with the effect table)"
-                 <<" and B_HIT_WATER (00278160, recorded, not played)\n";
+                 <<" and B_HIT_WATER (00278160: 001ca210 -> 0020f860 -> 003c9420(004ffb50, 0), posted to the sound system)\n";
     for(const auto& r:f.reloads)
         for(const auto& n:r.notices){
             std::cout<<"HUD notice at frame "<<frame<<" (00242b00 ticker): "<<n<<"\n";
@@ -7242,10 +7247,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         npc_system.far_distance=level_far_distance(load_level_lights(population_light_sources(population)));
         // Actor-versus-actor collision (001e7f40 / 001e8760, ACTOR_MOVEMENT_ADJUSTMENT.md "Checkpoint 128"): the
         // global list 004ea190 is the NPC system's think list (one AI component per element, its owner the NPC
-        // actor); player slot 0 is the local player (ActorWorld). The list pass's action-7 message (0016b380 to
-        // the AI Sound System, queued: the NPC hears the player bump into it, 0016adb0) is recorded, not
-        // delivered: play delivers no AI Sound System events (NPC_COMBAT.md, shot noise 0016b4f0). Port-only: an
-        // actor in an agent slot 1..3 (the --coop-partner) is read as that player slot, not as a list element.
+        // actor); player slot 0 is the local player (ActorWorld). Checkpoint 133gp1: the list pass's action-7
+        // message (001e8550 0016b380(msg, mover +c, target +c, 7), 001e8560 003c9420(msg, 004ee5c0, 0)) is queued
+        // for the next pump (ai_sound_msgs, after the mover's footsteps of the step) and 0016adb0 gives the NPC
+        // cause 7 (the NPC hears the actor bump into it). Port-only: an actor in an agent slot 1..3 (the
+        // --coop-partner) is read as that player slot, not as a list element.
+        // The AI Sound System messages (key 004ee5c8) sent to 004ee5c0 with transport 0 since the last pump, in send
+        // order; this frame's actor step's bumps (mover, target) are appended after the step.
+        std::vector<NpcSoundMessage> ai_sound_msgs;
+        std::vector<std::pair<std::size_t,std::size_t>> actor_contacts;
         actors.set_movement_list([&npc_system,&npcs,&actors]{
             std::vector<std::size_t> list;list.reserve(npc_system.think_list.size());
             for(const auto& k:npc_system.think_list){
@@ -7257,10 +7267,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             return list;
         });
-        actors.set_movement_contact([seen=std::set<std::pair<std::size_t,std::size_t>>{}](std::size_t mover,std::size_t target)mutable{
+        actors.set_movement_contact([&actor_contacts,seen=std::set<std::pair<std::size_t,std::size_t>>{}](std::size_t mover,std::size_t target)mutable{
             if(seen.insert({mover,target}).second)
                 std::cout<<"Actor contact (001e7f40): actor "<<mover<<" adjusted against actor "<<target
-                         <<"; action 7 to the AI Sound System recorded, not delivered\n";
+                         <<"; action 7 queued to the AI Sound System (0016b380)\n";
+            actor_contacts.emplace_back(mover,target);
         });
         // The route manager's frame update 00163ad0 runs from the world's frame-update broadcast before the
         // object loop (NPC_COMBAT.md section 5.7), with the local player in slot 0 (003fb8d0, +f4 translation).
@@ -7513,6 +7524,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const auto lan_remote_of=[&](std::uint32_t key)->LanRemote*{
             for(auto& r:lan_remotes)if(key&&r.peer==(key>>24)-1U)return &r;
             return nullptr;};
+        // 133lt4: the native trigger receivers (InteractGOBJ 00216580, PathedGOBJ 00219070, lift 00214640) for an agent
+        // key, assigned with the script filters below; a remote player's trigger reaches them through the LAN.
+        std::function<bool(std::uint64_t,const HotboxTrigger&)> lan_native_trigger;
         std::optional<PlayerCameraLookAtHost> camera_look_at;   // 00280070 over the combat actors
         std::unique_ptr<CombatPlaySession> combat_session;CombatPrinted combat_printed;std::vector<std::int32_t> combat_ids;   // --combat
     std::map<std::int32_t,std::uint32_t> combat_generator;   // --pilot gG references: a spawned combat ID's generator
@@ -7939,6 +7953,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     boxes.push_back(r.id);
                 }
                 auto& lift=lift_world.add(o.id,ElevatorGOBJ(o,boxes.size()));
+                if(lan_net)lift.set_network_game(lan_net->memory().read(dme::kNetworkGame,1)!=0);   // 133lt4: 005721c8
                 lift_recipients[o.id]=boxes;
                 // The lift's +7c references as 00219070's class-0xb pass reads them (a forwarded trigger).
                 for(const auto& r:o.references)if(r[0]<0x100&&r[1]<0x10000)pathed_references[o.id].push_back((r[0]<<16)|r[1]);
@@ -10690,6 +10705,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     }
                 };
                 sim.set_native_trigger_receiver([=](const HotboxTrigger& t){return native_trigger(player_key,t);});
+                lan_native_trigger=native_trigger;   // 133lt4
                 sim.set_object_code_receiver([=](std::uint64_t o,std::int32_t c){object_code(player_key,o,c);});
                 // An NPC's PerformAction_WithObject motion (132zf5): its agent key is its population ID.
                 if(script_npcs_host)script_npcs_host->set_interact_receiver(
@@ -12556,6 +12572,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // human (001b8130) for a client that joins again, which the port's derived figures cannot.
                 if(slot->gone){std::cout<<"; its peer's figure was removed (a new 001b8130 actor is not ported), not placed\n";continue;}
                 slot->key=h.key;
+                if(mission_host)mission_host->register_remote_player(h.key);   // 133lt4: Who / WhoPlayer / SetCheckpoint
                 // 132ln5h8: the agent first (a rebuild of the figure, 001b8130, replaces its actor before it is activated).
                 bool dress=false;
                 if(h.packing&&slot->dressed!=*h.packing){
@@ -12696,7 +12713,131 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 actors.remove(f.actor);
                 actors.deactivate(f.actor);
                 slot->gone=true;
+                if(mission_host)mission_host->unregister_remote_player(l.key);   // 133lt4
                 std::cout<<"; "<<f.label<<" ("<<f.actor_id<<") removed from the traversal (0040b720) and deactivated (+60)\n";
+            }
+        };
+        // 133lt4 (review2 W1-W5, research/NET_INLEVEL.md "World message routing"): the world messages QueueMessage 003c9420 routes to the
+        // session host or to an object's owner (LanNetCore's cHotboxMsg / cAddCheckpointMsg / cNetLockElevatorMsg /
+        // cGOBJTriggerEventMsg). A trigger whose +30 agent is another console's player, here (00211700's queue, or
+        // 00171880 on the host): its script handler (Who = that player), else the native receiver as for this
+        // console's own agents; an InteractGOBJ's pairing would act on the remote human (003e67c0): not hosted.
+        // A player's owner: 003fb340 / 003c9420's ((+c & 0x7f000000) >> 24) - 1.
+        const auto lan_owner_of=[](std::uint32_t key){return static_cast<std::uint16_t>(((key&0x7f000000U)>>24)-1U);};
+        const auto lan_deliver_remote_trigger=[&](std::uint32_t who,const HotboxTrigger& t,unsigned frame){
+            if(!mission_host)throw std::runtime_error("unhosted(0x00211700): a remote player's trigger without the mission scripts");
+            if(mission_host->has_receiver(t.receiver)&&mission_host->deliver_trigger(t.receiver,t.action_24,who,t.word_28)){
+                std::cout<<"LAN (133lt4): GOBJTriggerEventMsg "<<t.action_24<<" (+28 "<<t.word_28<<") from player 0x"<<std::hex<<who<<std::dec
+                         <<" -> "<<t.receiver<<": script handler at frame "<<frame<<"\n";
+                return;
+            }
+            if(mission_host->interact_links(t.receiver))
+                throw std::runtime_error("unhosted(0x00216580): an InteractGOBJ trigger from another console's player (its 003e67c0 actions go to the remote human)");
+            if(!lan_native_trigger||!lan_native_trigger(who,t))
+                throw std::runtime_error("unhosted(0x00211700): the native receiver of a remote player's trigger to "+std::to_string(t.receiver)+" is not hosted");
+            std::cout<<"LAN (133lt4): GOBJTriggerEventMsg "<<t.action_24<<" from player 0x"<<std::hex<<who<<std::dec<<" -> "<<t.receiver
+                     <<": native receiver at frame "<<frame<<"\n";
+        };
+        unsigned lan_world_frame=0;   // the frame of the last lan_world_messages (the sim's sends happen in the next step)
+        if(lan_net){
+            // 00170660 / 001714c0 on a joiner: the kind-2 HotboxMsg to the session host (box key +4, occupant +14 = its key).
+            sim.set_hotbox_network_sink([&](std::size_t box,std::uint8_t action,std::uint32_t code){
+                const auto id=sim.hotboxes().boxes.at(box).record.id;
+                lan_net->send_hotbox_message(id,action,code,0,lan_net->local_player_key(),std::nullopt,action==3?0U:0x40U);
+                std::cout<<"LAN (133lt4): HotboxMsg "<<int(action)<<" (type "<<code<<") of box "<<id<<" sent to the session host (003c9420 kind 2)"
+                         <<" after frame "<<lan_world_frame<<"\n";});
+            // 00171c90 on a joiner: kind 1 for a lift's InteractGOBJ link (class 0xe whose +98 first element has +68 3)
+            // with the parameter -1, otherwise kind 2 (to the host, +30 this console's player).
+            sim.set_trigger_network_route([&](const HotboxTrigger& t){
+                const auto& box=sim.hotboxes().boxes.at(t.box);
+                if(static_cast<std::int32_t>(box.record.parameter)==-1){
+                    const auto it=std::find_if(population.objects.begin(),population.objects.end(),[&](const PopulationObject& x){return x.id==t.receiver;});
+                    if(it!=population.objects.end()&&it->kind==5&&it->asset=="no_vum"&&it->references.size()>=3){
+                        const auto& f=it->references[0];
+                        if(f[0]<0x100&&f[1]<0x10000&&lift_world.find((f[0]<<16)|f[1]))return false;
+                    }
+                }
+                lan_net->send_trigger(t.receiver,static_cast<std::uint16_t>(t.action_24),t.word_28,t.sender_2c,lan_net->local_player_key(),std::nullopt);
+                std::cout<<"LAN (133lt4): GOBJTriggerEventMsg "<<t.action_24<<" (+28 "<<t.word_28<<") of box "<<box.record.id<<" to "<<t.receiver
+                         <<" sent to the session host (00171c90 kind 2) after frame "<<lan_world_frame<<"\n";
+                return true;});
+            // 00170200 on the host: a remote occupant's HotboxMsg in the pump (Who = that player).
+            sim.set_remote_hotbox_script_filter([&](std::size_t box,std::uint8_t payload,std::uint32_t who){
+                const auto id=sim.hotboxes().boxes.at(box).record.id;
+                if(!mission_host||!mission_host->has_receiver(id))return false;
+                const bool taken=mission_host->deliver_hotbox(id,payload,who);
+                std::cout<<"LAN (133lt4): HotboxMsg "<<int(payload)<<" -> box "<<id<<" with Who = player 0x"<<std::hex<<who<<std::dec
+                         <<(taken?": script handler":": no script handler (native receiver)")<<"\n";
+                return taken;});
+            // 00172400 / 00171ed0 to a remote occupant: event byte 8, 003c9420 sends it to the occupant's owner.
+            sim.set_remote_hotbox_actor_sink([&](std::uint32_t who,const HotboxActorEvent& e){
+                lan_net->send_hotbox_message(who,e.payload,e.code,e.word_2c,who,lan_owner_of(who),0x40);
+                std::cout<<"LAN (133lt4): hotbox event code "<<e.code<<" payload "<<int(e.payload)<<" sent to player 0x"<<std::hex<<who<<std::dec
+                         <<"'s owner (event byte 8)\n";});
+            sim.set_remote_trigger_sink([&](std::uint32_t who,const HotboxTrigger& t){lan_deliver_remote_trigger(who,t,lan_world_frame);});
+            if(script_world)script_world->network_checkpoint=[&](std::optional<Word> remote,Word node,const std::string& label){
+                const auto key=remote?static_cast<std::uint32_t>(*remote):lan_net->local_player_key();
+                lan_net->send_checkpoint(key,node,label);
+                std::cout<<"LAN (133lt4): cAddCheckpointMsg for player 0x"<<std::hex<<key<<std::dec<<" (node "<<node<<", \""<<label
+                         <<"\") sent to every client (event byte 5)\n";
+                return true;};
+        }
+        const auto lan_world_messages=[&](unsigned frame){
+            lan_world_frame=frame;
+            const auto local_key=lan_net->local_player_key();
+            for(const auto& r:lan_net->take_remote_hotboxes()){
+                std::cout<<"LAN (133lt4): 00170200 HotboxMsg "<<int(r.action)<<" (code "<<r.code<<", +2c "<<r.value<<") to 0x"<<std::hex<<r.target_key
+                         <<" occupant 0x"<<r.who_key<<std::dec<<" from client "<<r.origin<<" at frame "<<frame;
+                if(r.target_key==local_key){
+                    // The host's event for this console's occupant: queued to the player (transport 0).
+                    sim.queue_actor_hotbox({r.code,r.action,r.value});
+                    std::cout<<": queued to the local player\n";
+                    continue;
+                }
+                const auto b=sim.hotboxes().find(r.target_key);
+                if(!b){std::cout<<": no hosted box (0040c540 finds none): dropped\n";continue;}
+                if(!lan_remote_of(r.who_key))throw std::runtime_error("unhosted(0x00170200): a HotboxMsg whose occupant is not a remote player");
+                if(mission_host&&!mission_host->remote_player(r.who_key))mission_host->register_remote_player(r.who_key);
+                sim.queue_remote_hotbox(*b,r.action,r.who_key);
+                std::cout<<": queued to the box (+98 now "<<sim.hotboxes().boxes[*b].occupancy_98<<")\n";
+            }
+            for(const auto& c:lan_net->take_remote_checkpoints()){
+                std::cout<<"LAN (133lt4): 0022e710 cAddCheckpointMsg for 0x"<<std::hex<<c.target_key<<std::dec<<" node "<<c.node_key<<" \""<<c.label
+                         <<"\" from client "<<c.origin<<" at frame "<<frame;
+                if(c.target_key!=local_key){std::cout<<": another player's human here (001b3b60 on it: no port state)\n";continue;}
+                const auto node=mission_host?mission_host->checkpoint_node(c.node_key):std::nullopt;
+                if(!node)throw std::runtime_error("unhosted(0x0022e800): cAddCheckpointMsg for a node that is not hosted: "+std::to_string(c.node_key));
+                sim.queue_checkpoint(node->first,node->second,c.label);
+                std::cout<<": MSGGAME_ADD_CHECKPOINT queued to the local player\n";
+            }
+            for(const auto& l:lan_net->take_remote_lift_locks()){
+                std::cout<<"LAN (133lt4): 002115e0 lift "<<l.lift_key<<" floor "<<l.floor<<(l.locked?" locked":" unlocked")<<" from client "<<l.origin<<" at frame "<<frame;
+                auto* lift=lift_world.find(l.lift_key);
+                if(!lift){std::cout<<": no hosted lift (003fb4b0 finds none)\n";continue;}
+                if(l.locked)lift->lock_floor(l.floor,true);else lift->unlock_floor(l.floor,true);
+                std::cout<<": applied silently\n";
+            }
+            for(const auto& r:lan_net->take_remote_triggers()){
+                std::cout<<"LAN (133lt4): 00211700 GOBJTriggerEventMsg "<<r.action<<" (+28 "<<r.word_28<<", +2c "<<r.other_2c<<", +30 0x"<<std::hex
+                         <<r.source_30<<std::dec<<") to "<<r.target_key<<" from client "<<r.origin<<" at frame "<<frame<<"\n";
+                HotboxTrigger t{};t.receiver=r.target_key;t.action_24=r.action;t.word_28=r.word_28;t.sender_2c=r.other_2c;
+                if(const auto b=sim.hotboxes().find(r.other_2c)){
+                    // IsDeliverable (vt+30) of the +2c object, cHotbox 001729b0: on the host a type-8 box takes an
+                    // Interact (4) only while enabled (cGOBJ_IsEnabled); other messages pass.
+                    t.box=*b;
+                    const auto& box=sim.hotboxes().boxes[*b];
+                    if(lan_net->host_console()&&box.record.type==8&&r.action==4&&!box.enabled_2c){
+                        std::cout<<"LAN (133lt4): box "<<box.record.id<<" is disabled: 001729b0 refuses the trigger\n";continue;}
+                }
+                if(r.source_30==local_key){
+                    // This console's player: the lifts take it with the player's agent key, the rest through the pump.
+                    if(lift_world.find(r.target_key))
+                        lift_triggers.push_back({r.target_key,InteractTriggerClone{static_cast<std::int32_t>(r.action),r.word_28,r.other_2c,lift_player_key},false});
+                    else sim.queue_trigger(t);
+                }else if(lan_remote_of(r.source_30))lan_deliver_remote_trigger(r.source_30,t,frame);
+                else if(lift_world.find(r.target_key))
+                    lift_triggers.push_back({r.target_key,InteractTriggerClone{static_cast<std::int32_t>(r.action),r.word_28,r.other_2c,r.source_30},false});
+                else throw std::runtime_error("unhosted(0x00211700): a trigger whose +30 agent is neither a player nor hosted");
             }
         };
         const auto lan_backpacks=[&](unsigned frame){
@@ -14403,6 +14544,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_backpacks(frame);
                     lan_npc_sections(frame);
                     lan_damages(frame);
+                    lan_world_messages(frame);   // 133lt4
                     // Port-only (132on2d): the online game's lobby frame (004536b0 state 10 -> 004446e0(1)); 132on2f:
                     // its connection-path notice on the HUD ticker.
                     if(frontend_app)
@@ -15935,6 +16077,82 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             <<(actor?": no script handler (001b3b60 -> 003cea10 -> 003caca0: the actor's +0x20 child list, not forwarded)\n"
                                     :": no script handler (the GOB receiver -> 003cea10 -> 003caca0: empty +0x20 child list, dropped)\n");
                 }
+                // Checkpoint 133gp1 (review2 F1): the AI Sound System messages (key 004ee5c8) queued to 004ee5c0 with
+                // transport 0 since the last pump (003c9420 -> the queue 003c9350), in send order: this pump hands each
+                // to cAISoundSystem::HandleMessage 0016adb0 (ai_11.c:376), which looks the sender up by ID (0040c540) and
+                // reads the positions now. Kinds 0 / 1 reach the think-list NPCs within the radius (cause 5 also the
+                // listeners that sense the projectile's present owner); kind 2 (cause 7) reaches the directed NPC.
+                if(!ai_sound_msgs.empty()){
+                    const auto queued=std::move(ai_sound_msgs);ai_sound_msgs.clear();
+                    if(!combat_session)throw std::runtime_error("0016adb0: AI Sound System messages without the combat session");
+                    auto* throws=combat_session->throws();
+                    const auto actor_of_handle=[&](std::uint64_t h)->std::optional<std::size_t>{
+                        for(std::size_t k=0;k<actors.size();++k)if(actors.actor(k).handle()==h)return k;
+                        return std::nullopt;};
+                    const auto npc_of_handle=[&](std::uint64_t h)->NpcFigure*{
+                        for(auto& npc:npcs)if(actors.actor(npc.actor).handle()==h)return &npc;
+                        return nullptr;};
+                    NpcSoundWorld sound;
+                    // 0040c540: an actor still in the traversal tree (a despawned NPC leaves it at the flush 0040c5c0), or
+                    // a live thrown projectile (session IDs from CombatThrowConfig::first_id); other level objects (GOBs,
+                    // tanks) send none of these messages in the port's hosted paths, so their IDs throw.
+                    sound.object_by_id=[&](std::int32_t id)->std::uint64_t{
+                        for(std::size_t k=0;k<combat_ids.size()&&k<actors.size();++k)
+                            if(combat_ids[k]==id)return actors.removed(k)&&!actors.traversed(k)?0:actors.actor(k).handle();
+                        if(throws){
+                            if(const auto p=throws->projectile_by_id(id))return *p;
+                            if(id>=throws->config().first_id)return 0;   // a projectile already deleted
+                        }
+                        throw std::runtime_error("0016adb0: 0040c540 of the AI sound object "+std::to_string(id)+", not an actor or projectile of the play");
+                    };
+                    // Virtual +e8 row 3: an actor's floor-root placement (as the listeners'), a projectile's +bc.
+                    sound.position=[&](std::uint64_t q)->RootVector{
+                        if(const auto k=actor_of_handle(q)){
+                            const auto m=root_placement_matrix(actors.actor(*k).floor_root_placement());
+                            return {m[12],m[13],m[14],m[15]};
+                        }
+                        if(throws)if(const auto p=throws->projectile_view(q))return p->point_bc;
+                        throw std::runtime_error("0016adb0: the position (+e8) of an object that is neither an actor nor a projectile");
+                    };
+                    sound.projectile_owner=[&](std::uint64_t q)->std::uint64_t{
+                        if(!throws)return 0;
+                        const auto p=throws->projectile_view(q);
+                        return p?p->owner:0;};
+                    // Kind 2: IsNpc(target) || IsOther(target) -> the controller's virtual Hear (the AI component's +d0, 00152fd0).
+                    // PORT: a LAN remote NPC (another console's) is not heard here; its owner console runs its AI.
+                    sound.ai_controlled=[&](std::uint64_t q){
+                        const auto* npc=npc_of_handle(q);
+                        return npc&&npc->ai&&!npc->ai->is_remote()&&!npc->ai->port_is_remote_controlled()&&npc->ai->perception_hosted();};
+                    sound.hear_directed=[&](std::uint64_t q,std::uint8_t cause,std::uint64_t source,float value){
+                        auto* npc=npc_of_handle(q);
+                        if(!npc||!npc->ai)throw std::runtime_error("0016adb0: a directed sound to an object without an AI controller");
+                        npc->ai->hear(actors.actor(npc->actor),cause,source,value);};
+                    sound.listeners=[&]{
+                        std::vector<std::optional<NpcSoundListener>> out;
+                        for(auto& npc:npcs){
+                            if(!npc.active||!npc.ai||npc.ai->is_remote()||npc.ai->port_is_remote_controlled()||!npc.ai->perception_hosted())continue;
+                            auto& actor=actors.actor(npc.actor);
+                            const auto m=root_placement_matrix(actor.floor_root_placement());
+                            NpcSoundListener l;
+                            l.actor=actor.handle();l.id=static_cast<std::int32_t>(npc.actor_id);l.life_108=actor.life_state();l.ai_58=true;
+                            l.deafness_33ac=throws?throws->senses(npc.actor).flash_33ac:0.0F;   // +33ac: 0 without the throw flow
+                            l.position={m[12],m[13],m[14],m[15]};
+                            auto* ai=npc.ai.get();const auto a=npc.actor;
+                            l.hear=[&actors,ai,a](std::uint8_t cause,std::uint64_t source,float value){
+                                ai->hear(actors.actor(a),cause,source,value);};
+                            l.sees=[&actors,ai,a](std::uint64_t seen){return ai->senses(actors.actor(a),seen);};
+                            out.emplace_back(std::move(l));
+                        }
+                        return out;
+                    };
+                    for(const auto& m:queued){
+                        npc_ai_sound_event(m,sound);
+                        std::cout<<"AI sound at frame "<<frame<<": kind "<<int(m.kind_24)<<", cause "<<int(m.cause_25)<<", from "<<m.source_id_30;
+                        if(m.kind_24==2)std::cout<<" to "<<m.target_id_34;
+                        else std::cout<<", radius "<<m.radius_2c;
+                        std::cout<<" (0016adb0)\n";
+                    }
+                }
                 for(const auto& d:object_damage){
                     const auto id=static_cast<Word>(blast_objects->host_object(d.object).id_c);
                     std::cout<<"Object damage at frame "<<frame<<": "<<id<<" type "<<int(d.call.type)<<" amount "<<d.call.amount
@@ -16116,7 +16334,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         if(e.b==1||frame%30==0)std::cout<<"Lift "<<id<<": 00218200 carries link "<<e.object<<(e.b==1?" (004d9360)":" (vt+94)")<<" to ("
                                                          <<e.matrix[12]<<", "<<e.matrix[13]<<", "<<e.matrix[14]<<") at frame "<<frame<<"\n";
                         break;}
+                    case LiftEvent::Kind::NetworkLock:
+                        // 133lt4 (review2 W4): 002155f0 / 00215530's cNetLockElevatorMsg (byte +20 4) to every client.
+                        if(!lan_net)throw std::runtime_error("Lift "+std::to_string(id)+": a network floor lock (002155f0) outside a LAN game");
+                        lan_net->send_lift_lock(id,e.a,e.b!=0);
+                        std::cout<<"LAN (133lt4): lift "<<id<<" floor "<<e.a<<(e.b?" locked":" unlocked")<<" (002155f0 / 00215530): cNetLockElevatorMsg sent to every client at frame "<<frame<<"\n";
+                        break;
                     case LiftEvent::Kind::NetworkTrigger:
+                        if(lan_net&&lan_net->memory().read(dme::kInLevel,1)){
+                            // 133lt4 (review2 W5): 00214920 / 00210e70: 003fb020(lift +c, msg, 0, dest), the event byte 5 sending to
+                            // dest: the agent's owner for a player ((+c & 0x7f000000) >> 24) - 1), otherwise every client.
+                            const auto key=static_cast<std::uint32_t>(e.object);
+                            const bool player=lan_remote_of(key)!=nullptr;
+                            lan_net->send_trigger(id,1,0xffffffffU,0,key,player?lan_owner_of(key):lan::kLanAll);
+                            std::cout<<"LAN (133lt4): lift "<<id<<": 00214920 sends agent 0x"<<std::hex<<key<<std::dec<<"'s trigger (+24 1, +28 -1) to "
+                                     <<(player?"its owner":"every client")<<" at frame "<<frame<<"\n";
+                            break;
+                        }
                         std::cout<<"Lift "<<id<<": 00214920 hands agent "<<e.object<<"'s trigger to 003fb020 (solo: nothing) at frame "<<frame<<"\n";
                         break;
                     case LiftEvent::Kind::RiderCarry:
@@ -18252,7 +18486,29 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // An actor appended before the step reads the default input, as an AI actor appended during the step does.
                 OMEGA_ZONE_LAP(step_laps,"sim.partners");
                 world_inputs.resize(actors.size());
+                actor_contacts.clear();
                 const auto world_frames=actors.step(world_inputs);
+                // Checkpoint 133gp1: the step's AI Sound System sends, each queued for the next pump (003c9420 transport 0),
+                // per actor in step order: the running footsteps of 00199f30 (human_62.c:772, every 16 video frames while
+                // the run slider is above 0.5: 0016b4f0(msg, actor +c, cause 3, 1.0, +31f8), FireNoise) and then the
+                // bumps of its collision routine 001e7f40 (kind 2, cause 7, the target's +c; see set_movement_contact).
+                if(combat_session){
+                    for(std::size_t k=0;k<world_frames.size()&&k<combat_ids.size();++k){
+                        for(const auto& r:world_frames[k].running_world){
+                            NpcSoundMessage m;m.kind_24=0;m.cause_25=static_cast<std::uint8_t>(r.action);
+                            m.radius_2c=r.value;m.source_id_30=combat_ids[k];
+                            ai_sound_msgs.push_back(m);
+                        }
+                        for(const auto& [mover,target]:actor_contacts){
+                            if(mover!=k)continue;
+                            if(target>=combat_ids.size())throw std::runtime_error("0016b380: a bump target without its +c");
+                            NpcSoundMessage m;m.kind_24=2;m.cause_25=7;
+                            m.source_id_30=combat_ids[mover];m.target_id_34=combat_ids[target];
+                            ai_sound_msgs.push_back(m);
+                        }
+                    }
+                }
+                actor_contacts.clear();
                 // Checkpoint 132ia1b: the effects of the 00219070 runs in this step's actor pump (type-8 box triggers);
                 // the SND: references' triggers go to the next pump's list. Port: the +e4 sound is played here, after
                 // the step, rather than inside the actor's pump.
@@ -18494,7 +18750,30 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const auto desc=game_sound->request(1,"E_ZOOM",0,0);
                         game_sound->post(z.start?game_sound->owned_play(desc,owner):game_sound->owned_stop(desc,owner));
                     }
-                    if(game_sound)for(const auto& e:combat_frame.events){
+                    // Checkpoint 133gp1 (review2 F4): 00278160 (the bullet list's water callback, after its point splash)
+                    // 001ca210(desc, 1, "B_HIT_WATER" 004a9228, 0, 0), 0020f860(msg, desc, the collision point), +20 = 1,
+                    // 003c9420(msg, 004ffb50, 0), each before the bullet event that followed it (CombatWaterHit::at).
+                    std::size_t water_sound_next=0;
+                    const auto water_sounds_before=[&](std::size_t k){
+                        for(;water_sound_next<combat_frame.water_hits.size()&&combat_frame.water_hits[water_sound_next].at.event<=k;++water_sound_next){
+                            const auto& pt=combat_frame.water_hits[water_sound_next].point;
+                            game_sound->post(game_sound->positional_play(game_sound->request(1,"B_HIT_WATER",0,0),{pt[0],pt[1],pt[2],pt[3]}));
+                        }};
+                    if(game_sound)for(std::size_t k=0;k<combat_frame.events.size();++k){
+                        const auto& e=combat_frame.events[k];
+                        water_sounds_before(k);
+                        // Checkpoint 133gp1 (review2 F4): 0022ba30's near miss (0022bfa8..0022c014): a candidate the bullet
+                        // did not hit (+104 returned 0) whose controller +58 answers virtual +54 with its +14 set (the
+                        // local player), for a request without +20 (skip damage) and +2d (bullet type 1): 0020f990(msg,
+                        // 004ef3f0 "B_BY_PC_S", the candidate), +20 = 1, 003c9420(msg, 004ffb50, 0).
+                        if(e.bullet&&e.bullet->kind==BulletEvent::Kind::near_miss_sound){
+                            std::optional<std::size_t> who;
+                            for(std::size_t a=0;a<actors.size();++a)if(actors.actor(a).handle()==e.bullet->object){who=a;break;}
+                            if(!who)throw std::runtime_error("0022ba30: the near-miss candidate is not an actor of the world");
+                            game_sound->post(game_sound->owned_play(static_sound_record(static_sound_descriptor(0x004ef3f0U)),
+                                static_cast<std::uint32_t>(combat_ids.at(*who))));
+                            continue;
+                        }
                         // Checkpoint 131c: 00276460's impact sound, 0020f860(msg, desc, bullet +100), +20 = 1,
                         // 003c9420(msg, 004ffb50, 0); the static descriptor 004ef590 is bank 1 B_HIT_CONCRETE.
                         // Checkpoint 132uk4: the hold-9 block's 001ca210(desc, 1, "G_GRENEXP_INCIN", 0, 0) then
@@ -18513,6 +18792,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             named?im.sound_name:std::string(bullet_impact_default_sound),0,0),{pt[0],pt[1],pt[2],pt[3]}));
                         if(play_particles)++play_particles->impact_sounds;
                     }
+                    if(game_sound)water_sounds_before(std::numeric_limits<std::size_t>::max());
                     if(game_sound){
                         // Checkpoint 132f3: the pickup menu's GS_* messages (001ca010(msg, 3, name, 0, 0), 0020faa0,
                         // +20 = 1, 003c9420(msg, 004ffb50, transport)) and its 0020f860 descriptor sounds; the walk-over
@@ -18707,47 +18987,44 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         water_updated=true;
                         if(p.decals)p.decals->service(step_dt,decal_root);   // 00279630 at 00133800, after 003ec4c0
                     }
-                    // Checkpoint 132fx1: 0016b4f0's cause-5 sound from a projectile bounce, delivered through the
-                    // AI Sound System 0016adb0 to the active think-list NPCs. Distance listeners hear it normally;
-                    // listeners that sense the present owner hear it at value 0 even while deaf.
-                    if(combat_frame.throws&&combat_session->throws())
-                        for(const auto& [object,ev]:combat_frame.throws->world.projectile_events)
+                    // Checkpoint 133gp1: the combat frame's AI Sound System sends (key 004ee5c8 to 004ee5c0, each with
+                    // 003c9420 transport 0: queued, delivered by the next frame's pump to 0016adb0), after the actor
+                    // step's footsteps and bumps, in this order: the actor updates' shots (0013ff40 / its class-5 branch:
+                    // 0016b4f0(msg, actor +c, 4, 1.0, record +b8)), throws (00141e20 weapon_6.c:111, with an active AI
+                    // controller: the same message) and air-taser shocks (00264980 / 00263080 taser_5.c:347: 0016b420
+                    // (msg, owner +c, the dart point, 4, 1.0, def +fc)); then the bullet manager's static impacts
+                    // (00276460 bullet_2.c:671, the shooter resolving: 0016b420(msg, shooter +c, +100, 4, 1.0, type +fc));
+                    // then the thrown items after it (0025ad80 grenade_6.c:480 the bounce's cause 5 at radius 15 from the
+                    // projectile itself, :555 the detonation's 0016b420(msg, owner +c, the point, 4, 1.0, record +fc)).
+                    {
+                        const auto id_of_handle=[&](std::uint64_t h,const char* site)->std::int32_t{
+                            for(std::size_t k=0;k<actors.size()&&k<combat_ids.size();++k)if(actors.actor(k).handle()==h)return combat_ids[k];
+                            throw std::runtime_error(std::string(site)+": the sender is not an actor of the world (its +c is not hosted)");};
+                        const auto queue_sound=[&](std::uint8_t kind,std::uint8_t cause,float radius,std::int32_t source,const RootVector& point){
+                            NpcSoundMessage m;m.kind_24=kind;m.cause_25=cause;m.radius_2c=radius;m.source_id_30=source;m.point_40=point;
+                            ai_sound_msgs.push_back(m);};
+                        for(const auto& e:combat_frame.events)
+                            if(e.discharge&&e.discharge->kind==WeaponDischargeEvent::Kind::ai_noise)
+                                queue_sound(0,4,e.discharge->b,static_cast<std::int32_t>(e.discharge->value),{});
+                        if(combat_frame.throws){
+                            for(const auto& launch:combat_frame.throws->launches)for(const auto& le:launch.second.events)
+                                if(le.kind==InventoryLaunchEvent::Kind::ai_sound)
+                                    queue_sound(0,4,le.amount,id_of_handle(le.object,"00141e20 0016b4f0"),{});
+                            for(const auto& t:combat_frame.throws->taser)
+                                if(t.what=="noise")queue_sound(1,4,t.value,static_cast<std::int32_t>(t.descriptor),t.position);
+                        }
+                        for(const auto& e:combat_frame.events)
+                            if(e.bullet&&e.bullet->kind==BulletEvent::Kind::ai_impact_noise)
+                                queue_sound(1,4,e.bullet->amount,e.bullet->value,e.bullet->point);
+                        if(combat_frame.throws)for(const auto& [object,ev]:combat_frame.throws->world.projectile_events){
                             if(ev.kind==ThrownProjectileEvent::Kind::landed_ai_sound){
-                                const auto projectile=combat_session->throws()->projectile_view(object);
+                                const auto projectile=combat_session->throws()?combat_session->throws()->projectile_view(object):std::nullopt;
                                 if(!projectile)throw std::runtime_error("0016b4f0: a landed-projectile sound whose source no longer resolves");
-                                NpcSoundWorld sound;
-                                sound.object_by_id=[object,id=projectile->id](std::int32_t q){return q==id?object:0;};
-                                sound.position=[object,point=projectile->point_bc](std::uint64_t q){
-                                    if(q!=object)throw std::runtime_error("0016adb0: position of an object other than the projectile source");
-                                    return point;};
-                                sound.projectile_owner=[object,owner=projectile->owner](std::uint64_t q){return q==object?owner:0;};
-                                sound.ai_controlled=[](std::uint64_t){return false;};
-                                sound.hear_directed=[](std::uint64_t,std::uint8_t,std::uint64_t,float){};
-                                sound.listeners=[&]{
-                                    std::vector<std::optional<NpcSoundListener>> out;
-                                    for(auto& npc:npcs){
-                                        if(!npc.active||!npc.ai||npc.ai->is_remote()||npc.ai->port_is_remote_controlled()||!npc.ai->perception_hosted())continue;
-                                        auto& actor=actors.actor(npc.actor);
-                                        const auto m=root_placement_matrix(actor.floor_root_placement());
-                                        NpcSoundListener l;
-                                        l.actor=actor.handle();l.id=static_cast<std::int32_t>(npc.actor_id);l.life_108=actor.life_state();l.ai_58=true;
-                                        l.deafness_33ac=combat_session->throws()->senses(npc.actor).flash_33ac;
-                                        l.position={m[12],m[13],m[14],m[15]};
-                                        auto* ai=npc.ai.get();const auto a=npc.actor;
-                                        l.hear=[&actors,ai,a](std::uint8_t cause,std::uint64_t source,float value){
-                                            ai->hear(actors.actor(a),cause,source,value);};
-                                        l.sees=[&actors,ai,a](std::uint64_t seen){return ai->senses(actors.actor(a),seen);};
-                                        out.emplace_back(std::move(l));
-                                    }
-                                    return out;
-                                };
-                                NpcSoundMessage message;
-                                message.kind_24=0;message.cause_25=static_cast<std::uint8_t>(ev.value);
-                                message.radius_2c=ev.amount;message.source_id_30=projectile->id;
-                                npc_ai_sound_event(message,sound);
-                                std::cout<<"Projectile "<<object<<" landed sound at frame "<<frame<<" (0016b4f0 cause "
-                                         <<ev.value<<", radius "<<ev.amount<<") delivered by 0016adb0\n";
-                            }
+                                queue_sound(0,static_cast<std::uint8_t>(ev.value),ev.amount,projectile->id,{});
+                            }else if(ev.kind==ThrownProjectileEvent::Kind::detonation_ai_sound)
+                                queue_sound(1,static_cast<std::uint8_t>(ev.value),ev.amount,id_of_handle(ev.object,"0025ad80 0016b420"),ev.position);
+                        }
+                    }
                     print_combat_frame(combat_frame,*combat_session,actors,combat_ids,*weapon_db,combat_printed,frame,
                                        hud_object?&*hud_object:nullptr);
                     // 001868a8: 00260990(*004ffc30, 1, 0.0, *0048a2c8 = 0.3, amount, amount), the flash white-out.
