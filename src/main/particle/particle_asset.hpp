@@ -146,8 +146,20 @@ public:
     // (set_absent), vt+5c(1) (set_present): the effect restarts from time 0.
     void reset(ParticleSystem& system, const std::uint8_t* node_matrix = nullptr);
     // vt+64 001c5710 / vt+68 001c5680 (Enable / Disable(PARTICLE_GOBJ)):
-    // +2c = 1 / 0; the networked message (003ff930 / 003ff650) throws.
+    // +2c = 1 / 0; in a network game first the cEnableMsg / cDisableMsg
+    // (003ff930 / 003ff650 with +10, the key) through the sender below.
     void set_on(bool on);
+    // 005721c8 set (LAN play): the sender of 001c5710 / 001c5680's messages,
+    // (key, on) with the key +10 (type_word: the PLR key, the Shatter key, 0
+    // for an NIE asset). Unset: solo play, nothing is sent.
+    using NetSend = std::function<void(std::uint32_t key, bool on)>;
+    void set_network(NetSend send) { net_ = std::move(send); }
+    bool networked() const { return static_cast<bool>(net_); }
+    std::uint32_t key() const { return type_word_; }
+    // vt+28 001c5650 / vt+2c 001c5660 (cGameParticle NetEnable / NetDisable,
+    // called by 003ff8b0 / 003ff5d0 for a remote client's message): +2c only,
+    // nothing is sent.
+    void net_set_on(bool on) { on_ = on; }
     // vt+8c 001c5670 (ScaleBBox(PARTICLE_GOBJ)): +70 = f12.
     void set_scale(float scale) { scale_ = scale; }
     // vt+48 001c57a0 (dt in f12); `node_matrix` is the asset node's 64-byte
@@ -186,6 +198,7 @@ private:
     float scale_ = 1.0f;    // +70 (001c5950)
     bool released_ = false;
     std::unique_ptr<EffectInstance> instance_;
+    NetSend net_;
 };
 
 // Checkpoint 122f: the node world (node+10) of a PLR: placement. 001c59d0

@@ -7,7 +7,6 @@ namespace omega {
 void run_spawned_actor_ai(SpawnedActorMemory& m, SpawnedActorHost& h,
                           const SpawnedActorAiArgs& q) {
     if (q.role != 2) throw std::runtime_error("Spawned actor AI: only role 2 is hosted");
-    if (m.read(0x5721c8, 1)) throw std::runtime_error("Spawned actor AI: multiplayer branch 001ae478 unhosted");
     if (!q.actor) throw std::runtime_error("Spawned actor AI: required actor is null");
     const auto r8 = [&](std::uint32_t p) { return m.read(p, 1); };
     const auto r32 = [&](std::uint32_t p) { return m.read(p); };
@@ -17,7 +16,18 @@ void run_spawned_actor_ai(SpawnedActorMemory& m, SpawnedActorHost& h,
         return h.call(m, address, args);
     };
 
-    // 001ae640: the pair selects the generator-specific component constructor.
+    // 001ae458..001ae4f0 (001ae478): g_IsMultiplayer (005721c8) and a controller already at +58: an actor that is
+    // live (+2d && +2c && !+2e) clears +2d around the detach; the detach (+31fc set) is cGOBJ_DeleteController
+    // 003ccf30(actor), then +31fc = 0.
+    if (r8(0x5721c8) && r32(q.actor + 0x58)) {
+        const bool live = r8(q.actor + 0x2d) && r8(q.actor + 0x2c) && !r8(q.actor + 0x2e);
+        if (live) w8(q.actor + 0x2d, 0);
+        if (r8(q.actor + 0x31fc)) {
+            call(0x3ccf30, {q.actor});
+            w8(q.actor + 0x31fc, 0);
+        }
+        if (live) w8(q.actor + 0x2d, 1);
+    }    // 001ae640: the pair selects the generator-specific component constructor.
     const std::uint32_t line = q.pair ? 0xbd8 : 0xbde;
     if (r8(0x533880)) call(0x10dc40, {9});
     w32(0x533888, r32(0x533888) + 1);

@@ -586,6 +586,9 @@ public:
     // restored from the snapshot (00256d90), then the run-time boxes cleared (00170570 on
     // the player's hotbox world). false (deferred) without CombatPlayConfig::backpack_world.
     bool remove_all_backpacks();
+    // 134lt6: 00257040 for a client that left (001b2e90's last call; the play drains LanNetCore's RemoteLeft): each
+    // listed backpack with +2f3 0 owned (+308) by `client` gets +308 = 0 (backpack_release_client). Returns the count.
+    std::size_t release_client_backpacks(std::uint32_t client);
     bool hosts_backpacks() const;
     // 00333df0 on CombatPlayConfig::agent_statistics (ResetLevel's fourth step); false without them.
     bool reset_level_statistics();

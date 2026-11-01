@@ -523,4 +523,17 @@ void backpack_remove_drops(BackpackObjectList& list,const BackpackObjectHost& ho
     }
 }
 
+std::size_t backpack_release_client(const BackpackObjectList& list,const BackpackObjectHost& host,std::uint32_t client){
+    if(!host.multiplayer)return 0;                                  // 00257040: g_IsMultiplayer
+    std::size_t changed=0;
+    for(const auto address:list.data){                              // the list's +4 count, +8 data
+        auto& bp=host.object(address);
+        if(bp.byte(0x2f3)!=0)continue;
+        if(bp.word(0x308)!=client)continue;
+        bp.set_word(0x308,0);
+        ++changed;
+    }
+    return changed;
+}
+
 }

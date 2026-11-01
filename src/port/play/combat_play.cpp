@@ -2412,6 +2412,12 @@ bool CombatPlaySession::player_add_weapon(std::int32_t item){
     s.frame.notes.push_back("AddWeapon(Player, "+std::to_string(item)+")");
     return true;
 }
+std::size_t CombatPlaySession::release_client_backpacks(std::uint32_t client){
+    auto& s=*impl_;
+    if(!s.config.backpack_world)return 0;
+    return backpack_release_client(s.backpack_list,s.object_host(),client);
+}
+
 bool CombatPlaySession::remove_all_backpacks(){
     auto& s=*impl_;
     if(!s.config.backpack_world)return false;

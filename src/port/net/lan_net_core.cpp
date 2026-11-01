@@ -199,6 +199,12 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(kGeneratorVtable + 0x28, 4, kFnGenEnable);
     m.write(kGeneratorVtable + 0x2c, 4, kFnGenDisable);
     m.write(kGeneratorVtable + 0xc0, 4, kFnGenPosition);
+    // 134lt6: the particle placements' blocks (register_particle): NetEnable / NetDisable stand-ins.
+    m.write(kParticleVtable + 0x28, 4, kFnParticleEnable);
+    m.write(kParticleVtable + 0x2c, 4, kFnParticleDisable);
+    // 004daa10's +0x1c, cSystem_SendCreated 0012ed00 (returns 1): 003fa940 calls it for the host's placements (+0x14 set)
+    // when a client finishes loading into the running level.
+    m.write(kParticleVtable + 0x1c, 4, 0x12ed00);
     m.write(0x4da690 + 0xc0, 4, kFnHumanPosition);
     m.write(kHumanVtable + 0xc0, 4, kFnHumanPosition);
     // 132ln5h12: the spawn message 0x004de240 (+8 the destructor 0021df80, +0xc the clone 002d0ee0, +0x10 the
@@ -1073,6 +1079,74 @@ void LanNetCore::send_generator_message(std::uint32_t id, std::int32_t a1, bool 
     ++generator_sent_;
 }
 
+// 134lt6 (the header): 001c59d0's network tail for a PLR: placement.
+void LanNetCore::register_particle(std::uint32_t key) {
+    auto& m = memory_;
+    if (particle_blocks_.contains(key)) unhosted(0x3fb650, "a particle placement registered twice (" + std::to_string(key) + ")");
+    const auto block = next_particle_;
+    if (block + 0x30 > kParticlesEnd) unhosted(0x3fb650, "more particle placements than the port's blocks hold");
+    next_particle_ += 0x30;
+    for (std::uint32_t k = 0; k < 0x30; k += 4) m.write(block + k, 4, 0);
+    m.write(block, 4, kParticleVtable);
+    m.write(block + 0xc, 4, key);
+    m.write(block + 0x10, 4, key);
+    m.write(block + 0x2c, 1, 1);  // 003cf0e0: +2c = 1
+    const bool host = m.read(dme::kHostRole, 1) != 0;
+    // 001c5b6c..: a joiner's +0x14 = 0 (cSystemContainer's constructor left it 1).
+    m.write(block + 0x14, 1, host ? 1U : 0U);
+    std::uint32_t owner = 0;
+    if (host) {
+        // the inlined LocalId: 0x00494178, filled by NetGetMyClientIndex 002ebaf8 when still -1.
+        if (m.read(0x494178) == 0xffffffffU) call(m, 0x2ebaf8, {0x494178, m.read(dme::kWorld)});
+        owner = m.read(0x494178);
+    } else {
+        // NetGetPeerToPeerHostClientIndex 002ebba0(0x005721a8, &tmp).
+        const auto out = kScratch + 0x84;
+        call(m, 0x2ebba0, {m.read(dme::kWorld), out});
+        owner = m.read(out);
+    }
+    call(m, 0x3fb650, {key, owner, block});
+    particle_blocks_.emplace(key, block);
+}
+
+// 134lt6 (the header): 001c5710 / 001c5680's message.
+void LanNetCore::send_particle_toggle(std::uint32_t key, bool on) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN particle message during the background load pump");
+    const auto caller = sp_;
+    sp_ -= 0x100;
+    const auto msg = sp_ + 0x40;
+    const auto vtable = on ? 0x4e0880U : 0x4e0860U;
+    call(m, 0x3c9e30, {msg, on ? 0x55d4b8U : 0x55d498U});
+    m.write(msg, 4, vtable);
+    m.write(msg + 0x24, 4, 0xffffffffU);
+    m.write(msg + 0x1c, 4, 0x40);
+    if (on) call(m, 0x3ff930, {msg, key});
+    else call(m, 0x3ff650, {msg, key, 0xffffffffU});
+    m.write(msg, 4, vtable);
+    call(m, 0x3c9d60, {msg, 0});
+    sp_ = caller;
+    ++particle_sent_;
+}
+// 134lt6 (the header): 002d4460 (NetNPC_13.c) lse if (self->IsLocal()): cNPCInfoObject_ctor(&t),
+// cNPCInfoObject_GetOwner(&t, actor + 0xc), cNetObjectMgr_RemoveFromTerrainActivation(actor) when +141 bit 7, the dtor.
+void LanNetCore::npc_remote_release_002d4460(std::uint32_t c, bool terrain) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN NPC release during the background load pump");
+    const auto block = npc_block(c);
+    // 0042d910 (NetObjectMgr_3.c) finds +c in 0x00582700 and, on a hit, frees the reference and erases the node. The
+    // port never inserts there, so the find misses; a populated map is refused up front (before the NPC info object
+    // is made, so a refusal leaves no pass open).
+    if (terrain && m.read(0x58270c) != 0x582704)
+        unhosted(0x42d910, "a populated terrain-activation map 0x00582700 (0042d790's inserts are not ported)");
+    if (terrain && m.read(block + 0xc) != c) unhosted(0x42d910, "an NPC block whose +c is not its key");
+    call(m, 0x436c00, {kGeneratorNpcInfo});
+    m.write(kGeneratorKey, 4, c);
+    call(m, 0x434440, {kGeneratorNpcInfo, kGeneratorKey});
+    call(m, 0x436ba0, {kGeneratorNpcInfo, 0xffffffffU});
+    ++npc_remote_releases_;
+    log_.push_back("002d4460: NPC +c 0x" + hex8(c) + " released without +150 (00434440" + (terrain ? ", 0042d910 miss)" : ")"));
+}
 GeneratorNetHost LanNetCore::generator_net_host() {
     auto& m = memory_;
     GeneratorNetHost net;
@@ -2712,7 +2786,6 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     }
     case 0x1314f0: return kPlayerBlocks;  // PORT-ONLY: the game's player block of a client (001b2e90 clears +0xb70)
     case 0x18c770:  // PORT-ONLY: the human's state 3 (the leaving character's engine state): not ported
-    case 0x257040:  // PORT-ONLY: the client's per-player statistics reset: not ported
     case 0x3cb230:  // PORT-ONLY: the character's fade-out (f12 = 0.1): the play hides the figure (RemoteLeft)
         return 0;
     case 0x2ec2a8: {  // the DME object release (002dec60, native)
@@ -2725,6 +2798,12 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         if (arg(0) != kCharacters) unhosted(address, "a character list other than the port's");
         std::erase_if(remote_keys_, [&](const auto& e) { return e.second == arg(1); });
         remote_positions_.erase(arg(1));
+        return 0;
+    }
+    case 0x257040: {  // 134lt6: 001b2e90's last call, 00257040(client): the backpacks the client owned (the play's)
+        if (remote_left_.empty() || remote_left_.back().client != static_cast<std::uint16_t>(arg(0)))
+            unhosted(0x257040, "a backpack release for a client whose human 001b2e90 did not release");
+        remote_left_.back().backpacks_00257040 = true;
         return 0;
     }
     case kFnLeave: {  // PORT-ONLY: the remote human's release (virtual +0x60, a1 = 1)
@@ -2804,6 +2883,19 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         log_.push_back(std::string(enable ? "003ff8b0: cEnableMsg" : "003ff5d0: cDisableMsg") + " for generator " +
                        std::to_string(id) + " (client " + std::to_string(static_cast<std::int32_t>(arg(1))) + ")");
         generator_receiver_(id, static_cast<std::int32_t>(arg(1)), enable);
+        return 0;
+    }
+    case kFnParticleEnable:
+    case kFnParticleDisable: {  // PORT-ONLY: the particle's virtual +0x28 (001c5650) / +0x2c (001c5660): the play's
+        const bool on = address == kFnParticleEnable;
+        const auto key = m.read(arg(0) + 0xc);
+        if (!particle_receiver_)
+            unhosted(on ? 0x1c5650 : 0x1c5660, "a particle placement's remote " + std::string(on ? "enable" : "disable") +
+                                                   " without the play's placements");
+        log_.push_back(std::string(on ? "003ff8b0: cEnableMsg" : "003ff5d0: cDisableMsg") + " for particle placement " +
+                       std::to_string(key));
+        ++particle_received_;
+        particle_receiver_(key, on);
         return 0;
     }
     case 0x40b790: case 0x1b8750: case 0x2c9270:
@@ -2889,6 +2981,9 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     level_ = nullptr;
     lobby_exit_ = {};
     generator_receiver_ = {};
+    particle_receiver_ = {};
+    particle_blocks_.clear();
+    next_particle_ = kParticles;
     npc_control_handler_ = {};
     part_cache_ = nullptr;
     remote_keys_.clear();

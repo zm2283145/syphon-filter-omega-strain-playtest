@@ -531,7 +531,7 @@ void geninfo_removed_00438c20(LevelLoadMemory& m);
 // 00433160(master, handle): the NPC info object created: the first of the five slots whose received byte
 // (0x00582780 + 8k) is clear takes the object's data (0x005827f0 + 8k) and handle (0x00582a78 + 8k); slot 0 also
 // sets 0x00582778. The old block is freed ("NPCInfoObject.cc" 0x629 / 0x635 / 0x640 / 0x64a) but slot 0's, which a
-// joiner merges (00435f30 / 00434600, not ported: thrown by name) and frees (0x620). Frame 0x60 below `stack`.
+// joiner merges (00435f30 / 00434600, npc_info_add_00435f30 / npc_info_set_owner_00434600) and frees (0x620). Frame 0x60 below `stack`.
 void npc_info_created_00433160(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t handle, std::uint32_t stack);
 // 00432230(owner, handle, mode): the owner callback: with slot 1's block, the object, -2 and the local client the
 // owner: 004355d0 when the blocks are not created, 0x00582a68 raised, the six queues drained into the object's

@@ -18,8 +18,6 @@ namespace {
     throw std::runtime_error(b);
 }
 
-constexpr std::uint8_t kMultiplayer = 0;  // byte 005721c8: solo play
-
 }  // namespace
 
 ParticleAsset::ParticleAsset(int id) : id_(id) {}
@@ -111,7 +109,10 @@ void ParticleAsset::reset(ParticleSystem& system, const std::uint8_t* node_matri
 }
 
 void ParticleAsset::set_on(bool on) {
-    if (kMultiplayer != 0) unhosted(on ? 0x1c572c : 0x1c569c, "the multiplayer Enable / Disable message");
+    // 001c5710 / 001c5680 (event_toggle_send.h): with g_IsMultiplayer (005721c8) set, a stack cEnableMsg /
+    // cDisableMsg (003c9e30, vtable 004e0880 / 004e0860, +1c = 0x40, +24 = -1) goes to 003ff930(msg, +10) /
+    // 003ff650(msg, +10, -1) and is destroyed; then +2c. Solo play: no sender, no message.
+    if (net_) net_(type_word_, on);
     on_ = on;  // 001c5784 / 001c56f0
 }
 
@@ -123,7 +124,7 @@ std::optional<std::array<float, 4>> ParticleAsset::update(ParticleSystem& system
         if (instance_->u32(0x1c) != 0) {
             system.update(*instance_, node_matrix, 0, dt);  // 003a2400(inst, node+10, 0, dt)
         } else if (on_) {                      // vt+6c 0015bfa0
-            if (kMultiplayer != 0) unhosted(0x1c569c, "the multiplayer switch-off message");
+            if (net_) net_(type_word_, false);  // 001c5680 in a network game: the cDisableMsg (set_on)
             on_ = false;                       // vt+68 001c5680
             if (((type_word_ >> 16) & 0xff) == 0xe7) {
                 // 00394648..003946ec: 0040c9a0 (unregister), 003cb230(asset, 0.1f) (the delayed

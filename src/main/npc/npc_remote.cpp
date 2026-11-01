@@ -198,9 +198,11 @@ void NpcAiController::remote_deactivate(SoloActorSimulation& actor,bool destruct
     const std::uint32_t word=destructor?0xffffffffU:remote_link_.word_150();
     if((word&0xffffU)!=0){
         if(!destructor&&remote_link_.object_live(word))remote_link_.generator_message(word);   // 002d4554..
-    }else if(alive_or_eligible(actor))
-        throw std::runtime_error("NPC AI: the remote NPC's deactivation of an alive actor without +150 (the NPC info release 00436c00 / 00434440, "
-            "0042d910 with +141 bit 7) is not ported");
+    }else if(alive_or_eligible(actor)){                                       // 002d4554..: virtual +44
+        if(!remote_link_.local_release)
+            throw std::runtime_error("NPC AI: the remote NPC's deactivation without +150 needs NpcRemoteLink::local_release (00434440 / 0042d910)");
+        remote_link_.local_release((c.flags_141&0x80U)!=0);
+    }
     c.inactive_159=1;
 }
 void NpcAiController::remote_activate(SoloActorSimulation& actor){

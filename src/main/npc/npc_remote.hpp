@@ -38,6 +38,9 @@ struct NpcRemoteLink {
     // 00157c44..00157c9c / 002d4554..: the Generator Message 0x004a4a68 (+0x24 the actor, +0x28 = 1) to the live
     // object of +150 with 003c9420(msg, object, 0).
     std::function<void(std::uint32_t word_150)> generator_message;
+    // 134lt6: 002d4460's branch for a controller without +150 whose virtual +44 answers (NetNPC_13.c): cNPCInfoObject
+    // 00436c00, GetOwner 00434440(&actor +c) (its answer unused), 0042d910(actor) when +141 bit 7, then 00436ba0(-1).
+    std::function<void(bool terrain_141)> local_release;
 };
 // The remote controller's own fields.
 struct NpcRemoteState {

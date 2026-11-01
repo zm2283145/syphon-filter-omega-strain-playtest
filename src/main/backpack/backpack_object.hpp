@@ -287,5 +287,9 @@ void backpack_crate_restore(const BackpackObjectList& list,const BackpackObjectH
 // not an INV: crate) is destroyed (00254770) and the index steps back.
 void backpack_remove_drops(BackpackObjectList& list,const BackpackObjectHost& host,
     std::vector<BackpackObjectEvent>& events);
+// 00257040 (backpack_11.c; 001b2e90 calls it with the index of a client that left): with g_IsMultiplayer
+// (005721c8) every backpack of the list whose +2f3 is 0 and whose +308 (its network owner) is `client` gets
+// +308 = 0. Solo play changes nothing. Returns the number of backpacks changed.
+std::size_t backpack_release_client(const BackpackObjectList& list,const BackpackObjectHost& host,std::uint32_t client);
 
 }

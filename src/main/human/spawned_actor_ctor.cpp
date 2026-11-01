@@ -300,8 +300,16 @@ std::uint32_t run_ctor(SpawnedActorMemory& m, SpawnedActorHost& h, const CtorInp
             manifest = 0;
         }
     } else if (r32(q.stack)) {
-        if (r8(0x5721c8)) throw std::runtime_error("Spawned actor: multiplayer identity path 001b8030 unhosted");
-        w32(a + 0xc, r32(a + 0xc) | 0x01000000);
+        // 001b801c..001b8078: s = *0x005721a8 is read first; with g_IsMultiplayer (005721c8) the client is the slot
+        // 0x00494178, filled by NetGetMyClientIndex 002ebaf8(&0x00494178, s) while it is -1 (001b8030); solo play
+        // takes 0. +c |= (client + 1) << 24.
+        const auto session = r32(0x5721a8);
+        std::uint32_t client = 0;
+        if (r8(0x5721c8)) {
+            if (r32(0x494178) == 0xffffffffU) call(0x2ebaf8, {0x494178, session});
+            client = r32(0x494178);
+        }
+        w32(a + 0xc, r32(a + 0xc) | ((client + 1) << 24));
     }
     if (const auto draw = r32(a + 0x31f0); draw == 0xffffffff) {
         auto counter = r32(0x4ee968);

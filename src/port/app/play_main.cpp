@@ -8206,6 +8206,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         link.word_150=[net,c]{return net->npc_controller_150(c);};
                         link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
                         link.generator_message=[net,c](std::uint32_t word){net->send_generator_release(c,word);};
+                        link.local_release=[net,c](bool terrain){net->npc_remote_release_002d4460(c,terrain);};
                         // 0040c540 of the cNetHuman's target key: the local player, a spawned NPC or a remote human.
                         link.object_by_key=[net,&actors,&spawned_npcs,&lan_remotes](std::uint32_t key)->std::uint64_t{
                             if(key==0||key==0xffffffffU)return 0;   // 0040c540: no object (the none word *004bdd00)
@@ -10394,7 +10395,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     // "Checkpoint 132g"). The glass's +e4 / +e8 / +88 / +b8 are the GOB's (host_objects, the stored
                     // or pathed matrix, the VUM bounds 00213ac0, the model COL).
                     script_world->shatter_fn=[gob_vum,&population,&pathed_objects,&lift_world,&play_particles,&gob_shatter_models,&texture_remap,
-                        textured,&spawn_id_counters,&spawn_known_ids,&actors,&game_sound,&gob_position_e4,&script_world](Word glass,const RootVector& other){
+                        textured,&spawn_id_counters,&spawn_known_ids,&actors,&game_sound,&gob_position_e4,&script_world,&lan_net](Word glass,const RootVector& other){
                         std::size_t k=population.objects.size();
                         for(std::size_t i=0;i<population.objects.size();++i)if(population.objects[i].id==glass){k=i;break;}
                         if(k==population.objects.size())
@@ -10420,6 +10421,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         const RootVector e4=gob_position_e4(k);   // 00230eb8: glass vt+e4
                         p.shatters.push_back({key,glass,particle::ParticleAsset(entry->id,key),{}});
                         auto& s=p.shatters.back();
+                        // 134lt6: in a network game the asset's Disable (00394590's switch-off, 001c5680) sends.
+                        if(lan_net)s.asset.set_network([net=lan_net](std::uint32_t k,bool on){net->send_particle_toggle(k,on);});
                         // 00230e60..00230ef8 / 00230ff4: vt+40 00394740 with {+e4, identity rows}: the node world.
                         s.node=particle::placement_node_matrix({e4[0],e4[1],e4[2]},{1.0F,0.0F,0.0F,0.0F,1.0F,0.0F,0.0F,0.0F,1.0F});
                         spawn_known_ids.insert(key);                                      // 00230ffc: 0040c9d0
@@ -12707,6 +12710,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(const auto& l:lan_net->take_remote_left()){
                 std::cout<<"LAN (port-only, 132ln5g): 001b2e90: remote human key "<<std::hex<<l.key<<std::dec<<" of client "<<l.client
                          <<" removed at frame "<<frame<<" (HUD message \""<<l.message<<"\")";
+                // 134lt6: 00257040(client), after the release: the client's backpacks lose their owner (+308 = 0).
+                if(l.backpacks_00257040&&combat_session)
+                    std::cout<<"; 00257040: "<<combat_session->release_client_backpacks(l.client)<<" backpack(s) of client "<<l.client<<" released";
                 auto* slot=lan_remote_of(l.key);
                 if(!slot||slot->gone||slot->key!=l.key){std::cout<<"; no figure\n";continue;}
                 auto& f=*slot->figure;
@@ -12980,6 +12986,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             link.word_150=[net,key]{return net->npc_controller_150(key);};
             link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
             link.generator_message=[](std::uint32_t){};
+            link.local_release=[net,key](bool terrain){net->npc_remote_release_002d4460(key,terrain);};
             link.object_by_key=[&,net](std::uint32_t target)->std::uint64_t{
                 if(target==0||target==0xffffffffU)return 0;
                 if(target==net->local_player_key())return actors.actor(0).handle();
@@ -13129,9 +13136,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             objective_network_ready=true;
             struct PlayNetLevel final:LevelLoadHost{
                 std::function<void()> generators;   // 132ln5h11: the generators' network constructor parts
+                std::function<void()> particles;    // 134lt6: the PLR: placements' network constructor tails
                 std::uint32_t call(LevelLoadMemory&,std::uint32_t address,std::initializer_list<std::uint32_t>)override{
                     if(address==0x1350e0){   // the level setup above (the timer events pumped meanwhile)
                         if(generators)generators();
+                        if(particles)particles();
                         return 0;
                     }
                     char text[96];std::snprintf(text,sizeof text,"unhosted(0x%08x): the play side of a network game is not ported",address);
@@ -13181,6 +13190,30 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"LAN (132ln5h11): 001350e0's generators: "<<constructed<<" network constructor tails (0022234c), "
                     <<generator_for_good.size()<<" present for good (002214b0), "<<replayed<<" level-start zone requests' network parts; "
                     <<"stamp 004f56b8 = "<<(generator_stamp_4f56b8?std::to_string(*generator_stamp_4f56b8):std::string("unknown"))<<"\n";
+            };
+            // 134lt6: 001c59d0's network tail for each PLR: placement (LanNetCore::register_particle: the NetMap insert
+            // 003fb650 with the host's client, +0x14 0 on a joiner) and the Enable / Disable messages (001c5710 /
+            // 001c5680 send cEnableMsg / cDisableMsg with +10; 003ff8b0 / 003ff5d0 reach NetEnable 001c5650 / NetDisable
+            // 001c5660, +2c only). PORT-ONLY order: the population load built the placements before this level setup;
+            // their inserts run here, beside the generators', after the load pump stopped. The NIE kind-2 assets
+            // (001c5950, +10 = 0) send too and are never found by a receiver, as in the original.
+            if(play_particles)level.particles=[&]{
+                auto* p=play_particles.get();
+                lan_net->clear_particles();
+                for(const auto& pl:p->placements)lan_net->register_particle(pl.key);
+                lan_net->set_particle_receiver([p](std::uint32_t key,bool on){
+                    auto* pl=p->placement(key);
+                    if(!pl)throw std::runtime_error("LAN: a particle message for placement "+std::to_string(key)+" the play did not load");
+                    const bool before=pl->asset.on();
+                    pl->asset.net_set_on(on);
+                    std::cout<<"LAN (134lt6): "<<(on?"cEnableMsg -> particle placement ":"cDisableMsg -> particle placement ")<<key
+                        <<(on?": 001c5650":": 001c5660")<<" +2c "<<before<<" -> "<<pl->asset.on()<<"\n";
+                });
+                const auto send=[net=lan_net](std::uint32_t key,bool on){net->send_particle_toggle(key,on);};
+                for(auto& pl:p->placements)pl.asset.set_network(send);
+                for(auto& [id,a]:p->assets)a.set_network(send);
+                std::cout<<"LAN (134lt6): 001c59d0's network tails: "<<p->placements.size()<<" particle placements in the NetMap (003fb650), "
+                    <<p->assets.size()<<" NIE particle assets networked (001c5710 / 001c5680 send)\n";
             };
             lan_net->mirror_empty_level_objects();
             auto& m=lan_net->memory();

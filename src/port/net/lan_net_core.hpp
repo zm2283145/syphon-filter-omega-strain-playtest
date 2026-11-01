@@ -229,6 +229,9 @@ public:
         std::uint32_t key = 0;
         std::uint32_t human = 0;
         std::string message;
+        // 134lt6: 001b2e90 went on to 00257040(client) (the release of the client's backpacks): the play applies it
+        // (CombatPlaySession::release_client_backpacks).
+        bool backpacks_00257040 = false;
     };
     std::vector<RemoteLeft> take_remote_left();
     // 132ln5h: an actor action 002d83c0 / 002d7ed0 / 002d7d10 sent a remote human (003c9420(msg, human, transport)):
@@ -571,6 +574,26 @@ public:
     void set_generator_receiver(GeneratorReceiver receiver) { generator_receiver_ = std::move(receiver); }
     std::uint32_t generator_messages_sent() const { return generator_sent_; }
     std::uint32_t generator_messages_received() const { return generator_received_; }
+    // 134lt6: the level's PLR: particle placements (cGameParticle, vtable 004daa10) in the network game. With 005721c8
+    // set, 001c59d0 clears +0x14 on a joiner and inserts the object into the NetMap (003fb650) with the local client
+    // (0x00494178 by 002ebaf8) on the host, the host's client (002ebba0) on a joiner. register_particle gives the
+    // placement a PORT-ONLY block (kParticles up, 0x30 bytes: vtable kParticleVtable whose +0x28 / +0x2c stand in for
+    // NetEnable 001c5650 / NetDisable 001c5660 and hand the play the receiver's call; +0xc / +0x10 the key; +0x14 1 on
+    // the host, 0 on a joiner) and runs that insert. send_particle_toggle is the network part of Enable 001c5710 /
+    // Disable 001c5680 (event_toggle_send.h): 003c9e30(msg, 0055d4b8 / 0055d498), the vtable 004e0880 / 004e0860,
+    // +0x24 = -1, +0x1c = 0x40 (byte +0x20 stays the constructor's 5), 003ff930(msg, key) / 003ff650(msg, key, -1),
+    // the vtable again and 003c9d60(msg, 0). Without a receiver a remote message throws naming 001c5650 / 001c5660.
+    void register_particle(std::uint32_t key);
+    void clear_particles() {
+        particle_blocks_.clear();
+        next_particle_ = kParticles;
+    }
+    bool particle_registered(std::uint32_t key) const { return particle_blocks_.contains(key); }
+    void send_particle_toggle(std::uint32_t key, bool on);
+    using ParticleReceiver = std::function<void(std::uint32_t key, bool on)>;
+    void set_particle_receiver(ParticleReceiver receiver) { particle_receiver_ = std::move(receiver); }
+    std::uint32_t particle_messages_sent() const { return particle_sent_; }
+    std::uint32_t particle_messages_received() const { return particle_received_; }
 
     // 132ln5h12 (research/NET_INLEVEL.md 4.22): a generator's spawned NPCs in the network game. register_npc gives
     // the NPC (its key c: the actor's +c, the population id with the owning client + 1 in the top byte) a PORT-ONLY
@@ -679,6 +702,12 @@ public:
     // 003ca0e0, whose PORT-ONLY stand-in queues the generator's receiver 00221610 for the play here: +0x28 == 1, the
     // GenInfo 0043b190 (take_generator_releases).
     void send_generator_release(std::uint32_t c, std::uint32_t word_150);
+    // 134lt6: 002d4460's release for a remote controller without +150 on the console whose virtual +44 answers: the NPC
+    // info object (00436c00), GetOwner 00434440(&c) (its answer unused), 0042d910(the NPC block) when `terrain`, 00436ba0.
+    // 0042d910 finds +c in the terrain-activation map 0x00582700; nothing in the port inserts there (0042d790 is not ported),
+    // so the find misses and nothing is erased; a populated map throws naming 0042d910.
+    void npc_remote_release_002d4460(std::uint32_t c, bool terrain);
+    std::uint32_t npc_remote_releases() const { return npc_remote_releases_; }
     struct GeneratorRelease {
         std::uint32_t generator = 0, c = 0;
     };
@@ -909,11 +938,18 @@ private:
     std::uint32_t next_generator_ = kGenerators;
     GeneratorReceiver generator_receiver_;
     std::uint32_t generator_sent_ = 0, generator_received_ = 0;
+    std::uint32_t npc_remote_releases_ = 0;
     std::map<std::uint32_t, std::array<float, 3>> remote_positions_;  // human -> its last position
     std::uint32_t generator_block(std::uint32_t id) const;
     std::uint32_t client_player_003fb8d0(std::int32_t client);
     void send_generator_message(std::uint32_t id, std::int32_t a1, bool enable);
-    // 132ln5h12: the NPC blocks (register_npc; 0x4000 bytes each from kNpcBlocks, below the stack), key -> block.
+    // 134lt6: the particle placements' blocks (register_particle), their vtable and virtual functions.
+    static constexpr std::uint32_t kParticleVtable = kFakes + 0xb00, kParticles = 0x1d34000, kParticlesEnd = kFakes;
+    static constexpr std::uint32_t kFnParticleEnable = 0x1d38f24, kFnParticleDisable = 0x1d38f28;
+    std::map<std::uint32_t, std::uint32_t> particle_blocks_;  // key -> block
+    std::uint32_t next_particle_ = kParticles;
+    ParticleReceiver particle_receiver_;
+    std::uint32_t particle_sent_ = 0, particle_received_ = 0;    // 132ln5h12: the NPC blocks (register_npc; 0x4000 bytes each from kNpcBlocks, below the stack), key -> block.
     static constexpr std::uint32_t kNpcBlocks = 0x1d50000, kNpcBlockSize = 0x4000, kNpcBlockCount = 0x60;
     static constexpr std::uint32_t kNpcController = 0x3800, kNpcInventory = 0x3c00;   // 132ln5h14b: +0x3524's
     std::map<std::uint32_t, std::uint32_t> npc_blocks_, npc_generators_;
