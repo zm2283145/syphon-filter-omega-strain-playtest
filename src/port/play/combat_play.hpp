@@ -296,9 +296,13 @@ struct CombatPlayConfig {
     std::function<void(std::uint32_t victim_key,std::uint32_t killer_key,std::uint8_t type,std::uint8_t category)>
         net_kill_statistics;
     bool net_hosting{};
+    // 133lt2: 003fb8d0 cNetObj_GetPlayer(0..3) in a network game (005721c8): client i's player actor (the local
+    // player at the local client's slot, each other console's remote agent at its client's). Unset: single player.
+    std::function<std::array<std::optional<std::size_t>,4>()> net_player_slots;
     std::function<void(std::uint32_t id,std::uint32_t owner,std::uint32_t address)> net_backpack_bind;
+    // 133lt2: contents = cBackpack_Pack 002539b0 for types 0 and 3 (00281b40), empty for the other types.
     std::function<void(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
-                       std::uint16_t recipient)> net_backpack_send;
+                       std::uint16_t recipient,const std::vector<std::uint8_t>& contents)> net_backpack_send;
     // 003fdb50 (common pool, then the mission pool) for the reload's
     // TransferAmmo notice (0013fdb8); nullptr: a notice throws.
     const Localization* localization{};
@@ -705,7 +709,8 @@ public:
     // 003cea10 mode 3 with the message matrix (transport 1, at once).
     void carry_backpack(std::uint32_t address,bool message,const std::array<float,16>& matrix);
     // Applies one received cNetBackpackMsg after LanNetCore's network frame.
-    void receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target);
+    void receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
+                                  const std::vector<std::uint8_t>& contents);
     // Checkpoint 132bp: the population's INV: crates at load (001c2a10 ->
     // 00257480: cBackpack_ctor 00257f30, then the list append 00257620),
     // with CombatPlayConfig::backpack_world; `find_collision` answers

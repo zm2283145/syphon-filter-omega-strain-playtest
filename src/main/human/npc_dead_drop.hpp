@@ -15,7 +15,8 @@
 //      backpack, item, spare, clip, 0) then 00142450(inventory, slot, 0, 0,
 //      0), the native WeaponInventoryOps::remove without unloading), then
 //      with armor 00255a50(backpack, armor, +339c). The multiplayer send
-//      (005721c8 set) is not reproduced.
+//      (005721c8 set: cNetBackpackMsg type 0 with the packed contents) is
+//      the host's network_send, called last (133lt2).
 // The item list is only tested, not moved. The backpack object itself (its
 // constructor 00257640 with 003cf0e0, vtable 004dc350, the contents
 // 00255af0 / 00255a50, its update and pickup) is a host object.
@@ -38,6 +39,9 @@ struct NpcDeadDropHost {
     std::function<std::uint64_t()> create_backpack;                                   // 00257640(actor, 1, 0)
     std::function<void(std::uint64_t backpack,std::int32_t item,std::int32_t spare,std::int32_t clip)> add_weapon;   // 00255af0(.., 0)
     std::function<void(std::uint64_t backpack,std::int32_t armor,std::int32_t max_armor)> add_armor;                  // 00255a50
+    // 133lt2: the multiplayer tail (005721c8 set): cNetBackpackMsg type 0 queued to the actor after the contents.
+    // Unset: single player.
+    std::function<void(std::uint64_t backpack)> network_send;
 };
 // Returns the new +3464 (nullopt: unchanged).
 std::optional<std::uint64_t> npc_dead_inventory_drop(WeaponInventoryOps& inventory,const WeaponDatabase& database,

@@ -25,8 +25,8 @@
 // Not ported (throw naming the address): the constructor's base object
 // 003cf0e0 / id 0040c240 / vtable +90, the placement 002561d0, the box
 // bounds 00253fb0 (the gearpack model's +3e0 box computed by VU0 micro
-// code at model load, 0038d720), the multiplayer pickup sound send in
-// 00254da0, and the default receiver 003cea10. Checkpoint 132fx5 hosts the
+// code at model load, 0038d720) and the default receiver 003cea10 (133lt2:
+// 00254da0's pickup sound has no multiplayer branch). Checkpoint 132fx5 hosts the
 // remote-owner pickup request as an event. Checkpoint 132t: 001762c0 builds the Triangle
 // confirm object 00253070 through WeaponBackpackHost::open_menu (the menu
 // is pickup_menu.hpp, hosted in play by pickup_menu_play.hpp; without the
@@ -176,6 +176,17 @@ public:
     // 00255e50 (d90 false) / 00255d90 (d90 true): the valid owner (+300 set,
     // its +c == +304) has +2d, +2c set, +2e clear and +3468 (+3469) set.
     bool owner_state(bool d90) const;
+    // Checkpoint 133lt2 (tests/backpack_pack_goldens.hpp, gen_backpack_pack.py): the contents that
+    // cNetBackpackMsg_Pack 00281b40 appends for message types 0 (construct) and 3 (the directed pickup accept).
+    // 002539b0 cBackpack_Pack: +2e0 (byte), +2e4 (byte), +2e8 / +2ec (16 bits), +2f1, then per slot the slot
+    // byte, the entry count, the flag and per entry the item (byte), the pair count and the pairs (16-bit spare,
+    // byte clip). Counts beyond the object's arrays throw (the original would read past them).
+    std::vector<std::uint8_t> pack() const;
+    // 002536d0 cBackpack_Unpack: the same fields read back (sign-extended as the original's lb / lh; the item
+    // and the clip bytes unsigned), then with +2fc clear the box block (vtable +5c, 0040c9d0, 00170e20 and box
+    // +94: ensure_box) and Backpack_UpdateBoxPriority 00255f60. Returns the bytes consumed. PORT-ONLY guards:
+    // a stream shorter than its counts, or counts beyond the arrays, throws before anything is written.
+    std::size_t unpack(const std::uint8_t* data,std::size_t size);
     const WeaponBackpack& backpack() const{return bp_;}
 private:
     std::int8_t slot_of(std::int32_t item) const;

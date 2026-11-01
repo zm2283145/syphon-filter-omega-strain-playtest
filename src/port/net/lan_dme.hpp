@@ -146,13 +146,18 @@ public:
     // PORT-ONLY transport for cNetBackpackMsg's exact observable six-byte payload, plus the target's LAN key.
     // The native message class is still applied by CombatPlay; this channel replaces only NetMap routing and the
     // unported generic cNetMsg table entry.
+    // 133lt2: types 0 and 3 also carry cBackpack_Pack 002539b0's contents (cNetBackpackMsg_Pack 00281b40 appends
+    // them after the ID for exactly those types); every other type carries none. At most kBackpackContentsMax
+    // bytes (three slots of five entries of four pairs).
+    static constexpr std::size_t kBackpackContentsMax = 7 + 3 * (3 + 5 * (2 + 4 * 3));
     struct BackpackMessage {
         std::uint16_t origin{};
         std::uint8_t type{}, owner{};
         std::uint32_t backpack{}, target{};
+        std::vector<std::uint8_t> contents;
     };
     void send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t backpack, std::uint32_t target,
-                       std::uint16_t recipient = kLanAll);
+                       std::uint16_t recipient = kLanAll, const std::vector<std::uint8_t>& contents = {});
     std::vector<BackpackMessage> take_backpacks();
 
     // The world's client-left callback (checkpoint 132ln5g): DME calls the world create parameters' +0x24
@@ -184,6 +189,7 @@ private:
     void control(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes);
     void game_message(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes);
     void sync_callback(LevelLoadMemory& memory, std::uint32_t status);
+    void free_client_record(LevelLoadMemory& m, std::uint16_t client);  // 133lt3: NetClientLeaves' tail
     void joined(LevelLoadMemory& memory, std::uint16_t client);
     void client_left(LevelLoadMemory& memory, std::uint16_t client);
     void newly_joined(LevelLoadMemory& memory, std::uint16_t client);

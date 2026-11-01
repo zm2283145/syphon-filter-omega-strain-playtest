@@ -7503,7 +7503,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(!r.figure)throw std::runtime_error("LAN: the remote human's record has no AI actor");
             actors.set_agent_slot(static_cast<int>(lan_remotes.size()+1),r.figure->actor);
             set_npc_team(r.figure->ai->component(),0);
-            port_set_perception_ignored(actors.actor(r.figure->actor),true);
+            // 133lt2 (review2 F3): no longer ignored by the enemy perception: 0016e1a0 reaches it through the
+            // multiplayer player slots (003fb8d0) as the original's cNetPlayer agent.
             r.figure->ai->port_remote_controlled(true);
             actors.actor(r.figure->actor).set_byte_14(0);   // 132ln5h14c: another console's human (+14 clear)
             lan_remotes.push_back(r);
@@ -9364,16 +9365,32 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     cc.net_actor=[&](std::uint32_t key)->std::optional<std::size_t>{
                         if(key==lan_net->local_player_key())return 0;
                         for(const auto& r:lan_remotes)if(r.key==key&&r.figure)return r.figure->actor;
+                        // 133lt2: the inverse of net_actor_key: authored (stable object ID) and generator-spawned NPC
+                        // keys too, so a cNetBackpackMsg type 0 dropped by another console's NPC finds its actor here.
+                        for(const auto& [a,figure]:lan_named_npcs)if(static_cast<std::uint32_t>(npcs.at(figure).actor_id)==key)return a;
+                        for(const auto& [a,s]:spawned_npcs)if(s.c==key)return static_cast<std::size_t>(a);
                         for(std::size_t a=0;a<combat_ids.size();++a)
                             if(static_cast<std::uint32_t>(combat_ids[a])==key)return a;
                         return std::nullopt;};
+                    // 133lt2 (review2 F3): 003fb8d0's four player slots by client index for the enemy perception.
+                    cc.net_player_slots=[&]{
+                        std::array<std::optional<std::size_t>,4> slots{};
+                        const auto local=static_cast<std::size_t>(lan_net->local_client_index());
+                        if(local<slots.size())slots[local]=std::size_t{0};   // cc.player
+                        for(const auto& r:lan_remotes)
+                            if(!r.gone&&r.figure&&r.peer<slots.size()&&!actors.destroyed(r.figure->actor))slots[r.peer]=r.figure->actor;
+                        return slots;};
                     cc.net_kill_statistics=[&](std::uint32_t victim,std::uint32_t killer,std::uint8_t type,std::uint8_t category){
-                        lan_net->send_kill_statistics(victim,killer,type,category);};
+                        lan_net->send_kill_statistics(victim,killer,type,category);
+                        std::cout<<"LAN (A8): 00186f30 sent cNetUpdateStatsMsg for victim +c 0x"<<std::hex<<victim<<" to killer 0x"
+                                 <<killer<<std::dec<<" (type "<<int(type)<<", category "<<int(category)<<"); no local credit\n";};
                     cc.net_backpack_bind=[&](std::uint32_t id,std::uint32_t owner,std::uint32_t address){
                         lan_net->bind_backpack(id,static_cast<std::uint16_t>(owner),address);};
                     cc.net_backpack_send=[&](std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
-                                             std::uint16_t recipient){
-                        lan_net->send_backpack(type,owner,id,target,recipient);};
+                                             std::uint16_t recipient,const std::vector<std::uint8_t>& contents){
+                        lan_net->send_backpack(type,owner,id,target,recipient,contents);
+                        std::cout<<"LAN (133lt2): cNetBackpackMsg type "<<int(type)<<" owner "<<int(owner)<<" backpack 0x"
+                                 <<std::hex<<id<<std::dec<<" sent with "<<contents.size()<<" packed content bytes\n";};
                 }
                 const auto record_of=[&roster](std::size_t record)->const NpcRosterEntry&{
                     for(const auto& e:roster)if(e.record==record)return e;
@@ -12446,8 +12463,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
             if(stealth)stealth->reset_actor(at.actor);
             set_npc_team(at.ai->component(),0);
-            port_set_perception_ignored(actors.actor(at.actor),true);
-            at.ai->port_remote_controlled(true);
+            at.ai->port_remote_controlled(true);   // 133lt2: perceived through the player slots (review2 F3)
             actors.actor(at.actor).set_byte_14(0);   // 132ln5h14c: another console's human (+14 clear)
             if(script_npcs_host)script_npcs_host->replace_controller(at.actor_id,*at.ai);
             npc_figures_added=true;
@@ -12686,10 +12702,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const auto lan_backpacks=[&](unsigned frame){
             if(!combat_session)return;
             for(const auto& m:lan_net->take_remote_backpacks()){
-                combat_session->receive_backpack_network(m.type,m.owner,m.backpack,m.target);
+                combat_session->receive_backpack_network(m.type,m.owner,m.backpack,m.target,m.contents);
                 std::cout<<"LAN (132fx5): cNetBackpackMsg type "<<int(m.type)<<" owner "<<int(m.owner)
                          <<" backpack 0x"<<std::hex<<m.backpack<<" target 0x"<<m.target<<std::dec
-                         <<" from client "<<m.origin<<" at frame "<<frame<<"\n";
+                         <<" from client "<<m.origin<<" ("<<m.contents.size()<<" packed content bytes) at frame "<<frame<<"\n";
             }
         };
         // Checkpoint 132ln5h14b / 132ln5h15 (research/NET_INLEVEL.md 4.25):
@@ -12883,8 +12899,34 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         };
         // The DamageMsgs the other consoles sent: their receive 004081e0 ran the damage virtual +100 of the object of
         // the key (source, category, type, 0, 1, 0, amount): quiet, no penetration, no hit point.
+        // 133lt2 (diagnostics for the two-process NPC acceptance): each 002d4640 remote death cleanup, and the first
+        // frame an NPC this console owns has another console's agent as its perception target (review2 F3).
+        std::map<std::size_t,std::uint32_t> lan_cleanups_seen;
+        std::set<std::size_t> lan_remote_targets_seen;
+        const auto lan_npc_diagnostics=[&](unsigned frame){
+            for(auto& f:npcs){
+                if(!f.ai||actors.destroyed(f.actor))continue;
+                bool agent=false;
+                for(const auto& r:lan_remotes)if(r.figure==&f)agent=true;
+                if(agent)continue;
+                const auto n=f.ai->remote_death_cleanups();
+                if(n!=lan_cleanups_seen[f.actor]){
+                    lan_cleanups_seen[f.actor]=n;
+                    std::cout<<"LAN (A8): 002d4640 remote death cleanup on actor "<<f.actor<<" (count "<<n<<") at frame "<<frame<<"\n";
+                }
+                if(f.ai->is_remote()||lan_remote_targets_seen.count(f.actor))continue;
+                const auto target=f.ai->perception().target_40;
+                for(const auto& r:lan_remotes)
+                    if(!r.gone&&r.figure&&target&&actors.actor(r.figure->actor).handle()==target){
+                        lan_remote_targets_seen.insert(f.actor);
+                        std::cout<<"LAN (133lt2): NPC actor "<<f.actor<<" (owned here) targets client "<<r.peer
+                                 <<"'s agent (actor "<<r.figure->actor<<", 0016e1a0 player slots) at frame "<<frame<<"\n";
+                    }
+            }
+        };
         const auto lan_damages=[&](unsigned frame){
             lan_network_actors(frame);
+            lan_npc_diagnostics(frame);
             for(const auto a:lan_deaths_queued)if(!actors.destroyed(a))
                 std::cout<<"LAN (132ln5h14c): the received death action delivered to actor "<<a<<" (001a92a0 -> 0018a950): life state "
                     <<int(actors.actor(a).life_state())<<" at frame "<<frame<<"\n";

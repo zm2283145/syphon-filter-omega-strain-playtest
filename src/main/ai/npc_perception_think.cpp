@@ -281,6 +281,17 @@ std::uint64_t npc_perception_next_candidate(const NpcPerception& p,const NpcAiCo
         // starts at the first entry either way.)
         for(std::size_t k=0;k<list.size();++k)
             if(npc_resolve_handle(h,list[k].first,list[k].second)==previous){start=k+1;break;}
+    }else if(previous!=0&&h.multiplayer&&need(h,previous).controller==NpcSenseObject::Controller::player){
+        // 133lt2, ai_26.c:216-229: the previous object is a player (its controller's IsPlayer; cNetPlayer
+        // 002d7c70 answers 1): the first later slot (003fb8d0) this NPC's component counts an enemy is the next
+        // candidate, ahead of the think list. No flags_21 test here.
+        const auto previous_id=need(h,previous).id;
+        bool passed=false;
+        for(const auto slot:h.player_slots){
+            if(slot==0)continue;
+            if(need(h,slot).id==previous_id)passed=true;
+            else if(passed&&!npc_perception_ignores(h,slot)&&npc_is_enemy(c,h,slot))return slot;   // port-only: ignored skip
+        }
     }
     const auto candidate=[&](std::size_t k)->std::uint64_t{
         const auto o=npc_resolve_handle(h,list[k].first,list[k].second);
@@ -292,8 +303,15 @@ std::uint64_t npc_perception_next_candidate(const NpcPerception& p,const NpcAiCo
         return (!r||r->dead_notice_3b==0)?o:0;
     };
     for(std::size_t k=start;k<list.size();++k)if(const auto o=candidate(k))return o;
-    const auto player=h.local_player;                                        // single player: *004ffc0c +30
-    if(player!=0&&!npc_perception_ignores(h,player)&&(npc_is_enemy(c,h,player)||(p.flags_21&1U)!=0))return player;   // port-only: skip an ignored player
+    if(h.multiplayer){
+        // 133lt2, ai_26.c:289-305: the first of the four player slots (003fb8d0) that is an enemy or, with
+        // flags_21 bit 0, any player.
+        for(const auto slot:h.player_slots)
+            if(slot!=0&&!npc_perception_ignores(h,slot)&&(npc_is_enemy(c,h,slot)||(p.flags_21&1U)!=0))return slot;   // port-only: ignored skip
+    }else{
+        const auto player=h.local_player;                                    // single player: *004ffc0c +30
+        if(player!=0&&!npc_perception_ignores(h,player)&&(npc_is_enemy(c,h,player)||(p.flags_21&1U)!=0))return player;   // port-only: skip an ignored player
+    }
     for(std::size_t k=0;k<list.size();++k)if(const auto o=candidate(k))return o;
     return previous;
 }

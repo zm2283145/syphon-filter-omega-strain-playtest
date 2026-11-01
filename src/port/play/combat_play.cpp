@@ -360,7 +360,8 @@ struct CombatPlaySession::Impl {
             case K::inventory_send:
                 if(!config.net_backpack_send)fail("003c9420: the LAN backpack message bridge is not supplied");
                 config.net_backpack_send(static_cast<std::uint8_t>(e.a),static_cast<std::uint8_t>(e.c),
-                    backpack_at(e.b).object.word(0xc),backpack_at(e.d).object.word(0xc),0xffff);
+                    backpack_at(e.b).object.word(0xc),backpack_at(e.d).object.word(0xc),0xffff,
+                    e.a==0||e.a==3?packed_contents(backpack_at(e.b)):std::vector<std::uint8_t>{});
                 break;
             default:break;
             }
@@ -395,7 +396,7 @@ struct CombatPlaySession::Impl {
             case K::destroy:destroy_backpack(b);break;
             case K::pickup_request:
                 if(!config.net_backpack_send)fail("003fb020: the LAN backpack message bridge is not supplied");
-                config.net_backpack_send(2,static_cast<std::uint8_t>(e.b),e.a,e.a,static_cast<std::uint16_t>(e.c));
+                config.net_backpack_send(2,static_cast<std::uint8_t>(e.b),e.a,e.a,static_cast<std::uint16_t>(e.c),{});
                 break;
             default:break;
             }
@@ -423,24 +424,55 @@ struct CombatPlaySession::Impl {
         backpack_object_construct(c,d,backpack_list,object_host(),b.object_events,db);
         if(keep_owner)owner_cleared_3464[a]=false;
         apply_object_events(b,0);
-        // The death path 001a3520 sends cNetBackpackMsg type 0 after
-        // 00257640. D-pad Down calls 00257640 directly and has no such send.
-        if(keep_owner&&config.net_backpack_send){
-            if(!config.net_local_index||!config.net_actor_key)fail("001a3520: the LAN backpack identity bridge is not supplied");
-            config.net_backpack_send(0,static_cast<std::uint8_t>(config.net_local_index()),b.object.word(0xc),
-                config.net_actor_key(a),0xffff);
-        }
+        // The death path 001a3520 sends cNetBackpackMsg type 0 only after cWeapon_InitBackpack and the flak jacket
+        // (send_dead_drop_backpack, 133lt2: the message packs the contents). D-pad Down calls 00257640 directly and
+        // has no such send.
         frame.backpacks.push_back(n);
         return b.handle;
     }
-    void receive_backpack(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target){
+    // 133lt2: another console's player (a cNetPlayer agent, 003fb8d0's slot of its client): its controller's
+    // IsPlayer (002d7c70) answers 1 and it is not on the AI think list.
+    bool net_player(std::size_t a) const{
+        if(!config.net_player_slots||a==config.player)return false;
+        for(const auto& s:config.net_player_slots())if(s&&*s==a)return true;
+        return false;
+    }
+    // 133lt2: cBackpack_Pack 002539b0 of a backpack (cNetBackpackMsg_Pack 00281b40's types 0 and 3).
+    std::vector<std::uint8_t> packed_contents(CombatBackpack& b){
+        std::vector<WeaponBackpackEvent> unused;
+        const auto host=weapon_host(b.address);
+        return WeaponBackpackOps(b.object,db,host,unused).pack();
+    }
+    // 001a3520's multiplayer tail (human_82.c): after 00257640, cWeapon_InitBackpack and 00255a50, *00494178 (the
+    // local index) and cNetBackpackMsg {+20 4, +24 type 0, +28 the backpack, +2c the index} queued to the actor
+    // (003c9420(msg, actor, 0)): to every other console, with the contents packed.
+    void send_dead_drop_backpack(std::size_t a,std::uint64_t handle){
+        if(!config.net_backpack_send)return;
+        if(!config.net_local_index||!config.net_actor_key)fail("001a3520: the LAN backpack identity bridge is not supplied");
+        auto& b=backpack(handle);
+        config.net_backpack_send(0,static_cast<std::uint8_t>(config.net_local_index()),b.object.word(0xc),
+            config.net_actor_key(a),0xffff,packed_contents(b));
+    }
+    void receive_backpack(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
+                          const std::vector<std::uint8_t>& contents){
+        // 00281680 cBackpack_Unpack for types 0 and 3 (133lt2): the sender's contents replace the local ones.
+        const auto unpack=[&](CombatBackpack& b){
+            if(contents.empty())fail("00281680: a cNetBackpackMsg type "+std::to_string(type)+" without its packed contents");
+            const auto from=b.events.size();
+            const auto host=weapon_host(b.address);
+            if(WeaponBackpackOps(b.object,db,host,b.events).unpack(contents.data(),contents.size())!=contents.size())
+                fail("00281680: trailing bytes after the packed backpack contents");
+            apply_weapon_events(b,from);
+        };
         auto find_bp=[&]()->CombatBackpack*{
             for(auto& b:backpacks)if(!b.deleted&&b.object.word(0xc)==id)return &b;
             return nullptr;
         };
         auto* bp=find_bp();
         if(type==0){
-            if(bp){bp->object.set_word(0x308,owner);return;}
+            // PORT-ONLY: a backpack this console already holds under the ID is updated in place (the original
+            // allocates a second object under the same ID; nGobjManager's duplicate handling is not established).
+            if(bp){bp->object.set_word(0x308,owner);unpack(*bp);return;}
             if(!config.net_actor||!config.backpack_world)fail("00281680: the remote backpack constructor is not hosted");
             const auto actor=config.net_actor(target);
             if(!actor)fail("00281680: a cNetBackpackMsg target is not an actor of the session");
@@ -454,8 +486,10 @@ struct CombatPlaySession::Impl {
             c.clock_4f7f70=backpack_clock;c.network_id=id;c.network_owner=owner;
             if(config.backpack_world->register_remote_id)config.backpack_world->register_remote_id(id);
             backpack_object_construct(c,drop_actor(*actor),backpack_list,object_host(),b.object_events,db);
-            owner_cleared_3464[*actor]=false;
             apply_object_events(b,0);
+            auto& made=backpacks[n];
+            unpack(made);
+            if(made.object.byte(0x2f1)==0)owner_cleared_3464[*actor]=false;   // if (t && !+2f1) t->+3464 = bp
             frame.backpacks.push_back(n);
             return;
         }
@@ -466,10 +500,11 @@ struct CombatPlaySession::Impl {
         if(type==2){
             if(bp->object.word(0x308)==local&&bp->object.byte(0x2f2)==0){
                 bp->object.set_word(0x308,owner);
-                config.net_backpack_send(4,owner,id,id,0xffff);
-                config.net_backpack_send(3,0xff,id,id,owner);
-            }else config.net_backpack_send(5,static_cast<std::uint8_t>(bp->object.word(0x308)),id,id,owner);
+                config.net_backpack_send(4,owner,id,id,0xffff,{});
+                config.net_backpack_send(3,0xff,id,id,owner,packed_contents(*bp));
+            }else config.net_backpack_send(5,static_cast<std::uint8_t>(bp->object.word(0x308)),id,id,owner,{});
         }else if(type==3){
+            unpack(*bp);                                        // 00281680: cBackpack_Unpack before the switch
             if(bp->object.word(0x308)!=local){
                 bp->object.set_word(0x308,local);
                 bp->object.set_byte(0x2f2,1);
@@ -477,7 +512,10 @@ struct CombatPlaySession::Impl {
             }
         }else if(type==4){
             if(owner!=local)bp->object.set_word(0x308,owner);
-        }else if(type==5)frame.notes.push_back("00281680: Backpack already in use");
+        }else if(type==5){
+            bp->object.set_word(0x308,owner);                  // p->obj->owner = p->owner
+            frame.notes.push_back("00281680: Backpack already in use");
+        }
     }
     // The actor's +3464: its last dropped backpack until a destroy 00254770
     // cleared the word (owner_cleared_3464).
@@ -687,7 +725,7 @@ struct CombatPlaySession::Impl {
             if(!s_.config.net_backpack_send||!s_.config.net_actor_key)
                 fail("002524a8: the LAN backpack message bridge is not supplied");
             s_.config.net_backpack_send(0,static_cast<std::uint8_t>(local),b_.object.word(0xc),
-                s_.config.net_actor_key(s_.config.player),0xffff);
+                s_.config.net_actor_key(s_.config.player),0xffff,bp_.pack());
         }
         std::uint32_t agent_unlock(std::uint32_t player,std::int32_t unlock) override{
             if(player!=player_token||unlock!=1)fail("00332f90: an unlock other than the local player's 1");
@@ -2677,7 +2715,9 @@ NpcCombatLink CombatPlaySession::npc_combat_link(std::size_t actor){
     link.killer=[self](std::uint64_t k)->std::optional<NpcKillerView>{
         const auto v=self->find_index(k);
         if(!v)return std::nullopt;
-        return NpcKillerView{self->world.actor(*v).player_controller(),self->world.actor(*v).byte_14()!=0};
+        // 133lt2: 00186f30 reads the killer's controller IsPlayer; another console's agent is a cNetPlayer
+        // (002d7c70 answers 1) with +14 clear, so its kill takes the remote-player cNetUpdateStatsMsg branch.
+        return NpcKillerView{self->world.actor(*v).player_controller()||self->net_player(*v),self->world.actor(*v).byte_14()!=0};
     };
     link.killer_hostile=[self,actor](std::uint64_t k){return self->enemy(k,self->world.actor(actor).handle());};
     link.remote_statistics=[self,actor](std::uint64_t victim,std::uint64_t killer,std::uint8_t type,std::uint8_t category){
@@ -2730,6 +2770,7 @@ NpcCombatLink CombatPlaySession::npc_combat_link(std::size_t actor){
     link.add_backpack_weapon=[self](std::uint64_t h,std::int32_t item,std::int32_t spare,std::int32_t clip){
         self->backpack(h).weapons.push_back({item,spare,clip});
         self->add_backpack_contents(h,[&](WeaponBackpackOps& ops){ops.add_weapon(item,spare,clip,0);});};
+    link.backpack_network_created=[self,actor](std::uint64_t h){self->send_dead_drop_backpack(actor,h);};
     link.add_backpack_armor=[self](std::uint64_t h,std::int32_t armor,std::int32_t max_armor){
         self->backpack(h).armor=std::array<std::int32_t,2>{armor,max_armor};
         self->add_backpack_contents(h,[&](WeaponBackpackOps& ops){ops.add_armor(armor,max_armor);});};
@@ -2905,7 +2946,7 @@ NpcPerceptionLink CombatPlaySession::npc_perception_link(CombatPerceptionWorld w
             v.kind_5b0=floor;v.kind_580=floor;
             if(!self->config.team)fail("teams are not supplied");
             v.team=self->config.team(*a);                                               // 003cc950: controller +68
-            if(s.player_controller()){
+            if(s.player_controller()||self->net_player(*a)){
                 v.controller=NpcSenseObject::Controller::player;
                 const auto& aim=self->combat->aim(*a);                                  // 003ea550
                 if(aim.target_28){
@@ -2939,7 +2980,7 @@ NpcPerceptionLink CombatPlaySession::npc_perception_link(CombatPerceptionWorld w
                 const NpcAiController* c=self->world.actor(a).player_controller()?nullptr:world->controller(a);
                 if(c&&&c->component()==k.component){
                     found=true;
-                    if(observer_ignored||port_perception_ignores(self->world.actor(a)))continue;
+                    if(observer_ignored||port_perception_ignores(self->world.actor(a))||self->net_player(a))continue;
                     h.think_list.push_back({self->world.actor(a).handle(),self->config.object_ids[a]});
                 }
             }
@@ -2949,7 +2990,13 @@ NpcPerceptionLink CombatPlaySession::npc_perception_link(CombatPerceptionWorld w
         h.port_ignored=[self](std::uint64_t o){                                   // port-only (port_cheats.hpp)
             const auto a=self->find_index(o);
             return a&&port_perception_ignores(self->world.actor(*a));};
-        h.player_slots={h.local_player,0,0,0};                                         // 003fb8d0: slot 0 only in single player
+        if(self->config.net_player_slots){
+            // 133lt2: 003fb8d0(0..3) in a network game: client i's player (the local one or a remote agent).
+            h.multiplayer=true;
+            const auto slots=self->config.net_player_slots();
+            for(std::size_t i=0;i<slots.size();++i)
+                h.player_slots[i]=slots[i]?self->world.actor(*slots[i]).handle():0;
+        }else h.player_slots={h.local_player,0,0,0};                                   // 003fb8d0: slot 0 only in single player
         h.visibility=query.get();
         h.player_region=world->player_region;h.region_at=world->region_at;
         return h;
@@ -3111,7 +3158,7 @@ std::vector<NpcDeathNoticeEvent> CombatPlaySession::apply_remote_kill_statistics
     h.killer=[&s](std::uint64_t killer)->std::optional<NpcKillerView>{
         const auto k=s.find_index(killer);
         if(!k)return std::nullopt;
-        return NpcKillerView{s.world.actor(*k).player_controller(),s.world.actor(*k).byte_14()!=0};
+        return NpcKillerView{s.world.actor(*k).player_controller()||s.net_player(*k),s.world.actor(*k).byte_14()!=0};
     };
     h.killer_hostile=[&s,victim](std::uint64_t killer){
         return s.enemy(killer,s.world.actor(victim).handle());
@@ -3146,8 +3193,9 @@ void CombatPlaySession::carry_backpack(std::uint32_t address,bool message,const 
     backpack_object_move_a8(b.object,b.transform,{matrix[12],matrix[13],matrix[14],matrix[15]},impl_->object_host(),b.object_events);
     impl_->apply_object_events(b,from);
 }
-void CombatPlaySession::receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target){
-    impl_->receive_backpack(type,owner,id,target);
+void CombatPlaySession::receive_backpack_network(std::uint8_t type,std::uint8_t owner,std::uint32_t id,std::uint32_t target,
+                                                 const std::vector<std::uint8_t>& contents){
+    impl_->receive_backpack(type,owner,id,target,contents);
 }
 bool CombatPlaySession::reset_level_statistics(){
     if(!impl_->config.agent_statistics)return false;

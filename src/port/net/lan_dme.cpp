@@ -62,10 +62,15 @@ void LanDme::send_control(std::uint16_t to, std::uint8_t kind, std::initializer_
 }
 
 void LanDme::send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t backpack, std::uint32_t target,
-                           std::uint16_t recipient) {
+                           std::uint16_t recipient, const std::vector<std::uint8_t>& contents) {
+    const bool packed = type == 0 || type == 3;   // 00281b40: cBackpack_Pack only for types 0 and 3
+    if (packed != !contents.empty() || contents.size() > kBackpackContentsMax)
+        throw std::runtime_error("LanDme: backpack type " + std::to_string(type) + " with " +
+                                 std::to_string(contents.size()) + " content bytes (00281b40 packs types 0 and 3 only)");
     std::vector<std::uint8_t> frame{kChannelBackpack, static_cast<std::uint8_t>(local_index_), type, owner};
     for (const auto word : {backpack, target})
         for (int b = 0; b < 4; ++b) frame.push_back(static_cast<std::uint8_t>(word >> (8 * b)));
+    frame.insert(frame.end(), contents.begin(), contents.end());
     if (transport_.send(recipient, frame, kLanReliableOrdered) != LanSendResult::Sent)
         throw std::runtime_error("LanDme: a backpack frame could not be sent");
 }
@@ -263,11 +268,43 @@ void LanDme::joined(LevelLoadMemory& memory, std::uint16_t client) {
 void LanDme::client_left(LevelLoadMemory& memory, std::uint16_t client) {
     joined_[client] = false;
     info_pending_[client] = false;
-    if (!left_cb_) return;
-    ++left_calls_;
-    memory.write(scratch_ + 0x20, 4, 0);
-    memory.write(scratch_ + 0x24, 4, client);
-    invoke_(memory, left_cb_, scratch_ + 0x20);
+    // 133lt3: NetClientLeaves 002db8e8 (matched medius_2DB8E8.c): the member's +0x14 = 2 first.
+    state_[client] = 2;
+    if (left_cb_) {
+        ++left_calls_;
+        memory.write(scratch_ + 0x20, 4, 0);
+        memory.write(scratch_ + 0x24, 4, client);
+        invoke_(memory, left_cb_, scratch_ + 0x20);
+    }
+    free_client_record(memory, client);
+}
+
+// 133lt3: NetClientLeaves 002db8e8's tail after its callback: the client's reserved handles (status 1) back to free,
+// its second-space data streams cleared (a stream in use with a buffer: DmeFree of +0x10), then NetFreeClient
+// 002db320 (DmeFree of the table slot: the record released and the slot 0). Without it the record outlived the
+// departure and 002e8c50 refused a rejoiner in the same slot ("the host has the record already"): no START_GO.
+// The handle-object loop (NetFreeRemoteObject / RemoteObjectUpdate of the leaver's DME objects) stays with the
+// existing client-left callback path (00429920 -> 001b2e90 and the object field flush 002e31d0).
+void LanDme::free_client_record(LevelLoadMemory& m, std::uint16_t client) {
+    const auto rec = record(m, client);
+    if (!rec) return;
+    constexpr std::uint32_t kStatus = 0x58c178;
+    const auto base = m.read(rec + 6, 2), count = m.read(rec + 8, 2);
+    for (std::uint32_t i = base; i < base + count; ++i)
+        if (m.read(kStatus + i, 1) == 1) m.write(kStatus + i, 1, 0);
+    const auto first = m.read(rec + 0xa, 2), streams = m.read(rec + 0xc, 2);
+    if (first < 0x800) {
+        const auto out = scratch_ + 0x60;
+        for (std::uint32_t i = 0; i < streams; ++i) {
+            if (library_(m, 0x2dd9f8, {i + first, out})) continue;
+            const auto b = m.read(out);
+            if (!b) continue;
+            if (m.read(b, 1) == 2 && m.read(b + 2, 1) != 0) library_(m, 0x2dd328, {b + 0x10});
+            m.write(b, 1, 0);
+        }
+    }
+    const auto table = m.read(0x51f0d0);
+    if (table && client < 0x100) library_(m, 0x2dd328, {table + 4u * client});
 }
 
 void LanDme::control(LevelLoadMemory& memory, std::uint16_t origin, const std::vector<std::uint8_t>& bytes) {
@@ -442,12 +479,15 @@ std::uint32_t LanDme::update(LevelLoadMemory& memory) {
         if (bytes[0] == kChannelGame) game_message(memory, origin, bytes);
         else if (bytes[0] == kChannelControl) control(memory, origin, bytes);
         else {
-            if (bytes.size() != 12 || bytes[1] != origin)
+            const bool packed = bytes.size() >= 3 && (bytes[2] == 0 || bytes[2] == 3);
+            if (bytes.size() < 12 || bytes[1] != origin || (packed ? bytes.size() == 12 : bytes.size() != 12) ||
+                bytes.size() > 12 + kBackpackContentsMax)
                 throw std::runtime_error("LanDme: a malformed backpack frame from client " + std::to_string(origin));
             const auto word = [&](std::size_t at) {
                 return static_cast<std::uint32_t>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24);
             };
-            backpacks_.push_back({origin, bytes[2], bytes[3], word(4), word(8)});
+            backpacks_.push_back({origin, bytes[2], bytes[3], word(4), word(8),
+                                  std::vector<std::uint8_t>(bytes.begin() + 12, bytes.end())});
         }
     }
     for (const auto client : left) client_left(memory, client);

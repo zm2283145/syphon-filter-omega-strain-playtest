@@ -259,8 +259,8 @@ void LanNetCore::bind_backpack(std::uint32_t id, std::uint16_t owner, std::uint3
 }
 
 void LanNetCore::send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
-                               std::uint16_t recipient) {
-    dme_->send_backpack(type, owner, id, target, recipient);
+                               std::uint16_t recipient, const std::vector<std::uint8_t>& contents) {
+    dme_->send_backpack(type, owner, id, target, recipient, contents);
 }
 
 void LanNetCore::require_objective_main_thread() const {

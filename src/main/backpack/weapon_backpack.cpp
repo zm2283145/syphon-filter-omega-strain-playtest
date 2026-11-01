@@ -72,6 +72,77 @@ void WeaponBackpackOps::ensure_box(){
     event({WeaponBackpackEvent::Kind::box_word,box,0x94,bp_.word(0xc)});
 }
 
+std::vector<std::uint8_t> WeaponBackpackOps::pack() const{
+    std::vector<std::uint8_t> out;
+    const auto w8=[&](std::uint32_t v){out.push_back(static_cast<std::uint8_t>(v));};
+    const auto w16=[&](std::uint32_t v){w8(v);w8(v>>8);};
+    const std::int32_t count=bp_.value(0x2e0);
+    if(count>3)fail("002539b0 packs more than the three slots");
+    w8(bp_.word(0x2e0));w8(bp_.word(0x2e4));w16(bp_.word(0x2e8));w16(bp_.word(0x2ec));w8(bp_.byte(0x2f1));
+    for(std::int32_t i=0;i<count;++i){
+        const std::size_t s=WeaponBackpack::slot(static_cast<std::size_t>(i));
+        const std::int32_t entries=bp_.value(s+0xcc);
+        if(entries>5)fail("002539b0 packs more than a slot's five entries");
+        w8(bp_.byte(s));w8(bp_.word(s+0xcc));w8(bp_.byte(s+0xd0));
+        for(std::int32_t j=0;j<entries;++j){
+            const std::size_t e=WeaponBackpack::entry(static_cast<std::size_t>(i),j);
+            const std::int32_t pairs=bp_.value(e+0x24);
+            if(pairs>4)fail("002539b0 packs more than an entry's four pairs");
+            w8(bp_.word(e+0x20));w8(bp_.word(e+0x24));
+            for(std::int32_t k=0;k<pairs;++k){
+                w16(bp_.word(e+4*static_cast<std::size_t>(k)));
+                w8(bp_.word(e+0x10+4*static_cast<std::size_t>(k)));
+            }
+        }
+    }
+    return out;
+}
+
+std::size_t WeaponBackpackOps::unpack(const std::uint8_t* data,std::size_t size){
+    // A first pass checks the whole stream against the arrays before the object is written.
+    std::size_t at=0;
+    const auto need=[&](std::size_t n){if(size-at<n||at>size)fail("002536d0: the backpack stream ends inside its contents");};
+    const auto s8=[&]{need(1);return static_cast<std::int32_t>(static_cast<std::int8_t>(data[at++]));};
+    const auto u8=[&]{need(1);return static_cast<std::int32_t>(data[at++]);};
+    const auto s16=[&]{need(2);const auto v=static_cast<std::int16_t>(data[at]|data[at+1]<<8);at+=2;return static_cast<std::int32_t>(v);};
+    for(int pass=0;pass<2;++pass){
+        const bool write=pass==1;
+        at=0;
+        const std::int32_t count=s8();
+        if(count>3)fail("002536d0: a backpack stream with more than three slots");
+        const std::int32_t armor_count=s8(),armor=s16(),max_armor=s16();
+        const std::uint8_t flag=s8()!=0?1:0;
+        if(write){
+            bp_.set_word(0x2e0,static_cast<std::uint32_t>(count));bp_.set_word(0x2e4,static_cast<std::uint32_t>(armor_count));
+            bp_.set_word(0x2e8,static_cast<std::uint32_t>(armor));bp_.set_word(0x2ec,static_cast<std::uint32_t>(max_armor));
+            bp_.set_byte(0x2f1,flag);
+        }
+        for(std::int32_t i=0;i<count;++i){
+            const std::size_t s=WeaponBackpack::slot(static_cast<std::size_t>(i));
+            const std::int32_t id=s8(),entries=s8();
+            const std::uint8_t entry_flag=s8()!=0?1:0;
+            if(entries>5)fail("002536d0: a backpack stream slot with more than five entries");
+            if(write){bp_.set_byte(s,static_cast<std::uint8_t>(id));bp_.set_word(s+0xcc,static_cast<std::uint32_t>(entries));bp_.set_byte(s+0xd0,entry_flag);}
+            for(std::int32_t j=0;j<entries;++j){
+                const std::size_t e=WeaponBackpack::entry(static_cast<std::size_t>(i),j);
+                const std::int32_t item=u8(),pairs=s8();
+                if(pairs>4)fail("002536d0: a backpack stream entry with more than four pairs");
+                if(write){bp_.set_word(e+0x20,static_cast<std::uint32_t>(item));bp_.set_word(e+0x24,static_cast<std::uint32_t>(pairs));}
+                for(std::int32_t k=0;k<pairs;++k){
+                    const std::int32_t spare=s16(),clip=u8();
+                    if(write){
+                        bp_.set_word(e+4*static_cast<std::size_t>(k),static_cast<std::uint32_t>(spare));
+                        bp_.set_word(e+0x10+4*static_cast<std::size_t>(k),static_cast<std::uint32_t>(clip));
+                    }
+                }
+            }
+        }
+    }
+    ensure_box();       // 002536d0's +2fc test: vtable +5c(1), 0040c9d0, then 00170e20 and box +94 = +c
+    box_priority();     // 00255f60
+    return at;
+}
+
 void WeaponBackpackOps::add_armor(std::int32_t armor,std::int32_t max_armor){
     if(armor==0)return;
     const std::int32_t n=bp_.value(0x2e4);
@@ -291,7 +362,8 @@ void WeaponBackpackOps::pickup(WeaponBackpackActor& actor){
         event({WeaponBackpackEvent::Kind::position_c0,0,0,0,position});
         bool sounded=false;
         const auto sound=[&](std::uint32_t descriptor){
-            if(host_.multiplayer)fail("00254da0 sound send with 005721c8 set");
+            // 133lt2: matched cBackpack_AutoPickup (backpack_4.c) queues the PlaySndMsg (+20 = 1) to g_Game in
+            // every game: there is no 005721c8 branch, so a network game plays it locally as single player does.
             event({WeaponBackpackEvent::Kind::sound,descriptor,0,0,position});};
         for(const std::int32_t item:items){
             if(!take(item,true))continue;

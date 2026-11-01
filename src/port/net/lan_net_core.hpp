@@ -351,7 +351,7 @@ public:
     using RemoteBackpack = LanDme::BackpackMessage;
     void bind_backpack(std::uint32_t id, std::uint16_t owner, std::uint32_t address);
     void send_backpack(std::uint8_t type, std::uint8_t owner, std::uint32_t id, std::uint32_t target,
-                       std::uint16_t recipient = kLanAll);
+                       std::uint16_t recipient = kLanAll, const std::vector<std::uint8_t>& contents = {});
     std::vector<RemoteBackpack> take_remote_backpacks() { return dme_->take_backpacks(); }
     std::uint16_t local_client_index() const { return dme_->local_index(); }
     bool hosting() const { return transport_.is_host(); }

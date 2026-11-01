@@ -77,6 +77,9 @@ struct NpcCombatLink {
     std::function<std::uint64_t()> create_backpack;
     std::function<void(std::uint64_t backpack,std::int32_t item,std::int32_t spare,std::int32_t clip)> add_backpack_weapon;
     std::function<void(std::uint64_t backpack,std::int32_t armor,std::int32_t max_armor)> add_backpack_armor;
+    // 001a3520's multiplayer tail (133lt2): cNetBackpackMsg type 0 with the packed contents after the drop
+    // (unset: single player, 005721c8 clear).
+    std::function<void(std::uint64_t backpack)> backpack_network_created;
     // The destroy 00254770 of a backpack this actor owns writes the actor's
     // +3464 = 0: true once that happened to the given backpack (unset: never).
     std::function<bool(std::uint64_t backpack)> backpack_cleared_3464;
@@ -264,6 +267,8 @@ public:
     void set_remote(SoloActorSimulation& actor);
     void make_fresh_ai(SoloActorSimulation& actor);
     bool is_remote() const{return remote_.has_value();}
+    // 133lt2 (diagnostic): how many times the remote controller's death notice +7c (002d4640) ran.
+    std::uint32_t remote_death_cleanups() const{return remote_death_cleanups_;}
     // 132ln5h14c: +54 / +58 / +5c for the damage path: the remote NPC controller's 002d2a90 / 002d2aa0 / 002d2b20
     // answer 0 / 0 / 1; the LAN remote human's figure (PORT-ONLY stand-in for 0x004de530, whose +54 is 002d7c70) 1 / 0 / 0;
     // the AI's 0 / 1 / 0.
@@ -527,6 +532,7 @@ private:
     std::function<void()> generator_release();                               // NpcAiDeactivationHost::generator_release
     std::int32_t start_node_{-1};
     std::optional<NpcRemoteState> remote_;
+    std::uint32_t remote_death_cleanups_{};
     NpcRemoteLink remote_link_;
     NpcAiSystem& system_;
     const NpcNodeGraph& graph_;

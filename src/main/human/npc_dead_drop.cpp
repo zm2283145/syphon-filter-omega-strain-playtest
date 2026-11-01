@@ -31,6 +31,7 @@ std::optional<std::uint64_t> npc_dead_inventory_drop(WeaponInventoryOps& inv,con
             inv.remove(slot,false);                                          // 00142450(inv, slot, 0, 0, 0)
         }
     if(v.armor_33a0!=0)need(h.add_armor,"add_armor")(backpack,v.armor_33a0,v.max_armor_339c);   // 00255a50
+    if(h.network_send)h.network_send(backpack);                              // 001a3640..: 005721c8 set
     return backpack;
 }
 

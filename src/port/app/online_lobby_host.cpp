@@ -267,12 +267,14 @@ std::int32_t OnlineLobbyHost::policy(bool privacy, std::vector<std::string>& out
 
 std::optional<std::uint32_t> OnlineLobbyHost::level_fatal_state() {
     if (world_ == 0 || level_exit_reported_ || lobby_.client().connected()) return std::nullopt;
-    return static_cast<std::uint32_t>(state_);
+    // The level's lobby frame is session state 10 for the creator and the joiner alike (004536b0 runs 0044e330's
+    // PlayerReport only in state 10, and both send it); state_ tracks only the port's create/join steps.
+    return 10u;
 }
 
 void OnlineLobbyHost::leave(std::int32_t) {
-    // 002ca640: 00445850 when logged in (+264) and the session is not in state 10 (a game in progress).
-    if (lobby_.logged_in() && state_ != 10) lobby_.logout();
+    // 002ca640: 00445850 when logged in (+264) and the session is not in state 10 (a game in progress: world_ set).
+    if (lobby_.logged_in() && state_ != 10 && world_ == 0) lobby_.logout();
     lobby_.end();
     if (world_ != 0) {
         // 133lt3: the in-level lobby destroy (005723b8): SFOLobby_Reset drops the lobby's game record; the DME game

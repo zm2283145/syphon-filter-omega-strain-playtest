@@ -610,6 +610,7 @@ void NpcAiController::death_notice_7c(SoloActorSimulation& actor,const ActorDeat
         else ops.randomize_dropped_ammunition(combat_.random);
         perception_clear(perception_);
         if(combat_.inventory_changed)combat_.inventory_changed();
+        ++remote_death_cleanups_;
         return;
     }
     NpcDeathNoticeHost h;
@@ -717,6 +718,7 @@ void NpcAiController::dead_state_drop(SoloActorSimulation& actor){
     NpcDeadDropHost h;
     h.items_3528=combat_.items_3528;h.create_backpack=combat_.create_backpack;
     h.add_weapon=combat_.add_backpack_weapon;h.add_armor=combat_.add_backpack_armor;
+    h.network_send=combat_.backpack_network_created;
     if(const auto backpack=npc_dead_inventory_drop(ops,*combat_.database,v,h))backpack_3464_=*backpack;
     if(combat_.inventory_changed)combat_.inventory_changed();
     frame_.inventory_events.insert(frame_.inventory_events.end(),inventory_events.begin(),inventory_events.end());

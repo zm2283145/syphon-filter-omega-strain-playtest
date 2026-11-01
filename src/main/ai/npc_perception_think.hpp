@@ -99,6 +99,9 @@ struct NpcPerceptionHost {
     std::vector<std::pair<std::uint64_t,std::int32_t>> think_list;
     std::uint64_t local_player{};               // *004ffc0c +30
     std::array<std::uint64_t,4> player_slots{}; // 003fb8d0(0..3), 0 for an empty slot
+    // g_IsMultiplayer (005721c8): 0016e1a0 walks player_slots instead of local_player (133lt2, ai_26.c:216-229 and
+    // :289-305). In a network game slot i is client i's player (the local one or a remote cNetPlayer agent).
+    bool multiplayer{};
     NpcVisibilityQuery* visibility{};
     // 004ed9c0[team]: a player target's region (by 003cc950).
     std::function<std::int32_t(std::int32_t team)> player_region;
