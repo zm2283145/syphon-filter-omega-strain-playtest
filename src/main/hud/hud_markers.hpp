@@ -177,8 +177,10 @@ HudMapNodes hud_map_nodes(IeScreen& iamap);
 // 003e9550 (the map sprite's place, vtable 004e0360 +110): M = the object's
 // virtual +f4, R = 00140c50's rotation about (1, 0, 0) by -pi/2 (0xbfc90fdb),
 // P = M R (0013ea40, ni_matrix_product), the 3 x 3 entries scaled by
-// *00493980 (1.0, vmul), then 003e8040 copies P into the element's +30.
-std::array<float, 16> hud_map_sprite_matrix(const HudMatrix& f4);
+// *00493980 (`scale`, mul.s: .data 1.0, 1.25 once the map build 0026e070 ran
+// 003e9540, HudMapGlobals::sprite_scale_493980), then 003e8040 copies P into
+// the element's +30.
+std::array<float, 16> hud_map_sprite_matrix(const HudMatrix& f4, float scale);
 
 // The map sprites (+8 of each marker record, and the map's own +c player
 // arrow) on the IAMAP screen, 0x90 bytes (vtable 004e0360, 003e99b0): the
@@ -206,8 +208,9 @@ public:
     void close_player(IeScreen& screen);
     std::vector<std::size_t> step(const IeScreen& screen, const std::function<bool(std::int32_t)>& found);
     void release(IeScreen& screen, std::size_t sprite);
-    // The render pass's +58 on every registered sprite with +64: 003e9550.
-    void place(IeScreen& screen, const std::function<std::optional<HudMatrix>(std::int32_t)>& object_f4);
+    // The render pass's +58 on every registered sprite with +64: 003e9550, with `scale` = *00493980
+    // (HudMapGlobals::sprite_scale_493980).
+    void place(IeScreen& screen, const std::function<std::optional<HudMatrix>(std::int32_t)>& object_f4, float scale);
 
     const std::vector<HudBlip>& sprites() const { return sprites_; }
     std::optional<std::size_t> current(std::uint32_t serial) const;

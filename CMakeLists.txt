@@ -355,7 +355,7 @@ target_sources(omega_core PRIVATE src/port/platform/input_bindings.cpp src/port/
     src/port/platform/display_settings.cpp)
 # Checkpoint 132ln (port-only, research/LAN_PLAY.md §5.2 / §5.3): LAN discovery and transport groundwork,
 # not wired into the game. The socket wrapper needs Winsock2 on Windows.
-target_sources(omega_core PRIVATE src/port/net/lan_wire.cpp src/port/net/lan_socket.cpp src/port/net/lan_loopback.cpp
+target_sources(omega_core PRIVATE src/port/net/lan_wire.cpp src/port/net/lan_socket.cpp src/port/net/lan_loopback.cpp src/port/net/lan_impaired_socket.cpp
     src/port/net/lan_discovery.cpp src/port/net/lan_transport.cpp src/port/net/lan_migration.cpp
     src/port/net/lan_dme_commit.cpp src/port/net/lan_session.cpp
     src/port/net/lan_mod_gate.cpp)
@@ -375,7 +375,7 @@ endif()
 # Checkpoint 132on1 (port-only, research/ONLINE.md section 5): online play's server side (omega_server) and the
 # client transport. Standalone library (portable C++, no omega_core dependency) so the server can build alone.
 add_library(omega_online STATIC src/port/online/online_hash.cpp src/port/online/online_protocol.cpp
-    src/port/online/online_accounts.cpp src/port/online/online_server.cpp src/port/online/online_tcp.cpp
+    src/port/online/online_accounts.cpp src/port/online/online_server.cpp src/port/online/online_tcp.cpp src/port/online/online_rt.cpp
     src/port/online/online_client.cpp src/port/online/online_lobby.cpp src/port/online/online_mod_report.cpp
     src/port/online/online_stats.cpp src/port/online/online_files.cpp src/port/online/online_relay.cpp
     src/port/online/online_upnp.cpp src/port/online/online_portmap.cpp src/port/online/online_social.cpp)

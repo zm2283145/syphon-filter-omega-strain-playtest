@@ -204,11 +204,11 @@ HudMapNodes hud_map_nodes(IeScreen& iamap) {
     return n;
 }
 
-std::array<float, 16> hud_map_sprite_matrix(const HudMatrix& f4) {
+std::array<float, 16> hud_map_sprite_matrix(const HudMatrix& f4, float scale) {
     const auto r = ni_axis_angle(1.0F, 0.0F, 0.0F, std::bit_cast<float>(0xbfc90fdbU));  // 00140c50
     auto p = ni_matrix_product(f4, r);
     for (std::size_t i = 0; i < 3; ++i)
-        for (std::size_t j = 0; j < 3; ++j) p[i][j] = mul(p[i][j], 1.0F);  // *00493980
+        for (std::size_t j = 0; j < 3; ++j) p[i][j] = mul(p[i][j], scale);  // k = *00493980; m.r[i].xyz *= k (mul.s)
     std::array<float, 16> out{};
     for (std::size_t i = 0; i < 4; ++i)
         for (std::size_t j = 0; j < 4; ++j) out[4 * i + j] = p[i][j];       // 003e8040
@@ -310,12 +310,13 @@ void HudMapSprites::release(IeScreen& screen, std::size_t sprite) {
     b.released = true;
 }
 
-void HudMapSprites::place(IeScreen& screen, const std::function<std::optional<HudMatrix>(std::int32_t)>& object_f4) {
+void HudMapSprites::place(IeScreen& screen, const std::function<std::optional<HudMatrix>(std::int32_t)>& object_f4,
+                          float scale) {
     for (auto& b : sprites_) {
         if (!b.registered || !b.follow_64 || b.element_60 < 0) continue;
         const auto f4 = object_f4(b.marker_68);  // 0040c540(+68)
         if (!f4) continue;
-        screen.element_at(b.element_60).matrix = hud_map_sprite_matrix(*f4);
+        screen.element_at(b.element_60).matrix = hud_map_sprite_matrix(*f4, scale);
     }
 }
 

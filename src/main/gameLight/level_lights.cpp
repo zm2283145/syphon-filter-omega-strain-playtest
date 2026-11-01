@@ -315,6 +315,12 @@ LevelFog renderer_fog(float n,float f,float d0,float d1){                       
     fog.base=fdiv(add(add(a,b),fdiv(mul(sub(b,a),add(f,n)),sub(f,n))),2.0F);        // +0x180
     fog.scale=fdiv(mul(mul(f,n),sub(a,b)),sub(f,n));                                // +0x190
     require(std::isfinite(fog.base)&&std::isfinite(fog.scale),"fog terms not finite");
+    // 133pr1: 00133a3c..00133aa4, the GS / VU terms from the stored +0x180 / +0x190 and the same inputs.
+    const float dz=sub(f,n);                                                        // f6
+    fog.gs_1a0=add(8388608.0F,mul(16.0F,fog.base));                                 // +0x1a0
+    fog.gs_1a4=sub(fdiv(add(add(d0,d1),fdiv(mul(sub(d1,d0),add(f,n)),dz)),2.0F),1.0F);   // +0x1a4
+    fog.gs_1a8=fdiv(mul(mul(f,n),sub(d0,d1)),dz);                                   // +0x1a8
+    fog.gs_1ac=mul(16.0F,fog.scale);                                                // +0x1ac
     return fog;
 }
 LevelFog level_fog(const LevelLights& lights){
@@ -341,8 +347,70 @@ float blended_z_near(const LevelLights& lights){
 float frame_z_near(const LevelLights& lights){
     return lights.fog_180_written?lights.z_near_158:blended_z_near(lights);
 }
+namespace {
+// cvt.w.s (00133420's F2I): truncate toward zero, saturating at the int range (the EE's result for out-of-range).
+std::int32_t cvt_w_s(float f){
+    require(!std::isnan(f),"fog colour NaN (00133420 cvt.w.s)");
+    if(f>=2147483647.0F)return 2147483647;
+    if(f<=-2147483648.0F)return -2147483647-1;
+    return static_cast<std::int32_t>(f);
+}
+}
+LevelFogColour level_fog_colour(const LevelLights& lights){
+    require(lights.current_environment.has_value()&&*lights.current_environment<lights.environments.size(),
+        "no current environment for the fog colour");
+    const PopulationEnvironment& env=lights.environments[*lights.current_environment];
+    const auto& b=lights.environment_blend;
+    // 00133420 Color(): while blending Lerp(from, to, +1c) per channel (z, y, x in that order), else the current +0x70.
+    std::array<float,3> c{env.values[0],env.values[1],env.values[2]};
+    if(b.active_10)
+        for(std::size_t k=0;k<3;++k)c[k]=add(b.colour_from_40[k],mul(b.fraction_1c,sub(b.colour_to_4c[k],b.colour_from_40[k])));
+    LevelFogColour out;
+    for(std::size_t k=0;k<3;++k){
+        out.scaled[k]=mul(c[k],256.0F);                                             // 00538360..68
+        out.words[k]=cvt_w_s(out.scaled[k]);                                        // 00538350..58
+    }
+    out.scaled[3]=256.0F;                                                           // 0053836c
+    out.words[3]=0x80;                                                              // 0053835c
+    return out;
+}
+LevelFogColour frame_fog_colour(const LevelLights& lights){
+    return lights.fog_180_written?lights.fog_colour:level_fog_colour(lights);
+}
+std::array<std::uint8_t,3> fog_colour_register(const LevelFogColour& colour){
+    const std::int64_t v=static_cast<std::int64_t>(colour.words[0])|(static_cast<std::int64_t>(colour.words[1])<<8)|
+                         (static_cast<std::int64_t>(colour.words[2])<<16);   // 0037c350 (xlib_9.c), q->hi of 0x3d FOGCOL
+    return {static_cast<std::uint8_t>(v&0xff),static_cast<std::uint8_t>((v>>8)&0xff),static_cast<std::uint8_t>((v>>16)&0xff)};
+}
+namespace {
+// The renderer's +0x150..+0x15c as the head writes them (00133574..00133648): {d0, d1, n, f}.
+std::array<float,4> level_fog_inputs(const LevelLights& lights){
+    require(lights.current_environment.has_value()&&*lights.current_environment<lights.environments.size(),
+        "no current environment for the fog terms");
+    const PopulationEnvironment& env=lights.environments[*lights.current_environment];
+    const auto& b=lights.environment_blend;
+    const auto lerp=[](float from,float to,float t){return add(from,mul(t,sub(to,from)));};
+    if(!b.active_10)return {env.values[3],env.values[4],env.values[5],env.values[6]};
+    return {lerp(b.fog_near_from_30,b.fog_near_to_34,b.fraction_1c),lerp(b.fog_far_from_38,b.fog_far_to_3c,b.fraction_1c),
+            lerp(b.z_near_from_28,b.z_near_to_2c,b.fraction_1c),env.values[6]};
+}
+}
+std::optional<LevelFog> thermal_frame_fog(const LevelLights& lights){
+    const std::array<float,4> in=lights.fog_180_written?lights.fog_150:level_fog_inputs(lights);
+    try{return renderer_fog(mul(0.95F,in[3]),in[3],in[0],in[1]);}   // SetFogRange(thermalFogNear * ffar, ffar)
+    catch(const std::runtime_error&){return std::nullopt;}
+}
+LevelFogColour thermal_fog_colour(){
+    LevelFogColour c;
+    c.words={0,0,256,0x80};                                                         // SetFogColor(0, 0, 1.0): F2I(256 c)
+    c.scaled={0.0F,0.0F,256.0F,256.0F};
+    return c;
+}
 void update_level_fog(LevelLights& lights){
     lights.z_near_158=blended_z_near(lights);
+    lights.fog_150=level_fog_inputs(lights);
+    // 133pr1: 00133420 writes the fog colour first (00538350..6c), then the two XLib_UpdateFogParms calls.
+    lights.fog_colour=level_fog_colour(lights);
     lights.fog_180_written=true;
     // 00538370 / 00538380 are persistent renderer registers. A degenerate environment update does not make the
     // previous frame's valid terms unreadable: keep them until a later update produces replacements. TORONTO1's

@@ -594,12 +594,12 @@ A second announcement page.
 
 ## 10. PS2 clients
 
-A real PS2 (or PCSX2) cannot reach omega_server yet. It needs:
-- DNS pointed at this host;
-- DNAS handled;
-- an original-wire (SCE-RT) listener.
-
-ONLINE.md §8.3 lists the steps. When that layer exists, PS2 sessions will receive only the original message set (§8.1).
+133on1: `--original-port N` (config `original_port=`) opens the SCE-RT listener for original clients (ONLINE.md §8.4):
+unencrypted, so the disc needs the DISABLE_SECURITY patch, and DNAS is skipped by a patch too
+(`tools/pcsx2/SCUS-97264_D5605611.pnach`). The disc's INI names `syphonfilter-prod.pdonline.scea.com:10075`, so give
+10075 to `original_port`, move `port` elsewhere, point the PS2's DNS (or PCSX2's DEV9 hosts override) at this host
+and set `public_ip` to the address the PS2 reaches. `tools/run_pcsx2_original.ps1` prepares a local PCSX2 for it.
+Untested against the real client so far; open points are listed in ONLINE.md §8.4.
 
 ## 11. Test scripts and ports (132on2g)
 

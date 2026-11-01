@@ -100,7 +100,7 @@ void update_player_aim_entry(PlayerButtonState& s,const PlayerAimEntryInput& in,
     s.pending_top_40=top;
     if(in.previous_30==8&&in.selector_38!=8){                             // 0024aa08
         need(host.set_byte_2e00,"set_byte_2e00")(0);
-        if(in.multiplayer)throw std::runtime_error("Player aim entry: the multiplayer aim-view exit 00249460 is not hosted");
+        if(in.multiplayer)need(host.net_clear_point,"net_clear_point")();  // 0024aa2c: g_IsMultiplayer -> 00249460
     }
 }
 

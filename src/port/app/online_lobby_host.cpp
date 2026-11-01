@@ -265,9 +265,26 @@ std::int32_t OnlineLobbyHost::policy(bool privacy, std::vector<std::string>& out
     return ok ? 1 : 0;
 }
 
+std::optional<std::uint32_t> OnlineLobbyHost::level_fatal_state() {
+    if (world_ == 0 || level_exit_reported_ || lobby_.client().connected()) return std::nullopt;
+    return static_cast<std::uint32_t>(state_);
+}
+
 void OnlineLobbyHost::leave(std::int32_t) {
-    if (lobby_.logged_in()) lobby_.logout();  // 002ca640: 00445850 when logged in
+    // 002ca640: 00445850 when logged in (+264) and the session is not in state 10 (a game in progress).
+    if (lobby_.logged_in() && state_ != 10) lobby_.logout();
     lobby_.end();
+    if (world_ != 0) {
+        // 133lt3: the in-level lobby destroy (005723b8): SFOLobby_Reset drops the lobby's game record; the DME game
+        // itself goes on, and the level's release leaves its LAN session directly (no lobby game to leave).
+        log("online: the lobby was reset in game " + std::to_string(world_) + "; the game goes on without it");
+        world_ = 0;
+        joining_ = 0;
+        pending_ = Pending::None;
+        level_ = false;
+        level_exit_reported_ = false;
+        state_ = 0;
+    }
     if (relay_ && relay_->active) relay_->clear();  // 132on2e: the ticket died with the login
     contacts_open_ = contact_pending_ = false;
     clan_ = {};
@@ -1278,7 +1295,9 @@ std::int32_t OnlineLobbyHost::cell_invite(std::int32_t id) {
         error_ = 0x20;
         return 0;
     }
-    const auto st = lobby_.clan_invite(id);
+    // 0044ac10 sends the cell's name (session +e8c) as the invitation's message: the invitee's NETMESS row shows it
+    // as LOBBY_STR 45's "[$2]" (133on1, read from the disc's STRINGS.DAT).
+    const auto st = lobby_.clan_invite(id, clan_.name);
     if (!st) {
         error_ = 2;
         return 0;

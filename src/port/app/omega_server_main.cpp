@@ -47,6 +47,7 @@
 #include "online_client.hpp"
 #include "online_files.hpp"
 #include "online_mod_report.hpp"
+#include "online_rt.hpp"
 #include "online_server.hpp"
 #include "online_social.hpp"
 #include "online_tcp.hpp"
@@ -73,6 +74,8 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <span>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -197,7 +200,7 @@ int usage() {
                  "  omega_server [--config FILE] [--bind IP] [--port N] [--accounts FILE] [--policy FILE] [--log FILE]\n"
                  "               [--stats FILE] [--log-format text|json] [--no-console] [--run-seconds N]\n"
                  "               [--mod-policy gameplay|any|cosmetic|none] [--relay-port N|any] [--social FILE]\n"
-                 "               [--data-dir DIR] [--parent-pid N] [--service]\n"
+                 "               [--data-dir DIR] [--parent-pid N] [--service] [--original-port N|any]\n"
                  "  omega_server check [the server's options]   (validate the config and the stores, change nothing)\n"
                  "  omega_server admin HOST[:PORT] (--token TOKEN | --user NAME --password PASSWORD) COMMAND...\n"
                  "  omega_server demo HOST[:PORT]\n"
@@ -221,12 +224,17 @@ struct Settings {
     std::uint64_t backup_interval = 3600;
     std::uint64_t log_max_bytes = 10ull << 20;  // 132on2g: the log's rotation (0: never)
     int log_keep = 5;
+    // 133on1 (ONLINE.md §8.4): the TCP port for ORIGINAL clients (the retail disc's SCE-RT stream, online_rt.hpp);
+    // -1: off, 0: a free port. The disc's INI names MAS_PORT=10075, so a PS2 / PCSX2 deployment gives 10075 to this
+    // listener and moves the port framing (`port`) elsewhere.
+    int original_port = -1;
 };
 
 struct CommandLine {
     std::string config_path;
     int port_override = -1;  // 0: a system-picked port (the log's "listening on" line names it)
     int relay_port_override = -1;
+    int original_port_override = -2;  // 133on1: -2 none, -1 off, 0 any
     std::optional<std::string> bind, accounts, policy, log, stats, log_format, mod_policy, social;
 };
 
@@ -261,7 +269,13 @@ Settings load_settings(const CommandLine& cl, bool write_policy = true) {
             s.password_threads = std::clamp(std::atoi(it->second.c_str()), 0, 64);
         if (auto it = extra.find("log_max_bytes"); it != extra.end()) s.log_max_bytes = std::strtoull(it->second.c_str(), nullptr, 10);
         if (auto it = extra.find("log_keep"); it != extra.end()) s.log_keep = std::atoi(it->second.c_str());
+        if (auto it = extra.find("original_port"); it != extra.end()) {
+            const int p = std::atoi(it->second.c_str());
+            if (p < -1 || p > 65535) throw std::runtime_error("bad original_port " + it->second);
+            s.original_port = p;
+        }
     }
+    if (cl.original_port_override != -2) s.original_port = cl.original_port_override;
     if (cl.bind) s.bind_text = *cl.bind;
     if (cl.accounts) s.accounts_path = *cl.accounts;
     if (cl.policy) s.policy_path = *cl.policy;
@@ -346,6 +360,11 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
             // 132on2g: "any" opens the relay on a system-picked UDP port (the log's "relay: UDP port" line names it)
             if (v == "any") relay_any = true;
             else cl.relay_port_override = std::atoi(v.c_str());
+        }
+        else if (a == "--original-port") {
+            const std::string v = next();
+            cl.original_port_override = v == "any" ? 0 : v == "off" ? -1 : std::atoi(v.c_str());
+            if (cl.original_port_override < -1 || cl.original_port_override > 65535) return usage();
         }
         else if (a == "--parent-pid") parent_pid = std::strtoul(next().c_str(), nullptr, 10);
         else if (a == "--data-dir") data_dir = next();
@@ -438,6 +457,17 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
         return 1;
     }
 
+    // 133on1: the original clients' listener (SCE-RT); their connection ids carry kOriginalConn so the server core
+    // and the two TCP servers keep them apart.
+    TcpServer original;
+    constexpr std::uint32_t kOriginalConn = 0x40000000u;
+    if (s.original_port >= 0 && !original.listen(*bind_ip, static_cast<std::uint16_t>(s.original_port), &error)) {
+        std::cerr << "omega_server: original-client port " << s.original_port << " failed: " << error << "\n";
+        log("omega_server: original-client port " + std::to_string(s.original_port) + " failed: " + error);
+        return 1;
+    }
+    std::map<std::uint32_t, RtSession> rt_sessions;
+
     std::mutex console_mutex;
     std::deque<std::string> console_lines;
     if (console) {
@@ -469,6 +499,7 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
         ServerConfig cfg = s.cfg;
         cfg.port = tcp.port();
         cfg.relay_port = udp.is_open() ? udp.port() : 0;
+        cfg.original_port = s.original_port >= 0 ? original.port() : 0;
         AccountStore accounts(s.accounts_path, s.iterations);
         accounts.set_backups(s.backups, s.backup_interval);
         StatsStore stats(s.stats_path, s.backups, cfg.max_results, s.backup_interval);
@@ -495,8 +526,30 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
                                  ? static_cast<unsigned>(s.password_threads)
                                  : std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u));
         OmegaServer server(
-            accounts, cfg, [&](std::uint32_t conn, std::vector<std::uint8_t> frame) { tcp.send(conn, std::move(frame)); },
-            [&](std::uint32_t conn) { tcp.close(conn); }, log, unix_now);
+            accounts, cfg,
+            [&](std::uint32_t conn, std::vector<std::uint8_t> frame) {
+                if (!(conn & kOriginalConn)) {
+                    tcp.send(conn, std::move(frame));
+                    return;
+                }
+                FrameReader r;  // 133on1: the core's frame, re-wrapped as the original's RT message
+                r.feed(frame);
+                while (auto f = r.next()) {
+                    std::string note;
+                    auto bytes = RtSession::from_server_frame(*f, &note);
+                    if (!note.empty()) log("rt conn " + std::to_string(conn & ~kOriginalConn) + ": " + note);
+                    if (!bytes.empty()) {
+                        log("rt conn " + std::to_string(conn & ~kOriginalConn) + " <- Medius " + std::to_string(f->type) +
+                            " (" + std::to_string(f->body.size()) + " bytes): " + hex_preview(f->body, 32));
+                        original.send(conn & ~kOriginalConn, std::move(bytes));
+                    }
+                }
+            },
+            [&](std::uint32_t conn) {
+                if (conn & kOriginalConn) original.close(conn & ~kOriginalConn);
+                else tcp.close(conn);
+            },
+            log, unix_now);
         // 132on2h: the password work (PBKDF2) on the pool; its answers are drained on this thread after each poll.
         server.set_hash_runner([&](OmegaServer::PasswordWork work, OmegaServer::PasswordDone done) {
             passwords.submit([work = std::move(work), done = std::move(done)]() mutable -> std::function<void()> {
@@ -539,6 +592,9 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
                 " relay_idle=" + std::to_string(cfg.relay_idle) + ")");
         else
             log("relay: off (relay_port=0)");
+        if (s.original_port >= 0)
+            log("original clients (SCE-RT, unencrypted): TCP " + first_bind + ":" + std::to_string(original.port()) +
+                " (ONLINE.md 8.4)");
 
         auto last_flush = std::chrono::steady_clock::now();
         auto last_relay_log = last_flush, last_parent_check = last_flush;
@@ -553,6 +609,37 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
             server.on_frame(conn, f);
         };
         events.disconnected = [&](std::uint32_t conn) { server.on_disconnect(conn); };
+        TcpServer::Events rt_events;
+        rt_events.connected = [&](std::uint32_t conn, std::uint32_t ip) {
+            rt_sessions.erase(conn);
+            rt_sessions.emplace(conn, RtSession(static_cast<std::uint16_t>(conn & 0xffff)));
+            log("rt conn " + std::to_string(conn) + " connected from " + std::to_string(ip >> 24) + "." +
+                std::to_string((ip >> 16) & 0xff) + "." + std::to_string((ip >> 8) & 0xff) + "." + std::to_string(ip & 0xff) +
+                " (original client)");
+            server.on_connect(conn | kOriginalConn, ip, ClientKind::Original);
+        };
+        rt_events.raw = [&](std::uint32_t conn, std::span<const std::uint8_t> bytes) {
+            auto it = rt_sessions.find(conn);
+            if (it == rt_sessions.end()) return;
+            log("rt conn " + std::to_string(conn) + " -> " + std::to_string(bytes.size()) + " byte(s): " +
+                hex_preview(bytes, 64));
+            auto out = it->second.feed(bytes);
+            for (const auto& line : out.log) log("rt conn " + std::to_string(conn) + ": " + line);
+            if (!out.to_client.empty()) original.send(conn, std::move(out.to_client));
+            for (const auto& f : out.medius) {
+                ++frames_this_tick;
+                log("rt conn " + std::to_string(conn) + " -> Medius " + std::to_string(f.type) + " (" +
+                    std::to_string(f.body.size()) + " bytes): " + hex_preview(f.body, 32));
+                server.on_frame(conn | kOriginalConn, f);
+            }
+            if (out.close) original.close(conn);
+        };
+        rt_events.frame = [](std::uint32_t, const Frame&) {};
+        rt_events.disconnected = [&](std::uint32_t conn) {
+            rt_sessions.erase(conn);
+            log("rt conn " + std::to_string(conn) + " closed");
+            server.on_disconnect(conn | kOriginalConn);
+        };
         OmegaServer::Lifecycle ending = OmegaServer::Lifecycle::None;
         while (ending == OmegaServer::Lifecycle::None) {
             const auto tick_start = std::chrono::steady_clock::now();
@@ -561,7 +648,8 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
             // sessions are still closed and the stores saved).
             const bool pending_now = server.lifecycle_pending() == OmegaServer::Lifecycle::Shutdown;
             if (g_stop && !pending_now) server.request_stop(OmegaServer::Lifecycle::Shutdown, 0, "the server is stopping");
-            tcp.poll(passwords.outstanding() ? 2 : 50, events, relay ? &udp : nullptr);
+            tcp.poll(passwords.outstanding() ? 2 : (s.original_port >= 0 ? 20 : 50), events, relay ? &udp : nullptr);
+            if (s.original_port >= 0) original.poll(0, rt_events);
             passwords.drain();
             if (relay) {
                 for (int n = 0; n < 4096; ++n) {

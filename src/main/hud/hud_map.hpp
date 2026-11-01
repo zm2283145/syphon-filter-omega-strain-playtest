@@ -43,6 +43,9 @@ struct HudMapGlobals {
     std::array<float, 3> words_4ff074{};  // 004ff074..004ff07c: 0026c130's zeroes
     float zoom_48b2b0 = 0.0F;        // the camera record's half fov
     bool sound_latch_4ff060 = false; // GS_3D_MAP_TURN playing (0026be80)
+    // D_00493980 (.data 1.0, interface_gobj_2.c): 0x0026e764's cMAP_GOBJ::SetScale 003e9540(1.25), its only writer;
+    // the map sprites' place 003e9550 reads it (hud_map_sprite_matrix).
+    float sprite_scale_493980 = 1.0F;
 };
 
 struct HudMap {

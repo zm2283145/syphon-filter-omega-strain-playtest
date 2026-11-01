@@ -93,13 +93,15 @@ bool flush(std::intptr_t s, std::vector<std::uint8_t>& out) {
     return true;
 }
 
-// Reads everything available into `reader`. False when the peer closed or the connection failed.
-bool drain(std::intptr_t s, FrameReader& reader) {
+// Reads everything available into `reader` (133on1: or into `raw`, when given). False when the peer closed or the
+// connection failed.
+bool drain(std::intptr_t s, FrameReader& reader, std::vector<std::uint8_t>* raw = nullptr) {
     std::uint8_t buf[8192];
     for (;;) {
         const int n = ::recv(as_native(s), reinterpret_cast<char*>(buf), sizeof buf, 0);
         if (n > 0) {
-            reader.feed(std::span<const std::uint8_t>(buf, static_cast<std::size_t>(n)));
+            if (raw) raw->insert(raw->end(), buf, buf + n);
+            else reader.feed(std::span<const std::uint8_t>(buf, static_cast<std::size_t>(n)));
             continue;
         }
         if (n == 0) return false;
@@ -416,6 +418,12 @@ void TcpServer::poll(int timeout_ms, const Events& events, const UdpSocket* also
         auto it = conns_.find(id);
         if (it == conns_.end()) continue;
         Conn& c = *it->second;
+        if (!c.dead && readable.count(id) && events.raw) {
+            std::vector<std::uint8_t> bytes;
+            if (!drain(c.sock, c.reader, &bytes)) c.dead = true;
+            if (!bytes.empty()) events.raw(id, bytes);
+            continue;
+        }
         if (!c.dead && readable.count(id)) {
             if (!drain(c.sock, c.reader)) c.dead = true;
             while (auto f = c.reader.next()) {

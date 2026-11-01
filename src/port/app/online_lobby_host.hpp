@@ -235,6 +235,9 @@ public:
     // Repeated calls for one world do not upload the final record twice.
     void level_exit(bool completed);
     bool in_game() const { return world_ != 0; }
+    // 133lt3 (PORT-ONLY boundary): SFOLobby_IsFatalError 00452fd0 in the network level: the session state (+0x255c)
+    // once the server connection of the game in progress is lost, else nullopt.
+    std::optional<std::uint32_t> level_fatal_state();
 
     // Checkpoint 132on2e (see the header's stage E). The relay: the mode (online_relay) and the link the game socket
     // factory shares (relay_socket_factory); null: no relay.

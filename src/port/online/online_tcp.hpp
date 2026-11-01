@@ -71,6 +71,9 @@ public:
         std::function<void(std::uint32_t conn, std::uint32_t peer_ip)> connected;
         std::function<void(std::uint32_t conn, const Frame& frame)> frame;
         std::function<void(std::uint32_t conn)> disconnected;
+        // 133on1: when set, the bytes read are handed over as they arrive instead of being cut into port frames (the
+        // original client's SCE-RT stream, online_rt.hpp).
+        std::function<void(std::uint32_t conn, std::span<const std::uint8_t> bytes)> raw;
     };
     // Accepts, reads, writes; waits up to timeout_ms for activity (or a datagram on `also_wait`, the relay's UDP
     // socket, which the caller then drains). Callbacks run inside.

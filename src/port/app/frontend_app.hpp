@@ -19,6 +19,9 @@
 #include <vector>
 
 namespace omega {
+namespace snd989 {
+struct VolumeState;
+}
 
 class DiscImage;
 class GamepadDevice;
@@ -171,6 +174,14 @@ struct FrontendOptions {
     // ip:47524 directly. With 127.0.0.1, two instances on one machine play over loopback UDP and no firewall
     // rule is needed (a socket bound to 127.0.0.1 is unreachable from other machines).
     std::optional<std::uint32_t> lan_address;
+    // PORT-ONLY test (133lt1, --lan-clock-offset <ms>): added to this process's LAN millisecond clock (the session,
+    // transport and discovery clocks of the --lan-address path). Two instances on one machine share steady_clock, so
+    // their local clocks agree; the offset makes them disagree as two consoles' clocks do, which the JOIN_ACK session
+    // clock offset (LanTransport::host_clock_offset_ms, LanDme::session_clock) must hide.
+    std::int64_t lan_clock_offset_ms = 0;
+    // PORT-ONLY test network (133lt3, research/LAN_PLAY.md "LAN resilience", --lan-impair): seeded loss /
+    // duplication / reordering on the game socket of LAN Play and of the online game (lan_impaired_socket.hpp).
+    std::optional<std::string> lan_impair;
     // Port-only (checkpoint 132md5, research/MODDING.md "LAN: the mod report at join", --lan-mod-policy): the hosted
     // LAN games' mod policy (any / cosmetic / none / equal) over the settings key lan_mod_policy.
     std::optional<std::string> lan_mod_policy;
@@ -230,6 +241,15 @@ public:
     // the level's LanNetCore. release_network_level runs after level locals die.
     void network_level_exit(const AgentStatistics* live, bool completed);
     void release_network_level();
+    // 133lt3: cGameFrontEnd_LobbyDestroy 002ca640(app, a1), as 00169360's tail runs it in the level after 0x005723b8
+    // (the lobby session's fatal error in state 10). The level's DME game goes on; the lobby is reset and 004294c0
+    // answers no lobby afterwards (00429500(0)).
+    void network_lobby_destroy(std::int32_t a1);
+    // Checkpoint 133pr1 (PORT-ONLY boundary, SoundIopHost::adopt_volume_state): the front end sound host's 989snd
+    // volume state, which a level's host takes at its creation, and the level host's state taken back at the resume
+    // (the original's one IOP instance).
+    snd989::VolumeState sound_volume_state();
+    void adopt_sound_volume_state(const snd989::VolumeState& state);
 
 private:
     struct Impl;

@@ -26,6 +26,14 @@ cbuffer Scene : register(b0) {
                       // output is min(1, Cs * As / 128) for a ONE/ONE blend (0x48 / 0x42),
                       // w man model draw (Checkpoint 118e): RGBAQ.A + 1 (0 = off)
     float4 uvOffset;  // xy: shader 13 flag 2 q1 (VU1 program 0x595 adds it to the ST source)
+    // Checkpoint 133pr1: the GS fog (FGE, the mode word's 0x80 bit through XLib::SetModelContext 0037c350):
+    // fogColour.rgb = FOGCOL / 255 (renderer +0x160..: 00133420's int(256 c) words, r | g << 8 | b << 16), w = 1 when
+    // the draw fogs; fogTerms.xy = renderer +0x180 / +0x190 (001339b0). Per vertex F = clamp(x + y / w, 0, 255), the
+    // fog byte the VU1 programs write from +0x1a0 / +0x1ac (2^23 + 16 (x + y / w)), interpolated linearly on the
+    // screen as the GS does; the colour becomes FOGCOL + (C - FOGCOL) F / 255 (GS: (F C + (255 - F) FOGCOL) >> 8;
+    // the shader formulation is PORT-ONLY, the inputs and the formula's terms are the original's).
+    float4 fogColour;
+    float4 fogTerms;
 };
 Texture2D surfaceTexture : register(t0);
 SamplerState surfaceSampler : register(s0);
@@ -42,10 +50,18 @@ struct Varying {
     float2 uv : TEXCOORD0;
     float4 color : COLOR0;
     float3 gore : TEXCOORD1;
+    noperspective float fog : TEXCOORD2;  // 133pr1: the GS fog byte F (0..255; 255 = unfogged)
 };
+// 133pr1: F = clamp(+0x180 + +0x190 / w, 0, 255) (003d3700's arithmetic; a zero w, taken as +0, gives the quotient
+// +-FLT_MAX by the sign of +0x190 as the EE's div.s does).
+float fogFactor(float w) {
+    float q = w != 0 ? fogTerms.y / w : (fogTerms.y < 0 ? -3.4e38 : 3.4e38);
+    return clamp(fogTerms.x + q, 0, 255);
+}
 Varying vertexMain(Input input) {
     Varying output;
     output.position = mul(float4(input.position, 1), mvp);
+    output.fog = fogColour.w > 0.5 ? fogFactor(output.position.w) : 255;
     output.normal = input.normal;
     output.uv = input.uv - uvOffset.xy;
     if (options.w > 0.5 && options.w < 1.5) {
@@ -103,6 +119,8 @@ float4 pixelMain(Varying input) : SV_TARGET {
         float3 lit = input.color.rgb * (options.z <= 0.5 ? lighting : 1.0);
         rgb = max(lit - input.gore, 0) * texel.rgb;
     }
+    // 133pr1: the GS fog after the texture function, before the alpha blend (the alpha is not fogged).
+    if (fogColour.w > 0.5) rgb = lerp(fogColour.rgb, saturate(rgb), input.fog / 255.0);
     if (raw) {
         float as128 = color.a * 255.0 / 128.0;
         return float4(saturate(saturate(rgb) * as128), saturate(as128));

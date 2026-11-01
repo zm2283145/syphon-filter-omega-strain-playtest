@@ -409,6 +409,7 @@ struct SoloActorSimulation::Impl {
     SoloActorSimulation::NativeTriggerReceiver native_trigger_receiver;
     SoloActorSimulation::ObjectCodeReceiver object_code_receiver;
     bool multiplayer_host{};                               // port-only: 005721c8 / 005721c0 (132ob3)
+    std::function<void()> network_clear_point;             // 00249460 in a LAN network game (set: 005721c8)
     bool network_game{},network_host{};                    // 132ln5h14c: 005721c8 / 005721c0 for 003ccb00
     std::function<bool(const ActorDamageEvent&)> network_damage;   // 132ln5h14c: 003c9420 of a network damage message
     bool port_ladder_arrival_at_end{};                     // port-only: the partner's ladder arrival (132ob5)
@@ -2743,8 +2744,10 @@ void SoloActorSimulation::Impl::logic(const SoloActorFrameInput& input){
                 if(!input.camera_9c4)throw std::runtime_error("Solo actor: the aim view's camera test 0017a610 (camera +9c4) has no camera");
                 return !(*input.camera_9c4==0.0F);};
             bh.aim.set_byte_2e00=[this](std::uint8_t v){byte_2e00=v;};
+            bh.aim.net_clear_point=network_clear_point;
             PlayerButtonTailInput tail{triangle_fa4,input.cross,actions.flags_3248};
             tail.l1=input.l1;tail.r1=input.r1;tail.selector_38=selector_38;tail.previous_selector_30=previous_selector_30;
+            tail.multiplayer=static_cast<bool>(network_clear_point);   // byte 005721c8: a LAN network game
             tail.object_128=menu_open();
             run_player_button_tail(buttons,tail,bh);
             // 0x0024f928..0x0024f964: the crosshair 00241ec0 (between the L1/R1
@@ -3538,6 +3541,7 @@ void SoloActorSimulation::set_trigger_script_filter(TriggerScriptFilter filter){
 void SoloActorSimulation::set_native_trigger_receiver(NativeTriggerReceiver receiver){impl_->native_trigger_receiver=std::move(receiver);}
 void SoloActorSimulation::set_object_code_receiver(ObjectCodeReceiver receiver){impl_->object_code_receiver=std::move(receiver);}
 void SoloActorSimulation::set_multiplayer_host(bool host){impl_->multiplayer_host=host;}
+void SoloActorSimulation::set_network_clear_point(std::function<void()> clear){impl_->network_clear_point=std::move(clear);}
 void SoloActorSimulation::set_port_ladder_arrival_at_end(bool on){impl_->port_ladder_arrival_at_end=on;}
 void SoloActorSimulation::queue_trigger(const HotboxTrigger& trigger){
     if(!trigger.receiver)throw std::runtime_error("Solo actor: trigger without a receiver");

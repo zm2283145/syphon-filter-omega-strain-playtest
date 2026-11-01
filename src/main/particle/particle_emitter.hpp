@@ -326,7 +326,9 @@ public:
     std::array<RainPoolEntry, 4> rain_pool{};  // 0053b560
 
     bool night_vision = false;            // byte 0053b540 (0 at boot)
-    Qword light{};                        // 00538350..5c, copied to em+a0 (0 at boot)
+    // 00538350..5c, copied to em+a0 (0 at boot); checkpoint 133pr1: the play host writes it at every world update's
+    // head from 00133420's fog colour (LevelLights::fog_colour: int(256 r), int(256 g), int(256 b), 0x80).
+    Qword light{};
     // 0053b5a0 / 5a8 / 5b0 / 5b8: the ids 00397b20 stores for the requests
     // "ShatterWindow.par" / "SnowBelarus2.par" / "RainTokyo.par" /
     // "RainLorelei.par" (0 at boot); 003a2dd0 builds their special emitters.

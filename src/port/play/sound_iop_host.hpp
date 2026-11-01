@@ -114,6 +114,14 @@ public:
     std::optional<bool> stream_paused(std::uint32_t handle) const;
     // The 989snd volume state (masters 0x1e41c, ducks 0x1e49c, duckers 0x25ddc).
     const snd989::VolumeState& volume_state() const { return volume_; }
+    // Checkpoint 133pr1: the original has one 989snd / IOP instance for the whole run, so the group masters (0x1e41c,
+    // set only through 003a81d0 from cGameOptions::Apply 0045a3a0 and cGameSound::SetMasterVolume 001c9540) and the
+    // output mode (0x1e51c, 003a80f0 from cGameSound::Init 001c9bf0 at boot and 0045a3a0 bit 0x80) persist across the
+    // front end / level hand-offs. The port runs one host per level and one for the front end (PORT-ONLY), so the
+    // play copies the front end host's masters and mode into its host at creation and back at the resume: this takes
+    // `from`'s 17 masters and play_mode (the ducks and duckers are the host's own: duck_reset at each level load) and
+    // refreshes the playing stream and bank voices of every group whose master changed (1af50 / b3d4, as 003a81d0).
+    void adopt_volume_state(const snd989::VolumeState& from);
     // The disc member a stream start's sector names (or "sector N").
     std::string member_at(std::uint32_t sector) const;
     // The bank player and the SPU2 voices it drives.

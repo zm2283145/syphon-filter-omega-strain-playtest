@@ -356,6 +356,25 @@ std::string SoundIopHost::member_at(std::uint32_t sector) const {
     return it == members_.end() ? "sector " + std::to_string(sector) : it->second;
 }
 
+void SoundIopHost::adopt_volume_state(const snd989::VolumeState& from) {
+    std::uint32_t changed = 0;
+    for (std::size_t g = 0; g < volume_.master.size(); ++g)
+        if (volume_.master[g] != from.master[g]) {
+            volume_.master[g] = from.master[g];
+            changed |= snd989::voice_group_bit(static_cast<std::int8_t>(g));
+        }
+    volume_.play_mode = from.play_mode;
+    if (changed) {
+        for (auto& [handle, s] : streams_)
+            if (changed & snd989::voice_group_bit(s.group)) apply_volume(s);
+        engine_->reapply_groups(changed);
+        engine_errors();
+    }
+    std::string masters;
+    for (const auto m : volume_.master) masters += (masters.empty() ? "" : " ") + std::to_string(m);
+    log_.push_back("133pr1 adopt masters " + masters + " play_mode " + std::to_string(volume_.play_mode));
+}
+
 std::optional<std::int32_t> SoundIopHost::stream_volume_10(std::uint32_t handle) const {
     const auto it = streams_.find(handle);
     if (it == streams_.end()) return std::nullopt;

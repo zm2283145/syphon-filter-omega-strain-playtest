@@ -112,6 +112,15 @@ struct OverlaySkin {
     std::array<float, 3> thermal_u{}, thermal_v{};
 };
 
+// Checkpoint 133pr1: the GS fog of the scene's model draws for one frame (the HLSL Scene fogColour / fogTerms):
+// on = the draw mode word's FGE bit (005392d0 & 0x80, level_frame_mode) for the draw; colour = the FOGCOL bytes / 255
+// (scene_fog_colour); base / scale = renderer +0x180 / +0x190 (001339b0). Off: the pixels are unchanged.
+struct SceneFog {
+    bool on = false;
+    std::array<float, 3> colour{};
+    float base = 0.0F, scale = 0.0F;
+};
+
 struct SceneDrawItem {
     // hook (Checkpoint 132cp7): a non-model step of the scene frame at this position; `first` is its id (the
     // original's call address), passed to the draw hook (set_draw_hook).
@@ -200,6 +209,9 @@ public:
     // The draw order of the next draw() calls. Empty (the default): every
     // main surface, then every shadow receiver pass, then the overlay.
     void set_draw_plan(std::vector<SceneDrawItem> plan) { plan_ = std::move(plan); }
+    // Checkpoint 133pr1: the GS fog of the next draw() calls for the main (level / object) surfaces and for the overlay
+    // (the characters and their gear; the thermal tail 0013ea28.. draws them with its own fog terms and colour).
+    void set_fog(const SceneFog& main, const SceneFog& overlay) { fog_main_ = main; fog_overlay_ = overlay; }
     // Checkpoint 132cp7: called by draw() for each hook item with its id, between the model draws around it. The
     // hook may draw with its own pipeline over render_target() / depth_view() / frame_alpha_target(); draw()
     // restores its own state afterwards. A plan with hook items and no hook throws.
@@ -270,6 +282,7 @@ private:
     Ptr<gfx::Texture> depth_;
     Ptr<gfx::Texture> frame_alpha_;
     std::function<void(std::uint32_t)> draw_hook_;
+    SceneFog fog_main_, fog_overlay_;   // 133pr1
     Ptr<gfx::Buffer> constants_;
     Ptr<gfx::Buffer> vertices_;
     Ptr<gfx::Buffer> indices_;

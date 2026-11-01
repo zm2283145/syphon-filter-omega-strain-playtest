@@ -22,6 +22,7 @@
 #include "ie_draw.hpp"
 #include "input_bindings.hpp"
 #include "keyboard_pad.hpp"
+#include "lan_impaired_socket.hpp"
 #include "lan_loopback.hpp"
 #include "lan_mod_gate.hpp"
 #include "lan_net_core.hpp"
@@ -382,6 +383,17 @@ struct FrontendApp::Impl {
     std::unique_ptr<CardBackups> card_backups;  // port-only (132win13): rolling backups before each card change
     std::unique_ptr<FrontendSession> session;
     // Port-only (132ln3): the LAN session (FrontendOptions::lan_loopback: on lan_net, an in-memory network).
+    // PORT-ONLY test network (133lt3, --lan-impair): the impaired game sockets' totals, logged at exit.
+    struct LanImpairReport {
+        std::shared_ptr<lan::LanImpairmentStats> stats;
+        ~LanImpairReport() {
+            if (stats)
+                std::cout << "Front end: LAN impairment totals (PORT-ONLY, 133lt3): sent " << stats->sent << ", dropped "
+                          << stats->dropped << ", duplicated " << stats->duplicated << ", delayed " << stats->delayed
+                          << ", forwarded " << stats->forwarded << std::endl;
+        }
+    } lan_impair_report;
+    std::shared_ptr<lan::LanImpairmentStats> lan_impair_stats;
     std::shared_ptr<lan::LanLoopbackNetwork> lan_net;
     std::unique_ptr<lan::LanSession> lan_session;
     // Port-only (132on2b): the online games' own session (online_game_port, port mapping, relay), apart from LAN
@@ -787,6 +799,26 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
             std::cout << "Front end: LAN sockets bound to " << lan::lan_address_text({ip, 0}) << " (port-only, 132ln5f, --lan-address): "
                       << "no broadcasts, the browser asks port " << lc.discovery.discovery_port << " there\n";
         }
+        if (options.lan_clock_offset_ms != 0) {  // PORT-ONLY test (133lt1, --lan-clock-offset)
+            if (options.lan_loopback) throw std::runtime_error("--lan-clock-offset needs real UDP (--lan-address)");
+            const auto offset = options.lan_clock_offset_ms;
+            const lan::LanClock skewed = [base = lan::lan_steady_clock(), offset] {
+                return static_cast<std::uint64_t>(static_cast<std::int64_t>(base()) + offset);
+            };
+            if (static_cast<std::int64_t>(skewed()) <= 0) throw std::runtime_error("--lan-clock-offset moves the clock below zero");
+            lc.clock = skewed;
+            lc.discovery.clock = skewed;
+            std::cout << "Front end: LAN local clock offset " << offset << " ms (port-only test, --lan-clock-offset): local clock "
+                      << skewed() << " ms\n";
+        }
+        if (options.lan_impair) {  // PORT-ONLY test network (133lt3): the game socket only, never discovery
+            const auto impairment = *lan::lan_parse_impairment(*options.lan_impair);
+            if (!lan_impair_stats) lan_impair_stats = lan_impair_report.stats = std::make_shared<lan::LanImpairmentStats>();
+            lc.socket_factory = lan::lan_impaired_socket_factory(
+                lc.socket_factory ? lc.socket_factory : lan::lan_udp_socket_factory(), impairment, lan_impair_stats);
+            std::cout << "Front end: LAN game socket impaired (PORT-ONLY test network, 133lt3, --lan-impair): "
+                      << lan::lan_impairment_text(impairment) << "\n";
+        }
         lan_session = std::make_unique<lan::LanSession>(lc);
         services.lan_host = [this](const gui::GuiHost::LanHostRequest& r) {
             const bool retained = network_level_retained && lan_session->hosting();
@@ -948,6 +980,16 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
                 }
                 // 132on2e: the game socket under the omega_server relay (online_relay_socket.hpp); a datagram to a
                 // relay virtual address goes through omega_server, everything else directly.
+                if (options.lan_impair) {  // PORT-ONLY test network (133lt3): under the relay, as a lossy path
+                    const auto impairment = *lan::lan_parse_impairment(*options.lan_impair);
+                    if (!lan_impair_stats)
+                        lan_impair_stats = lan_impair_report.stats = std::make_shared<lan::LanImpairmentStats>();
+                    lc.socket_factory = lan::lan_impaired_socket_factory(
+                        lc.socket_factory ? lc.socket_factory : lan::lan_udp_socket_factory(), impairment,
+                        lan_impair_stats);
+                    std::cout << "Front end: the online game's socket impaired (PORT-ONLY test network, 133lt3): "
+                              << lan::lan_impairment_text(impairment) << "\n";
+                }
                 auto link = std::make_shared<RelayLink>();
                 if (relay_mode != "off") lc.socket_factory = relay_socket_factory(lc.socket_factory, link);
                 online_lobby->set_relay(relay_mode == "force" ? OnlineLobbyHost::RelayMode::Force
@@ -2215,6 +2257,11 @@ FrontendResult FrontendApp::Impl::loop() {
         // Checkpoint 132ln5f: the lobby keep-alive 002ca580 in the level serves LanSession's discovery (the host's
         // advertisement goes on, as the Medius listing does), not its transport (LanDme polls that).
         lan_core->set_lobby([ns] { ns->pump_lobby(); });
+        // 133lt3 (PORT-ONLY boundary): 00452fd0 answers the online lobby's lost server connection (its session
+        // state), so 002ca580 reaches the original lobby-destroy branch; a LAN game has no lobby server.
+        lan_core->set_lobby_fatal([this]() -> std::optional<std::uint32_t> {
+            return online_lobby ? online_lobby->level_fatal_state() : std::nullopt;
+        });
         try {
             lan_core->level_load_begin(nullptr);
         } catch (const std::exception& e) {
@@ -2254,6 +2301,20 @@ FrontendApp::~FrontendApp() = default;
 FrontendResult FrontendApp::run() { return impl_->loop(); }
 
 FrontendSession& FrontendApp::session() { return *impl_->session; }
+snd989::VolumeState FrontendApp::sound_volume_state() {
+#ifdef __vita__
+    std::lock_guard<std::recursive_mutex> g(impl_->sound_lock);
+#endif
+    if (!impl_->sound_host) throw std::runtime_error("133pr1: the front end has no sound host for the level's 989snd state");
+    return impl_->sound_host->volume_state();
+}
+void FrontendApp::adopt_sound_volume_state(const snd989::VolumeState& state) {
+#ifdef __vita__
+    std::lock_guard<std::recursive_mutex> g(impl_->sound_lock);
+#endif
+    if (!impl_->sound_host) throw std::runtime_error("133pr1: the front end has no sound host to take the level's 989snd state");
+    impl_->sound_host->adopt_volume_state(state);
+}
 const std::map<std::uint32_t, Texture>& FrontendApp::zeus_images() const { return impl_->data->zeus_images(); }
 PortSettings FrontendApp::port_settings() const { return impl_->port_settings_reader(); }
 bool FrontendApp::vsync() const { return impl_->vsync; }
@@ -2270,6 +2331,21 @@ std::vector<std::string> FrontendApp::online_level_frame() {
     m.online_lobby->level_frame();
     for (const auto& line : m.online_lobby->take_log()) std::cout << "Front end: " << line << "\n";
     return m.online_lobby->take_path_notices();
+}
+
+void FrontendApp::network_lobby_destroy(std::int32_t a1) {
+    auto& m = *impl_;
+    // cGameFrontEnd_LobbyDestroy 002ca640: 002ca160, then with a lobby (004294c0) the logout when logged in outside
+    // state 10, 002c8090, SFOLobby_Reset 00453b00(lobby, a1) and cDME_ActivateLobby 00429500(0).
+    const bool lobby = m.lan_core && m.lan_core->memory().read(0x572480) && m.lan_core->memory().read(0x572488, 1);
+    std::cout << "Front end: 002ca640(app, " << a1 << ") cGameFrontEnd_LobbyDestroy in the network level: "
+              << (lobby ? "the lobby session is reset" : "no lobby session (004294c0 is 0)") << "\n";
+    if (!lobby) return;
+    if (m.online_lobby) {
+        m.session->lobby_leave(a1);
+        for (const auto& line : m.online_lobby->take_log()) std::cout << "Front end: " << line << "\n";
+    }  // LAN: the stand-in lobby is the listing 002ca580 pumps; 00429500(0) below stops that pump
+    m.lan_core->activate_lobby(false);
 }
 
 void FrontendApp::network_level_exit(const AgentStatistics* live, bool completed) {
@@ -2307,8 +2383,11 @@ void FrontendApp::Impl::release_network_level() {
     // itself still borrows the transport and its clock, so destroy it first.
     auto* session = net_session();
     lan_core.reset();
-    if (online_lobby && online_lobby->in_game()) online_lobby->game_cleanup();
-    else if (session) {
+    if (online_lobby && online_lobby->in_game()) {
+        online_lobby->game_cleanup();
+        // 133lt3: game_cleanup's lines (the relay counters, the game left) are printed here; nothing later drains them.
+        for (const auto& line : online_lobby->take_log()) std::cout << "Front end: " << line << "\n";
+    } else if (session) {
         if (session->hosting()) session->leave();
         else session->cancel_join();
     }

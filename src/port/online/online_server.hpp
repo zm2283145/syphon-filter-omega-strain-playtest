@@ -51,6 +51,9 @@ struct ServerConfig {
     std::string admin_token;            // empty: only admin accounts can run admin commands
     std::string public_ip = "127.0.0.1";  // the address written into the login response's connect info
     std::uint16_t port = kDefaultServerPort;
+    // 133on1 (ONLINE.md §8.4): the original clients' SCE-RT port (0: none); an original session's login ConnectInfo
+    // names it, since the original moves from the MAS to the MLS address it is given (0044ce60).
+    std::uint16_t original_port = 0;
     std::uint16_t default_game_port = 47525;  // kLanGamePort: the host's in-level port if it reports none
     int max_players = 4;                       // kLanMaxClients
     // PORT-ONLY (132md4, ONLINE.md §6.9): who may create or join a game by the mods its client reports
@@ -364,6 +367,15 @@ private:
     LogFn log_;
     ClockFn clock_;
     std::map<std::uint32_t, Conn> conns_;
+    // 133on1: an original session's login kept for its move to the MLS connection (0044ce60): by SessionKey, the
+    // account and the time it lapses. A new original connection whose request carries that SessionKey (+0x15) takes
+    // the login over.
+    struct Resumable {
+        std::uint32_t account = 0;
+        std::uint64_t until = 0;
+    };
+    std::map<std::string, Resumable> resumable_;
+    bool resume_original(Conn& c, std::span<const std::uint8_t> body);
     std::map<std::uint32_t, ServerGame> games_;
     std::uint32_t next_world_ = 1;
     std::string policy_file_;

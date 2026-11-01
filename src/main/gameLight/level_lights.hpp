@@ -54,8 +54,21 @@ struct LevelLightRef { LevelLightPool pool{}; std::size_t index{}; };
 // A registered light object (kind 6, 0040c9d0): every PNT record and the first
 // four DIR records, in that order.
 struct LevelLightObject { std::uint32_t id{}; LevelLightRef light; };
-// Renderer fog terms +0x180 (base) / +0x190 (scale); see renderer_fog below.
-struct LevelFog { float base{},scale{}; };
+// Renderer fog terms +0x180 (base) / +0x190 (scale), and (checkpoint 133pr1) the GS / VU fog terms +0x1a0..+0x1ac the
+// same 001339b0 writes; see renderer_fog below.
+struct LevelFog {
+    float base{},scale{};
+    float gs_1a0{},gs_1a4{},gs_1a8{},gs_1ac{};
+};
+// Checkpoint 133pr1: the frame's fog colour as cGameSystem::NextFrame 00133420 writes it after cEnvMan::NextFrame: the
+// current environment's +0x70 colour (while the controller blends, +40 + +1c * (+4c - +40) per channel) times 256,
+// truncated (cvt.w.s) into the words 00538350 / 54 / 58 with 0x80 in 0053835c (renderer +0x160..+0x16c: the GS
+// FOGCOL r | g << 8 | b << 16 that XLib::SetModelContext 0037c350 sends, and the particle emitters' em+a0 copy), and
+// the floats themselves in 00538360..68 with 256.0 in 0053836c.
+struct LevelFogColour {
+    std::array<std::int32_t,4> words{};   // 00538350..5c
+    std::array<float,4> scaled{};         // 00538360..6c
+};
 struct LevelLights {
     // Manager +0x0/+0x10, +0x4/+0x14, +0x8/+0x18, +0xc/+0x1c. Absent pools are empty.
     std::vector<LevelLight> ambient,directional,point,spot;
@@ -96,6 +109,10 @@ struct LevelLights {
     // nullopt: the terms were undefined (renderer_fog threw).
     bool fog_180_written{};
     std::optional<LevelFog> fog_180;
+    // Checkpoint 133pr1: the fog colour words the same head wrote (00133420; fog_180_written tells whether it ran),
+    // and its 001339b0 inputs: renderer +0x150 (d0), +0x154 (d1), +0x158 (n), +0x15c (f).
+    LevelFogColour fog_colour;
+    std::array<float,4> fog_150{};
     // The near distance renderer +0x158 (D_00538348) the same head wrote: the current +0x60, or while blending
     // +28 + +1c * (+2c - +28).
     float z_near_158{};
@@ -195,6 +212,11 @@ std::uint32_t level_frame_mode(const LevelLights& lights);
 //   base = ((a+b) + ((b-a)*(f+n))/(f-n)) / 2,  scale = ((f*n)*(a-b)) / (f-n),
 // so base + scale/w is a at w = n and b at w = f (the fog factor 003d3700
 // clamps it to 0..255; 255 = no fog). Throws when f == n or a result is not finite.
+// Checkpoint 133pr1: the rest of 001339b0, the GS / VU fog terms (EE goldens tests/fog_gs_goldens.hpp):
+//   +0x1a0 = 2^23 + 16 * +0x180, +0x1a4 = ((d0 + d1) + (d1 - d0) * (f + n) / (f - n)) / 2 - 1,
+//   +0x1a8 = f * n * (d0 - d1) / (f - n), +0x1ac = 16 * +0x190.
+// (+0x1a0 + +0x1ac / w is 2^23 + 16 F: F = +0x180 + +0x190 / w in the low mantissa bits, the 4-bit-shifted fog byte;
+// +0x1a4 + +0x1a8 / w = the density d - 1 at w.)
 LevelFog renderer_fog(float near_distance,float far_distance,float near_density,float far_density);
 // The frame's fog terms (00133574..00133648, the world update 00133420):
 // renderer +0x150 = +0x68, +0x154 = +0x6c, +0x158 = +0x60 of the current
@@ -211,6 +233,22 @@ void update_level_fog(LevelLights& lights);
 // environment switched later in the frame takes effect at the next update), else level_fog now (nullopt when it
 // throws).
 std::optional<LevelFog> frame_fog(const LevelLights& lights);
+// Checkpoint 133pr1: 00133420's fog colour (LevelFogColour) from the current environment's +0x70 colour, or the blend
+// of colour_from_40 / colour_to_4c by fraction_1c while the controller blends. Throws without a current environment.
+LevelFogColour level_fog_colour(const LevelLights& lights);
+// The frame's fog colour words: fog_colour once update_level_fog has run (it writes them with the terms), else
+// level_fog_colour now.
+LevelFogColour frame_fog_colour(const LevelLights& lights);
+// Checkpoint 133pr1: the GS FOGCOL register XLib::SetModelContext 0037c350 builds from renderer +0x160..+0x168:
+// (long) r | (long) g << 8 | (long) b << 16, so a word outside 0..255 spills into the next field (0x100 in b leaves
+// bit 24, outside FCB); the bytes FCR / FCG / FCB.
+std::array<std::uint8_t,3> fog_colour_register(const LevelFogColour& colour);
+// Checkpoint 133pr1: the thermal (vision mode 2) tail of cScene::Render 0013e1b0 (0013ea28..): SetFogRange(0.95 *
+// +0x15c, +0x15c) and SetFogColor(0, 0, 1.0) around the skm / foreground walks: 001339b0 with n = 0.95 f and the
+// frame's densities (fog_150 once update_level_fog ran, else the current values), and the colour words
+// (0, 0, 256, 0x80) (256 * 1.0). nullopt when the terms are undefined (f == 0.95 f: a zero far distance).
+std::optional<LevelFog> thermal_frame_fog(const LevelLights& lights);
+LevelFogColour thermal_fog_colour();
 // The frame's renderer +0x158: z_near_158 once update_level_fog has run, else the current (or blended) +0x60
 // now. Throws without a current environment.
 float frame_z_near(const LevelLights& lights);

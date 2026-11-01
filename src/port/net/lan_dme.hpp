@@ -137,6 +137,7 @@ public:
     std::uint16_t last_refused_origin() const { return last_refused_origin_; }
     // 0042b1a0(0): host local time, or the client's local time plus the JOIN_ACK host offset.
     std::uint32_t shared_clock() const { return session_clock(); }
+    std::uint32_t local_clock_ms() const { return local_clock(); }   // 002ebc48's clock (133lt1 diagnostics)
     // Only while a registered game-message callback runs: bytes remaining
     // after its category/type pair in the current DME frame. A standalone
     // direct callback has no frame bound (0xffffffff).

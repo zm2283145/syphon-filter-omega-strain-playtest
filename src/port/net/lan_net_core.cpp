@@ -1645,6 +1645,21 @@ void LanNetCore::record_lock(std::uint32_t target, std::int32_t subtarget) {
 
 void LanNetCore::record_lower() { net_record_aim_mode_00249420(memory_, kLocalInput, kLocalPlayer, 0); }
 
+void LanNetCore::record_clear_point() { net_record_clear_point_00249460(memory_, kLocalInput, kLocalPlayer); }
+
+std::optional<std::uint8_t> LanNetCore::record_point_flag(std::uint32_t key) const {
+    std::uint32_t block = 0;
+    if (key == 0 || key == local_player_key()) {
+        block = memory_.read(kLocalInput + 0x140, 4);
+        if (!block) block = memory_.read(kLocalPlayer + 0x3584, 4);
+    } else {
+        for (const auto& [k, human] : remote_keys_)
+            if (k == key) block = memory_.read(human + 0x3584, 4);
+    }
+    if (!block) return std::nullopt;
+    return static_cast<std::uint8_t>(memory_.read(block, 1));
+}
+
 void LanNetCore::record_point(const std::array<float, 3>& point) {
     auto& m = memory_;
     for (std::uint32_t c = 0; c < 3; ++c) m.write(kScratch + c * 4, 4, std::bit_cast<std::uint32_t>(point[c]));
@@ -2023,7 +2038,14 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         if (lobby_) lobby_();
         return 0;
     case 0x3fbeb0: return 0;  // an empty function (jr $ra) that 00429d30 calls in the level (0x005724d0 set)
-    case 0x452fd0: return 0;  // PORT-ONLY: the session's disconnect check (+0x2564 == 5): a LAN lobby has no server to lose
+    case 0x452fd0: {  // PORT-ONLY: the session's disconnect check (+0x2564 == 5): a LAN lobby has no server to lose
+        // 133lt3: the online lobby's lost server connection answers its session state for 002ca580 (+0x255c).
+        if (arg(0) != kLobbySession) unhosted(address, "a lobby session that is not the port's");
+        const auto state = lobby_fatal_ ? lobby_fatal_() : std::nullopt;
+        if (!state) return 0;
+        m.write(kLobbySession + 0x255c, 4, *state);
+        return 1;
+    }
     case 0x43b190: { Frame f(sp_); return geninfo_create_0043b190(m, *this, arg(0)); }
     case 0x439670: { Frame f(sp_); geninfo_objects_00439670(m, *this, f.caller); return 0; }
     case 0x43aa30:  // j 0043a8b0
@@ -2689,6 +2711,20 @@ void LanNetCore::set_lobby_exit(std::function<void()> exit_game) {
     lobby_exit_ = std::move(exit_game);
 }
 
+void LanNetCore::set_lobby_fatal(std::function<std::optional<std::uint32_t>()> fatal) {
+    lobby_fatal_ = std::move(fatal);
+}
+
+void LanNetCore::activate_lobby(bool on) {
+    memory_.write(0x572488, 1, on ? 1U : 0U);  // 00429500: g_DmeLobbyActive = a0
+}
+
+bool LanNetCore::take_lobby_lost() {
+    if (!memory_.read(dme::kPeerQuit, 1)) return false;
+    memory_.write(dme::kPeerQuit, 1, 0);
+    return true;
+}
+
 void LanNetCore::finish_level_teardown(bool retain_session) {
     level_loaded_ = false;
     // World_Teardown has already freed the native network objects. These are
@@ -2859,6 +2895,16 @@ void LanNetCore::retained_frontend_tick(double milliseconds) {
         throw std::invalid_argument("LAN retained frontend tick requires finite nonnegative elapsed time");
     if (!thread_alive()) call(memory_, 0x42a770, {});
     advance_timer(milliseconds);
+}
+
+void LanNetCore::summary_net_update(double milliseconds) {
+    if (pump_.joinable() || !memory_.read(dme::kNetworkGame, 1))
+        throw std::logic_error("LAN summary net update requires the teardown's multiplayer core without a load pump");
+    if (!std::isfinite(milliseconds) || milliseconds < 0.0)
+        throw std::invalid_argument("LAN summary net update requires finite nonnegative elapsed time");
+    advance_timer(milliseconds);
+    call(memory_, 0x169390, {});
+    ++summary_updates_;
 }
 
 void LanNetCore::resume_retained_level(bool host_role) {

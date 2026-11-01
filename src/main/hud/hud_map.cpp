@@ -78,7 +78,8 @@ HudMapGlobals hud_map_construct(std::int32_t level_index, const std::vector<std:
         g.scaled_4ff058 = true;
     }
     g.inverse_scale_48b280 = 1.0F / g.scale_48b278;
-    // 0x0026e764: 003e9540(1.25) stores 00493980 (the IAMAP tracker's scale; the trackers are not hosted).
+    // 0x0026e764: cMAP_GOBJ::SetScale 003e9540(1.25) stores 00493980, the map sprites' scale (003e9550).
+    g.sprite_scale_493980 = 1.25F;
     const float sine = game_sinf(kQuarterPi);
     g.distance_4ff084 = -(g.extent_48b288 / sine);
     // 0x0026e7c0: min.s (EE 0x29) with pi / 4.

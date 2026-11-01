@@ -119,12 +119,27 @@ public:
     // LanSession may pump discovery only, never transport.poll({}). The next
     // 001693f0 reuses this thread and 0042a1b0 stops it.
     void retained_frontend_tick(double milliseconds);
+    // 00134110 (game_33.c:262): each end-of-mission screen iteration runs cMachine_NetUpdate 00169390, World_Teardown
+    // still having g_IsMultiplayer set (00134640 clears it after the screens): 00472080 and the DME update 00429d30,
+    // then the lobby keep-alive 002ca580. The elapsed real time first plays into the TIM0 model, as net_frame's caller
+    // does. Not the in-level 003fbec0 world services.
+    void summary_net_update(double milliseconds);
     // Frontend state 3 re-arms multiplayer before the next 001693f0 hand-off.
     // The retained room cannot change host role between missions.
     void resume_retained_level(bool host_role);
     // 132ln5h7: 00169360 on the network memory (run_gameplay_state reads and clears the quit request 0x005721d8
     // before its quit dialog 002cae30); quit_text() is the dialog's message, the C string at 0x005721e0.
     bool take_quit_request();
+    // 133lt3: 00169360's tail (cDME_Quit): read and clear 0x005723b8 (set by 002ca580 when the lobby session's
+    // fatal error 00452fd0 comes in session state 10, or by 00429d30's world-status walk); the caller then runs
+    // cGameFrontEnd_LobbyDestroy 002ca640(app, 0) (FrontendApp::network_lobby_destroy).
+    bool take_lobby_lost();
+    // 133lt3: cDME_ActivateLobby 00429500(on): the byte 0x00572488 (004294c0 answers no lobby while it is clear).
+    void activate_lobby(bool on);
+    // 133lt3 (PORT-ONLY boundary): SFOLobby_IsFatalError 00452fd0 for the online lobby. The callback answers the
+    // lobby session's state (+0x255c) when its server connection is lost, nullopt while it holds. A LAN lobby has no
+    // server: without a callback 00452fd0 keeps answering 0.
+    void set_lobby_fatal(std::function<std::optional<std::uint32_t>()> fatal);
     std::string quit_text();
     struct QuitNotice {
         std::uint8_t kind{};  // 005723b0: 1 selects canvas message 0x668, otherwise 0x667
@@ -286,6 +301,13 @@ public:
     void record_point(const std::array<float, 3>& point);
     void record_shot();
     void record_weapon(std::int32_t item);
+    // 0024a850 -> 00249460 (cPlayerControls_NetDisableManualAim): leaving the manual aim view in multiplayer clears
+    // the record block's byte +0 (the aim-point flag 00249490 sets) without touching the lock fields +4..+0xc.
+    void record_clear_point();
+    // 133lt1 diagnostics (read only): a record block's byte +0 (1: the aim point 00249490 is live, 0: cleared by
+    // 00249460 / 00249420). Key 0 or the local player's key reads the local player's block; another key reads that
+    // remote human's received block (its +0x3584). nullopt before the block exists.
+    std::optional<std::uint8_t> record_point_flag(std::uint32_t key) const;
     std::uint32_t remote_controller_runs() const { return controller_runs_; }
     // 132ln5h stage 2: how many times the local player's +0x3584 became its cNetHuman's data (001b53d0's tail).
     std::uint32_t local_block_links() const { return local_links_; }
@@ -335,6 +357,8 @@ public:
     bool hosting() const { return transport_.is_host(); }
     std::uint16_t session_host() const { return 0; }
     std::uint32_t session_clock_ms() const { return dme_->shared_clock(); }
+    std::uint32_t local_clock_ms() const { return dme_->local_clock_ms(); }
+    std::uint32_t summary_updates() const { return summary_updates_; }
 
     // 00245560 / 002467d0 / 00245750: cNetTimerMsg is generic cNetMsg inner
     // ID 16. The authority sends the shared absolute HUD end time followed by
@@ -747,6 +771,7 @@ private:
     bool level_loaded_ = false;
     std::function<void()> lobby_;
     std::function<void()> lobby_exit_;
+    std::function<std::optional<std::uint32_t>()> lobby_fatal_;  // 133lt3: 00452fd0's online stand-in
     // PORT-ONLY: the GUI app 0x004ffc04 (the front end's; nothing here reads it) and the lobby session 004294c0
     // returns (only 002ca580 reads it, at +0x255c, after 00452fd0 reports a disconnect, which a LAN lobby never does).
     static constexpr std::uint32_t kGuiApp = 0x1d30000, kLobbySession = 0x1d31000;
@@ -875,6 +900,7 @@ private:
     std::uint32_t global_timers_sent_ = 0, global_timers_received_ = 0;
     std::vector<RemotePersonalTimer> personal_timers_;
     std::uint32_t personal_timers_sent_ = 0, personal_timers_received_ = 0;
+    std::uint32_t summary_updates_ = 0;   // 133lt1: 00134110's cMachine_NetUpdate calls
     std::vector<RemoteKillStatistics> kill_statistics_;
     std::uint32_t kill_statistics_sent_ = 0, kill_statistics_received_ = 0;
     std::uint32_t receive_generic_message(std::uint32_t origin, std::uint32_t data);

@@ -215,7 +215,8 @@ std::map<std::string, std::string> parse_server_config(std::string_view text, Se
             extra[key] = value;
         } else if (key == "accounts" || key == "log" || key == "bind" || key == "pbkdf2_iterations" ||
                    key == "policy_file" || key == "stats_file" || key == "backups" || key == "backup_interval" ||
-                   key == "log_format" || key == "social_file" || key == "chat_filter_words" || key == "password_threads") {
+                   key == "log_format" || key == "social_file" || key == "chat_filter_words" || key == "password_threads" ||
+                   key == "original_port") {
             extra[key] = value;
         } else {
             throw std::runtime_error("server config line " + std::to_string(number) + ": unknown key " + key);
@@ -569,6 +570,11 @@ void OmegaServer::maintain(std::uint64_t now) {
 void OmegaServer::on_disconnect(std::uint32_t conn) {
     auto it = conns_.find(conn);
     if (it == conns_.end()) return;
+    if (it->second.kind == ClientKind::Original && it->second.account_id && !it->second.session_key.empty()) {
+        const std::uint64_t now = clock_ ? clock_() : 0;
+        std::erase_if(resumable_, [&](const auto& kv) { return kv.second.until <= now; });
+        resumable_[it->second.session_key] = {it->second.account_id, now + 120};
+    }
     log_out(it->second, "disconnected");
     log("conn " + std::to_string(conn) + " closed");
     conns_.erase(it);
@@ -584,6 +590,8 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
         if (c.kind == ClientKind::Port) on_ext(c, frame);  // an original session never speaks the extensions
         return;
     }
+    if (c.kind == ClientKind::Original && !c.account_id && frame.type != mid::SessionBegin && !resumable_.empty())
+        resume_original(c, b);
     auto sized = [&](std::size_t need) {
         if (b.size() >= need) return true;
         log("conn " + std::to_string(conn) + ": Medius id " + std::to_string(frame.type) + " too short (" +
@@ -645,6 +653,26 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
             std::to_string(b.size()) + " bytes)");
         break;
     }
+}
+
+bool OmegaServer::resume_original(Conn& c, std::span<const std::uint8_t> body) {
+    if (body.size() < kSessionKeyOffset + kSessionKeyLength) return false;
+    const std::string key = get_str(body, kSessionKeyOffset, kSessionKeyLength);
+    const auto it = resumable_.find(key);
+    const std::uint64_t now = clock_ ? clock_() : 0;
+    if (it == resumable_.end() || it->second.until <= now) return false;
+    const Account* a = accounts_.find(it->second.account);
+    resumable_.erase(it);
+    if (!a || conn_of_account(a->id)) return false;
+    c.account_id = a->id;
+    c.name = a->name;
+    c.admin = a->admin;
+    c.session_key = key;
+    c.in_channel = true;
+    log("login: " + c.name + " resumed on conn " + std::to_string(c.id) +
+        " (the original's move to the MLS connection, 0044ce60; by its SessionKey)");
+    broadcast_roster();
+    return true;
 }
 
 void OmegaServer::on_session_begin(Conn& c, std::span<const std::uint8_t> req) {
@@ -838,7 +866,9 @@ void OmegaServer::finish_login(Conn& c, const std::string& name, const std::stri
     put_i32(r, kStatusOffset, status::Success);
     put_i32(r, 0x1c, static_cast<std::int32_t>(account->id));  // 0x004475e0: account id -> lobby+0x2480
     put_i32(r, 0x20, 1);
-    put_connect_info(r, 0x28, config_.public_ip, config_.port, 0, c.session_key, to_hex(random_bytes(8)));
+    put_connect_info(r, 0x28, config_.public_ip,
+                     c.kind == ClientKind::Original && config_.original_port ? config_.original_port : config_.port, 0,
+                     c.session_key, to_hex(random_bytes(8)));
     send(c.id, mid::AccountLoginResponse, r);
     log("login: " + c.name + " (id " + std::to_string(c.account_id) + ", " + std::string(platform_name(c.platform())) +
         ") on conn " + std::to_string(c.id));

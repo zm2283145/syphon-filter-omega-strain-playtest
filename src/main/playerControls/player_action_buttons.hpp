@@ -96,12 +96,14 @@ struct PlayerAimEntryHost {
     // Actor byte +2e00: 2 while the aim view holds a resting camera, 0 when it
     // is left (its only writers; no reader is known).
     std::function<void(std::uint8_t)> set_byte_2e00;
+    // 00249460(input, actor) (cPlayerControls_NetDisableManualAim): the local player's network record block byte
+    // +0 = 0 (the aim-point flag 00249490 set). Called only in multiplayer.
+    std::function<void()> net_clear_point;
 };
 // 0024a850. With +38 = 8 and a resting camera, actor +2e00 = 2. A zero value
 // or current bit 11 clears pending bit 8, otherwise it is set; +40 becomes the
 // highest set pending bit of 11..0 (or -1). Leaving the aim view (+30 = 8,
-// +38 != 8) sets +2e00 = 0 and in multiplayer calls 00249460 (not hosted:
-// throws).
+// +38 != 8) sets +2e00 = 0 and in multiplayer calls 00249460 (net_clear_point).
 void update_player_aim_entry(PlayerButtonState&,const PlayerAimEntryInput&,const PlayerAimEntryHost&);
 // 0x0024cef0..0x0024cf8c (after the targeting stage 0x0024cec0, before the
 // selector-8 sends 0x0024cf90): the Circle send. With an actor (s2) and none

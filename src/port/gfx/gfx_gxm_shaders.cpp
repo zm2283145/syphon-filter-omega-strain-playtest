@@ -30,16 +30,26 @@ namespace {
     "#endif\n"
 
 // ---- scene_model (scene_source vertexMain / pixelMain) ----
+// Checkpoint 133pr1: the GS fog (HLSL fogColour = Scene[9], fogTerms = Scene[10]). HLSL's `noperspective float fog`:
+// oFog = (F * w, w) interpolated perspective-correct, divided per pixel = F linear in screen space.
 constexpr char scene_vs[] = R"(
 void main(float3 position, float3 normal, float2 uv, float4 color, float3 gore,
-          uniform float4 Scene[9],
+          uniform float4 Scene[11],
           out float4 oPosition : POSITION, out float3 oNormal : TEXCOORD0, out float2 oUv : TEXCOORD1,
-          out float4 oColor : TEXCOORD2, out float3 oGore : TEXCOORD3) {
+          out float4 oColor : TEXCOORD2, out float3 oGore : TEXCOORD3, out float2 oFog : TEXCOORD4) {
     const float4 options = Scene[4];
     const float4 eye = Scene[5];
     const float4 up = Scene[6];
     const float4 uvOffset = Scene[8];
+    const float4 fogColour = Scene[9];
+    const float4 fogTerms = Scene[10];
     oPosition = position.x * Scene[0] + position.y * Scene[1] + position.z * Scene[2] + Scene[3];
+    float fogF = 255.0;
+    if (fogColour.w > 0.5) {
+        float q = oPosition.w != 0.0 ? fogTerms.y / oPosition.w : (fogTerms.y < 0.0 ? -3.4e38 : 3.4e38);
+        fogF = clamp(fogTerms.x + q, 0.0, 255.0);
+    }
+    oFog = float2(fogF * oPosition.w, oPosition.w);
     oNormal = normal;
     oUv = uv - uvOffset.xy;
     if (options.w > 0.5 && options.w < 1.5) {
@@ -57,9 +67,11 @@ void main(float3 position, float3 normal, float2 uv, float4 color, float3 gore,
 )";
 constexpr char scene_ps[] = OMEGA_FRAGMENT_PRELUDE R"(
 OMEGA_OUT main(float3 vNormal : TEXCOORD0, float2 vUv : TEXCOORD1, float4 vColor : TEXCOORD2, float3 vGore : TEXCOORD3,
-               uniform sampler2D surfaceTexture : TEXUNIT0, uniform float4 Scene[9], uniform float4 omegaBlendMul) : COLOR {
+               float2 vFog : TEXCOORD4,
+               uniform sampler2D surfaceTexture : TEXUNIT0, uniform float4 Scene[11], uniform float4 omegaBlendMul) : COLOR {
     const float4 options = Scene[4];
     const float4 alphaTest = Scene[7];
+    const float4 fogColour = Scene[9];
     if (options.y > 0.5) { OMEGA_RETURN(float4(1.0, 0.35, 0.05, 1.0)); }
     float4 color = vColor;
     float4 texel = float4(1.0, 1.0, 1.0, 1.0);
@@ -98,6 +110,7 @@ OMEGA_OUT main(float3 vNormal : TEXCOORD0, float2 vUv : TEXCOORD1, float4 vColor
         float3 lit = vColor.rgb * (options.z <= 0.5 ? lighting : 1.0);
         rgb = max(lit - vGore, 0.0) * texel.rgb;
     }
+    if (fogColour.w > 0.5) rgb = lerp(fogColour.rgb, saturate(rgb), (vFog.x / vFog.y) / 255.0);
     if (raw) {
         float as128 = color.a * 255.0 / 128.0;
         OMEGA_RETURN(float4(saturate(saturate(rgb) * as128), saturate(as128)));
@@ -136,7 +149,7 @@ OMEGA_OUT main(float2 vUv : TEXCOORD0, float4 vColor : TEXCOORD1,
 // their ratio per pixel is I interpolated linearly in screen space.
 constexpr char shadow_pass_vs[] = R"(
 void main(float3 position,
-          uniform float4 Scene[9], uniform float4 Shadow[8],
+          uniform float4 Scene[11], uniform float4 Shadow[8],
           out float4 oPosition : POSITION, out float4 oX : TEXCOORD0, out float oIntensityW : TEXCOORD1,
           out float oW : TEXCOORD2) {
     const float4 scale = Shadow[4];

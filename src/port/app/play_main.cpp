@@ -31,6 +31,7 @@
 #include "man_sort.hpp"
 #include "disc.hpp"
 #include "frontend_app.hpp"
+#include "lan_impaired_socket.hpp"
 #include "lan_mod_gate.hpp"
 #include "lan_net_core.hpp"
 #include "online_portmap.hpp"
@@ -540,12 +541,16 @@ struct CharacterAnimation final:SoloActorAnimation {
 // the level (LanNetCore created its remote human), so two consoles' scripts line up whenever the joiner arrives.
 // 132ln5h14 (LAN test conveniences): "waitleft" gives no input until that human has left again (its client quit);
 // "quit" ends the play there, as --frames does (a host that outlives its joiner stops before its NPCs kill it).
+// 133lt3 (LAN test convenience): "waitpeers N" gives no input until N other consoles' humans are present at once
+// (four-client and rejoin runs: the host's script waits for every joiner, or for a new one after a loss).
 struct ScriptStep{unsigned frames{};float x{},y{},p10{},p11{},rx{},ry{},cross{},triangle{},square{},r1{},l1{},circle{};
     std::array<float,4> dpad{};   // Up, Down, Left, Right (sp+fb0..fbc)
     std::uint32_t pad{};          // the PAD column (checkpoint 132f)
     std::optional<std::array<float,4>> teleport;
     std::optional<float> rise;    // 132ws9 "rise H" (port-only soak aid, tools\run_soak.ps1): the test teleport H above the player
-    bool wait_peer{},wait_left{},quit{};};
+    bool wait_peer{},wait_left{},quit{};
+    bool wait_timer{};   // 133lt1 "waittimer" (LAN test convenience): no input until the global HUD timer +6c4 expired here
+    unsigned wait_peers{};};   // 133lt3 "waitpeers N"
 // --dt-trace: one world dt per frame as the IEEE-754 bits in hex (for example
 // 3d08a4b2, as read from the emulator's 005383d0), '#' comments allowed.
 std::vector<float> read_dt_trace(const fs::path& path){
@@ -581,8 +586,14 @@ std::vector<ScriptStep> read_script(const fs::path& path){
             s.rise=h;steps.push_back(s);continue;
         }
         if(line=="waitpeer"){s.wait_peer=true;steps.push_back(s);continue;}
+        if(line.rfind("waitpeers ",0)==0){
+            std::string op;fields>>op;
+            if(!(fields>>s.wait_peers)||s.wait_peers<1||s.wait_peers>3)throw std::runtime_error("Script waitpeers needs 1..3: "+line);
+            steps.push_back(s);continue;
+        }
         if(line=="waitleft"){s.wait_left=true;steps.push_back(s);continue;}
         if(line=="quit"){s.quit=true;steps.push_back(s);continue;}
+        if(line=="waittimer"){s.wait_timer=true;steps.push_back(s);continue;}
         if(!(fields>>s.frames>>s.x>>s.y>>s.p10>>s.p11)||s.frames>100000)throw std::runtime_error("Invalid input script line: "+line);
         if(fields>>s.rx){if(!(fields>>s.ry))throw std::runtime_error("Script right stick needs two values: "+line);
             if(fields>>s.cross){if(!(fields>>s.triangle))throw std::runtime_error("Script buttons need Cross and Triangle: "+line);
@@ -3144,7 +3155,8 @@ struct PlayGuiOverlay{
     // 00244fa0's GUI tail (0x00245378): 00419260 -> 00419270 (the manager flush), then 00415870 on the pad
     // record (+14c / +158 of 0055a300 = pad 0's +10c / +118) unless game state 0x13. The canvas update
     // (+60) stays in draw(), once per drawn frame. The pad clock is the T1 model of the front end.
-    void gui_frame(std::uint8_t state_50,std::uint8_t previous_51){
+    std::uint64_t pad_counts=0;   // the T1 model's running count (9600 per 1/60 s frame unless a live delta is given)
+    void gui_frame(std::uint8_t state_50,std::uint8_t previous_51,std::uint32_t t1_counts=9600U){
         if(!menu)return;
         // Checkpoint 132f3: G+50 / +51 (004ffba0 / 004ffba1, the sim's game state) as the runtime reads them
         // (004569d0's 0x13 / 0x14 test before 0012fa60).
@@ -3156,7 +3168,8 @@ struct PlayGuiOverlay{
         gui::PadInput in;
         in.current[0]=driver.held_10c;
         in.previous[0]=driver.prev_118;
-        const std::uint64_t count=gui_frames*9600U;
+        pad_counts+=t1_counts;
+        const std::uint64_t count=pad_counts;
         in.t1=static_cast<std::uint32_t>(count&0xffffU);
         in.ticks=static_cast<std::int64_t>(static_cast<double>(count-in.t1)/5.76);
         rt.translate_pads(in);
@@ -3980,6 +3993,7 @@ std::vector<std::uint32_t> object_dump_ids;   // --object-dump (diagnostic, 132u
     std::optional<bool> online_upnp; // --online-upnp 0|1 (port-only, 132on2e/f): the host's port forward (UPnP, PCP, NAT-PMP)
     std::optional<std::string> online_portmap_test; // --online-portmap-test pcp|natpmp|refuse|silent (port-only test, 132on2f)
     std::optional<std::uint32_t> lan_address; // --lan-address <ip> (port-only, 132ln5f): the LAN sockets bound to that local address, no broadcasts
+    std::optional<std::string> lan_impair; // --lan-impair <spec> (PORT-ONLY test network, 133lt3): loss/dup/reorder on the game socket
     std::optional<std::string> lan_mod_policy; // --lan-mod-policy gameplay|any|cosmetic|none|equal (port-only, 132md5): whom a hosted LAN game lets join by their mods
         // Checkpoint 132ob6 (port-only): --no-coop-partner, and the port settings file (port_settings.hpp) whose coop_partner
         // the front end's "CPU Partner" row writes; coop_from_setting: the partner comes from that setting, not the flag.
@@ -4039,7 +4053,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
     std::optional<unsigned> coop_partner_drop;   // --coop-partner-drop FRAME (port-only diagnostic, checkpoint 132ob7)
         std::string mission="TORONTO1",skeleton_name="MALE.SKEL",motion="CoreMotions";
         std::vector<std::pair<std::string,std::string>> part_names;std::vector<std::string> part_textures;
-        std::optional<float> options_gamma;bool objects=false,hidden=false,textured=false,first_pass=false,no_coronas=false;unsigned max_frames=0;std::set<unsigned> captures;float ledge_survey=0;bool hotbox_survey=false;bool shadows_on=true;unsigned shadow_capture=0;bool shadow_debug=false;std::optional<std::array<float,4>> start_override;bool activate_all=false;std::optional<std::int32_t> npc_serial;bool mission_scripts=false;bool script_start_calls=false;
+        bool fog_on=true;   // 133pr1: the GS distance fog (--no-fog, a PORT-ONLY comparison switch, draws without it)
+    std::optional<float> options_gamma;bool objects=false,hidden=false,textured=false,first_pass=false,no_coronas=false;unsigned max_frames=0;std::set<unsigned> captures;float ledge_survey=0;bool hotbox_survey=false;bool shadows_on=true;unsigned shadow_capture=0;bool shadow_debug=false;std::optional<std::array<float,4>> start_override;bool activate_all=false;std::optional<std::int32_t> npc_serial;bool mission_scripts=false;bool script_start_calls=false;
         bool combat=false;std::optional<unsigned> god_from;std::string hard_mesh_name;bool npc_perception=false;std::optional<EquipmentLoadoutSelection> loadout;bool weapon_models=false;bool native_flow=false;bool gui_overlay=false;bool loadout_screen=false;bool no_loadout_screen=false;std::optional<std::int32_t> waypoint_id;std::optional<std::uint32_t> map_marker_id;bool draw_lod0=false;
         std::optional<float> fixed_dt;std::wstring dt_trace_path;
 #if defined(OMEGA_PS5)
@@ -4070,6 +4085,15 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::set<unsigned> debug_objective_state_frames;   // read-only snapshot after this frame's script/network delivery
         bool lan_end_results=false;   // opt-in composed multiplayer ending validation
         std::optional<std::array<std::int64_t,2>> test_level_end;   // PORT-ONLY --test-level-end <kind> <frame>
+        // PORT-ONLY LAN acceptance drivers (133lt1, research/NET_INLEVEL.md "LAN timing and audio acceptance"): they call
+        // the live script-native routes (00267860, 001c6a00 / 001c6890, 001c67c0) with this console's LAN targets.
+        // Their frames count from the first frame a remote human is present.
+        std::optional<std::pair<unsigned,float>> test_lan_personal_timer;   // --test-lan-personal-timer <frame> <seconds>
+        struct TestLanMusic{unsigned play{},stop{};std::string name;};
+        std::optional<TestLanMusic> test_lan_music;   // --test-lan-music <play frame> <stop frame> <name>
+        std::optional<std::pair<unsigned,std::string>> test_lan_quip;   // --test-lan-quip <frame> <name>
+        std::int64_t lan_clock_offset=0;   // --lan-clock-offset <ms> (FrontendOptions::lan_clock_offset_ms)
+        std::optional<double> debrief_test_hz;   // --debrief-test-hz <hz>: a hidden debrief paced at hz with live dt
         std::vector<std::pair<unsigned,std::uint32_t>> diagnostic_resets;   // PORT-ONLY --reset-npc: (frame, NPC ID) ResetNpc 00148600 calls
         std::set<unsigned> flashlight_taps;   // --flashlight-tap: frames D-pad Right is held (scripted runs)
         std::optional<std::int32_t> goggles_item;   // --goggles-item: port-only 00143df0 add of a goggles item after the start
@@ -4136,6 +4160,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     const auto kind=std::stoll(value()),at=std::stoll(value());
                     if(kind<0||kind>3||at<0)throw std::runtime_error("--test-level-end needs a kind 0..3 and a frame >= 0");
                     test_level_end=std::array<std::int64_t,2>{kind,at};}
+                else if(arg==L"--test-lan-personal-timer"){
+                    const auto at=number<unsigned>(value());const auto s=std::stof(narrow(value()));
+                    if(!(s>0.0F)||!std::isfinite(s))throw std::runtime_error("--test-lan-personal-timer needs a frame and positive seconds");
+                    test_lan_personal_timer=std::pair<unsigned,float>{at,s};}
+                else if(arg==L"--test-lan-music"){
+                    TestLanMusic m;m.play=number<unsigned>(value());m.stop=number<unsigned>(value());m.name=narrow(value());
+                    if(m.stop<=m.play||m.name.empty()||m.name.size()>15)
+                        throw std::runtime_error("--test-lan-music needs a play frame, a later stop frame and a name of 1..15 bytes");
+                    test_lan_music=m;}
+                else if(arg==L"--test-lan-quip"){
+                    const auto at=number<unsigned>(value());auto name=narrow(value());
+                    if(name.empty()||name.size()>15)throw std::runtime_error("--test-lan-quip needs a frame and a name of 1..15 bytes");
+                    test_lan_quip=std::pair<unsigned,std::string>{at,name};}
+                else if(arg==L"--lan-clock-offset")lan_clock_offset=std::stoll(narrow(value()));
+                else if(arg==L"--debrief-test-hz"){const auto hz=std::stod(narrow(value()));
+                    if(!(hz>=10.0&&hz<=500.0))throw std::runtime_error("--debrief-test-hz needs 10..500");
+                    debrief_test_hz=hz;}
                 else if(arg==L"--mods")mods_flag=fs::path(value());   // 132md1 (port-only, research/MODDING.md)
                 else if(arg==L"--no-mods")no_mods_flag=true;
                 else if(arg==L"--mods-cpu-skinning")mods_cpu_skinning=true;
@@ -4185,6 +4226,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 else if(arg==L"--lan-address"){
                     lan_address=lan::lan_parse_ipv4(narrow(value()));
                     if(!lan_address)throw std::runtime_error("--lan-address wants a dotted IPv4 address");
+                }
+                else if(arg==L"--lan-impair"){  // PORT-ONLY test network (133lt3, research/LAN_PLAY.md "LAN resilience")
+                    lan_impair=narrow(value());
+                    std::string why;
+                    if(!lan::lan_parse_impairment(*lan_impair,&why))throw std::runtime_error("--lan-impair: "+why);
                 }
                 else if(arg==L"--lan-mod-policy"){  // 132md5 (port-only, research/MODDING.md)
                     lan_mod_policy=narrow(value());
@@ -4402,7 +4448,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             else if(arg==L"--waitable-swap")waitable_swap=true;
             else if(arg==L"--present-probe")present_probe_on=true;
             else if(arg==L"--profile")profile_path=value();
-            else if(arg==L"--no-shadows")shadows_on=false;
+            else if(arg==L"--no-shadows"||arg==L"--no-fog"){if(arg==L"--no-fog")fog_on=false;else shadows_on=false;}   // 133pr1: one branch (C1061)
             else if(arg==L"--no-cheat-menu")port_set_cheat_menu_enabled(false);
             else if(arg==L"--flashlight-tap"){const auto f=number<unsigned>(value());for(unsigned k=0;k<4;++k)flashlight_taps.insert(f+k);}
             else if(arg==L"--flashlight-hold"){const auto f=number<unsigned>(value());for(unsigned k=0;k<40;++k)flashlight_taps.insert(f+k);}
@@ -4603,6 +4649,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "(9 floats + normal + geometry handle per triangle) for map tools and exits.\n"
                     "Each character is drawn at the LOD 003870c0 picks from the game camera (CHARACTER_APPEARANCE.md): LOD 1 (the\n"
                     "MORPH.HOG '1' meshes and MANTEX '1' images) beyond 12 / half field of view; --draw-lod0 (diagnostic) keeps LOD 0.\n"
+                    "The GS distance fog (133pr1: 001339b0 terms, 00133420 colour, FGE from the mode word 0x80) is drawn unless\n"
+                    "--no-fog (port-only, for comparisons).\n"
                     "Character shadows (CHARACTER_SHADOWS.md) are on unless --no-shadows; caster bounds and fog come from the\n"
                     "skeleton pose and the current ENV record. --shadow-capture N saves slot buffer N with each --capture.\n"
                     "With --frontend and --gui-overlay a level success or Quit shows the mission debrief 00134110 (SUMMARY, SCOREONE,\n"
@@ -5121,6 +5169,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         frontend_options.online_upnp=online_upnp;
         frontend_options.online_portmap_test=online_portmap_test;
         frontend_options.lan_address=lan_address;  // port-only (132ln5f)
+        frontend_options.lan_clock_offset_ms=lan_clock_offset;  // port-only test (133lt1)
+        frontend_options.lan_impair=lan_impair;    // PORT-ONLY test network (133lt3)
         frontend_options.lan_mod_policy=lan_mod_policy;  // port-only (132md5)
         if(fullscreen_flag&&frontend_only&&frontend_hidden)std::cout<<"Host window (port-only): --fullscreen ignored (no visible window)\n";
         if(frontend_only){
@@ -7556,6 +7606,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::unique_ptr<audio::Device> sound_device;
         std::uint32_t sound_player_id=0;
         std::function<void(float)> start_personal_timer;
+        std::function<void(Word,float)> route_personal_timer;   // 00267860's three-way target classification
 #ifdef __vita__
         // Port-only (132vs1, research/VITA.md "Audio"): the level's mix on the app's sound pump (the audio core, pulled
         // by the output) as the play host's front end has it; gameSound reaches the host through the pump's lock.
@@ -7821,6 +7872,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // Checkpoint 132zf4: hosted before init::StartLevel, which starts it in TORONTO2 (the HUD 001307f0 is
         // built in the level load before the scripts' start, so the original applies that call).
         std::unique_ptr<PlayHudTimerHost> timer_host;
+        bool hud_global_timer_expired=false;   // 133lt1: +6c4 expired on this console (the script's "waittimer")
+        std::optional<unsigned> lan_peer_frame;bool lan_music_played=false;   // 133lt1 test drivers' clock and state
+        std::map<std::uint32_t,int> lan_point_flags;   // 133lt1 log: the last record block byte +0 per LAN key
         if(mission_scripts){
             const std::vector<std::string> archive{"GAMEDATA",mission,"SCRIPTS.HOG"};
             std::map<std::string,Script> modules;
@@ -8253,7 +8307,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         auto& s=*g;const auto& msg=rs.message;
                         auto rh=lan_net->generator_spawn_receive_host([&](std::uint32_t actor){return spawned_at(actor,"NPC block").c;});
                         rh.create=[&](const GeneratorSpawnMessage& m)->std::uint32_t{
-                            const std::uint32_t c=m.key_50,id=c&0xffffffU;
+                            // 133lt3: two consoles that spawn at once both draw 0040c240's next index (each probes only
+                            // its own registry), so another console's 0x02450001 may arrive while this console's 0x01450001
+                            // holds ID 0x450001. The original still builds the actor: 0040b790's insert_one (0040cc40)
+                            // refuses the duplicate word and 0021e0c0 never reads that answer (0021e2b4: no use of v0 after the jal), so lookups of 0x450001 keep
+                            // finding the first actor. The PORT-ONLY script tables need a distinct name for the second:
+                            // its whole key, which no lookup of the original's 24-bit ID reaches either.
+                            const std::uint32_t c=m.key_50;
+                            std::uint32_t id=c&0xffffffU;
+                            if(spawn_known_ids.count(id)&&!spawn_known_ids.count(c)){
+                                std::cout<<"Generator "<<s.id<<": received +c 0x"<<std::hex<<c<<" while ID 0x"<<id<<std::dec
+                                    <<" is this console's (0040cc40 refuses the duplicate registry word); named by its key\n";
+                                id=c;
+                            }
                             std::ostringstream at;
                             at<<"Generator "<<s.id<<": the actor of 0021e0c0 (+c 0x"<<std::hex<<c<<std::dec<<", node "<<m.node_60<<")";
                             if(m.node_60<0||static_cast<std::size_t>(m.node_60)>=population.nodes.size())
@@ -8951,7 +9017,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // callback list, *004ffc2c the HUD object and 00245e00 its subtitle record.
                 sound_mixer=std::make_unique<audio::Mixer>();
                 SoundIopHostConfig sound_config;sound_config.level=mission;
+                // Checkpoint 133pr1: one 989snd instance in the original (cGameSound::Init 001c9bf0 runs once at boot;
+                // only cGameOptions::Apply 0045a3a0 changes the masters and the mode). The level's host takes the front
+                // end host's masters and output mode (SoundIopHost::adopt_volume_state, PORT-ONLY boundary) before
+                // GameSoundManager::init re-sends 003a80f0(output_mode), so that send keeps the IOP's mode. Without a front
+                // end the boot state stands (0x400 masters, mode 0: 0045a150 applies only fields that differ).
+                std::optional<snd989::VolumeState> frontend_sound_state;
+                if(frontend_app){
+                    frontend_sound_state=frontend_app->sound_volume_state();
+                    sound_config.output_mode=static_cast<std::uint32_t>(static_cast<std::uint16_t>(frontend_sound_state->play_mode));
+                }
                 sound_host=std::make_unique<SoundIopHost>(disc,sound_config,*sound_mixer);
+                if(frontend_sound_state){
+                    sound_host->adopt_volume_state(*frontend_sound_state);
+                    std::cout<<"Sound: the front end's 989snd masters and output mode "<<frontend_sound_state->play_mode
+                             <<" carried into the level host (one IOP instance, 001c9bf0 / 0045a3a0)\n";
+                }
 #ifdef __vita__
                 if(vita_movie_hooks().locked_host&&vita_movie_hooks().sound_pump){
                     locked_sound_host=vita_movie_hooks().locked_host(*sound_host,sound_lock);
@@ -9120,7 +9201,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     return c;};
                 // The actors' own sounds (SoloActorSimulation::set_sound_sink): 001ca210(desc, bank, name, 0, 0),
                 // 0020f990 / 0020eba0(msg, desc, actor), +20 = 1, then 003c9420(msg, 004ffb50, transport).
-                attach_actor_sound=[&actors,&game_sound,&sound_host,mission_cue](std::size_t a,std::uint32_t id){
+                attach_actor_sound=[&actors,&game_sound,&sound_host,mission_cue,&lan_net,&lan_remotes](std::size_t a,std::uint32_t id){
                     actors.actor(a).set_sound_sink([&game_sound,id](const ActorAnimationSoundRequest& q,bool immediate){
                         std::string name;for(auto ch:q.key){if(!ch)break;name.push_back(static_cast<char>(ch));}
                         auto desc=game_sound->request(q.bank,name,0,static_cast<std::int32_t>(q.preset_word_180));
@@ -9139,10 +9220,20 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             fire();});});
                     // 0018c770(actor, line): "%d_%d_%d" of the mission cue, the line and 1 (a solo game), the quip
                     // 0020f2a0 delivered at once (transport 1); nothing while the cue is <= 0.
-                    actors.actor(a).set_voice_sink([&game_sound,&sound_host,mission_cue](std::int32_t line){
-                        if(sound_host->multiplayer_5721c8())
-                            throw std::runtime_error("gameSound: 0018c770 in a multiplayer game (the controller's +58 / +54) is not hosted");
-                        if(const auto name=player_voice_line_name(mission_cue,line,VoiceLineSpeaker{}))
+                    // 133lt3: in a multiplayer game the third number is the speaker's client + 1 when its controller +58
+                    // answers virtual +54 (a human: the local player, whose +c carries (client + 1) << 24), else 0 (an
+                    // AI controller). A remote human's controller (002d85d0) +54 is not decoded: still refused there.
+                    actors.actor(a).set_voice_sink([&game_sound,&sound_host,mission_cue,&lan_net,&lan_remotes,a,id](std::int32_t line){
+                        VoiceLineSpeaker speaker;
+                        if(sound_host->multiplayer_5721c8()){
+                            if(!lan_net)throw std::runtime_error("gameSound: 0018c770 in a multiplayer game without the LAN core");
+                            for(const auto& r:lan_remotes)if(r.figure&&r.figure->actor==a)
+                                throw std::runtime_error("gameSound: 0018c770 on a remote human (its controller 002d85d0's virtual +54) is not hosted");
+                            speaker.multiplayer=true;speaker.controller_58=true;
+                            speaker.controller_54=a==0;
+                            speaker.serial_c=a==0?lan_net->local_player_key():id;
+                        }
+                        if(const auto name=player_voice_line_name(mission_cue,line,speaker))
                             game_sound->deliver(voice_line_message(*game_sound,*name));});};
                 attach_actor_sound(0,sound_player_id);
                 for(const auto& n:npcs)if(n.ai)attach_actor_sound(n.actor,n.actor_id);
@@ -9254,6 +9345,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         else lan_net->record_point({r.point[0],r.point[1],r.point[2]});
                     };
                     cc.net_shot=[&]{lan_net->record_shot();};
+                    // 133lt1: 0024a850's multiplayer aim-view exit 00249460 clears the same block's aim-point byte.
+                    sim.set_network_clear_point([&]{lan_net->record_clear_point();});
                     cc.net_weapon=[&](std::int32_t item){lan_net->record_weapon(item);};
                     cc.net_local_index=[&]{return static_cast<std::uint32_t>(lan_net->local_client_index());};
                     cc.net_session_host=[&]{return static_cast<std::uint32_t>(lan_net->session_host());};
@@ -9263,8 +9356,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         for(const auto& r:lan_remotes)if(r.key&&r.figure&&r.figure->actor==a)return r.key;
                         if(const auto n=lan_named_npcs.find(a);n!=lan_named_npcs.end())
                             return npcs.at(n->second).actor_id;
+                        // 133lt3: a generator NPC is known to the other consoles by its +c (net_actor matches combat_ids,
+                        // the +c of local and received spawns), not by this console's 24-bit script ID.
                         if(const auto s=spawned_npcs.find(static_cast<std::uint32_t>(a));s!=spawned_npcs.end())
-                            return s->second.id;
+                            return s->second.c;
                         return static_cast<std::uint32_t>(combat_ids.at(a));};
                     cc.net_actor=[&](std::uint32_t key)->std::optional<std::size_t>{
                         if(key==lan_net->local_player_key())return 0;
@@ -10405,7 +10500,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<"SetPersonalTimer at frame "<<t->frame<<": HUD timer +6ac "<<seconds<<" s, clock "<<mission_clock_6dc
                     <<" -> end "<<end<<" (00267860 -> 00244ee0"<<(t->fields.timer_6ac.value?"; drawn in GAMEGUI value_timer)\n":"; no timer widgets, nothing drawn)\n");
             };
-            mission_host->set_personal_timer([&](Word object,float seconds){
+            route_personal_timer=[&](Word object,float seconds){
                 if(object==sound_player_id){
                     start_personal_timer(seconds);
                     return;
@@ -10418,7 +10513,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         return;
                     }
                 std::cout<<"SetPersonalTimer ignored for non-player GOBJ "<<object<<" (00267860: no active player controller)\n";
-            });
+            };
+            mission_host->set_personal_timer([&](Word object,float seconds){route_personal_timer(object,seconds);});
             // Checkpoint 132f6: with the loadout screen the level load runs only 003e20a0 (init::Init); 003e1a20's
             // init::ClientStartLevel / init::StartLevel wait for the state-0x12 done path after its Accept (00168bac).
             // Checkpoint 132ms6: a --loadout without the screen is that screen's Accept, so 003e1a20 runs after it
@@ -14104,6 +14200,50 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 sim.request_level_end(kind);
                 test_level_end.reset();
             }
+            // PORT-ONLY LAN acceptance drivers (133lt1): the first present remote human is the target; their frames
+            // count from the frame that human first appeared here (the joiner arrives whenever its front end does).
+            {
+                const auto first_remote=[&]()->const LanRemote*{
+                    for(const auto& r:lan_remotes)if(!r.gone&&r.key&&r.figure)return &r;
+                    return nullptr;};
+                if(!lan_peer_frame&&first_remote())lan_peer_frame=frame;
+                const auto peer_at=[&](unsigned offset){return lan_peer_frame&&frame>=*lan_peer_frame+offset;};
+                if(test_lan_personal_timer&&peer_at(test_lan_personal_timer->first)){
+                    if(!lan_net||!route_personal_timer)throw std::runtime_error("--test-lan-personal-timer needs a LAN mission with --mission-scripts");
+                    if(const auto* r=first_remote()){
+                        std::cout<<"PORT-ONLY --test-lan-personal-timer at frame "<<frame<<": game::SetPersonalTimer(actor "<<r->figure->actor_id
+                            <<", "<<test_lan_personal_timer->second<<") through 00267860's target classification\n";
+                        route_personal_timer(static_cast<Word>(r->figure->actor_id),test_lan_personal_timer->second);
+                        test_lan_personal_timer.reset();
+                    }
+                }
+                if(test_lan_music&&peer_at(lan_music_played?test_lan_music->stop:test_lan_music->play)){
+                    if(!lan_net||!game_sound)throw std::runtime_error("--test-lan-music needs a LAN mission with gameSound");
+                    const auto* r=first_remote();
+                    if(!r)throw std::runtime_error("--test-lan-music: no remote human at frame "+std::to_string(frame));
+                    const bool stop=lan_music_played;
+                    lan_music_played=true;
+                    const auto& name=test_lan_music->name;
+                    const auto before=game_sound->queue().size();
+                    if(stop){game_sound->stop_music(name,sound_player_id);}else{game_sound->play_music(name,sound_player_id);}
+                    const auto local=game_sound->queue().size()-before;
+                    if(stop){game_sound->stop_music(name,r->figure->actor_id);}else{game_sound->play_music(name,r->figure->actor_id);}
+                    const auto remote=game_sound->queue().size()-before-local;
+                    std::cout<<"PORT-ONLY --test-lan-music at frame "<<frame<<": "<<(stop?"StopMusic":"PlayMusic")<<"(\""<<name<<"\") for the local player "
+                        <<sound_player_id<<" ("<<local<<" local post) and remote actor "<<r->figure->actor_id<<" ("<<remote<<" local posts; "
+                        <<(stop?"001c6890":"001c6a00")<<")\n";
+                    if(stop)test_lan_music.reset();
+                }
+                if(test_lan_quip&&peer_at(test_lan_quip->first)){
+                    if(!game_sound)throw std::runtime_error("--test-lan-quip needs gameSound");
+                    const auto before=game_sound->queue().size();
+                    game_sound->play_quip(test_lan_quip->second,100);
+                    const auto posted=game_sound->queue().size()-before;
+                    std::cout<<"PORT-ONLY --test-lan-quip at frame "<<frame<<": PlayQuip(\""<<test_lan_quip->second<<"\", 100) (001c67c0) "
+                        <<(posted?"posted":"suppressed")<<" on this "<<(lan_net&&!lan_net->hosting()?"client":"authority")<<" ("<<posted<<" message(s))\n";
+                    test_lan_quip.reset();
+                }
+            }
             if(test_crash&&std::int64_t(frame)==test_crash->second)omega::crash::test_crash(test_crash->first,"the play loop");
             // Port-only diagnostics (132win12): --test-focus-loss / --test-alt-enter at a window frame.
             if(test_focus_loss&&std::int64_t(frame)==(*test_focus_loss)[0])window.simulate_focus(false);
@@ -14135,6 +14275,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
+                    // 133lt1 (port-only log): the record block byte +0 (the aim point flag: 00249490 sets it, 00249460 and
+                    // 00249420 clear it) of the local block and of each remote human's received block, on change.
+                    {
+                        const auto log_flag=[&](std::uint32_t key,const char* who){
+                            const auto v=lan_net->record_point_flag(key);
+                            const int now=v?int(*v):-1;
+                            auto& last=lan_point_flags[key];
+                            if(now==last)return;
+                            last=now;
+                            std::cout<<"LAN record point flag ("<<who<<" key 0x"<<std::hex<<key<<std::dec<<") = "<<now<<" at frame "<<frame<<"\n";};
+                        log_flag(lan_net->local_player_key(),"local");
+                        for(const auto& r:lan_remotes)if(!r.gone&&r.key)log_flag(r.key,"remote");
+                    }
                     for(const auto& timer:lan_net->take_personal_timers()){
                         if(timer.localization_key!=-1)
                             throw std::runtime_error("002679f0: labeled cNetLocalTimerMsg is not exposed by the two-argument script native");
@@ -14230,6 +14383,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 <<"): ending the process outside opt-in gameplay recovery\n";
                             running=false;
                         }
+                    }
+                    // 133lt3: 00169360's tail reads and clears 0x005723b8 (002ca580's lobby fatal error in state 10)
+                    // and runs cGameFrontEnd_LobbyDestroy 002ca640(*(G+b4), 0); the level goes on.
+                    if(lan_net->take_lobby_lost()){
+                        std::cout<<"LAN lobby lost (005723b8) at frame "<<frame<<": 002ca640(app, 0)\n";
+                        if(frontend_app)frontend_app->network_lobby_destroy(0);
                     }
                 }catch(const std::exception& e){
                     lan_print_log();
@@ -14377,7 +14536,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::array<float,4> dpad{};   // sp+fb0..fbc: Up, Down, Left, Right
                 if(!script.empty()){
                     script_teleport();
-                    const auto waits=[](const ScriptStep& st){return st.wait_peer||st.wait_left||st.quit;};
+                    const auto waits=[](const ScriptStep& st){return st.wait_peer||st.wait_left||st.quit||st.wait_timer||st.wait_peers!=0;};
                     for(;;){
                         while(script_index<script.size()&&script_left==0&&!waits(script[script_index])){++script_index;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}}
                         if(script_index>=script.size()||!waits(script[script_index]))break;
@@ -14386,8 +14545,21 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             if(running)std::cout<<"Script quit at frame "<<frame<<": the play ends (port-only test convenience)\n";
                             running=false;break;
                         }
+                        if(w.wait_timer){   // 133lt1
+                            if(!hud_global_timer_expired)break;   // no input this frame
+                            std::cout<<"Script waittimer at frame "<<frame<<": the global HUD timer +6c4 expired (port-only test convenience)\n";
+                            ++script_index;script_left=0;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}
+                            continue;
+                        }
                         if(!lan_net)throw std::runtime_error(std::string("Script ")+(w.wait_peer?"waitpeer":"waitleft")+" needs a LAN game (--lan-host / --lan-join)");
                         if(w.wait_peer&&lan_net->remote_humans_created()==0)break;   // no input this frame
+                        if(w.wait_peers){
+                            if(lan_net->remote_humans()<w.wait_peers)break;
+                            std::cout<<"Script waitpeers "<<w.wait_peers<<" at frame "<<frame<<": "<<lan_net->remote_humans()
+                                <<" other consoles' humans are in the level (port-only test convenience)\n";
+                            ++script_index;script_left=0;if(script_index<script.size()){script_teleport();script_left=script[script_index].frames;}
+                            continue;
+                        }
                         if(w.wait_left&&(lan_net->remote_humans_created()==0||lan_net->remote_humans()!=0))break;
                         if(w.wait_peer)std::cout<<"Script waitpeer at frame "<<frame<<": the other console's human is in the level (port-only test convenience)\n";
                         else std::cout<<"Script waitleft at frame "<<frame<<": the other console's human has left (port-only test convenience)\n";
@@ -15229,11 +15401,40 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             while(rt.popup_close(-1)!=0)++closed;   // 002cac80(*004ffc04, -1)
                             std::cout<<"Debrief (00134110) at frame "<<frame<<": a1 "<<a1<<", "<<popped<<" canvas screen(s) popped, "
                                      <<closed<<" popup(s) closed\n";
-                            // 00134110 measures one T-clock delta for the GUI/motion/canvas iteration.
-                            // Use that same interval for host audio; hidden probes retain deterministic time.
+                            // 00134110 (game_33.c:251-272) measures one T-clock delta per iteration, right after the pad
+                            // poll, and advances GUI, motion and canvas by it. A7: that one delta also drives the pad
+                            // translation's T1 clock (gui_frame) and host audio, so the summary keeps wall-clock speed at
+                            // any display rate. Manual pauses are excluded; hidden probes keep 1/60 s per frame unless
+                            // --debrief-test-hz paces them (PORT-ONLY test) with the live delta.
                             float debrief_dt=1.0F/60.0F;
                             auto debrief_frame_at=std::chrono::steady_clock::now();
-                            double debrief_seconds=0.0;
+                            const auto debrief_wall_at=debrief_frame_at;
+                            auto debrief_paced_at=debrief_frame_at;
+                            double debrief_seconds=0.0,debrief_pad_seconds=0.0;
+                            std::uint64_t debrief_pad_issued=0;
+                            const bool debrief_live_dt=!hidden||debrief_test_hz.has_value();
+                            const auto measure_debrief_dt=[&]{
+                                if(hidden&&debrief_test_hz){
+                                    const auto period=std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                        std::chrono::duration<double>(1.0/ *debrief_test_hz));
+                                    debrief_paced_at+=period;
+                                    const auto now=std::chrono::steady_clock::now();
+                                    if(debrief_paced_at>now)std::this_thread::sleep_until(debrief_paced_at);
+                                    else debrief_paced_at=now;
+                                }
+                                const auto now=std::chrono::steady_clock::now();
+                                debrief_dt=debrief_live_dt?std::max(0.0F,std::chrono::duration<float>(now-debrief_frame_at).count()):1.0F/60.0F;
+                                debrief_frame_at=now;
+                            };
+                            // The T1 counts (576000 per second) of this iteration's delta for 00415870's pad clock.
+                            const auto debrief_pad_counts=[&]()->std::uint32_t{
+                                if(!debrief_live_dt)return 9600U;
+                                debrief_pad_seconds+=double(debrief_dt);
+                                const auto total=static_cast<std::uint64_t>(std::llround(debrief_pad_seconds*576000.0));
+                                const auto counts=total-debrief_pad_issued;
+                                debrief_pad_issued=total;
+                                return static_cast<std::uint32_t>(counts);
+                            };
                             const bool auto_advance=!script.empty()||hidden;
                             const gui::Widget* page_widget=nullptr;
                             // One pass of the loop's tail: 0037a9f0's flip of the frame (cleared; the canvas +5c when
@@ -15276,12 +15477,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                         <<" the debrief at debrief frame "<<debrief_frames<<": the session ends\n";
                                     return false;
                                 }
-                                // Pause/Break may wait for minutes; the resumed frame should mix only its own duration.
-                                if(debrief_was_paused)debrief_frame_at=std::chrono::steady_clock::now();
-                                const auto debrief_now=std::chrono::steady_clock::now();
-                                debrief_dt=hidden?1.0F/60.0F:std::max(0.0F,
-                                    std::chrono::duration<float>(debrief_now-debrief_frame_at).count());
-                                debrief_frame_at=debrief_now;
+                                // Pause/Break may wait for minutes; the next iteration's delta starts at the resumption.
+                                if(debrief_was_paused)debrief_frame_at=debrief_paced_at=std::chrono::steady_clock::now();
                                 if(window.minimized()!=state.minimized){
                                     state.minimized=window.minimized();
                                     if(pacing)pacing->set_refresh(state.minimized?0.0:
@@ -15330,7 +15527,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                                 start_actor_fade(fader,mode,1.0F);
                                 unsigned n=0;
                                 while(fader.duration_04!=0.0F){
-                                    update_actor_fader(fader,0.05F);
+                                    measure_debrief_dt();
+                                    update_actor_fader(fader,0.05F);   // Fade_134110: a fixed 0.05 per flip, not the delta
                                     if(!debrief_frame(false,actor_fader_alpha(fader)))return false;
                                     sound_step(debrief_dt);++n;
                                 }
@@ -15347,28 +15545,42 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             // 00415870 (the pad translation), the canvas +60 / +5c, 001698c0 (the network poll: offline),
                             // 0037a9f0, then the sound's frame message 003c9420(.., 004f2cc0).
                             const auto loop_begin=debrief_frames;
+                            const double loop_gui_begin=debrief_seconds;
+                            double next_advance=double(debrief_advance)/60.0;
                             while(rt.top()){
                                 std::uint32_t held=0;
                                 if(auto_advance){
-                                    // Port-only test input: Cross for one frame every --debrief-advance frames.
-                                    if((debrief_frames-loop_begin)%debrief_advance==debrief_advance-1)held|=ds2::cross;
+                                    // Port-only test input: Cross for one frame every --debrief-advance frames (with
+                                    // --debrief-test-hz: every debrief_advance / 60 s of the live summary time instead).
+                                    if(debrief_test_hz&&hidden){
+                                        if(debrief_seconds-loop_gui_begin+double(debrief_dt)>=next_advance){held|=ds2::cross;next_advance+=double(debrief_advance)/60.0;}
+                                    }else if((debrief_frames-loop_begin)%debrief_advance==debrief_advance-1)held|=ds2::cross;
                                 }else{
                                     KeyboardState k{};
                                     if(state.focused)k=host_keyboard_state();
                                     held|=bound_menu_buttons(bindings.play,k);
                                     if(state.focused)if(const auto p=session_gamepad->read())held|=p->pad.held;
                                 }
+                                measure_debrief_dt();   // game_33.c:255-256, after the pad poll 0036a0f0
                                 o.driver.read(held);
-                                o.gui_frame(sim.game_end().state_50,sim.game_end().previous_51);
+                                o.gui_frame(sim.game_end().state_50,sim.game_end().previous_51,debrief_pad_counts());
                                 if(!debrief_frame(true,0))break;
+                                // game_33.c:262: cMachine_NetUpdate 00169390 after the canvas draw (the port's present
+                                // is inside debrief_frame, so it follows the flip here). Retained rooms stay serviced.
+                                if(network_debrief)lan_net->summary_net_update(double(debrief_dt)*1000.0);
                                 sound_step(debrief_dt);
                             }
                             if(window_closed_during_teardown){o.host.debrief=false;return;}
                             std::cout<<"Debrief (00134110): the canvas emptied after "<<debrief_frames-loop_begin<<" frames\n";
                             if(!fade(2,"fade-out")){o.host.debrief=false;return;}
                             o.host.debrief=false;
+                            if(network_debrief)std::cout<<"Debrief (00134110): cMachine_NetUpdate 00169390 ran "
+                                <<lan_net->summary_updates()<<" times in total on this core\n";
                             std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames, "
-                                     <<debrief_seconds<<" s shared GUI/audio time\n";
+                                     <<debrief_seconds<<" s shared GUI/audio time, pad clock "
+                                     <<(debrief_live_dt?debrief_pad_seconds:0.0)<<" s, wall "
+                                     <<std::chrono::duration<double>(std::chrono::steady_clock::now()-debrief_wall_at).count()<<" s"
+                                     <<(debrief_test_hz&&hidden?" (--debrief-test-hz "+std::to_string(int(*debrief_test_hz))+")":std::string())<<"\n";
                         };
                         const bool retain_network=network_debrief&&ending->b1c7;
                         const auto teardown=network_debrief
@@ -16175,6 +16387,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // 00133420's head: the environment blend 00178440, then the far distance 0053834c = the current +0x64.
                 update_environment_blend(shadow_scene.lights(),step_dt);
                 update_level_fog(shadow_scene.lights());   // XLib_UpdateFogParms (00538370 / 00538380), before the traversal
+                // Checkpoint 133pr1: the same head's fog colour words 00538350..5c (00133420), which the particle emitter
+                // constructors copy into em+a0 (00398e20 particle_8.c:264, particle_14.c:197, 0039b3a0, 0039f860): the
+                // VU1 programs' data 0x10, the environment colour they blend each sprite colour toward.
+                if(play_particles&&play_particles->system){
+                    const auto& fc=shadow_scene.lights().fog_colour.words;
+                    play_particles->system->light={static_cast<std::uint32_t>(fc[0]),static_cast<std::uint32_t>(fc[1]),
+                                                   static_cast<std::uint32_t>(fc[2]),static_cast<std::uint32_t>(fc[3])};
+                }
                 npc_system.far_distance=level_far_distance(shadow_scene.lights());
                 // 003bc520 (the sky's vt +48): every layer's motion 003bcb90, once per frame.
                 if(sky_draw)for(auto& layer:sky_draw->layers)update_sky_layer(layer);
@@ -19459,14 +19679,16 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         };
                         hud_blips.place(hud_object->screen(),hud_marker_m,blip_object,blip_vars);
                         // 132hud2: the map sprites' +58 (003e9550: the object's vt +f4 times the x rotation by -pi/2,
-                        // hud_map_sprite_matrix).
+                        // the 3 x 3 scaled by *00493980, hud_map_sprite_matrix). 133pr1: 00493980 is 1.25 from the map
+                        // build 0026e070 (003e9540); .data's 1.0 before it.
                         if(gui_overlay_draw&&gui_overlay_draw->host.iamap){
                             auto& h=gui_overlay_draw->host;
+                            const float sprite_scale=h.hud_map?h.hud_map->g.sprite_scale_493980:1.0F;
                             h.map_sprites.place(*h.iamap,[&](std::int32_t id)->std::optional<HudMatrix>{
                                 if(const auto b=combat_session->hud_blip_object(id))return b->f4;
                                 if(!host_object_by_id)return std::nullopt;
                                 const auto o=host_object_by_id(id);
-                                return o?std::optional<HudMatrix>(o->matrix_f4):std::nullopt;});
+                                return o?std::optional<HudMatrix>(o->matrix_f4):std::nullopt;},sprite_scale);
                         }
                         std::optional<HudMarkerView> view;
                         if(combat_session->hud_found(combat_ids.at(0))){
@@ -19523,8 +19745,25 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // Checkpoint 132sx3: 00244fa0's timers (after the map update) against the clock just advanced.
                         timer_host->fields.clock_6dc=mission_clock_6dc;
                         timer_host->frame=frame;
+                        const bool personal_before=timer_host->fields.timer_6ac.running!=0;
+                        const bool global_before=timer_host->fields.timer_6c4.running!=0;
                         hud_update_timers(timer_host->fields,*timer_host);
                         timer_host->report();
+                        // 133lt1 (port-only log): a HUD timer's expiry on this console and the clocks that judged it. Only the
+                        // multiplayer authority (005721c0) posts TimerExpired for +6c4 (hud_update_timers); +6ac is local.
+                        const auto wall_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                        if(personal_before&&!timer_host->fields.timer_6ac.running)
+                            std::cout<<"HUD timer +6ac expired at frame "<<frame<<": end "<<timer_host->fields.timer_6ac.end<<", mission clock "
+                                <<mission_clock_6dc<<", wall "<<wall_ms<<" ms (personal: TimerExpiredMsg kind 2 on this console)\n";
+                        if(global_before&&!timer_host->fields.timer_6c4.running){
+                            hud_global_timer_expired=true;
+                            std::cout<<"HUD timer +6c4 expired at frame "<<frame<<": end "<<std::fixed<<std::setprecision(3)<<timer_host->fields.timer_6c4.end
+                                <<std::defaultfloat;
+                            if(lan_net)std::cout<<", session clock "<<lan_net->session_clock_ms()<<" ms, local LAN clock "<<lan_net->local_clock_ms()<<" ms";
+                            else std::cout<<", mission clock "<<mission_clock_6dc;
+                            std::cout<<", wall "<<wall_ms<<" ms; TimerExpired "<<(!lan_net||lan_net->hosting()?"posted (authority)":"not posted (client, 005721c0 clear)")<<"\n";
+                        }
                     }
                 }
                 // 001337dc: the vision effects update 002604c0(G+e0, dt) after the HUD update 00244fa0.
@@ -20824,6 +21063,44 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
 #endif
                 if(scene_frame){
+                    // Checkpoint 133pr1: the GS distance fog of the frame's model draws. XLib::SetModelContext 0037c350
+                    // keeps the mode word's 0x80 (PRMODE FGE) for a model whose draw request has 0x10 (the culler's code
+                    // bit 0x10 for a box past the near plane, set for every filed model of the scene frame), and sends
+                    // FOGCOL from renderer +0x160..: the world update head's colour (00133420) and terms (001339b0).
+                    // Mode 0x100 (ENV fog byte +0x7c) has no FGE. The thermal tail (vision mode 2, 0013ea28..) draws the
+                    // skm / foreground lists (the overlay) with near = 0.95 far and the colour words (0, 0, 256), whose
+                    // FOGCOL is black (256 leaves FCB). The shadow receiver pass stays unfogged (CHARACTER_SHADOWS.md
+                    // open question 4).
+                    SceneFog main_fog,overlay_fog;
+                    const auto& fog_lights=shadow_scene.lights();
+                    if(fog_on&&fog_lights.current_environment&&(level_frame_mode(fog_lights)&0x80U)){
+                        const auto byte_colour=[](const LevelFogColour& c){
+                            const auto r=fog_colour_register(c);
+                            return std::array<float,3>{r[0]/255.0F,r[1]/255.0F,r[2]/255.0F};};
+                        if(const auto terms=frame_fog(fog_lights)){
+                            main_fog={true,byte_colour(frame_fog_colour(fog_lights)),terms->base,terms->scale};
+                            overlay_fog=main_fog;
+                        }
+                        if(vision_fx.mode_00==2){
+                            overlay_fog={};
+                            if(const auto thermal=thermal_frame_fog(fog_lights))
+                                overlay_fog={true,byte_colour(thermal_fog_colour()),thermal->base,thermal->scale};
+                        }
+                    }
+                    {   // the fog state the frame draws with, logged when it changes
+                        static std::string fog_logged;
+                        std::ostringstream fs;
+                        const auto put=[&fs](const char* what,const SceneFog& f){
+                            fs<<what<<(f.on?"":" off");
+                            if(f.on)fs<<" FOGCOL "<<std::lround(f.colour[0]*255.0F)<<" "<<std::lround(f.colour[1]*255.0F)<<" "
+                                      <<std::lround(f.colour[2]*255.0F)<<", +180 "<<f.base<<", +190 "<<f.scale;};
+                        put("main",main_fog);put("; overlay",overlay_fog);
+                        if(fs.str()!=fog_logged){
+                            fog_logged=fs.str();
+                            std::cout<<"GS fog (133pr1, 00133420 / 001339b0 / 0037c350) at frame "<<frame<<": "<<fog_logged<<"\n";
+                        }
+                    }
+                    state.renderer->set_fog(main_fog,overlay_fog);
                     state.renderer->set_draw_hook(run_hook);in_scene_draw=true;
                     state.renderer->draw(*state.camera,{textured,state.wire,false,true,state.vertex_light,textured&&!first_pass});
                 }else state.renderer->clear_frame();   // 132fe1: state 0x12 (above)
@@ -21457,6 +21734,9 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             state.renderer->release_targets();
             window.clear_events();
             window.log_handoff("level end ("+mission+"), front end resume");
+            // Checkpoint 133pr1: the one 989snd instance's masters and output mode, as the level left them (the in-game
+            // options' 0045a3a0 calls), go back to the front end's host (SoundIopHost::adopt_volume_state).
+            if(sound_host)frontend_app->adopt_sound_volume_state(sound_host->volume_state());
             // *004ffd2c is one global: the in-game options screen's changes stay for the front end (its save).
             if(gui_overlay_draw){
                 auto& fg=frontend_app->session().runtime().g;

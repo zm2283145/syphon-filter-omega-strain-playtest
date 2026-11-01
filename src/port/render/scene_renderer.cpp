@@ -49,8 +49,15 @@ struct alignas(16) Constants {
     XMFLOAT4 up{0, 0, 1, 0};
     XMFLOAT4 alpha_test{-1, 0, 0, 0};
     XMFLOAT4 uv_offset{0, 0, 0, 0};
+    XMFLOAT4 fog_colour{0, 0, 0, 0};   // 133pr1: FOGCOL / 255, w = 1 when the draw fogs
+    XMFLOAT4 fog_terms{0, 0, 0, 0};    // 133pr1: renderer +0x180, +0x190
 };
 static_assert(sizeof(MeshVertex) == 60);
+// 133pr1: a SceneFog into the model constants.
+void apply_fog(Constants& data, const SceneFog& fog) {
+    data.fog_colour = {fog.colour[0], fog.colour[1], fog.colour[2], fog.on ? 1.0F : 0.0F};
+    data.fog_terms = {fog.base, fog.scale, 0, 0};
+}
 
 gfx::TargetBlend blend_target(gfx::BlendFactor src, gfx::BlendFactor dst, gfx::BlendOp op, gfx::BlendFactor src_alpha,
                               gfx::BlendFactor dst_alpha, std::uint8_t mask = gfx::mask_all) {
@@ -660,6 +667,11 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
     const gfx::Viewport viewport{0, 0, float(scene_w), float(scene_h), 0, 1};
     l.set_viewport(viewport);
     data.options = {options.textured ? 1.0F : 0.0F, 0, options.vertex_lighting ? 1.0F : 0.0F, 0};
+    // 133pr1: the main surfaces' fog; none for a no-depth item (the sky: cSKYBOX_GOBJ::Render 003bc280 clears the mode
+    // word's 0x1f0 bits, so no FGE, and draws its layers with request 2, no 0x10).
+    const SceneFog no_fog{};
+    const SceneFog* main_fog = &fog_main_;
+    apply_fog(data, *main_fog);
     const gfx::Buffer* constants = constants_.get();
     const auto update = [&] { l.update_buffer(constants, &data, sizeof data); };
     update();
@@ -689,6 +701,7 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
         data.options = {options.textured ? 1.0F : 0.0F, 0, options.vertex_lighting ? 1.0F : 0.0F, 0};
         data.alpha_test = {-1, 0, 0, 0};
         data.uv_offset = {0, 0, 0, 0};
+        apply_fog(data, *main_fog);
         update();
         texturing = options.textured;
         l.set_program(gfx::Program::scene_model);
@@ -850,6 +863,7 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
             data.options = {0, 0, 0, 0};
             data.alpha_test = {-1, 0, 0, 0};
             data.uv_offset = {0, 0, 0, 0};
+            apply_fog(data, fog_overlay_);
             update();
             overlay_texturing = false;
             if (overlay_buffers) {
@@ -966,6 +980,14 @@ void SceneRenderer::draw(const OrbitCamera& camera, const SceneOptions& options)
             continue;
         }
         if (item.source == SceneDrawItem::Source::main) {
+            const SceneFog* fog = item.no_depth ? &no_fog : &fog_main_;
+            if (fog != main_fog) {
+                main_fog = fog;
+                if (bound == Bound::main) {
+                    apply_fog(data, *main_fog);
+                    update();
+                }
+            }
             const gfx::DepthState* want = item.no_depth ? depth_disabled_.get() : depth_enabled_.get();
             if (want != main_depth) {
                 main_depth = want;

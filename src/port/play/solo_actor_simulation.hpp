@@ -1065,6 +1065,9 @@ public:
     // receiver of that message (001717a0 action 3 -> 00171880). Off by
     // default (a solo game).
     void set_multiplayer_host(bool host);
+    // 0024a850 in a network game (byte 005721c8): leaving the manual aim view calls 00249460 on the local player's
+    // network record block (LanNetCore::record_clear_point). Unset: solo (no call).
+    void set_network_clear_point(std::function<void()> clear);
     // Port-only (checkpoint 132ob5, omega_play --coop-partner, the partner
     // only): in actor mode 16, 001a80e0 marks the navigation arrived (+30ad,
     // 001a84c8..001a84e8) on every frame its ladder request (00476490: 31 / 32)
