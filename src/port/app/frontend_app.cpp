@@ -105,6 +105,8 @@ struct ScriptStep {
     // count is no measure of the refresh. With both, the step waits for both. 132ln5h14: without an online lobby,
     // the LAN browser's games (LanSession::games, the JOINMIS rows of the LAN browse, refreshed every update).
     std::optional<std::size_t> wait_games;
+    // PORT-ONLY test (A10): "waitmission N" waits for a LAN advertisement of the exact mission index.
+    std::optional<std::uint8_t> wait_mission;
     // PORT-ONLY test (132on2h): "capture NAME" keeps the last drawn frame as a --frontend-capture BMP when this step
     // begins (a screen whose content changes after it settled, e.g. a list filled by the server).
     std::optional<std::string> capture;
@@ -252,6 +254,7 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
     std::optional<std::string> card;
     std::optional<std::string> keys, touch_file, wait_file, capture;
     std::optional<std::size_t> wait_games;
+    std::optional<std::uint8_t> wait_mission;
     // The rest of the line, trimmed (a path or text that may hold spaces).
     const auto rest = [](std::istringstream& s) {
         std::string r;
@@ -291,6 +294,13 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
             wait_games = static_cast<std::size_t>(n);
             continue;
         }
+        if (word == "waitmission") {  // PORT-ONLY test (A10): see ScriptStep
+            long long n = -1;
+            if (!(s >> n) || n < 0 || n > 0xff)
+                throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"waitmission N\"");
+            wait_mission = static_cast<std::uint8_t>(n);
+            continue;
+        }
         if (word == "keys") {  // PORT-ONLY test (132on2b): typed on the USB keyboard at the next step
             const std::string text = rest(s);  // 132on2c: the rest of the line (it may hold spaces)
             if (text.empty()) throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"keys TEXT\"");
@@ -305,16 +315,18 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
         if (!(s >> buttons) || n <= 0)
             throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"N BUTTONS\"");
         steps.push_back({n, frontend_buttons(buttons), std::move(card), std::move(keys), std::move(touch_file), std::move(wait_file),
-                         wait_games, std::move(capture)});
+                         wait_games, wait_mission, std::move(capture)});
         capture.reset();
         card.reset();
         keys.reset();
         touch_file.reset();
         wait_file.reset();
         wait_games.reset();
+        wait_mission.reset();
     }
-    if (touch_file || wait_file || wait_games || capture)
-        throw std::runtime_error("Front-end script: a \"touch\" / \"waitfile\" / \"waitgames\" / \"capture\" line after the last step");
+    if (touch_file || wait_file || wait_games || wait_mission || capture)
+        throw std::runtime_error(
+            "Front-end script: a \"touch\" / \"waitfile\" / \"waitgames\" / \"waitmission\" / \"capture\" line after the last step");
     if (keys) throw std::runtime_error("Front-end script: a \"keys\" line after the last step");
     if (card) throw std::runtime_error("Front-end script: a \"card\" line after the last step");
     return steps;
@@ -381,6 +393,9 @@ struct FrontendApp::Impl {
     void draw_lan_notices();
     std::unique_ptr<lan::LanNetCore> lan_core;  // port-only (132ln5): the network game's DME.cc game side
     bool network_exit_started = false;
+    bool network_level_retained = false;
+    void retain_network_level();
+    void release_network_level();
     // Port-only test (132on2f, --online-portmap-test): the fake PCP / NAT-PMP gateway (outlives online_lobby, whose
     // destructor waits for the mapping's removal).
     std::unique_ptr<online::FakePortMapGateway> portmap_test_gateway;
@@ -763,18 +778,25 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
         }
         lan_session = std::make_unique<lan::LanSession>(lc);
         services.lan_host = [this](const gui::GuiHost::LanHostRequest& r) {
-            const bool ok = lan_session->host({r.host_name, r.mission, r.num_agents, r.join_filter});
+            const bool retained = network_level_retained && lan_session->hosting();
+            const bool ok = retained ? lan_session->continue_hosted_mission(r.mission)
+                                     : lan_session->host({r.host_name, r.mission, r.num_agents, r.join_filter});
             if (ok) {
                 const auto& a = lan_session->advert();
                 char id[32];
                 std::snprintf(id, sizeof id, "%016llx", static_cast<unsigned long long>(a.session_id));
-                std::cout << "Front end: LAN game hosted (port-only, 132ln3" << (lan_net ? ", loopback network" : "")
-                          << "): session " << id << ", game port " << a.game_port << ", build hash "
-                          << std::hex << a.build_hash << std::dec << "\n";
+                if (retained)
+                    std::cout << "Front end: retained LAN game session " << id << " published mission "
+                              << r.mission << " without rehosting\n";
+                else
+                    std::cout << "Front end: LAN game hosted (port-only, 132ln3" << (lan_net ? ", loopback network" : "")
+                              << "): session " << id << ", game port " << a.game_port << ", build hash "
+                              << std::hex << a.build_hash << std::dec << "\n";
             }
             return ok;
         };
         services.lan_hosting = [this] { return lan_session->hosting(); };
+        services.lan_continuing = [this] { return network_level_retained; };
         // Port-only (132ln4): GuiNetJoinMission's browser and join.
         services.lan_browse = [this](bool on) {
             const bool ok = lan_session->browse(on);
@@ -799,12 +821,15 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
         };
         services.lan_join = [this](std::uint64_t id) {
             const std::string name = session->profile_name(session->current_profile()).value_or("");
-            const bool ok = lan_session->join(id, name.substr(0, name.find('\0')));
+            const bool retained = network_level_retained;
+            const bool ok = retained ? lan_session->continue_joined_session(id)
+                                     : lan_session->join(id, name.substr(0, name.find('\0')));
             char text[32];
             std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(id));
             const auto mods = mods::active_online_report();
             std::cout << "Front end: LAN join (port-only, 132ln4) of session " << text << ": "
-                      << (ok ? "JOIN_REQ sent" : "not sent") << " (132md5: with " << lan::lan_mod_brief(&mods) << ")\n";
+                      << (ok ? (retained ? "retained connection reused" : "JOIN_REQ sent") : "not sent")
+                      << " (132md5: with " << lan::lan_mod_brief(&mods) << ")\n";
             return ok;
         };
         services.lan_join_state = [this] {
@@ -829,7 +854,8 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
             return "Refused by the host: " + why;
         };
         services.lan_pump = [this] {
-            lan_session->pump();
+            if (network_level_retained && net_session() == lan_session.get()) lan_session->pump_lobby();
+            else lan_session->pump();
             if (lan_peer) lan_peer->pump();
         };
         services.lan_clock_ms = [this] { return static_cast<std::int64_t>(lan_session->clock_ms()); };
@@ -1280,6 +1306,10 @@ void FrontendApp::Impl::step(std::uint16_t held) {
 #ifndef __vita__
     const std::string movie_before = s.movie_playing() ? s.movie_name() : std::string{};
 #endif
+    if (network_level_retained) {
+        if (!lan_core) throw std::logic_error("Front end retained a missing network core");
+        lan_core->retained_frontend_tick(1000.0 / 60.0);
+    }
     {
         FrontendProfileScope scope(profile, "session");  // port-only (132win5): includes the services timed apart
         s.frame(held);
@@ -1295,8 +1325,14 @@ void FrontendApp::Impl::step(std::uint16_t held) {
         start_movie_audio(movie_before);
     }
 #endif
-    if (lan_session) lan_session->pump();  // port-only (132ln3): the hosted LAN game's discovery and transport
-    if (online_session) online_session->pump();  // port-only (132on2b2): the online game's
+    if (lan_session) {
+        if (network_level_retained && net_session() == lan_session.get()) lan_session->pump_lobby();
+        else lan_session->pump();
+    }
+    if (online_session) {
+        if (network_level_retained && net_session() == online_session.get()) online_session->pump_lobby();
+        else online_session->pump();
+    }
     if (lan_peer) lan_peer->pump();        // port-only test (132ln4): --lan-loopback-peer
     // Port-only (132on2b): the online lobby's service (the room's game list; a request's callback waits for the
     // screen's 004536b0).
@@ -2001,7 +2037,8 @@ FrontendResult FrontendApp::Impl::loop() {
                               << s.frames() << " (port-only)\n";
                 }
                 if (script[script_index].capture) capture(*script[script_index].capture);  // PORT-ONLY test (132on2h)
-                script_waiting = script[script_index].wait_file.has_value() || script[script_index].wait_games.has_value();
+                script_waiting = script[script_index].wait_file.has_value() || script[script_index].wait_games.has_value() ||
+                                 script[script_index].wait_mission.has_value();
             }
             std::uint16_t held = script[script_index].held;
             if (script_waiting) {  // PORT-ONLY test (132on2c): the step waits, buttons up, for its file / games
@@ -2011,7 +2048,11 @@ FrontendResult FrontendApp::Impl::loop() {
                 const bool games = !st.wait_games ||
                                    (online_lobby ? online_lobby->game_list().rows.size() >= *st.wait_games
                                                  : lan_session && lan_session->games().size() >= *st.wait_games);
-                if (file && games) {
+                const bool mission = !st.wait_mission ||
+                                     (lan_session && std::ranges::any_of(lan_session->games(), [&](const lan::LanBrowseEntry& e) {
+                                          return e.advert.mission_index == *st.wait_mission;
+                                      }));
+                if (file && games && mission) {
                     script_waiting = false;
                     if (st.wait_file)
                         std::cout << "Front-end script: waitfile \"" << *st.wait_file << "\" found at front-end frame "
@@ -2019,6 +2060,9 @@ FrontendResult FrontendApp::Impl::loop() {
                     if (st.wait_games)
                         std::cout << "Front-end script: waitgames " << *st.wait_games << " met at front-end frame "
                                   << s.frames() << " (port-only)\n";
+                    if (st.wait_mission)
+                        std::cout << "Front-end script: waitmission " << int(*st.wait_mission)
+                                  << " met at front-end frame " << s.frames() << " (port-only)\n";
                 } else {
                     held = 0;
                 }
@@ -2139,8 +2183,17 @@ FrontendResult FrontendApp::Impl::loop() {
         if (!ns || !ns->transport())
             throw std::runtime_error("Level load 001693f0 (state 0xe) in a network game without a LAN session: Online play "
                                      "(the DME connect 0042ab00) is not ported");
-        lan_core = std::make_unique<lan::LanNetCore>(*ns->transport(), [ns] { return ns->clock_ms(); },
-                                                     s.host_role());
+        if (network_level_retained) {
+            if (!lan_core) throw std::logic_error("Network level reload lost its retained core");
+            lan_core->resume_retained_level(s.host_role());
+            network_level_retained = false;
+            network_exit_started = false;
+            std::cout << "Front end: reusing the retained network core and connected game transport\n";
+        } else {
+            if (lan_core) throw std::logic_error("Network level load found an unreleased network core");
+            lan_core = std::make_unique<lan::LanNetCore>(*ns->transport(), [ns] { return ns->clock_ms(); },
+                                                         s.host_role());
+        }
         // Checkpoint 132ln5f: the lobby keep-alive 002ca580 in the level serves LanSession's discovery (the host's
         // advertisement goes on, as the Medius listing does), not its transport (LanDme polls that).
         lan_core->set_lobby([ns] { ns->pump_lobby(); });
@@ -2162,6 +2215,10 @@ FrontendResult FrontendApp::Impl::loop() {
                   << "(the thread ran " << lan_core->thread_runs() << " time(s)), 0016a970 native (team data 004ee620 = 0x"
                   << std::hex << m.read(0x4ee620) << std::dec << "), client index " << ns->transport()->local_index()
                   << "; 001350e0 and the rest of 001693f0 are the play's\n";
+    }
+    if (s.handoff() && !s.multiplayer() && network_level_retained) {
+        release_network_level();
+        std::cout << "Front end: retained network game released before a solo level hand-off\n";
     }
     if (s.handoff()) {
         result.level = s.level();
@@ -2214,27 +2271,43 @@ void FrontendApp::network_level_exit(const AgentStatistics* live, bool completed
         for (const auto& line : m.online_lobby->take_log()) std::cout << "Front end: " << line << "\n";
 }
 
-void FrontendApp::release_network_level() {
-    auto& m = *impl_;
-    if (!m.lan_core) return;
+void FrontendApp::Impl::retain_network_level() {
+    if (!lan_core || lan_core->level_loaded())
+        throw std::logic_error("Front end can retain only a torn-down network level");
+    if (network_exit_started)
+        throw std::logic_error("Front end cannot retain a network level after exiting its game session");
+    network_level_retained = true;
+    std::cout << "Front end: retained the connected game transport for the next network mission\n";
+}
+
+void FrontendApp::Impl::release_network_level() {
+    if (!lan_core) {
+        network_level_retained = false;
+        return;
+    }
     // All level-local borrowers are gone before this API is called. The core
     // itself still borrows the transport and its clock, so destroy it first.
-    auto* session = m.net_session();
-    m.lan_core.reset();
-    if (m.online_lobby && m.online_lobby->in_game()) m.online_lobby->game_cleanup();
+    auto* session = net_session();
+    lan_core.reset();
+    if (online_lobby && online_lobby->in_game()) online_lobby->game_cleanup();
     else if (session) {
         if (session->hosting()) session->leave();
         else session->cancel_join();
     }
-    m.network_exit_started = false;
+    network_exit_started = false;
+    network_level_retained = false;
     std::cout << "Front end: network level released (core before session transport)\n";
 }
+
+void FrontendApp::release_network_level() { impl_->release_network_level(); }
 std::string FrontendApp::port_settings_source() const {
     return impl_->store->where();
 }
 
-FrontendResult FrontendApp::resume_after_level(std::uint8_t state_50, std::uint8_t previous_51) {
-    release_network_level();
+FrontendResult FrontendApp::resume_after_level(std::uint8_t state_50, std::uint8_t previous_51,
+                                               bool retain_network_level) {
+    if (retain_network_level) impl_->retain_network_level();
+    else release_network_level();
     impl_->session->resume_after_level(state_50, previous_51);
     std::cout << "Front end: resumed after the level end (state 0x" << std::hex << int(state_50) << ", previous 0x"
               << int(previous_51) << std::dec << ")";

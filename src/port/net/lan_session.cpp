@@ -81,6 +81,14 @@ bool LanSession::host(const LanHostSetup& setup) {
     return true;
 }
 
+bool LanSession::continue_hosted_mission(std::int32_t mission) {
+    if (!hosting() || !discovery_ || mission < 0 || mission > 0xff) return false;
+    advert_.mission_index = static_cast<std::uint8_t>(mission);
+    advert_.state = LanSessionState::Open;
+    discovery_->update(advert_);
+    return true;
+}
+
 void LanSession::exit_game() {
     if (!hosting_) return;
     if (transport_) transport_->set_accepting_joins(false);
@@ -144,6 +152,11 @@ bool LanSession::join(std::uint64_t session_id, const std::string& agent_name) {
     hosting_ = false;
     joined_session_ = session_id;
     return true;
+}
+
+bool LanSession::continue_joined_session(std::uint64_t session_id) const {
+    return transport_ && !hosting_ && transport_->state() == LanTransportState::Connected &&
+           transport_->session_id() == session_id;
 }
 
 bool LanSession::join_at(const LanAddress& host_address, const std::string& agent_name) {

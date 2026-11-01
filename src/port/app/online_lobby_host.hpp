@@ -50,9 +50,9 @@
 //    account; its record, else 00585e90, rebuilt and sent with the lobby tail), the create 0044e960 (reason 1), the
 //    join 0044e430 (reason 2: the game row's host, mission and filter from its name), the game's end 0044e340
 //    (reason 3; the abandoned join and the network level's end) and 00451b30's refresh every 0x9c40 ms in the
-//    states 4 / 5 / 6 / 7 (GetAccountStats, AccountUpdateStats of the answer). +e8 is session +2484, the clan id
-//    GetMyClans (00449a00 / 00448b70) stores: -1, as the original's with no clan (132on2i; omega_server has no clans
-//    yet). PORT-ONLY: +f4 (00443020, the client's own address) is 0: omega_server
+//    states 4 / 5 / 6 / 7 (GetAccountStats, AccountUpdateStats of the answer). +e8 is session +2484, the cell ID
+//    GetMyClans (00449a00 / 00448b70) stores, or -1 without membership. PORT-ONLY: +f4 (00443020, the client's own
+//    address) is 0: omega_server
 //    sees the address itself; 00451b30's 004499a0 (the login's refresh 00449a00 every 00497800 ms) is not run;
 //  * (132on2d) in the level the lobby's frame is level_frame (play_main's): the original's 004536b0 runs 004446e0(1)
 //    in state 10 while the DME game runs; the port's level pumps only the lobby's client (the LAN session is the
@@ -179,13 +179,24 @@ public:
     std::int32_t account_id(const std::string& name) override;
     std::int32_t contact_add(std::int32_t id) override;
     // Checkpoint 132on2i (GuiAgentInfo mode 1, ONLINE.md §3.7.2): 00450c60, the record cache's (00450cf0, younger
-    // than 30000 ms) or GetAccountStats'; the contacts test 0044d670 over the last contact list. The agency cell
-    // calls answer as the original with no clan (GetMyClans' NoResult, 00448b70: +2484 / the leader -1): omega_server
-    // has no clans yet (PORT-ONLY; the creation fails as a timeout, error 2).
+    // than 30000 ms) or GetAccountStats'; the contacts test 0044d670 over the last contact list; and the original
+    // agency-cell services used by AGNTINFO, NETMESS and AGENTCEL.
     bool agent_stats(std::int32_t id, std::array<std::uint8_t, 0xfc>& out) override;
     bool is_contact(std::int32_t id) override;
+    bool cell_leader() override;
+    bool cell_member() override;
+    std::string cell_name() override;
+    std::optional<std::string> cell_name_of(std::int32_t clan) override;
+    bool cell_has(std::int32_t id) override;
     std::int32_t cell_invite(std::int32_t id) override;
     std::int32_t cell_create(const std::string& name) override;
+    std::int32_t cell_open() override;
+    void cell_close() override;
+    std::vector<gui::GuiHost::LobbyCellMember> cell_members() override;
+    std::string cell_message() override;
+    std::int32_t cell_set_message(const std::string& message) override;
+    std::int32_t cell_resign() override;
+    std::int32_t cell_remove(std::int32_t id) override;
     bool join_password_refused() override { return password_refused_; }
     void set_join_password(const std::string& password) override { join_password_ = password; }
     // PORT-ONLY (132on2c): the password the games this agent creates are protected by (empty: none; the settings key
@@ -312,7 +323,11 @@ private:
     std::vector<gui::GuiHost::LobbyCachedGame> game_cache_updates_;
     std::uint64_t game_info_fetch_ms_ = 0;  // *00585e50
     bool invitations_asked_ = false, social_asked_ = false;
+    bool clan_invitations_asked_ = false;
     std::optional<bool> chat_filter_;
+    online::OnlineLobby::ClanInfo clan_;
+    std::vector<online::OnlineLobby::ClanMember> clan_members_;
+    bool refresh_clan();
 
     // Checkpoint 132on2d: the statistics record (see the header's 132on2d paragraph).
     // 00452f30(session, reason, blob): the callback +2554 builds the record (reasons 0 login, 1 create, 2 join,
@@ -323,7 +338,7 @@ private:
     void upload_record(const char* why, const online::StatsBlob& blob);
     // The login's tail 0044ce60 and 0044e340: +e8 the lobby world, +f4 the client's address, +ec / +f0 / +f9 0,
     // +f8 5.
-    static void lobby_tail(online::StatsBlob& blob);
+    void lobby_tail(online::StatsBlob& blob);
     // 0044e340's head: the game's end (state 10 -> 9), the record rebuilt and uploaded.
     void entry_end();
     StatsBuilder stats_builder_;

@@ -113,6 +113,17 @@ void OnlineLobbyHost::message_answer(std::int32_t index, std::int32_t accept) {
     if (index < 0 || static_cast<std::size_t>(index) >= messages_.size()) return;
     log("online: message " + std::to_string(index) + " answered " + std::to_string(accept));
     const auto& m = messages_[static_cast<std::size_t>(index)];
+    if (m.type == 0 && lobby_.logged_in()) {
+        const auto st = lobby_.clan_answer(m.id, accept != 0);
+        log("online: agency cell invitation from " + m.from + (accept ? " accepted" : " declined") +
+            " (102 -> 103, status " + (st ? std::to_string(*st) : std::string("none")) + ")");
+        if (accept && st == online::status::Success) {
+            refresh_clan();
+            build_record(0, record_);
+            lobby_tail(record_);
+            upload_record("agency cell joined", record_);
+        }
+    }
     // 00450f30: a type 1 message (a contact invitation) is answered by 00446560: AddToBuddyListFwdConfirmationResponse
     // (260; +18 accept ? 2 : -985, +30 the inviter), no reply (132on2g, ONLINE.md §3.7).
     if (m.type == 1 && lobby_.logged_in()) {
@@ -130,7 +141,7 @@ void OnlineLobbyHost::message_answer(std::int32_t index, std::int32_t accept) {
 // chat filter choice (online_chat_filter) and the recent players list, asked once per login and logged.
 void OnlineLobbyHost::contacts_service() {
     if (!lobby_.logged_in()) {
-        invitations_asked_ = social_asked_ = false;
+        invitations_asked_ = clan_invitations_asked_ = social_asked_ = false;
         return;
     }
     auto& client = lobby_.client();
@@ -156,6 +167,25 @@ void OnlineLobbyHost::contacts_service() {
     while (const auto f = client.wait_for(online::mid::AddToBuddyListFwdConfirmation, 0)) {
         if (f->body.size() < online::msize::AddToBuddyListFwdConfirmation) continue;
         invitation(online::get_i32(f->body, 0x18), online::get_str(f->body, 0x1c, 32), "259");
+    }
+    if (!clan_invitations_asked_ && state_ >= 4) {
+        clan_invitations_asked_ = true;
+        client.send_medius(online::mid::CheckMyClanInvitations,
+                           online::request::clan_invitations(lobby_.session_key()));
+        log("online: CheckMyClanInvitations sent (100)");
+    }
+    while (const auto f = client.wait_for(online::mid::CheckMyClanInvitationsResponse, 0)) {
+        if (f->body.size() < online::msize::CheckMyClanInvitationsResponse) continue;
+        if (online::get_i32(f->body, online::kStatusOffset) == online::status::Success) {
+            gui::GuiHost::LobbyMessage m;
+            m.type = 0;
+            m.id = online::get_i32(f->body, 0x1c);
+            m.text = online::get_str(f->body, 0x28, 200);
+            m.from = online::get_str(f->body, 0xf4, 32);
+            messages_.push_back(std::move(m));
+            messages_changed_ = true;
+            log("online: agency cell invitation received (101)");
+        }
     }
     if (!social_asked_ && client.welcomed() && (client.caps() & online::cap::Social)) {
         social_asked_ = true;
@@ -194,6 +224,9 @@ void OnlineLobbyHost::leave(std::int32_t) {
     lobby_.end();
     if (relay_ && relay_->active) relay_->clear();  // 132on2e: the ticket died with the login
     contacts_open_ = contact_pending_ = false;
+    clan_ = {};
+    clan_.id = clan_.leader = -1;
+    clan_members_.clear();
     game_cache_.clear();  // 0044d528: 0044f7e0(session + 118)
     game_cache_updates_.clear();
     log("online: left the server");
@@ -216,6 +249,7 @@ std::int32_t login_error(std::int32_t st) {
 // (else 00585e90) rebuilt (reason 0) with the lobby tail and uploaded (132on2d).
 std::int32_t OnlineLobbyHost::login(const std::string& name, const std::string& password) {
     if (!login_core(name, password)) return 0;
+    refresh_clan();
     if (lobby_.get_account_stats(lobby_.account_id(), &response_) != online::status::Success) response_ = record_;
     build_record(0, response_);
     lobby_tail(response_);
@@ -486,7 +520,7 @@ void OnlineLobbyHost::upload_record(const char* why, const online::StatsBlob& bl
 }
 
 void OnlineLobbyHost::lobby_tail(online::StatsBlob& blob) {
-    online::put_i32(blob, 0xe8, -1);  // session +2484, the clan id: -1, no agency cell (see the header)
+    online::put_i32(blob, 0xe8, clan_.id);
     online::put_i32(blob, 0xec, 0);
     online::put_i32(blob, 0xf0, 0);
     online::put_i32(blob, 0xf4, 0);  // 00443020's address (PORT-ONLY 0)
@@ -712,7 +746,7 @@ void OnlineLobbyHost::service() {
         stats_update_ms_ = now_ms();
         online::StatsBlob& blob =
             lobby_.get_account_stats(lobby_.account_id(), &response_) == online::status::Success ? response_ : record_;
-        online::put_i32(blob, 0xe8, 0);
+        online::put_i32(blob, 0xe8, clan_.id);
         upload_record("lobby refresh", blob);
     }
     if (pending_ == Pending::Create) {
@@ -1140,23 +1174,165 @@ bool OnlineLobbyHost::is_contact(std::int32_t id) {
     return false;
 }
 
-// 0044ac10: only an agency cell's leader invites (AGNTINFO enables "02" only then); PORT-ONLY no cells: not sent.
-std::int32_t OnlineLobbyHost::cell_invite(std::int32_t id) {
-    error_ = 2;
-    log("online: agency cell invitation to " + std::to_string(id) + " not sent (omega_server has no agency cells)");
-    return 0;
+bool OnlineLobbyHost::refresh_clan() {
+    clan_ = {};
+    clan_.id = -1;
+    clan_.leader = -1;
+    clan_members_.clear();
+    if (!lobby_.logged_in()) return false;
+    const auto st = lobby_.clan_mine(&clan_);
+    if (!st || *st != online::status::Success) return false;
+    (void)lobby_.clan_message(clan_.id, &clan_.message);
+    (void)lobby_.clan_members(clan_.id, clan_members_);
+    return true;
 }
 
-// 0044af60: a name longer than 0x20 -> error 0x1b (before any request); PORT-ONLY no cells: as CreateClan's timeout
-// (error 2, CMDCENTR's LOBBY_STR 0x63).
+bool OnlineLobbyHost::cell_leader() {
+    refresh_clan();
+    return clan_.leader == own_id();
+}
+
+bool OnlineLobbyHost::cell_member() { return refresh_clan(); }
+
+std::string OnlineLobbyHost::cell_name() {
+    refresh_clan();
+    return clan_.name;
+}
+
+std::optional<std::string> OnlineLobbyHost::cell_name_of(std::int32_t clan) {
+    if (clan == clan_.id && clan_.id >= 0) return clan_.name;
+    online::OnlineLobby::ClanInfo info;
+    const auto st = lobby_.clan_info(clan, &info);
+    if (!st || *st != online::status::Success) return std::nullopt;
+    return info.name;
+}
+
+bool OnlineLobbyHost::cell_has(std::int32_t id) {
+    refresh_clan();
+    return std::any_of(clan_members_.begin(), clan_members_.end(),
+                       [=](const online::OnlineLobby::ClanMember& member) { return member.id == id; });
+}
+
+// 0044ac10: only an agency cell's leader invites (AGNTINFO enables "02" only then).
+std::int32_t OnlineLobbyHost::cell_invite(std::int32_t id) {
+    if (!cell_leader()) {
+        error_ = 0x20;
+        return 0;
+    }
+    const auto st = lobby_.clan_invite(id);
+    if (!st) {
+        error_ = 2;
+        return 0;
+    }
+    if (*st != online::status::Success) {
+        error_ = *st == online::status::DataAlreadyExists ? 0x1f : 1;
+        return 0;
+    }
+    error_ = 0;
+    log("online: agency cell invitation sent to " + std::to_string(id) + " (98 -> 99)");
+    return 1;
+}
+
+// 0044af60: a name longer than 0x20 -> error 0x1b before CreateClan.
 std::int32_t OnlineLobbyHost::cell_create(const std::string& name) {
-    if (name.size() > 0x20) {
+    if (name.empty() || name.size() > 0x20) {
         error_ = 0x1b;
         return 0;
     }
-    error_ = 2;
-    log("online: agency cell '" + name + "' not created (omega_server has no agency cells)");
-    return 0;
+    const auto st = lobby_.clan_create(name);
+    if (!st) {
+        error_ = 2;
+        return 0;
+    }
+    if (*st != online::status::Success) {
+        error_ = *st == online::status::ClanNameInUse ? 0x1a : *st == online::status::AlreadyClanLeader ? 0x1c : 1;
+        return 0;
+    }
+    refresh_clan();
+    build_record(0, record_);
+    lobby_tail(record_);
+    upload_record("agency cell created", record_);
+    error_ = 0;
+    log("online: agency cell '" + name + "' created (84 -> 85)");
+    return 1;
+}
+
+std::int32_t OnlineLobbyHost::cell_open() {
+    if (!refresh_clan()) {
+        error_ = 1;
+        return 0;
+    }
+    state_ = 7;
+    error_ = 0;
+    log("online: agency cell '" + clan_.name + "' opened: " + std::to_string(clan_members_.size()) +
+        " member(s), message '" + clan_.message + "'");
+    return 1;
+}
+
+void OnlineLobbyHost::cell_close() {
+    if (state_ == 7) state_ = 4;
+    clan_members_.clear();
+}
+
+std::vector<gui::GuiHost::LobbyCellMember> OnlineLobbyHost::cell_members() {
+    std::vector<gui::GuiHost::LobbyCellMember> out;
+    for (const auto& member : clan_members_) out.push_back({member.id, member.name, member.player_status});
+    return out;
+}
+
+std::string OnlineLobbyHost::cell_message() {
+    return clan_.message;
+}
+
+std::int32_t OnlineLobbyHost::cell_set_message(const std::string& message) {
+    const auto st = lobby_.clan_set_message(message);
+    if (!st || *st != online::status::Success) {
+        error_ = st ? 1 : 2;
+        return 0;
+    }
+    clan_.message = message;
+    error_ = 0;
+    log("online: agency cell message set to '" + message + "' (124 -> 126)");
+    return 1;
+}
+
+std::int32_t OnlineLobbyHost::cell_resign() {
+    if (!refresh_clan()) {
+        error_ = 1;
+        return 0;
+    }
+    const bool disband = clan_.leader == own_id();
+    const auto st = disband ? lobby_.clan_disband(clan_.id) : lobby_.clan_remove(own_id(), clan_.id);
+    if (!st || *st != online::status::Success) {
+        error_ = st ? 1 : 2;
+        return 0;
+    }
+    clan_ = {};
+    clan_.id = -1;
+    clan_.leader = -1;
+    clan_members_.clear();
+    build_record(0, record_);
+    lobby_tail(record_);
+    upload_record("agency cell left", record_);
+    error_ = 0;
+    log(std::string("online: agency cell ") + (disband ? "disbanded" : "resigned"));
+    return 1;
+}
+
+std::int32_t OnlineLobbyHost::cell_remove(std::int32_t id) {
+    if (!refresh_clan() || clan_.leader != own_id()) {
+        error_ = 0x20;
+        return 0;
+    }
+    const auto st = lobby_.clan_remove(id, clan_.id);
+    if (!st || *st != online::status::Success) {
+        error_ = st ? 1 : 2;
+        return 0;
+    }
+    refresh_clan();
+    error_ = 0;
+    log("online: agency cell member " + std::to_string(id) + " removed (218 -> 219)");
+    return 1;
 }
 
 // ---- Checkpoint 132on2e: the relay, the game port, UPnP and the agent edit's upload (see the header) ----------

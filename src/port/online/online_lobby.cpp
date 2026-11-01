@@ -227,6 +227,124 @@ std::optional<Frame> OnlineLobby::account_get_id(const std::string& name) {
     return r;
 }
 
+std::optional<std::int32_t> OnlineLobby::clan_mine(ClanInfo* out) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::GetMyClans, request::clan_get_mine(session_key_));
+    const auto r = client_.wait_for(mid::GetMyClansResponse, options_.timeout_ms);
+    const auto st = status_of(r, msize::GetMyClansResponse);
+    if (!st) {
+        error_ = "no GetMyClans response";
+        return st;
+    }
+    if (*st == status::Success && out) {
+        out->id = get_i32(r->body, 0x1c);
+        out->name = get_str(r->body, 0x24, 32);
+        out->leader = get_i32(r->body, 0x44);
+    }
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_info(std::int32_t clan, ClanInfo* out) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::GetClanByID,
+                        request::clan_get(session_key_, static_cast<std::int32_t>(account_id_), clan));
+    const auto r = client_.wait_for(mid::GetClanByIDResponse, options_.timeout_ms);
+    const auto st = status_of(r, msize::GetClanByIDResponse);
+    if (!st) {
+        error_ = "no GetClanByID response";
+        return st;
+    }
+    if (*st == status::Success && out) {
+        out->id = clan;
+        out->name = get_str(r->body, 0x20, 32);
+        out->leader = get_i32(r->body, 0x40);
+    }
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_members(std::int32_t clan, std::vector<ClanMember>& out) {
+    out.clear();
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::GetClanMemberListExtraInfo, request::clan_members(clan));
+    for (;;) {
+        const auto r = client_.wait_for(mid::GetClanMemberListExtraInfoResponse, options_.timeout_ms);
+        if (!r || r->body.size() < msize::GetClanMemberListExtraInfoResponse) {
+            error_ = "no GetClanMemberList_ExtraInfo response";
+            return std::nullopt;
+        }
+        const auto st = get_i32(r->body, kStatusOffset);
+        if (st == status::Success)
+            out.push_back({get_i32(r->body, 0x1c), get_str(r->body, 0x20, 32), get_i32(r->body, 0x140)});
+        if (r->body[0x1d8]) return st == status::Success || !out.empty() ? status::Success : st;
+    }
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_message(std::int32_t clan, std::string* out) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::GetMyClanMessages, request::clan_get_message(session_key_, clan));
+    const auto r = client_.wait_for(mid::GetMyClanMessagesResponse, options_.timeout_ms);
+    const auto st = status_of(r, msize::GetMyClanMessagesResponse);
+    if (!st) {
+        error_ = "no GetMyClanMessages response";
+        return st;
+    }
+    if (*st == status::Success && out) *out = get_str(r->body, 0x20, 200);
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_create(const std::string& name) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::CreateClan, request::clan_create(session_key_, name));
+    const auto st = status_of(client_.wait_for(mid::CreateClanResponse, options_.timeout_ms), msize::CreateClanResponse);
+    if (!st) error_ = "no CreateClan response";
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_disband(std::int32_t clan) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::DisbandClan, request::clan_disband(session_key_, clan));
+    const auto st =
+        status_of(client_.wait_for(mid::DisbandClanResponse, options_.timeout_ms), msize::DisbandClanResponse);
+    if (!st) error_ = "no DisbandClan response";
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_invite(std::int32_t account, const std::string& message) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::InvitePlayerToClan, request::clan_invite(session_key_, account, message));
+    const auto st = status_of(client_.wait_for(mid::InvitePlayerToClanResponse, options_.timeout_ms),
+                              msize::InvitePlayerToClanResponse);
+    if (!st) error_ = "no InvitePlayerToClan response";
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_remove(std::int32_t account, std::int32_t clan) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::RemovePlayerFromClan, request::clan_remove(session_key_, account, clan));
+    const auto st = status_of(client_.wait_for(mid::RemovePlayerFromClanResponse, options_.timeout_ms),
+                              msize::RemovePlayerFromClanResponse);
+    if (!st) error_ = "no RemovePlayerFromClan response";
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_set_message(const std::string& message) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::SendClanMessage, request::clan_set_message(session_key_, message));
+    const auto st =
+        status_of(client_.wait_for(mid::SendClanMessageResponse, options_.timeout_ms), msize::SendClanMessageResponse);
+    if (!st) error_ = "no SendClanMessage response";
+    return st;
+}
+
+std::optional<std::int32_t> OnlineLobby::clan_answer(std::int32_t invitation, bool accept) {
+    if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::RespondToClanInvitation, request::clan_answer(session_key_, invitation, accept));
+    const auto st = status_of(client_.wait_for(mid::RespondToClanInvitationResponse, options_.timeout_ms),
+                              msize::RespondToClanInvitationResponse);
+    if (!st) error_ = "no RespondToClanInvitation response";
+    return st;
+}
+
 void OnlineLobby::game_password(std::uint32_t world, const std::string& password) {
     if (session() && (client_.caps() & cap::GamePassword))
         client_.send_ext(ext::GamePassword, ExtWriter().u32(world).str(password).bytes());

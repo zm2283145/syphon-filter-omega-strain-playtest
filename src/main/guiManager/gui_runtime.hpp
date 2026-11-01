@@ -1050,6 +1050,7 @@ struct Widget {
         Widget* resign_cell = nullptr;         // +164 "resign_cell" (GuiButtonWidget)
         Widget* invite_agent = nullptr;        // +168 "invite_agent"
         Widget* set_message = nullptr;         // +16c "set_message"
+        std::uint8_t b170 = 0;                 // +170 player leads the cell
         // PORT-ONLY (132on2b): the last game list (GuiHost::LobbyGameList::serial) 00447790 copied into +e4
         std::uint32_t port_list_serial = 0;
         // PORT-ONLY (132on2c): the last player list (GuiHost::LobbyPlayerList::serial) 00447a30 copied into +c8
@@ -1604,6 +1605,18 @@ public:
     virtual bool lobby_is_contact(std::int32_t id);
     virtual std::int32_t lobby_cell_invite(std::int32_t id);
     virtual std::int32_t lobby_cell_create(const std::string& name);
+    struct LobbyCellMember {
+        std::int32_t id = 0;
+        std::string name;
+        std::int32_t status = 0;
+    };
+    virtual std::int32_t lobby_cell_open();
+    virtual void lobby_cell_close();
+    virtual std::vector<LobbyCellMember> lobby_cell_members();
+    virtual std::string lobby_cell_message();
+    virtual std::int32_t lobby_cell_set_message(const std::string& message);
+    virtual std::int32_t lobby_cell_resign();
+    virtual std::int32_t lobby_cell_remove(std::int32_t id);
     // PORT-ONLY (132on2c, research/ONLINE.md §5.3 GamePassword): the last join was refused for its game password
     // (JoinGameResponse -978); the default (no such service) answers false. lobby_set_join_password stores the
     // password the next lobby_join sends (JoinGame +0x30, which the original leaves zero).
@@ -1617,7 +1630,7 @@ public:
     // 00332a10(profile, level, a, b): the agent's level-state list (agent_level_progress).
     virtual void level_progress(std::int32_t profile, std::int32_t level, std::int32_t a, std::int32_t b);
     // PORT-ONLY (checkpoint 132ln3, research/LAN_PLAY.md §4 rows 5 and 6b): the LAN session (LanSession). The
-    // default has none: lan_hosting answers false and lan_host throws.
+    // default has none: lan_hosting / lan_continuing answer false and lan_host throws.
     struct LanHostRequest {
         std::string host_name;         // the agent's name (00336170)
         std::int32_t mission = -1;     // app +248 (the command centre's online mission, table 004acb30)
@@ -1625,6 +1638,7 @@ public:
         std::uint8_t join_filter = 0;  // app +185 (MSNSETUP join_filter, 0..2)
     };
     virtual bool lan_hosting();
+    virtual bool lan_continuing();
     // Open the LAN game (the host socket and its discovery advertisement); false when it cannot be opened.
     virtual bool lan_host(const LanHostRequest& request);
     // PORT-ONLY (checkpoint 132ln4, LAN_PLAY.md §4 rows 7 / 7b): GuiNetJoinMission in LAN mode. The lobby lists the
@@ -2911,6 +2925,10 @@ public:
     void ct_activate(Widget* w);                     // 002ade60 (vt +64)
     void ct_deactivate(Widget* w);                   // 002ade00 (vt +68)
     void ct_remove(Widget* w, LobbyRecord* r);       // vt +78 002ada10
+    std::uint8_t cell_event(Widget* w, Widget* sender, std::uint32_t type, std::int32_t a3, std::int32_t t0);
+    void cell_activate(Widget* w);
+    void cell_deactivate(Widget* w);
+    void cell_remove(Widget* w, LobbyRecord* r);
     void ct_add(Widget* w, std::int32_t id, const std::string& name);  // 0033c7c0
     void mlist_init(Widget* w);                      // 002accf0
     void mlist_wake(Widget* w);                      // 002abd50

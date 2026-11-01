@@ -617,6 +617,24 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
         break;
     case mid::RemoveFromBuddyList: if (sized(msize::RemoveFromBuddyList)) on_buddy_remove(c, b); break;
     case mid::AccountGetID: if (sized(msize::AccountGetID)) on_account_get_id(c, b); break;
+    case mid::CreateClan: if (sized(msize::CreateClan)) on_clan_create(c, b); break;
+    case mid::DisbandClan: if (sized(msize::DisbandClan)) on_clan_disband(c, b); break;
+    case mid::GetClanByID: if (sized(msize::GetClanByID)) on_clan_get(c, b); break;
+    case mid::GetClanByName: if (sized(msize::GetClanByName)) on_clan_get_by_name(c, b); break;
+    case mid::GetClanMemberListExtraInfo:
+        if (sized(msize::GetClanMemberListExtraInfo)) on_clan_members(c, b);
+        break;
+    case mid::InvitePlayerToClan: if (sized(msize::InvitePlayerToClan)) on_clan_invite(c, b); break;
+    case mid::CheckMyClanInvitations:
+        if (sized(msize::CheckMyClanInvitations)) on_clan_invitations(c, b);
+        break;
+    case mid::RespondToClanInvitation:
+        if (sized(msize::RespondToClanInvitation)) on_clan_answer(c, b);
+        break;
+    case mid::RemovePlayerFromClan: if (sized(msize::RemovePlayerFromClan)) on_clan_remove(c, b); break;
+    case mid::GetMyClans: if (sized(msize::GetMyClans)) on_clan_get_mine(c, b); break;
+    case mid::GetMyClanMessages: if (sized(msize::GetMyClanMessages)) on_clan_get_message(c, b); break;
+    case mid::SendClanMessage: if (sized(msize::SendClanMessage)) on_clan_set_message(c, b); break;
     default:
         log("conn " + std::to_string(conn) + ": unhandled Medius id " + std::to_string(frame.type) + " (" +
             std::to_string(b.size()) + " bytes)");
@@ -1498,6 +1516,226 @@ void OmegaServer::on_account_get_id(Conn& c, std::span<const std::uint8_t> req) 
     }
     put_i32(r, 0x1c, code);
     send(c.id, mid::AccountGetIDResponse, r);
+}
+
+void OmegaServer::on_clan_create(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::CreateClanResponse);
+    std::int32_t code = status::WMError;
+    std::uint32_t clan = 0;
+    if (c.account_id) {
+        const auto result = social_.create_clan(c.account_id, get_str(req, 0x2c, 32));
+        code = result.first;
+        clan = result.second;
+        if (code == status::Success) {
+            save_social();
+            log("cell: " + c.name + " created cell " + std::to_string(clan));
+        }
+    }
+    put_i32(r, kStatusOffset, code);
+    put_i32(r, 0x1c, static_cast<std::int32_t>(clan));
+    send(c.id, mid::CreateClanResponse, r);
+}
+
+void OmegaServer::on_clan_disband(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::DisbandClanResponse);
+    const auto clan = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const auto code = c.account_id ? social_.disband_clan(c.account_id, clan) : status::WMError;
+    if (code == status::Success) {
+        save_social();
+        log("cell: " + c.name + " disbanded cell " + std::to_string(clan));
+    }
+    put_i32(r, kStatusOffset, code);
+    send(c.id, mid::DisbandClanResponse, r);
+}
+
+void OmegaServer::on_clan_get(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetClanByIDResponse);
+    const auto* clan = c.account_id ? social_.clan(static_cast<std::uint32_t>(get_i32(req, 0x2c))) : nullptr;
+    put_i32(r, kStatusOffset, !c.account_id ? status::WMError : clan ? status::Success : status::ClanNotFound);
+    if (clan) {
+        put_i32(r, 0x1c, 10683);
+        put_str(r, 0x20, 32, clan->name);
+        put_i32(r, 0x40, static_cast<std::int32_t>(clan->leader));
+        if (const auto* leader = accounts_.find(clan->leader)) put_str(r, 0x44, 32, leader->name);
+    }
+    send(c.id, mid::GetClanByIDResponse, r);
+}
+
+void OmegaServer::on_clan_get_by_name(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetClanByNameResponse);
+    const auto* clan = c.account_id ? social_.clan_by_name(get_str(req, 0x2c, 32)) : nullptr;
+    put_i32(r, kStatusOffset, !c.account_id ? status::WMError : clan ? status::Success : status::ClanNotFound);
+    if (clan) {
+        put_i32(r, 0x1c, static_cast<std::int32_t>(clan->id));
+        put_i32(r, 0x20, static_cast<std::int32_t>(clan->leader));
+        if (const auto* leader = accounts_.find(clan->leader)) put_str(r, 0x24, 32, leader->name);
+    }
+    send(c.id, mid::GetClanByNameResponse, r);
+}
+
+void OmegaServer::on_clan_members(Conn& c, std::span<const std::uint8_t> req) {
+    const auto* clan = c.account_id ? social_.clan(static_cast<std::uint32_t>(get_i32(req, 0x18))) : nullptr;
+    std::vector<const Account*> members;
+    if (clan)
+        for (const auto id : clan->members)
+            if (const auto* account = accounts_.find(id)) members.push_back(account);
+    if (members.empty()) {
+        auto r = response(req, msize::GetClanMemberListExtraInfoResponse);
+        put_i32(r, kStatusOffset, !c.account_id ? status::WMError : clan ? 1 : status::ClanNotFound);
+        r[0x1d8] = 1;
+        send(c.id, mid::GetClanMemberListExtraInfoResponse, r);
+        return;
+    }
+    for (std::size_t i = 0; i < members.size(); ++i) {
+        auto r = response(req, msize::GetClanMemberListExtraInfoResponse);
+        put_i32(r, kStatusOffset, status::Success);
+        put_i32(r, 0x1c, static_cast<std::int32_t>(members[i]->id));
+        put_str(r, 0x20, 32, members[i]->name);
+        if (const auto* stats = stats_.find(members[i]->id))
+            std::copy(stats->blob.begin(), stats->blob.end(), r.begin() + 0x40);
+        if (const auto* member = conn_of_account(members[i]->id)) {
+            put_i32(r, 0x140, member->world_id ? 3 : 2);
+            put_i32(r, 0x144, 1);
+            put_i32(r, 0x148, static_cast<std::int32_t>(member->world_id));
+            put_str(r, 0x14c, 64, config_.server_name);
+            if (const auto game = games_.find(member->world_id); game != games_.end())
+                put_str(r, 0x18c, 64, game->second.game_name);
+        }
+        r[0x1d8] = i + 1 == members.size() ? 1 : 0;
+        send(c.id, mid::GetClanMemberListExtraInfoResponse, r);
+    }
+}
+
+void OmegaServer::on_clan_invite(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::InvitePlayerToClanResponse);
+    const auto account = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    std::int32_t code = status::WMError;
+    std::uint32_t invitation = 0;
+    if (c.account_id) {
+        if (accounts_.find(account)) {
+            const auto result = social_.invite_to_clan(c.account_id, account, get_str(req, 0x2c, 200));
+            code = result.first;
+            invitation = result.second;
+        } else {
+            code = status::AccountNotFound;
+        }
+        if (code == status::Success) {
+            save_social();
+            log("cell: " + c.name + " invited account " + std::to_string(account));
+            if (auto* target = conn_of_account(account)) {
+                auto fwd = response(req, msize::CheckMyClanInvitationsResponse);
+                put_i32(fwd, kStatusOffset, status::Success);
+                put_i32(fwd, 0x1c, static_cast<std::int32_t>(invitation));
+                if (const auto* clan = social_.clan_for(c.account_id)) {
+                    put_i32(fwd, 0x20, static_cast<std::int32_t>(clan->id));
+                    put_str(fwd, 0x28, 200, get_str(req, 0x2c, 200));
+                }
+                put_i32(fwd, 0xf0, static_cast<std::int32_t>(c.account_id));
+                put_str(fwd, 0xf4, 32, c.name);
+                fwd[0x114] = 1;
+                send(target->id, mid::CheckMyClanInvitationsResponse, fwd);
+            }
+        }
+    }
+    put_i32(r, kStatusOffset, code);
+    send(c.id, mid::InvitePlayerToClanResponse, r);
+}
+
+void OmegaServer::on_clan_invitations(Conn& c, std::span<const std::uint8_t> req) {
+    const auto invitations = c.account_id ? social_.clan_invitations(c.account_id)
+                                          : std::vector<SocialStore::ClanInvitation>{};
+    if (invitations.empty()) {
+        auto r = response(req, msize::CheckMyClanInvitationsResponse);
+        put_i32(r, kStatusOffset, c.account_id ? 1 : status::WMError);
+        r[0x114] = 1;
+        send(c.id, mid::CheckMyClanInvitationsResponse, r);
+        return;
+    }
+    for (std::size_t i = 0; i < invitations.size(); ++i) {
+        auto r = response(req, msize::CheckMyClanInvitationsResponse);
+        put_i32(r, kStatusOffset, status::Success);
+        put_i32(r, 0x1c, static_cast<std::int32_t>(invitations[i].id));
+        put_i32(r, 0x20, static_cast<std::int32_t>(invitations[i].clan));
+        put_i32(r, 0x24, 0);
+        put_str(r, 0x28, 200, invitations[i].message);
+        if (const auto* clan = social_.clan(invitations[i].clan)) {
+            put_i32(r, 0xf0, static_cast<std::int32_t>(clan->leader));
+            if (const auto* leader = accounts_.find(clan->leader)) put_str(r, 0xf4, 32, leader->name);
+        }
+        r[0x114] = i + 1 == invitations.size() ? 1 : 0;
+        send(c.id, mid::CheckMyClanInvitationsResponse, r);
+    }
+}
+
+void OmegaServer::on_clan_answer(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::RespondToClanInvitationResponse);
+    const auto invitation = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const bool accept = get_i32(req, 0x2c) == 1;
+    const auto code =
+        c.account_id ? social_.answer_clan_invitation(c.account_id, invitation, accept) : status::WMError;
+    if (code == status::Success) {
+        save_social();
+        log("cell: " + c.name + (accept ? " accepted" : " declined") + " invitation " +
+            std::to_string(invitation));
+    }
+    put_i32(r, kStatusOffset, code);
+    send(c.id, mid::RespondToClanInvitationResponse, r);
+}
+
+void OmegaServer::on_clan_remove(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::RemovePlayerFromClanResponse);
+    const auto account = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const auto clan = static_cast<std::uint32_t>(get_i32(req, 0x2c));
+    const auto code = c.account_id ? social_.remove_clan_member(c.account_id, clan, account) : status::WMError;
+    if (code == status::Success) {
+        save_social();
+        log("cell: " + c.name + " removed account " + std::to_string(account) + " from cell " +
+            std::to_string(clan));
+    }
+    put_i32(r, kStatusOffset, code);
+    send(c.id, mid::RemovePlayerFromClanResponse, r);
+}
+
+void OmegaServer::on_clan_get_mine(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetMyClansResponse);
+    const auto* clan = c.account_id ? social_.clan_for(c.account_id) : nullptr;
+    put_i32(r, kStatusOffset, !c.account_id ? status::WMError : clan ? status::Success : 1);
+    if (clan) {
+        put_i32(r, 0x1c, static_cast<std::int32_t>(clan->id));
+        put_i32(r, 0x20, 10683);
+        put_str(r, 0x24, 32, clan->name);
+        put_i32(r, 0x44, static_cast<std::int32_t>(clan->leader));
+        if (const auto* leader = accounts_.find(clan->leader)) put_str(r, 0x48, 32, leader->name);
+    }
+    r[0x16c] = 1;
+    send(c.id, mid::GetMyClansResponse, r);
+}
+
+void OmegaServer::on_clan_get_message(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetMyClanMessagesResponse);
+    const auto clan_id = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const auto* clan = c.account_id ? social_.clan(clan_id) : nullptr;
+    const bool member = clan && clan->members.contains(c.account_id);
+    put_i32(r, kStatusOffset,
+            !c.account_id ? status::WMError : !clan ? status::ClanNotFound : member ? status::Success : status::NotClanMember);
+    if (member) {
+        put_i32(r, 0x1c, static_cast<std::int32_t>(clan_id));
+        put_str(r, 0x20, 200, clan->message);
+    }
+    r[0xe8] = 1;
+    send(c.id, mid::GetMyClanMessagesResponse, r);
+}
+
+void OmegaServer::on_clan_set_message(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::SendClanMessageResponse);
+    const auto code =
+        c.account_id ? social_.set_clan_message(c.account_id, get_str(req, 0x26, 200)) : status::WMError;
+    if (code == status::Success) {
+        save_social();
+        log("cell: " + c.name + " updated its agency message");
+    }
+    put_i32(r, kStatusOffset, code);
+    send(c.id, mid::SendClanMessageResponse, r);
 }
 
 // PORT-ONLY (132on2g, cap::Social): ext::RecentPlayersList: u16 count, then per player u32 account, str name,

@@ -192,10 +192,10 @@ void GameSoundManager::receive_player_music(std::string_view name, bool stop) {
 
 void GameSoundManager::play_sound(std::int8_t type, std::string_view name, std::uint32_t owner) {
     // 001c6d00: 001ca210(rec, type, name, owner, 0) wrapped by 0020f2a0 (type 4) or 0020faa0; +20 = 1 when
-    // *005721c8 or *005721c0 is clear (always, solo).
+    // *005721c8 or *005721c0 is clear. A multiplayer authority leaves the wrapper's original +20 = 5.
     auto r = request(type, name, owner, 0);
-    if (host_.multiplayer_5721c8()) unhosted("001c6d60", "the multiplayer PlaySnd flag (*005721c0)");
-    post({type == 4 ? GameSoundMessage::Kind::quip_20f2a0 : GameSoundMessage::Kind::play_20faa0, 1,
+    const std::uint8_t flag = host_.multiplayer_5721c8() && host_.authority_5721c0() ? 5 : 1;
+    post({type == 4 ? GameSoundMessage::Kind::quip_20f2a0 : GameSoundMessage::Kind::play_20faa0, flag,
           message_copy(r, false)});
 }
 
@@ -209,10 +209,10 @@ void GameSoundManager::play_sound(std::int8_t type, std::string_view name) {
 void GameSoundManager::stop_sound(std::int8_t type, std::string_view name, std::uint32_t owner) {
     // 001c6c50 (StopSnd(type, name) 001c72e0) / 001c6b70 (StopSnd(type, name, GOBJ) 001c7240):
     // 001ca210(rec, type, name, owner or 0, 0) wrapped by 0020ecb0(msg, rec, 0); +20 = 1 (001c6b70 only
-    // when *005721c8 or *005721c0 is clear: always, solo), posted with 003c9420 transport 0.
+    // when *005721c8 or *005721c0 is clear), posted with 003c9420 transport 0.
     auto r = request(type, name, owner, 0);
-    if (owner && host_.multiplayer_5721c8()) unhosted("001c6bc0", "the multiplayer StopSnd flag (*005721c0)");
-    post({GameSoundMessage::Kind::stop_20ecb0, 1, message_copy(r, true)});
+    const std::uint8_t flag = owner && host_.multiplayer_5721c8() && host_.authority_5721c0() ? 5 : 1;
+    post({GameSoundMessage::Kind::stop_20ecb0, flag, message_copy(r, true)});
 }
 
 void GameSoundManager::stop_all_quips() {

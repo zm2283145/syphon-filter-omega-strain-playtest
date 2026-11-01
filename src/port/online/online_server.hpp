@@ -311,6 +311,18 @@ private:
     void on_buddy_answer(Conn& c, std::span<const std::uint8_t> req);
     void on_buddy_remove(Conn& c, std::span<const std::uint8_t> req);
     void on_account_get_id(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_create(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_disband(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_get(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_get_by_name(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_members(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_invite(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_invitations(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_answer(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_remove(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_get_mine(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_get_message(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_set_message(Conn& c, std::span<const std::uint8_t> req);
     void forward_invitation(Conn& to, std::uint32_t from);
     void save_social();
     // 132on2h (the load test's hot spot): the busy paths (account creation, a policy acceptance at login, a game

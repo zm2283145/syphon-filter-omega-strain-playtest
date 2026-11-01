@@ -381,6 +381,17 @@ bool GuiHost::lobby_cell_has(std::int32_t) { unhosted(0x44a0d0, "the agency cell
 bool GuiHost::lobby_is_contact(std::int32_t) { unhosted(0x44d670, "the contacts test"); }
 std::int32_t GuiHost::lobby_cell_invite(std::int32_t) { unhosted(0x44ac10, "the agency cell's invitation"); }
 std::int32_t GuiHost::lobby_cell_create(const std::string&) { unhosted(0x44af60, "CreateClan"); }
+std::int32_t GuiHost::lobby_cell_open() { unhosted(0x448dc0, "the agency cell's member lists"); }
+void GuiHost::lobby_cell_close() { unhosted(0x448cc0, "the agency cell's member-list release"); }
+std::vector<GuiHost::LobbyCellMember> GuiHost::lobby_cell_members() {
+    unhosted(0x449730, "the agency cell's member list");
+}
+std::string GuiHost::lobby_cell_message() { unhosted(0x449570, "the agency cell's message"); }
+std::int32_t GuiHost::lobby_cell_set_message(const std::string&) {
+    unhosted(0x4491d0, "the agency cell's message update");
+}
+std::int32_t GuiHost::lobby_cell_resign() { unhosted(0x4490a0, "the agency cell's resignation"); }
+std::int32_t GuiHost::lobby_cell_remove(std::int32_t) { unhosted(0x449420, "the agency cell's member removal"); }
 bool GuiHost::lobby_join_password_refused() { return false; }
 void GuiHost::lobby_set_join_password(const std::string&) {
     throw std::runtime_error("gui runtime: PORT-ONLY game password with no lobby (132on2c)");
@@ -393,6 +404,7 @@ void GuiHost::level_progress(std::int32_t, std::int32_t, std::int32_t, std::int3
     unhosted(0x332a10, "the agent's level-state list");
 }
 bool GuiHost::lan_hosting() { return false; }  // PORT-ONLY (132ln3): no LanSession
+bool GuiHost::lan_continuing() { return false; }  // PORT-ONLY (A10): no retained LanSession
 bool GuiHost::lan_host(const LanHostRequest&) {
     throw std::runtime_error("gui runtime: the PORT-ONLY LAN session (LanSession) is not hosted");
 }
@@ -1216,11 +1228,8 @@ void GuiRuntime::v_wake(Widget* w) {
     case WidgetClass::netmess: nm_wake(w); break;           // 003477d0
     case WidgetClass::netmsgarray: nma_wake(w); break;      // 00348b90
     case WidgetClass::netjoin:
-    case WidgetClass::netcontacts: lb_wake(w); break;       // 0033f110
-    // Checkpoint 132on2i: omega_server keeps no agency cells, so the navigator releases AGENTCEL before it wakes
-    // (0044a230 false); the screen's own handlers (wake 002afa80, sleep 002afa20, update 002af2a0, event 002af310)
-    // are a later delivery.
-    case WidgetClass::netagencycell: unhosted(0x2afa80, "GuiNetAgencyCell's wake (an agency cell member)");
+    case WidgetClass::netcontacts:
+    case WidgetClass::netagencycell: lb_wake(w); break;
     case WidgetClass::missionlist: mlist_wake(w); break;    // 002abd50
     case WidgetClass::agentdisplay: ad_wake(w); break;
     case WidgetClass::equippane: ep_wake(w); break;
@@ -1260,8 +1269,9 @@ void GuiRuntime::v_sleep(Widget* w) {
     else if (w->cls == WidgetClass::onlinepref) opt_sleep(w);     // 0033d360
     else if (w->cls == WidgetClass::netmess) nm_sleep(w);         // 0033d360
     else if (w->cls == WidgetClass::netmsgarray) nma_sleep(w);    // 00348ad0
-    else if (w->cls == WidgetClass::netjoin || w->cls == WidgetClass::netcontacts) lb_sleep(w);  // 0033f050
-    else if (w->cls == WidgetClass::netagencycell) unhosted(0x2afa20, "GuiNetAgencyCell's sleep");
+    else if (w->cls == WidgetClass::netjoin || w->cls == WidgetClass::netcontacts ||
+             w->cls == WidgetClass::netagencycell)
+        lb_sleep(w);
     else if (w->cls == WidgetClass::missionlist) mlist_sleep(w); // 002abc90
     else if (w->cls == WidgetClass::bitmap) {  // 0043caa0
         base_sleep(w);
@@ -1386,8 +1396,9 @@ void GuiRuntime::v_update(Widget* w, float dt) {
     else if (w->cls == WidgetClass::onlinepref) opt_net_update(w, dt);  // 0033d310
     else if (w->cls == WidgetClass::netmess) nm_net_update(w, dt);      // 0033d310
     else if (w->cls == WidgetClass::netmsgarray) nma_update(w, dt);     // 00348a00
-    else if (w->cls == WidgetClass::netjoin || w->cls == WidgetClass::netcontacts) lb_update(w, dt);  // 0033de00
-    else if (w->cls == WidgetClass::netagencycell) unhosted(0x2af2a0, "GuiNetAgencyCell's update");
+    else if (w->cls == WidgetClass::netjoin || w->cls == WidgetClass::netcontacts ||
+             w->cls == WidgetClass::netagencycell)
+        lb_update(w, dt);
     else if (w->cls == WidgetClass::missionlist) mlist_update(w, dt); // 002acca0
     else if (w->cls == WidgetClass::agentdisplay) ad_update(w, dt);
     else if (w->cls == WidgetClass::agentsave) al_update(w, dt);  // 00293660 (GuiAgentLoad's)
@@ -1439,7 +1450,7 @@ std::uint8_t GuiRuntime::v_event(Widget* w, Widget* sender, std::uint32_t type, 
     case WidgetClass::netmess: return nm_event(w, sender, type, a3, t0);      // 00346d60
     case WidgetClass::netjoin: return jm_event(w, sender, type, a3, t0);      // 002a8d60
     case WidgetClass::netcontacts: return ct_event(w, sender, type, a3, t0);  // 002adab0 (132on2h)
-    case WidgetClass::netagencycell: unhosted(0x2af310, "GuiNetAgencyCell's event");
+    case WidgetClass::netagencycell: return cell_event(w, sender, type, a3, t0);
     case WidgetClass::port_cheats: return pc_event(w, sender, type, a3, t0);
     case WidgetClass::port_settings: return ps_event(w, sender, type, a3, t0);
     case WidgetClass::eqmodify: return em_event(w, sender, type, a3, t0);
@@ -2743,7 +2754,8 @@ std::uint8_t GuiRuntime::save_widget_event(Widget* w, Widget* sender, std::uint3
     if (w->cls == WidgetClass::gameopt || w->cls == WidgetClass::cmdcentr || w->cls == WidgetClass::agentmod ||
         w->cls == WidgetClass::agentsave || w->cls == WidgetClass::autosaver || w->cls == WidgetClass::onlinecn ||
         w->cls == WidgetClass::msnsetup || w->cls == WidgetClass::netjoin || w->cls == WidgetClass::acntlogn ||
-        w->cls == WidgetClass::onlinepref || w->cls == WidgetClass::netmess || w->cls == WidgetClass::netcontacts)
+        w->cls == WidgetClass::onlinepref || w->cls == WidgetClass::netmess || w->cls == WidgetClass::netcontacts ||
+        w->cls == WidgetClass::netagencycell)
         return static_cast<std::uint8_t>(save_flow(w, sender, [&](SaveAgentFlow& f) {
             return f.on_event(0, type, a3, static_cast<std::uint32_t>(t0));
         }));
@@ -6148,7 +6160,8 @@ void GuiRuntime::save_done(Widget* w, std::uint8_t result) {
         return;
     }
     if (w->cls == WidgetClass::agentload || w->cls == WidgetClass::onlinecn || w->cls == WidgetClass::msnsetup ||
-        w->cls == WidgetClass::netjoin || w->cls == WidgetClass::netcontacts || w->cls == WidgetClass::netmess)
+        w->cls == WidgetClass::netjoin || w->cls == WidgetClass::netcontacts ||
+        w->cls == WidgetClass::netagencycell || w->cls == WidgetClass::netmess)
         return;  // 00293890: the base's nothing
     if (w->cls == WidgetClass::agentmod) {  // 0033fa00 ignores the result: back to the command centre
         am_leave(w);
@@ -6759,7 +6772,7 @@ std::int64_t GuiScript::config(const std::string& key) const {
         {"b506488", 0}, {"b506490", 0}, {"b51eea0", 0}, {"b51eea8", 0}, {"b5723d0", 0}, {"b532fe8", 0},
         {"a30", 0}, {"port_lan", 0}, {"a31", 0}, {"a32", 0}, {"clp", 0}, {"done", 0}, {"f8", 0}, {"zeus", 0}, {"ukc", 0},
         {"pb68", 0}, {"pb72", 0}, {"pb73", 0}, {"b868", 1}, {"bb5", 1}, {"svp", 0}, {"svi", -1},
-        {"oc10", 0}, {"p9a0", 0}, {"lan_mode", 0}, {"lan_hosting", 0}, {"lan_host_ok", 1},
+        {"oc10", 0}, {"p9a0", 0}, {"lan_mode", 0}, {"lan_hosting", 0}, {"lan_continuing", 0}, {"lan_host_ok", 1},
         {"lan_reply", 1}, {"lan_join_ok", 1},
         // checkpoint 132on2: the DME session and the SFOLobby hooks' results
         {"sess", 0}, {"cfgok", 1}, {"neterr", 0}, {"connok", 1}, {"conn_dnas", 0}, {"dnasres", 0}, {"muisbegin", 1},
@@ -6777,8 +6790,9 @@ std::int64_t GuiScript::config(const std::string& key) const {
         {"chatok", 1}, {"maxchat", 0},
         // checkpoint 132on2h: GuiNetContacts' AccountGetID, add and remove
         {"acctid", 7}, {"acctiderr", 0}, {"addok", 1}, {"adderr", 0}, {"rmok", 1},
-        // checkpoint 132on2i: the game info's GameName (0: "A" with gipw); the agency cell (0044a230 / 0044af60)
-        {"giname", 0}, {"cellmember", 0}, {"cellok", 0}, {"cellerr", 2}};
+        // checkpoint 132on2i: the game info's GameName (0: "A" with gipw); the agency cell
+        {"giname", 0}, {"cellmember", 0}, {"cellleader", 0}, {"cellok", 0}, {"cellerr", 2},
+        {"cellopen", 1}, {"cellinvite", 1}, {"cellset", 1}, {"cellresign", 1}, {"cellremove", 1}};
     const auto d = defaults.find(key);
     if (d == defaults.end()) throw std::runtime_error("gui script: unknown cfg key " + key);
     return d->second;
@@ -7043,6 +7057,7 @@ public:
                        std::to_string(a) + " " + std::to_string(b));
     }
     bool lan_hosting() override { return script_.config("lan_hosting") != 0; }
+    bool lan_continuing() override { return script_.config("lan_continuing") != 0; }
     // PORT-ONLY (132ln4): the LAN join services (logged; the clock steps 1 s per read so a wait loop ends)
     bool lan_joined_ = false;
     std::int64_t lan_clock_ = 0;
@@ -7353,16 +7368,49 @@ public:
         if (!r) neterr_ = cfg32("adderr");
         return r;
     }
-    // checkpoint 132on2i: the agency cell's member test 0044a230 and CreateClan 0044af60 (the EE's install_ccs)
+    // checkpoint 132on2i: agency-cell services (the EE's install_ccs, plus the hosted member screen).
+    bool lobby_cell_leader() override { return cfg32("cellleader") != 0; }
     bool lobby_cell_member() override {
         const std::int32_t r = cfg32("cellmember");
         log_.push_back("cellmember -> " + std::to_string(r));
         return r != 0;
     }
+    std::string lobby_cell_name() override { return "omega"; }
+    std::int32_t lobby_cell_invite(std::int32_t id) override {
+        const std::int32_t r = cfg32("cellinvite");
+        log_.push_back("cellinvite " + std::to_string(id) + " -> " + std::to_string(r));
+        return r;
+    }
     std::int32_t lobby_cell_create(const std::string& name) override {
         const std::int32_t r = cfg32("cellok");
         log_.push_back("cellcreate '" + name + "' -> " + std::to_string(r));
         if (!r) neterr_ = cfg32("cellerr");
+        return r;
+    }
+    std::int32_t lobby_cell_open() override {
+        const std::int32_t r = cfg32("cellopen");
+        log_.push_back("cellopen -> " + std::to_string(r));
+        return r;
+    }
+    void lobby_cell_close() override { log_.push_back("cellclose"); }
+    std::vector<LobbyCellMember> lobby_cell_members() override {
+        log_.push_back("cellmembers -> 2");
+        return {{7, "Gabe", 3}, {8, "Lian", 2}};
+    }
+    std::string lobby_cell_message() override { return "Ready"; }
+    std::int32_t lobby_cell_set_message(const std::string& text) override {
+        const std::int32_t r = cfg32("cellset");
+        log_.push_back("cellset '" + text + "' -> " + std::to_string(r));
+        return r;
+    }
+    std::int32_t lobby_cell_resign() override {
+        const std::int32_t r = cfg32("cellresign");
+        log_.push_back("cellresign -> " + std::to_string(r));
+        return r;
+    }
+    std::int32_t lobby_cell_remove(std::int32_t id) override {
+        const std::int32_t r = cfg32("cellremove");
+        log_.push_back("cellremove " + std::to_string(id) + " -> " + std::to_string(r));
         return r;
     }
     // the stand-in session is zeroed (cfg maxchat, else 0)

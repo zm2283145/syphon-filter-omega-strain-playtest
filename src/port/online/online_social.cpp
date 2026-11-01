@@ -43,12 +43,24 @@ std::uint64_t to_u64(const std::string& s) {
     return v;
 }
 
+bool same_name(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    return true;
+}
+
 }  // namespace
 
 void SocialStore::load() {
     contacts_.clear();
     invitations_.clear();
     recent_.clear();
+    clans_.clear();
+    clan_invitations_.clear();
+    next_clan_id_ = 1;
+    next_clan_invitation_id_ = 1;
     if (file_.empty() || !std::filesystem::exists(file_)) return;
     std::ifstream in(file_, std::ios::binary);
     if (!in) throw std::runtime_error("social: cannot read " + file_.string());
@@ -66,6 +78,31 @@ void SocialStore::load() {
                 invitations_[to_u32(f[2])].push_back({to_u32(f[1]), to_u64(f[3])});
             } else if (f[0] == "recent" && f.size() == 5) {
                 recent_[to_u32(f[1])].push_back({to_u32(f[2]), to_u64(f[3]), static_cast<std::uint32_t>(to_u64(f[4]))});
+            } else if (f[0] == "cell" && f.size() == 5) {
+                Clan clan;
+                clan.id = to_u32(f[1]);
+                clan.leader = to_u32(f[2]);
+                clan.name = f[3];
+                clan.message = f[4];
+                clan.members.insert(clan.leader);
+                if (clan.name.empty() || clans_.contains(clan.id)) throw std::invalid_argument("cell");
+                next_clan_id_ = std::max(next_clan_id_, clan.id + 1);
+                clans_.emplace(clan.id, std::move(clan));
+            } else if (f[0] == "cell_member" && f.size() == 3) {
+                const auto clan = to_u32(f[1]);
+                const auto account = to_u32(f[2]);
+                const auto it = clans_.find(clan);
+                if (it == clans_.end()) throw std::invalid_argument("cell member");
+                it->second.members.insert(account);
+            } else if (f[0] == "cell_invite" && f.size() == 5) {
+                ClanInvitation invitation;
+                invitation.id = to_u32(f[1]);
+                invitation.clan = to_u32(f[2]);
+                invitation.account = to_u32(f[3]);
+                invitation.message = f[4];
+                if (!clans_.contains(invitation.clan)) throw std::invalid_argument("cell invitation");
+                next_clan_invitation_id_ = std::max(next_clan_invitation_id_, invitation.id + 1);
+                clan_invitations_.push_back(std::move(invitation));
             } else {
                 throw std::invalid_argument("kind");
             }
@@ -78,8 +115,8 @@ void SocialStore::load() {
 void SocialStore::save() const {
     if (file_.empty()) return;
     std::ostringstream out;
-    out << "# omega_server contacts, contact invitations and recent players (132on2g).\n";
-    out << "# contact\towner\tother | invite\tfrom\tto\twhen | recent\towner\tother\twhen\tworld\n";
+    out << "# omega_server contacts, invitations, recent players and agency cells.\n";
+    out << "# Fields are tab-separated; cell names/messages must not contain tabs or newlines.\n";
     for (const auto& [owner, set] : contacts_)
         for (const auto other : set) out << "contact\t" << owner << '\t' << other << '\n';
     for (const auto& [to, list] : invitations_)
@@ -87,6 +124,13 @@ void SocialStore::save() const {
     for (const auto& [owner, list] : recent_)
         for (const auto& r : list)
             out << "recent\t" << owner << '\t' << r.account << '\t' << r.when << '\t' << r.world << '\n';
+    for (const auto& [id, clan] : clans_) {
+        out << "cell\t" << id << '\t' << clan.leader << '\t' << clan.name << '\t' << clan.message << '\n';
+        for (const auto member : clan.members) out << "cell_member\t" << id << '\t' << member << '\n';
+    }
+    for (const auto& invitation : clan_invitations_)
+        out << "cell_invite\t" << invitation.id << '\t' << invitation.clan << '\t' << invitation.account << '\t'
+            << invitation.message << '\n';
     write_file_atomic(file_, out.str(), backups_, backup_interval_);
 }
 
@@ -155,6 +199,118 @@ const std::vector<SocialStore::Recent>& SocialStore::recent(std::uint32_t owner)
     return it == recent_.end() ? kNoRecent : it->second;
 }
 
+const SocialStore::Clan* SocialStore::clan(std::uint32_t id) const {
+    const auto it = clans_.find(id);
+    return it == clans_.end() ? nullptr : &it->second;
+}
+
+const SocialStore::Clan* SocialStore::clan_by_name(std::string_view name) const {
+    for (const auto& [_, clan] : clans_)
+        if (same_name(clan.name, name)) return &clan;
+    return nullptr;
+}
+
+const SocialStore::Clan* SocialStore::clan_for(std::uint32_t account) const {
+    for (const auto& [_, clan] : clans_)
+        if (clan.members.contains(account)) return &clan;
+    return nullptr;
+}
+
+std::pair<std::int32_t, std::uint32_t> SocialStore::create_clan(std::uint32_t leader, std::string name) {
+    if (!leader || name.empty() || name.size() > 32 || name.find_first_of("\t\r\n") != std::string::npos)
+        return {-968, 0};
+    if (clan_for(leader)) return {-992, 0};
+    if (clan_by_name(name)) return {-970, 0};
+    Clan clan;
+    clan.id = next_clan_id_++;
+    clan.leader = leader;
+    clan.name = std::move(name);
+    clan.members.insert(leader);
+    const auto id = clan.id;
+    clans_.emplace(id, std::move(clan));
+    return {0, id};
+}
+
+std::int32_t SocialStore::disband_clan(std::uint32_t account, std::uint32_t clan_id) {
+    const auto it = clans_.find(clan_id);
+    if (it == clans_.end()) return -971;
+    if (it->second.leader != account) return -990;
+    clans_.erase(it);
+    clan_invitations_.erase(
+        std::remove_if(clan_invitations_.begin(), clan_invitations_.end(),
+                       [=](const ClanInvitation& invitation) { return invitation.clan == clan_id; }),
+        clan_invitations_.end());
+    return 0;
+}
+
+std::int32_t SocialStore::set_clan_message(std::uint32_t account, std::string message) {
+    auto* found = const_cast<Clan*>(clan_for(account));
+    if (!found) return -947;
+    if (found->leader != account) return -990;
+    if (message.size() > 200 || message.find_first_of("\t\r\n") != std::string::npos) return -968;
+    found->message = std::move(message);
+    return 0;
+}
+
+std::pair<std::int32_t, std::uint32_t> SocialStore::invite_to_clan(std::uint32_t leader, std::uint32_t account,
+                                                                  std::string message) {
+    auto* found = const_cast<Clan*>(clan_for(leader));
+    if (!found) return {-947, 0};
+    if (found->leader != leader) return {-990, 0};
+    if (!account || account == leader || clan_for(account)) return {-958, 0};
+    if (message.size() > 200 || message.find_first_of("\t\r\n") != std::string::npos) return {-968, 0};
+    const auto pending = std::find_if(clan_invitations_.begin(), clan_invitations_.end(),
+                                      [&](const ClanInvitation& invitation) {
+                                          return invitation.clan == found->id && invitation.account == account;
+                                      });
+    if (pending != clan_invitations_.end()) return {-958, pending->id};
+    ClanInvitation invitation;
+    invitation.id = next_clan_invitation_id_++;
+    invitation.clan = found->id;
+    invitation.account = account;
+    invitation.message = std::move(message);
+    const auto id = invitation.id;
+    clan_invitations_.push_back(std::move(invitation));
+    return {0, id};
+}
+
+std::vector<SocialStore::ClanInvitation> SocialStore::clan_invitations(std::uint32_t account) const {
+    std::vector<ClanInvitation> out;
+    for (const auto& invitation : clan_invitations_)
+        if (invitation.account == account) out.push_back(invitation);
+    return out;
+}
+
+std::int32_t SocialStore::answer_clan_invitation(std::uint32_t account, std::uint32_t invitation_id, bool accept) {
+    const auto it = std::find_if(clan_invitations_.begin(), clan_invitations_.end(),
+                                 [=](const ClanInvitation& invitation) {
+                                     return invitation.id == invitation_id && invitation.account == account;
+                                 });
+    if (it == clan_invitations_.end()) return -957;
+    const auto clan_id = it->clan;
+    clan_invitations_.erase(it);
+    if (!accept) return 0;
+    if (clan_for(account)) return -958;
+    const auto clan_it = clans_.find(clan_id);
+    if (clan_it == clans_.end()) return -971;
+    clan_it->second.members.insert(account);
+    clan_invitations_.erase(
+        std::remove_if(clan_invitations_.begin(), clan_invitations_.end(),
+                       [=](const ClanInvitation& invitation) { return invitation.account == account; }),
+        clan_invitations_.end());
+    return 0;
+}
+
+std::int32_t SocialStore::remove_clan_member(std::uint32_t actor, std::uint32_t clan_id, std::uint32_t account) {
+    const auto it = clans_.find(clan_id);
+    if (it == clans_.end()) return -971;
+    if (!it->second.members.contains(account)) return -947;
+    if (account == it->second.leader) return -951;
+    if (actor != account && actor != it->second.leader) return -990;
+    it->second.members.erase(account);
+    return 0;
+}
+
 void SocialStore::forget(std::uint32_t account) {
     contacts_.erase(account);
     for (auto& [owner, set] : contacts_) set.erase(account);
@@ -166,6 +322,16 @@ void SocialStore::forget(std::uint32_t account) {
     for (auto& [owner, list] : recent_)
         list.erase(std::remove_if(list.begin(), list.end(), [&](const Recent& r) { return r.account == account; }),
                    list.end());
+    if (const auto* found = clan_for(account)) {
+        if (found->leader == account)
+            (void)disband_clan(account, found->id);
+        else
+            (void)remove_clan_member(account, found->id, account);
+    }
+    clan_invitations_.erase(
+        std::remove_if(clan_invitations_.begin(), clan_invitations_.end(),
+                       [=](const ClanInvitation& invitation) { return invitation.account == account; }),
+        clan_invitations_.end());
 }
 
 // ---- ChatFilter -------------------------------------------------------------------------------------------------

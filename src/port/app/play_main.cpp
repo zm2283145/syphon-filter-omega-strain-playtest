@@ -4069,6 +4069,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<std::pair<unsigned,std::string>> debug_script_calls;   // harness: (frame, module::function) script calls
         std::set<unsigned> debug_objective_state_frames;   // read-only snapshot after this frame's script/network delivery
         bool lan_end_results=false;   // opt-in composed multiplayer ending validation
+        std::optional<std::array<std::int64_t,2>> test_level_end;   // PORT-ONLY --test-level-end <kind> <frame>
         std::vector<std::pair<unsigned,std::uint32_t>> diagnostic_resets;   // PORT-ONLY --reset-npc: (frame, NPC ID) ResetNpc 00148600 calls
         std::set<unsigned> flashlight_taps;   // --flashlight-tap: frames D-pad Right is held (scripted runs)
         std::optional<std::int32_t> goggles_item;   // --goggles-item: port-only 00143df0 add of a goggles item after the start
@@ -4131,6 +4132,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 else if(arg==L"--freed-ai-resend-skip")freed_ai_resend_skip=true;   // 132ms3 (port-only aid)
                 else if(arg==L"--debug-objective-state")debug_objective_state_frames.insert(number<unsigned>(value()));
                 else if(arg==L"--lan-end-results")lan_end_results=true;
+                else if(arg==L"--test-level-end"){
+                    const auto kind=std::stoll(value()),at=std::stoll(value());
+                    if(kind<0||kind>3||at<0)throw std::runtime_error("--test-level-end needs a kind 0..3 and a frame >= 0");
+                    test_level_end=std::array<std::int64_t,2>{kind,at};}
                 else if(arg==L"--mods")mods_flag=fs::path(value());   // 132md1 (port-only, research/MODDING.md)
                 else if(arg==L"--no-mods")no_mods_flag=true;
                 else if(arg==L"--mods-cpu-skinning")mods_cpu_skinning=true;
@@ -4677,6 +4682,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "mission-complete branch of LevelEndCheck, which schedules game::RequestLevelEnd 10 s later; LEVEL_END.md).\n"
                     "--debug-objective-state <frame> (with --mission-scripts) prints the local stage and each objective's\n"
                     "stage, active bit and status after that frame's received network events and script pump.\n"
+                    "--test-level-end <kind> <frame> (PORT-ONLY, with --lan-end-results) requests the original ENDLEVEL path\n"
+                    "once at that gameplay frame. Kind 1 exercises the retained multiplayer-room transition (LEVEL_END.md).\n"
                     "Keys: WASD/arrows stick (Shift = 60% deflection), E/Q strafe pressure slots 10/11, TFGH camera look (right stick),\n"
                     "C toggle the diagnostic orbit view (wheel zoom), P pause, O wireframe, L vertex-colour-only lighting, Esc quit.\n"
                     "Space Cross, R Triangle, K Circle (the roll, action 8), I L1 (the manual aim view 0024a850); with --combat J Square, U R1\n"
@@ -5281,12 +5288,14 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         const bool coop_forced=coop_partner;
         unsigned level_pass=0;   // 0: the first level; 1..: the levels the front end handed off after a level end
         std::optional<std::uint8_t> resume_state;   // 132vp1: 001690f0's next state, the front end resumes here
+        bool resume_retained_network=false;
         for(;;){
         if(resume_state){
             host_window->log_handoff("level end ("+mission+") released, front end resume");
             lan_net=nullptr;  // resume releases the old owner before opening the GUI
-            const auto r=frontend_app->resume_after_level(*resume_state,0x14);
+            const auto r=frontend_app->resume_after_level(*resume_state,0x14,resume_retained_network);
             resume_state.reset();
+            resume_retained_network=false;
             if(!r.level){std::cout<<"Front end: ended ("<<r.frames<<" frames, "<<r.captures.size()<<" captures)\n";break;}
             std::cout<<"Front end: hand-off to the "<<*r.level<<" play setup (the next level, in this process; "<<r.frames<<" frames, "
                 <<r.captures.size()<<" captures)\n";
@@ -12688,7 +12697,6 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             const auto figure=static_cast<std::size_t>(found-npcs.begin());
             auto& npc=*found;auto& actor=actors.actor(npc.actor);
             lan_named_npcs[npc.actor]=figure;
-            npc.ai->set_remote(actor);
             actor.set_health_40(static_cast<float>(msg.health));
             if(msg.state)actor.queue_network_death(msg.state);
             if(msg.active&&!actor.eligible()){
@@ -12726,6 +12734,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::ostringstream o;o<<"LAN: 0040c540 of the remote named NPC's target key 0x"<<std::hex<<target<<": no object of this console";
                 throw std::runtime_error(o.str());};
             npc.ai->set_remote_link(std::move(link));
+            npc.ai->set_remote(actor);
             npc.active=actor.eligible();
             std::cout<<"LAN (132ln5h15): 002c6690 attached remote controller to existing "<<npc.label<<" (actor "<<npc.actor
                      <<", key 0x"<<std::hex<<msg.key<<std::dec<<"), health "<<msg.health<<", "
@@ -13951,6 +13960,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             }
         };
         std::optional<std::uint8_t> level_end_next;   // 001690f0's next state at the level end
+        bool level_end_retain_network=false;
         if(lan_end_results&&lan_net){
             if(!frontend_app||!gui_overlay_draw||!gui_overlay_draw->menu||native_flow)
                 throw std::runtime_error("--lan-end-results requires the front end and GUI canvas, without --native-flow");
@@ -14086,6 +14096,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(test_close>=0&&std::int64_t(frame)==test_close){
                 std::cout<<"Host window (port-only): --test-close posts Alt+F4 to the game window at frame "<<frame<<"\n";
                 PostMessageW(window.handle(),WM_SYSKEYDOWN,VK_F4,LPARAM(1)|(LPARAM(1)<<29));
+            }
+            if(test_level_end&&std::int64_t(frame)==(*test_level_end)[1]){
+                if(!lan_end_results)throw std::runtime_error("--test-level-end needs --lan-end-results");
+                const auto kind=static_cast<std::uint8_t>((*test_level_end)[0]);
+                std::cout<<"PORT-ONLY --test-level-end: 0012fa60(G, "<<int(kind)<<") at gameplay frame "<<frame<<"\n";
+                sim.request_level_end(kind);
+                test_level_end.reset();
             }
             if(test_crash&&std::int64_t(frame)==test_crash->second)omega::crash::test_crash(test_crash->first,"the play loop");
             // Port-only diagnostics (132win12): --test-focus-loss / --test-alt-enter at a window frame.
@@ -15353,7 +15370,10 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                             std::cout<<"Debrief (00134110) ended: "<<debrief_frames<<" debrief frames, "
                                      <<debrief_seconds<<" s shared GUI/audio time\n";
                         };
-                        const auto teardown=network_debrief?run_lan_play_level_teardown(*lan_net,*ending,actions)
+                        const bool retain_network=network_debrief&&ending->b1c7;
+                        const auto teardown=network_debrief
+                            ?run_lan_play_level_teardown(*lan_net,*ending,actions,
+                                retain_network?LanTeardownSession::Retain:LanTeardownSession::Exit)
                             :run_play_level_teardown(*ending,actions);
                         if(network_debrief){
                             std::cout<<"LAN native teardown: live services";
@@ -15376,8 +15396,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         // Port-only (132on2d, ONLINE.md §3.6): World_Teardown's network branch 0013493c (with 004294c0
                         // set: 0044e340, the record's upload, then 0042b1f0, the game left), which the teardown mirror
                         // answers as solo: an online game's lobby side runs here, after the teardown.
-                        if(frontend_app)frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,ending->agent_b74!=0);
+                        if(frontend_app&&!retain_network)
+                            frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,
+                                ending->agent_b74!=0);
                         if(window_closed_during_teardown){++frame;running=false;return true;}
+                        level_end_retain_network=retain_network;
                         level_end_next=next;
                         ++frame;running=false;return true;
                     }
@@ -21419,7 +21442,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         if(!state.error.empty())throw std::runtime_error(state.error);
         // Port-only (132on2d): an online game the level left without its teardown (a frame limit, the window's close):
         // the game's end as 0044e340 / 0042b1f0 (nothing when the teardown's ran).
-        if(frontend_app)frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,false);
+        if(frontend_app&&!level_end_next)
+            frontend_app->network_level_exit(combat_session&&combat_session->agent_statistics()?&*combat_session->agent_statistics():nullptr,false);
         if(frontend_app&&level_end_next){
             // The level's teardown ran natively at the level end (001690f0, play_level_teardown.hpp); the
             // objects its "pass" / "renderer" services destroy are this pass's locals, released at the pass's
@@ -21452,6 +21476,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // next pass's start, after this pass's locals (the level: terrain, models, textures, NPCs, renderers)
             // are released, so the _EOL movie, the command centre and the briefing do not run beside the whole
             // level (130 MB of TORONTO1's heap on the Vita).
+            resume_retained_network=level_end_retain_network;
             resume_state=*level_end_next;
             continue;
         }

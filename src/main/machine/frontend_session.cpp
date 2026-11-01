@@ -1202,6 +1202,7 @@ void FrontendSession::level_progress(std::int32_t profile, std::int32_t level, s
 }
 
 bool FrontendSession::lan_hosting() { return services_.lan_hosting ? services_.lan_hosting() : false; }
+bool FrontendSession::lan_continuing() { return services_.lan_continuing ? services_.lan_continuing() : false; }
 
 bool FrontendSession::lan_host(const LanHostRequest& request) {
     if (!services_.lan_host) unreachable(0x2a1044, "the PORT-ONLY LAN host without a LAN session");
@@ -1559,6 +1560,28 @@ std::int32_t FrontendSession::lobby_cell_invite(std::int32_t id) {
 }
 std::int32_t FrontendSession::lobby_cell_create(const std::string& name) {
     return services_.lobby ? services_.lobby->cell_create(name) : GuiHost::lobby_cell_create(name);
+}
+std::int32_t FrontendSession::lobby_cell_open() {
+    return services_.lobby ? services_.lobby->cell_open() : GuiHost::lobby_cell_open();
+}
+void FrontendSession::lobby_cell_close() {
+    if (services_.lobby) services_.lobby->cell_close();
+    else GuiHost::lobby_cell_close();
+}
+std::vector<gui::GuiHost::LobbyCellMember> FrontendSession::lobby_cell_members() {
+    return services_.lobby ? services_.lobby->cell_members() : GuiHost::lobby_cell_members();
+}
+std::string FrontendSession::lobby_cell_message() {
+    return services_.lobby ? services_.lobby->cell_message() : GuiHost::lobby_cell_message();
+}
+std::int32_t FrontendSession::lobby_cell_set_message(const std::string& message) {
+    return services_.lobby ? services_.lobby->cell_set_message(message) : GuiHost::lobby_cell_set_message(message);
+}
+std::int32_t FrontendSession::lobby_cell_resign() {
+    return services_.lobby ? services_.lobby->cell_resign() : GuiHost::lobby_cell_resign();
+}
+std::int32_t FrontendSession::lobby_cell_remove(std::int32_t id) {
+    return services_.lobby ? services_.lobby->cell_remove(id) : GuiHost::lobby_cell_remove(id);
 }
 
 std::optional<std::int32_t> FrontendSession::lobby_player_rank(std::int32_t account) {

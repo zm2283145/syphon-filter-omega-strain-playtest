@@ -315,6 +315,77 @@ std::vector<std::uint8_t> account_get_id(std::string_view key, std::string_view 
     put_str(r, 0x26, 32, name.substr(0, 31));
     return r;
 }
+std::vector<std::uint8_t> clan_create(std::string_view key, std::string_view name) {
+    auto r = base(msize::CreateClan, "1", key);
+    put_i32(r, 0x28, 10683);
+    put_str(r, 0x2c, 32, name);
+    return r;
+}
+std::vector<std::uint8_t> clan_disband(std::string_view key, std::int32_t clan) {
+    auto r = base(msize::DisbandClan, "1", key);
+    put_i32(r, 0x28, clan);
+    return r;
+}
+std::vector<std::uint8_t> clan_get(std::string_view key, std::int32_t account, std::int32_t clan) {
+    auto r = base(msize::GetClanByID, "1", key);
+    put_i32(r, 0x28, account);
+    put_i32(r, 0x2c, clan);
+    return r;
+}
+std::vector<std::uint8_t> clan_get_by_name(std::string_view key, std::string_view name) {
+    auto r = base(msize::GetClanByName, "1", key);
+    put_i32(r, 0x28, 10683);
+    put_str(r, 0x2c, 32, name);
+    return r;
+}
+std::vector<std::uint8_t> clan_members(std::int32_t clan) {
+    std::vector<std::uint8_t> r(msize::GetClanMemberListExtraInfo, 0);
+    put_str(r, kMessageIdOffset, kMessageIdLength, "1");
+    put_i32(r, 0x18, clan);
+    return r;
+}
+std::vector<std::uint8_t> clan_invite(std::string_view key, std::int32_t account, std::string_view message) {
+    auto r = base(msize::InvitePlayerToClan, "1", key);
+    put_i32(r, 0x28, account);
+    put_str(r, 0x2c, 200, message);
+    return r;
+}
+std::vector<std::uint8_t> clan_invitations(std::string_view key) {
+    auto r = base(msize::CheckMyClanInvitations, "1", key);
+    put_i32(r, 0x28, 0);
+    put_i32(r, 0x2c, 50);
+    return r;
+}
+std::vector<std::uint8_t> clan_answer(std::string_view key, std::int32_t invitation, bool accept) {
+    auto r = base(msize::RespondToClanInvitation, "1", key);
+    put_i32(r, 0x28, invitation);
+    put_i32(r, 0x2c, accept ? 1 : 2);
+    return r;
+}
+std::vector<std::uint8_t> clan_remove(std::string_view key, std::int32_t account, std::int32_t clan) {
+    auto r = base(msize::RemovePlayerFromClan, "1", key);
+    put_i32(r, 0x28, account);
+    put_i32(r, 0x2c, clan);
+    return r;
+}
+std::vector<std::uint8_t> clan_get_mine(std::string_view key) {
+    auto r = base(msize::GetMyClans, "1", key);
+    put_i32(r, 0x28, 0);
+    put_i32(r, 0x2c, 10);
+    return r;
+}
+std::vector<std::uint8_t> clan_get_message(std::string_view key, std::int32_t clan) {
+    auto r = base(msize::GetMyClanMessages, "1", key);
+    put_i32(r, 0x28, clan);
+    put_i32(r, 0x2c, 0);
+    put_i32(r, 0x30, 10);
+    return r;
+}
+std::vector<std::uint8_t> clan_set_message(std::string_view key, std::string_view message) {
+    auto r = base(msize::SendClanMessage, "1", key);
+    put_str(r, 0x26, 200, message);
+    return r;
+}
 }  // namespace request
 
 ConnectInfo read_connect_info(std::span<const std::uint8_t> s, std::size_t base) {

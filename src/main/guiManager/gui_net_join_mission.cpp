@@ -316,6 +316,7 @@ void GuiRuntime::lb_wake(Widget* w) {  // 0033f110
     auto& l = *w->lb;
     base_wake(w);  // 0033d3a0: 0041efa0, vt +64, start_button +10 = -1
     if (w->cls == WidgetClass::netcontacts) ct_activate(w);  // 002ade60 (132on2h)
+    else if (w->cls == WidgetClass::netagencycell) cell_activate(w);  // 002afa80
     else jm_activate(w);
     if (l.start_button) l.start_button->id10 = -1;
     l.source = nullptr;
@@ -346,6 +347,7 @@ void GuiRuntime::lb_sleep(Widget* w) {  // 0033f050
     auto& l = *w->lb;
     base_sleep(w);  // 0033d360: 0041ebf0, vt +68
     if (w->cls == WidgetClass::netcontacts) ct_deactivate(w);  // 002ade00 (132on2h)
+    else if (w->cls == WidgetClass::netagencycell) cell_deactivate(w);  // 002afa20
     else jm_deactivate(w);
     l.source = nullptr;
     if (l.list) mlist_attach(l.list, nullptr);
@@ -379,6 +381,8 @@ void GuiRuntime::lb_update(Widget* w, float dt) {  // 0033de00
     for (const LobbyRecord& c : l.chat_ac.items) chat_line(l.chat, c.name, c.text, c.b64 != 0);
     if (!l.chat_ac.items.empty()) l.chat_ac.changed = 1;
     l.chat_ac.items.clear();
+    if (w->cls == WidgetClass::netagencycell && l.agency_message)
+        set_text(l.agency_message, cstr_of(host_.lobby_cell_message()), false);
     if (g.lan_mode) lb_lan_refresh(w);  // PORT-ONLY (132ln4)
 }
 
@@ -529,6 +533,7 @@ void GuiRuntime::lb_action(Widget* w, LobbyRecord* r) {  // vt +6c / +70 / +74 /
     case 2: lb_join(w, r, 1); break;
     case 3:  // 002a8b50 (GuiNetJoinMission): nothing; 002ada10 (GuiNetContacts): the remove prompt
         if (w->cls == WidgetClass::netcontacts) ct_remove(w, r);
+        else if (w->cls == WidgetClass::netagencycell) cell_remove(w, r);
         break;
     default: break;
     }
@@ -885,6 +890,24 @@ void GuiRuntime::lb_session_refresh(Widget* w) {
         l.chat_ac.items.push_back(std::move(rec));
         l.chat_ac.changed = 1;
     }
+    if (w->cls == WidgetClass::netagencycell) {
+        std::vector<LobbyRecord> records;
+        for (const auto& row : host_.lobby_cell_members()) {
+            LobbyRecord rec;
+            rec.id = row.id;
+            rec.name = cstr_of(row.name).substr(0, 0x1f);
+            rec.at(0x24) = row.status == 3 ? 1 : row.status == 2 ? 2 : 3;
+            rec.at(0x28) = 2;
+            rec.at(0x2c) = 0;
+            rec.at(0x30) = 0;
+            rec.at(0x34) = rec.at(0x38) = rec.at(0x3c) = rec.at(0x40) = -1;
+            rec.at(0x44) = 5;
+            records.push_back(std::move(rec));
+        }
+        if (!l.players_c8.items.empty() || !records.empty()) l.players_c8.changed = 1;
+        l.players_c8.items = std::move(records);
+        return;
+    }
     if (w->cls == WidgetClass::netcontacts) {
         // 00446830 (GetBuddyListExtraInfo's callback, checkpoint 132on2h): each response with status +18 0 a record
         // (0044f470) in the session's work list +e0: +0 the id, +4 the name, +24 the kind by the player status +40
@@ -1225,6 +1248,151 @@ void GuiRuntime::ct_add(Widget*, std::int32_t id, const std::string& name) {  //
         popup_open(2, title, lobby_string(text, name), nullptr, 0);
     }
     popup_close(wait);
+}
+
+// ---------------------------------------------------------------- GuiNetAgencyCell (vtable 004ddd40)
+
+void GuiRuntime::cell_activate(Widget* w) {  // 002afa80
+    auto& l = *w->lb;
+    if (l.active) return;
+    if (!host_.net_session() || !host_.lobby_cell_open()) {
+        popup_open(2, std::string(), lobby_string(0x58), w, 0xf);
+    }
+    l.players_c8.items.clear();
+    for (const auto& row : host_.lobby_cell_members()) {
+        LobbyRecord rec;
+        rec.id = row.id;
+        rec.name = cstr_of(row.name).substr(0, 0x1f);
+        rec.at(0x24) = row.status == 3 ? 1 : row.status == 2 ? 2 : 3;
+        rec.at(0x28) = 2;
+        rec.at(0x34) = rec.at(0x38) = rec.at(0x3c) = rec.at(0x40) = -1;
+        rec.at(0x44) = 5;
+        l.players_c8.items.push_back(std::move(rec));
+    }
+    l.players_c8.changed = 1;
+    l.source = &l.players_c8;
+    if (l.list) {
+        l.list->mls->b4 = 1;
+        l.list->mls->b5 = 1;
+        mlist_attach(l.list, l.source);
+    }
+    if (l.agency_message) set_text(l.agency_message, cstr_of(host_.lobby_cell_message()), false);
+    l.b170 = host_.lobby_cell_leader() ? 1 : 0;
+    for (Widget* button : {l.invite_agent, l.set_message, l.agent_remove}) {
+        if (!button) continue;
+        if (l.b170) button->flags |= static_cast<std::uint16_t>(flag_visible | flag_enabled);
+        else button->flags &= static_cast<std::uint16_t>(~(flag_visible | flag_enabled));
+    }
+    if (l.resign_cell)
+        set_text(l.resign_cell,
+                 cstr_of(host_.get_string(l.b170 ? "DestroyCell" : "ResignCell").value_or(
+                     l.b170 ? "Destroy Cell" : "Resign Cell")),
+                 false);
+    l.active = 1;
+}
+
+void GuiRuntime::cell_deactivate(Widget* w) {  // 002afa20
+    auto& l = *w->lb;
+    if (!l.active) return;
+    lb_off(w);
+    if (host_.net_session()) host_.lobby_cell_close();
+    l.players_c8.items.clear();
+    l.active = 0;
+}
+
+void GuiRuntime::cell_remove(Widget* w, LobbyRecord* r) {  // 002af190
+    if (!r || !w->lb->b170) return;
+    w->lb->w100 = r->id;
+    w->lb->s104 = cstr_of(r->name);
+    popup_open(5, std::string(), lobby_string(0x51, w->lb->s104), w, 0x12);
+}
+
+std::uint8_t GuiRuntime::cell_event(Widget* w, Widget* sender, std::uint32_t type, std::int32_t a3,
+                                    std::int32_t t0) {  // 002af310
+    auto& l = *w->lb;
+    const std::uint32_t t = type & 0xffff;
+    if (t == 2) {
+        if (sender == l.resign_cell) {
+            popup_open(5, std::string(), lobby_string(l.b170 ? 0x45 : 0x44, host_.lobby_cell_name()), w, 0x11);
+            return 1;
+        }
+        if (sender == l.invite_agent) {
+            Widget* kb = factory("GuiKeyboard", std::string("KEYBOARD"));
+            if (kb) kb_open(kb, lobby_string(0x49), std::string(), w, 0x10, 0x10, 0);
+            return 1;
+        }
+        if (sender == l.set_message) {
+            Widget* kb = factory("GuiKeyboard", std::string("KEYBOARD"));
+            if (kb) kb_open(kb, lobby_string(0x41), host_.lobby_cell_message(), w, 0x28, 0xe, 0);
+            return 1;
+        }
+    }
+    if (t == 0x1a) {
+        if (a3 == 0xe) {
+            const std::string text = sender && sender->kb ? cstr_of(sender->kb->result.value_or("")) : std::string();
+            const std::int32_t wait = popup_open(0, std::string(), lobby_string(0x42), nullptr, 0);
+            if (host_.lobby_cell_set_message(text)) {
+                if (l.agency_message) set_text(l.agency_message, text, false);
+            } else {
+                popup_open(2, std::string(), lobby_string(0x43), nullptr, 0);
+            }
+            popup_close(wait);
+            return 1;
+        }
+        if (a3 == 0x10) {
+            const std::string name = sender && sender->kb ? cstr_of(sender->kb->result.value_or("")) : std::string();
+            if (!name.empty()) {
+                const std::int32_t id = host_.lobby_account_id(name);
+                if (host_.lobby_error() & 0xff) {
+                    popup_open(2, std::string(), lobby_string(0x17, name), nullptr, 0);
+                } else {
+                    const std::int32_t wait = popup_open(0, std::string(), lobby_string(0x4a, name), nullptr, 0);
+                    if (host_.lobby_cell_invite(id)) {
+                        popup_open(2, std::string(), lobby_string(0x4b, name), nullptr, 0);
+                    } else {
+                        std::uint32_t text = 0x4d;
+                        switch (host_.lobby_error() & 0xff) {
+                        case 0x1e: text = 0x50; break;
+                        case 0x1d: text = 0x17; break;
+                        case 0x1f: text = 0x4e; break;
+                        case 0x2a: text = 0x4f; break;
+                        default: break;
+                        }
+                        popup_open(2, lobby_string(0x4c), lobby_string(text, name), nullptr, 0);
+                    }
+                    popup_close(wait);
+                }
+            }
+            return 1;
+        }
+        if (a3 == 0x11) {
+            const std::string cell = host_.lobby_cell_name();
+            const std::int32_t wait =
+                popup_open(0, std::string(), lobby_string(0x46, cell), nullptr, 0);
+            if (host_.lobby_cell_resign())
+                popup_open(2, std::string(), lobby_string(0x47, cell), w, 0xf);
+            else
+                popup_open(2, std::string(), lobby_string(0x48, cell), nullptr, 0);
+            popup_close(wait);
+            return 1;
+        }
+        if (a3 == 0x12) {
+            const std::int32_t wait = popup_open(0, std::string(), lobby_string(0x52), nullptr, 0);
+            popup_open(2, std::string(), lobby_string(host_.lobby_cell_remove(l.w100) ? 0x53 : 0x54), nullptr, 0);
+            popup_close(wait);
+            return 1;
+        }
+        if (a3 == 0xf || a3 == 0x17) {
+            net_navigate(w, 1);
+            return 1;
+        }
+    }
+    if (t == 0 && sender != l.list) {
+        if (sender == l.agent_remove) lb_show(w, 3);
+        else if (sender == l.resign_cell || sender == l.invite_agent || sender == l.set_message) lb_show(w, 4);
+        else lb_show(w, 1);
+    }
+    return lb_event(w, sender, type, a3, t0);
 }
 
 // ---------------------------------------------------------------- GuiMissionList (vtable 004ddb80)

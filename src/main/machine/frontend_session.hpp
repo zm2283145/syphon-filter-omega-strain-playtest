@@ -167,6 +167,13 @@ public:
     virtual bool is_contact(std::int32_t) { return false; }                                    // 0044d670
     virtual std::int32_t cell_invite(std::int32_t) { return 0; }                               // 0044ac10
     virtual std::int32_t cell_create(const std::string&) { return 0; }                         // 0044af60
+    virtual std::int32_t cell_open() { return 0; }
+    virtual void cell_close() {}
+    virtual std::vector<gui::GuiHost::LobbyCellMember> cell_members() { return {}; }
+    virtual std::string cell_message() { return {}; }
+    virtual std::int32_t cell_set_message(const std::string&) { return 0; }
+    virtual std::int32_t cell_resign() { return 0; }
+    virtual std::int32_t cell_remove(std::int32_t) { return 0; }
     // Checkpoint 132on2h (GuiNetContacts; the GuiHost calls of the same names).
     virtual std::int32_t contacts_open() = 0;                                  // 0044df80
     virtual void contacts_close() = 0;                                         // 0044dd20
@@ -250,6 +257,7 @@ struct FrontendServices {
     // lan_hosting (MSNSETUP's begin_mission in LAN mode). Unset: hosting throws, lan_hosting answers false.
     std::function<bool(const gui::GuiHost::LanHostRequest& request)> lan_host;
     std::function<bool()> lan_hosting;
+    std::function<bool()> lan_continuing;  // A10: this command-centre pass owns a retained room
     // Port-only (checkpoint 132ln4, §4 rows 7 / 7b): the LAN session behind GuiNetJoinMission's LAN mode (the
     // GuiHost::lan_browse / lan_games / lan_join / lan_join_state / lan_join_cancel / lan_pump / lan_clock_ms
     // services). Unset: nothing is listed and a join throws.
@@ -426,6 +434,7 @@ public:
     void profiles_clear_b70() override;                                                         // 0012ee30
     void level_progress(std::int32_t profile, std::int32_t level, std::int32_t a, std::int32_t b) override;  // 00332a10
     bool lan_hosting() override;
+    bool lan_continuing() override;
     bool lan_host(const LanHostRequest& request) override;
     void lan_browse(bool on) override;                     // port-only (132ln4)
     std::vector<LanGame> lan_games() override;
@@ -508,6 +517,13 @@ public:
     bool lobby_is_contact(std::int32_t id) override;
     std::int32_t lobby_cell_invite(std::int32_t id) override;
     std::int32_t lobby_cell_create(const std::string& name) override;
+    std::int32_t lobby_cell_open() override;
+    void lobby_cell_close() override;
+    std::vector<gui::GuiHost::LobbyCellMember> lobby_cell_members() override;
+    std::string lobby_cell_message() override;
+    std::int32_t lobby_cell_set_message(const std::string& message) override;
+    std::int32_t lobby_cell_resign() override;
+    std::int32_t lobby_cell_remove(std::int32_t id) override;
     bool lobby_join_password_refused() override;
     void lobby_set_join_password(const std::string& password) override;
     // App +310: the "please wait" thread (002c82f0 / 002c81d0) runs. Wait-thread frames drawn so far.

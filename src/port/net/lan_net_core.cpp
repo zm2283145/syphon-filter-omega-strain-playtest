@@ -2081,8 +2081,14 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         npc.active = m.read(msg + 0x4c, 1) != 0;
         npc.state = static_cast<std::uint8_t>(m.read(msg + 0x4d, 1));
         npc.health = static_cast<std::int16_t>(m.read(msg + 0x4e, 2));
+        // The play installs its remote controller while resolving the authored
+        // actor. Give that controller its level-local block before the callback
+        // can run; discard it again when no authored actor exists here.
+        const bool temporary_block = !npc_blocks_.contains(npc.key);
+        if (temporary_block) register_npc(npc.key, 0);
         const bool found = named_npc_receiver_ && named_npc_receiver_(npc);
         bind_remote_named_npc(npc.key, npc.origin, found);
+        if (!found && temporary_block) forget_npc(npc.key);
         ++named_npcs_received_;
         return 0;
     }
@@ -2735,6 +2741,14 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     hud_line_.clear();
     local_set_ = false;
     local_inventory_ = false;
+    remote_created_ = 0;
+    // The play's player/input stand-ins persist with this core, unlike the
+    // level-owned originals. Forget the released cNetHuman and its lazy input
+    // caches so the next level creates and links a fresh network block.
+    memory_.write(kLocalPlayer + 0x3584, 4, 0);
+    memory_.write(kLocalPlayer + 0x3268, 1, 0);
+    memory_.write(kLocalInput + 0x13c, 4, 0);
+    memory_.write(kLocalInput + 0x140, 4, 0);
     if (!retain_session) {
         lobby_ = {};
         memory_.write(0x572480, 4, 0);
@@ -2745,12 +2759,33 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
 void LanNetCore::level_load_begin(LevelLoadHost* level) {
     require_objective_main_thread();
     auto& m = memory_;
+    const auto queued_character_map = [&] {
+        const auto count = m.read(dme::kNetMap);
+        const auto root = m.read(dme::kNetMap + 4);
+        if (!count || !root) return count == 0 && root == 0;
+        std::uint32_t visited = 0;
+        const auto queued = [&](const auto& self, std::uint32_t node) -> bool {
+            if (!node) return true;
+            ++visited;
+            const auto key = m.read(node + 0xc);
+            const auto data = m.read(node + 0x1c);
+            const auto live = game_live_.find(data);
+            if (m.read(node + 0x10) || m.read(node + 0x18, 1) != 1 || m.read(node + 0x14) >= 4 ||
+                (key >> 24) < 1 || (key >> 24) > 4 || live == game_live_.end() || live->second < 0x430)
+                return false;
+            return self(self, m.read(node)) && self(self, m.read(node + 4));
+        };
+        return queued(queued, root) && visited == count;
+    };
     // The play host flushes deferred objective constructors before its
     // 001350e0 adapter. Mirror that loader's 0040c2d0 reset here, before any
     // new registration. Reusing IDs/storage requires the preceding native
     // 003fbcd0 and finish_level_teardown, not merely removing C++ bindings.
+    // A retained peer may already have sent its next-level character while
+    // this console was still in the front end. 002c7810 legitimately queues
+    // that copied message in the otherwise-clean NetMap for 00185840.
     if (level_loaded_ || !objective_bindings_.empty() || !objective_outcomes_.empty() ||
-        !objective_actives_.empty() || m.read(dme::kNetMap) || m.read(dme::kNetMap + 4))
+        !objective_actives_.empty() || !queued_character_map())
         throw std::runtime_error("LAN level load requires previous world network cleanup before objective ID reuse");
     objective_counter_ = 0;
     next_objective_block_ = kObjectiveBlocks;
@@ -2824,6 +2859,20 @@ void LanNetCore::retained_frontend_tick(double milliseconds) {
         throw std::invalid_argument("LAN retained frontend tick requires finite nonnegative elapsed time");
     if (!thread_alive()) call(memory_, 0x42a770, {});
     advance_timer(milliseconds);
+}
+
+void LanNetCore::resume_retained_level(bool host_role) {
+    if (pump_.joinable() || level_loaded_ || memory_.read(dme::kNetworkGame, 1) ||
+        memory_.read(dme::kInLevel, 1) || !lobby_)
+        throw std::logic_error("LAN retained level resume requires a quiescent MP-off core with a lobby");
+    if (memory_.read(dme::kHostRole, 1) != (host_role ? 1U : 0U))
+        throw std::runtime_error("LAN retained level resume changed the connected room's host role");
+    memory_.write(dme::kNetworkGame, 1, 1);
+    // 003fbcd0 marks every client's world-data slot complete. A normal new
+    // room clears a peer's slot in 003faab0 when it joins, but retained peers
+    // do not join again. Re-arm the existing connections so 003fac40 sends
+    // each local player's fresh character snapshot for this level.
+    for (const auto client : transport_.clients()) memory_.write(0x493a10 + client, 1, 0);
 }
 
 void LanNetCore::net_frame() {

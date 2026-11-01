@@ -122,6 +122,18 @@ std::vector<std::uint8_t> buddy_add(std::string_view session_key, std::int32_t a
 std::vector<std::uint8_t> buddy_answer(std::string_view session_key, std::int32_t inviter, bool accept);  // 0x00446560 (260)
 std::vector<std::uint8_t> buddy_remove(std::string_view session_key, std::int32_t account);   // 0x0044d9c0 (65)
 std::vector<std::uint8_t> account_get_id(std::string_view session_key, std::string_view name);  // 0x00451370 (23)
+std::vector<std::uint8_t> clan_create(std::string_view session_key, std::string_view name);
+std::vector<std::uint8_t> clan_disband(std::string_view session_key, std::int32_t clan);
+std::vector<std::uint8_t> clan_get(std::string_view session_key, std::int32_t account, std::int32_t clan);
+std::vector<std::uint8_t> clan_get_by_name(std::string_view session_key, std::string_view name);
+std::vector<std::uint8_t> clan_members(std::int32_t clan);
+std::vector<std::uint8_t> clan_invite(std::string_view session_key, std::int32_t account, std::string_view message);
+std::vector<std::uint8_t> clan_invitations(std::string_view session_key);
+std::vector<std::uint8_t> clan_answer(std::string_view session_key, std::int32_t invitation, bool accept);
+std::vector<std::uint8_t> clan_remove(std::string_view session_key, std::int32_t account, std::int32_t clan);
+std::vector<std::uint8_t> clan_get_mine(std::string_view session_key);
+std::vector<std::uint8_t> clan_get_message(std::string_view session_key, std::int32_t clan);
+std::vector<std::uint8_t> clan_set_message(std::string_view session_key, std::string_view message);
 }  // namespace request
 
 // The decoded fields of a NetConnectionInfo (login +0x28, join +0x20).

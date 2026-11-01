@@ -119,6 +119,9 @@ public:
     // LanSession may pump discovery only, never transport.poll({}). The next
     // 001693f0 reuses this thread and 0042a1b0 stops it.
     void retained_frontend_tick(double milliseconds);
+    // Frontend state 3 re-arms multiplayer before the next 001693f0 hand-off.
+    // The retained room cannot change host role between missions.
+    void resume_retained_level(bool host_role);
     // 132ln5h7: 00169360 on the network memory (run_gameplay_state reads and clears the quit request 0x005721d8
     // before its quit dialog 002cae30); quit_text() is the dialog's message, the C string at 0x005721e0.
     bool take_quit_request();

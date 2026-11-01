@@ -38,6 +38,19 @@ public:
         std::uint64_t when = 0;
         std::uint32_t world = 0;
     };
+    struct Clan {
+        std::uint32_t id = 0;
+        std::uint32_t leader = 0;
+        std::string name;
+        std::string message;
+        std::set<std::uint32_t> members;
+    };
+    struct ClanInvitation {
+        std::uint32_t id = 0;
+        std::uint32_t clan = 0;
+        std::uint32_t account = 0;
+        std::string message;
+    };
 
     explicit SocialStore(std::filesystem::path file = {}, int backups = 0, std::uint64_t backup_interval = 0)
         : file_(std::move(file)), backups_(backups), backup_interval_(backup_interval) {}
@@ -60,6 +73,18 @@ public:
     void played_with(std::uint32_t owner, std::uint32_t other, std::uint32_t world, std::uint64_t now);
     const std::vector<Recent>& recent(std::uint32_t owner) const;
 
+    const Clan* clan(std::uint32_t id) const;
+    const Clan* clan_by_name(std::string_view name) const;
+    const Clan* clan_for(std::uint32_t account) const;
+    std::pair<std::int32_t, std::uint32_t> create_clan(std::uint32_t leader, std::string name);
+    std::int32_t disband_clan(std::uint32_t account, std::uint32_t clan_id);
+    std::int32_t set_clan_message(std::uint32_t account, std::string message);
+    std::pair<std::int32_t, std::uint32_t> invite_to_clan(std::uint32_t leader, std::uint32_t account,
+                                                         std::string message);
+    std::vector<ClanInvitation> clan_invitations(std::uint32_t account) const;
+    std::int32_t answer_clan_invitation(std::uint32_t account, std::uint32_t invitation_id, bool accept);
+    std::int32_t remove_clan_member(std::uint32_t actor, std::uint32_t clan_id, std::uint32_t account);
+
     // An account was deleted: every trace of it goes.
     void forget(std::uint32_t account);
 
@@ -70,6 +95,10 @@ private:
     std::map<std::uint32_t, std::set<std::uint32_t>> contacts_;
     std::map<std::uint32_t, std::vector<Invitation>> invitations_;  // by invitee, oldest first
     std::map<std::uint32_t, std::vector<Recent>> recent_;          // newest first
+    std::map<std::uint32_t, Clan> clans_;
+    std::vector<ClanInvitation> clan_invitations_;
+    std::uint32_t next_clan_id_ = 1;
+    std::uint32_t next_clan_invitation_id_ = 1;
 };
 
 class ChatFilter {

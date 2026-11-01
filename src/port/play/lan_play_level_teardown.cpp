@@ -13,8 +13,8 @@ PlayTeardownReport run_lan_play_level_teardown(lan::LanNetCore& core, const Game
     auto& live = core.memory();
     if (!core.level_loaded() || live.read(dme::kNetworkGame, 1) != 1)
         throw std::runtime_error("LAN level teardown requires a loaded multiplayer game");
-    // G+1c7 skips 0044e340 / 0042b1f0. The live caller has no owner to
-    // carry the core through the next GUI pass, so it must opt in explicitly.
+    // G+1c7 skips 0044e340 / 0042b1f0. The live frontend opts in only when it
+    // will carry this same core and connected transport through the next GUI pass.
     const bool retain = session == LanTeardownSession::Retain;
     if (game.b1c7 && !retain)
         throw std::runtime_error("LAN level teardown: G+1c7 keep-game continuation is not hosted");

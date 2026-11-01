@@ -289,6 +289,7 @@ bool GuiRuntime::net_navigate(Widget* screen, std::int32_t op) {
     else if (screen->cls == WidgetClass::msnsetup) mset_deactivate(screen);  // 002a1700
     else if (screen->cls == WidgetClass::netjoin) jm_deactivate(screen);     // 002a8fd0 (132ln4)
     else if (screen->cls == WidgetClass::netcontacts) ct_deactivate(screen);  // 002ade00 (132on2h)
+    else if (screen->cls == WidgetClass::netagencycell) cell_deactivate(screen);  // 002afa20
     else if (screen->cls == WidgetClass::acntlogn) acl_deactivate(screen);  // 0028a430 (132on2b)
     else if (screen->cls == WidgetClass::onlinepref) opt_deactivate(screen);  // 002a9b50 (132on2c)
     else if (screen->cls == WidgetClass::netmess) nm_deactivate(screen);      // 00347690 (132on2c)
@@ -953,11 +954,12 @@ void GuiRuntime::oc_lan_wake(Widget* w) {
 // PORT-ONLY (checkpoint 132ln3, research/LAN_PLAY.md §4 row 5): the LAN stand-in for the navigator's lobby check
 // 00442510(lobby, app +248). The original fails for a mission index outside 0 .. lobby +58 (the lobby's mission
 // channels) and otherwise joins that mission's Medius channel. LAN has no channels: the index must name one of
-// the nine online missions (table 004acb30, the command centre's 004acb60 values 0..8), and no LAN game may be
-// hosted already.
+// the nine online missions (table 004acb30, the command centre's 004acb60 values 0..8). A new room cannot be
+// hosted over an existing one; A10's retained room is the explicit exception.
 bool GuiRuntime::lan_lobby_check() {
     constexpr std::int32_t online_missions = 9;  // 004acb30: 0, 1, 2, 4, 5, 8, 12, 13, 16
-    return g.app_248 >= 0 && g.app_248 < online_missions && !host_.lan_hosting();
+    return g.app_248 >= 0 && g.app_248 < online_missions &&
+           (!host_.lan_hosting() || host_.lan_continuing());
 }
 
 // PORT-ONLY: Host goes to the command centre in online mode exactly as after an online login (the navigator's

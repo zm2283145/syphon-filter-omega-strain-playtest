@@ -11,8 +11,8 @@ class LanNetCore;
 
 namespace omega {
 
-// Explicitly opt into G+1c7's retained DME session. The live play uses the
-// default exit path until its front end can carry the core into another level.
+// Explicitly opt into G+1c7's retained DME session. The live frontend owns the
+// same core and connected transport until the next network mission hand-off.
 enum class LanTeardownSession { Exit, Retain };
 
 PlayTeardownReport run_lan_play_level_teardown(lan::LanNetCore& core, const GameEndState& game,

@@ -107,6 +107,27 @@ public:
     void send_buddy_add(std::int32_t account);
     std::optional<std::int32_t> remove_contact(std::int32_t account);
     std::optional<Frame> account_get_id(const std::string& name);
+    struct ClanInfo {
+        std::int32_t id = -1;
+        std::int32_t leader = -1;
+        std::string name;
+        std::string message;
+    };
+    struct ClanMember {
+        std::int32_t id = -1;
+        std::string name;
+        std::int32_t player_status = 0;
+    };
+    std::optional<std::int32_t> clan_mine(ClanInfo* out = nullptr);
+    std::optional<std::int32_t> clan_info(std::int32_t clan, ClanInfo* out = nullptr);
+    std::optional<std::int32_t> clan_members(std::int32_t clan, std::vector<ClanMember>& out);
+    std::optional<std::int32_t> clan_message(std::int32_t clan, std::string* out = nullptr);
+    std::optional<std::int32_t> clan_create(const std::string& name);
+    std::optional<std::int32_t> clan_disband(std::int32_t clan);
+    std::optional<std::int32_t> clan_invite(std::int32_t account, const std::string& message = {});
+    std::optional<std::int32_t> clan_remove(std::int32_t account, std::int32_t clan);
+    std::optional<std::int32_t> clan_set_message(const std::string& message);
+    std::optional<std::int32_t> clan_answer(std::int32_t invitation, bool accept);
     int timeout_ms() const { return options_.timeout_ms; }
     // PORT-ONLY (cap::GamePassword, 132on2c): the created game's join password (empty: none).
     void game_password(std::uint32_t world, const std::string& password);

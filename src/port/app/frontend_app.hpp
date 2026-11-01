@@ -205,7 +205,8 @@ public:
     // Checkpoint 132f11: the ZEUS.HOG / MANTEX pictures by slot (FrontendDisc::zeus_images), which the debrief's
     // GuiEndGameAwards loads through session() (0043c890) and the play's GUI renderer draws.
     const std::map<std::uint32_t, Texture>& zeus_images() const;
-    FrontendResult resume_after_level(std::uint8_t state_50, std::uint8_t previous_51);
+    FrontendResult resume_after_level(std::uint8_t state_50, std::uint8_t previous_51,
+                                      bool retain_network_level = false);
     // Port-only (checkpoint 132win3): the CPU PARTNER / FULLSCREEN rows' current values (the settings file,
     // or the values kept in memory without one) and where they live, read by the play at each level hand-off.
     PortSettings port_settings() const;

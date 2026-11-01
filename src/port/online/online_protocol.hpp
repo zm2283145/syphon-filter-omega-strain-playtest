@@ -78,6 +78,31 @@ constexpr std::uint16_t GetBuddyInvitationsResponse = 262;  // callback 0x004467
 // Checkpoint 132on2h (ONLINE.md §3.7): a name's account id, for CONTACTS' "invite by name" (0x002adab0 -> 0x00451370).
 constexpr std::uint16_t AccountGetID = 23;            // API 0x0046b140 (slot 0x00598508), caller 0x00451370
 constexpr std::uint16_t AccountGetIDResponse = 24;    // callback 0x00446e00 (copies 0x20 bytes to lobby +0xa68)
+// The original agency-cell (Medius clan) messages used by SFOLobby_Cell.c.
+constexpr std::uint16_t CreateClan = 84;
+constexpr std::uint16_t CreateClanResponse = 85;
+constexpr std::uint16_t DisbandClan = 86;
+constexpr std::uint16_t DisbandClanResponse = 87;
+constexpr std::uint16_t GetClanByID = 88;
+constexpr std::uint16_t GetClanByIDResponse = 89;
+constexpr std::uint16_t GetClanByName = 90;
+constexpr std::uint16_t GetClanByNameResponse = 91;
+constexpr std::uint16_t RemovePlayerFromClan = 96;
+constexpr std::uint16_t RemovePlayerFromClanResponse = 97;
+constexpr std::uint16_t InvitePlayerToClan = 98;
+constexpr std::uint16_t InvitePlayerToClanResponse = 99;
+constexpr std::uint16_t CheckMyClanInvitations = 100;
+constexpr std::uint16_t CheckMyClanInvitationsResponse = 101;
+constexpr std::uint16_t RespondToClanInvitation = 102;
+constexpr std::uint16_t RespondToClanInvitationResponse = 103;
+constexpr std::uint16_t GetMyClanMessages = 108;
+constexpr std::uint16_t GetMyClanMessagesResponse = 109;
+constexpr std::uint16_t SendClanMessage = 110;
+constexpr std::uint16_t SendClanMessageResponse = 111;
+constexpr std::uint16_t GetMyClans = 124;
+constexpr std::uint16_t GetMyClansResponse = 125;
+constexpr std::uint16_t GetClanMemberListExtraInfo = 218;
+constexpr std::uint16_t GetClanMemberListExtraInfoResponse = 219;
 }  // namespace mid
 
 // Request / response sizes (each incoming handler returns its struct size; each API passes its request size).
@@ -104,6 +129,18 @@ constexpr std::size_t AddToBuddyListFwdConfirmation = 0x40, AddToBuddyListFwdCon
 constexpr std::size_t GetBuddyListExtraInfo = 0x15, GetBuddyListExtraInfoResponse = 0xd0;
 constexpr std::size_t GetBuddyInvitations = 0x15, GetBuddyInvitationsResponse = 0x48;
 constexpr std::size_t AccountGetID = 0x46, AccountGetIDResponse = 0x20;
+constexpr std::size_t CreateClan = 0x4c, CreateClanResponse = 0x20;
+constexpr std::size_t DisbandClan = 0x2c, DisbandClanResponse = 0x1c;
+constexpr std::size_t GetClanByID = 0x30, GetClanByIDResponse = 0x168;
+constexpr std::size_t GetClanByName = 0x4c, GetClanByNameResponse = 0x148;
+constexpr std::size_t RemovePlayerFromClan = 0x30, RemovePlayerFromClanResponse = 0x1c;
+constexpr std::size_t InvitePlayerToClan = 0xf4, InvitePlayerToClanResponse = 0x1c;
+constexpr std::size_t CheckMyClanInvitations = 0x30, CheckMyClanInvitationsResponse = 0x118;
+constexpr std::size_t RespondToClanInvitation = 0xf8, RespondToClanInvitationResponse = 0x1c;
+constexpr std::size_t GetMyClanMessages = 0x34, GetMyClanMessagesResponse = 0xec;
+constexpr std::size_t SendClanMessage = 0xee, SendClanMessageResponse = 0x1c;
+constexpr std::size_t GetMyClans = 0x30, GetMyClansResponse = 0x170;
+constexpr std::size_t GetClanMemberListExtraInfo = 0x24, GetClanMemberListExtraInfoResponse = 0x1dc;
 }  // namespace msize
 
 // Field offsets every message shares (the API functions copy these two fields first).
@@ -123,6 +160,14 @@ constexpr std::int32_t PlayerNotPrivileged = -989;   // 0x004475e0 -> error 1 GE
 constexpr std::int32_t RequestDenied = -985;         // join refused (game full / closed)
 constexpr std::int32_t InvalidPassword = -978;       // 0x004475e0 -> error 0x3a INCORRECTPASSWORD
 constexpr std::int32_t GameNotFound = -977;
+constexpr std::int32_t ClanNotFound = -971;
+constexpr std::int32_t ClanNameInUse = -970;
+constexpr std::int32_t AlreadyClanLeader = -992;
+constexpr std::int32_t NotClanLeader = -990;
+constexpr std::int32_t DataAlreadyExists = -958;
+constexpr std::int32_t DataDoesNotExist = -957;
+constexpr std::int32_t LeaderCannotLeaveClan = -951;
+constexpr std::int32_t NotClanMember = -947;
 }  // namespace status
 
 // GameInfo / game list world status (the lobby's game entries test 1 = open, 3 = closed, 0x0044e430).

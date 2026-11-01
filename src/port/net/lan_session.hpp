@@ -81,6 +81,9 @@ public:
     // nothing left open, when either cannot be opened, the setup is out of range or a game is hosted already.
     bool host(const LanHostSetup& setup);
     bool hosting() const { return transport_ != nullptr && hosting_; }
+    // A retained room's host publishes its next mission without replacing the
+    // transport or session id. The connected clients remain members.
+    bool continue_hosted_mission(std::int32_t mission);
     // Checkpoint 132on2e (online create): the port the next host() binds (0: an ephemeral port).
     void set_game_port(std::uint16_t port) { config_.game_port = port; }
     std::uint16_t game_port() const { return config_.game_port; }
@@ -107,6 +110,9 @@ public:
     // (nothing opened) while hosting or joining, without a browser, for an unknown session or for a game of
     // another build.
     bool join(std::uint64_t session_id, const std::string& agent_name);
+    // A retained room's client confirms the already-connected session chosen
+    // in JOINMIS without sending another JOIN_REQ.
+    bool continue_joined_session(std::uint64_t session_id) const;
     // Checkpoint 132on2b (online JOINMIS): connect to the game at `host_address` (the address omega_server's
     // JoinGameResponse hands over) and send JOIN_REQ, with no browser; any session id the host accepts with counts.
     // False (nothing opened) while hosting or joining.

@@ -843,6 +843,7 @@ void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widge
         return;
     case WidgetClass::netjoin:  // GuiNetJoinMission (004dda50): +30 is 0041e470 (132ln4)
     case WidgetClass::netcontacts:  // GuiNetContacts (004ddc20): +30 is 0041e470 (132on2h)
+    case WidgetClass::netagencycell:  // GuiNetAgencyCell (004ddd40): +30 is 0041e470 (132on2i)
         break;
     case WidgetClass::netmsgarray:  // GuiNetMessageArray (004deb80): 00423670 with +64 00347b40 / +68 00348530 (132on2c)
         draw_net_message_array(out, gui, w, now_ms);  // the rows and cells (132on2h)
