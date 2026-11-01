@@ -148,6 +148,7 @@ public:
     virtual std::int32_t message_count() = 0;                                          // list +4
     virtual std::optional<gui::GuiHost::LobbyMessage> message(std::int32_t index) = 0;  // 00451010
     virtual void message_answer(std::int32_t index, std::int32_t accept) = 0;          // 00450f30
+    virtual void message_mark(std::int32_t) {}                                          // +4 = 1 (002af040)
     virtual bool messages_changed() = 0;                                                // list +18
     virtual void messages_set_changed(bool changed) = 0;                                // 0044f280
     // Checkpoint 132on2c (GuiLobbyScreen's chat and player list; the GuiHost calls of the same names).
@@ -470,6 +471,7 @@ public:
     std::int32_t lobby_message_count() override;
     std::optional<LobbyMessage> lobby_message(std::int32_t index) override;
     void lobby_message_answer(std::int32_t index, std::int32_t accept) override;
+    void lobby_message_mark(std::int32_t index) override;
     bool lobby_messages_changed() override;
     void lobby_messages_set_changed(bool changed) override;
     std::int32_t lobby_login(const std::string& name, const std::string& password) override;

@@ -103,7 +103,72 @@ constexpr std::uint16_t GetMyClans = 124;
 constexpr std::uint16_t GetMyClansResponse = 125;
 constexpr std::uint16_t GetClanMemberListExtraInfo = 218;
 constexpr std::uint16_t GetClanMemberListExtraInfoResponse = 219;
+// Checkpoint 133on1 (ONLINE.md §3.7): message 163 is MediusSetLocalizationParams (API 0x0046beb0, slot 0x005987ac),
+// the connect flow's last step (SFOLobby_Authenticate 0044d510 -> 0044d3d0): +15 SessionKey, +28 CharacterEncoding 2,
+// +2c Language (session +26a4, 1). Its answer 164 (handler 0x0046dbc8, 0x1c bytes) goes to 00445f40, which copies it
+// to session +334 and sets +188; 0044d3d0 fails the connect (error 1) unless its status +18 is 0. 132on1 read the
+// clan event tags into this callback: they belong to the RT system message (rt::SystemMessage below).
+// 133on1: SFOLobby_CellSetMessage 0044a420 empties the cell's messages before SendClanMessage: GetAllClanMessages
+// (+28 start 1, +2c page 30; 0xf0 rows: +18 status, +1c ClanMessageID, +20 Message[200], +ec EndOfList), then a
+// DeleteClanMessage (+28 the ClanMessageID; 0x1c answer) for each row.
+constexpr std::uint16_t DeleteClanMessage = 114;
+constexpr std::uint16_t DeleteClanMessageResponse = 115;
+constexpr std::uint16_t GetAllClanMessages = 126;
+constexpr std::uint16_t GetAllClanMessagesResponse = 127;
+constexpr std::uint16_t SetLocalizationParams = 163;
+constexpr std::uint16_t SetLocalizationParamsResponse = 164;
 }  // namespace mid
+
+// Checkpoint 133on1 (ONLINE.md §3.7): the SCE-RT layer's own server messages, carried in the port's framing under
+// 0x1000 + the RT message id (the original sent them on the same RT connection as the Medius messages). They are
+// ORIGINAL content (an original-kind session gets them too), unlike the 0xF000 extensions.
+namespace rt {
+// RT id 28 (rt_msg_client_process_system_message 0x00300450): body u8 Severity, u8 Encoding, u8 Language,
+// u8 EndOfMessage, then the text (len - 4 bytes). MsgClientSystemMessageCallback 0x002e6640 hands it to
+// SFOLobby_Callback_SystemMessage 0x00445f90 (NetInitialize's +14, SFOLobby_InitializeMediusBare), which parses the
+// text with ParseSystemMessage 0x00446340 (sysmsg below).
+constexpr std::uint16_t SystemMessage = 0x1000 + 28;
+}  // namespace rt
+
+// ParseSystemMessage 0x00446340: the tag table 0x004976e0 (8 x {u8 id, char* tag}, strings 0x004c0b90..0x004c0c60);
+// the fields after the tag are split at the separator byte *0x004978f8 (9, a tab), at most four, each trimmed of
+// bytes <= ' '. A text with no tag is code 0 with the whole text as its one field.
+namespace sysmsg {
+constexpr std::uint8_t ServerMessage = 0, ClanKick = 1, ClanDisband = 2, ClanResign = 3, ClanConfirmation = 4,
+                       BuddyConfirmation = 6, BuddyRemove = 8, CheatDetection = 9;
+constexpr char kSeparator = '\t';  // *0x004978f8 = 9
+// The severity that sends a code-0 text to the session's +38 list instead of NETMESS (0x00445f90).
+constexpr std::uint8_t kSeverityBig = 100;
+// The SFO tag of a code (0x004976e0); nullptr for a code not in the table.
+const char* tag(std::uint8_t code);
+struct Parsed {
+    std::uint8_t code = ServerMessage;
+    std::vector<std::string> fields;  // 1..4 (0x00584530, the count 0x00584540)
+};
+Parsed parse(std::string_view text);  // ParseSystemMessage 0x00446340
+// A server's message: the tag and the fields joined by the separator (a field's own separator becomes a space).
+std::string compose(std::uint8_t code, const std::vector<std::string>& fields);
+// What 0x00445f90 makes of one RT system message (its severity and text, under 0x200 bytes): nothing, a record for
+// the session's +38 list (Big: code 0 with severity 100, or code 9; text 0x200), or a NETMESS lobby message (session
+// +1c, texts under 0x80 bytes only): type 10 server message (s1 the first field), 2 kick, 6 disband, 11 resign
+// (s1 field 0, s0 field 1; two fields), 4 / 5 cell confirmation accepted / declined (s1 field 0, s0 field 1, field 2
+// "ACCEPT" case-insensitive; three fields), 7 / 8 contact confirmation (s0 field 0, field 1 "ACCEPT"; two fields),
+// 3 contact removed (s0 field 0; one field).
+struct Event {
+    enum class Kind { None, Big, Lobby } kind = Kind::None;
+    std::int32_t type = 0;  // Lobby: the NETMESS type (+0); Big: the code
+    std::string s0;         // Lobby +c [0x20] (the sender column)
+    std::string s1;         // Lobby +2c ([0x80] type 10, else [0x20]); Big: the text [0x200]
+};
+Event event(std::uint8_t severity, std::string_view text);
+}  // namespace sysmsg
+std::vector<std::uint8_t> encode_system_message(std::uint8_t severity, std::uint8_t encoding, std::uint8_t language,
+                                                std::string_view text);
+struct SystemMessageFields {
+    std::uint8_t severity = 0, encoding = 0, language = 0, end = 1;
+    std::string text;
+};
+std::optional<SystemMessageFields> decode_system_message(std::span<const std::uint8_t> body);
 
 // Request / response sizes (each incoming handler returns its struct size; each API passes its request size).
 namespace msize {
@@ -141,6 +206,9 @@ constexpr std::size_t GetMyClanMessages = 0x34, GetMyClanMessagesResponse = 0xec
 constexpr std::size_t SendClanMessage = 0xee, SendClanMessageResponse = 0x1c;
 constexpr std::size_t GetMyClans = 0x30, GetMyClansResponse = 0x170;
 constexpr std::size_t GetClanMemberListExtraInfo = 0x24, GetClanMemberListExtraInfoResponse = 0x1dc;
+constexpr std::size_t SetLocalizationParams = 0x30, SetLocalizationParamsResponse = 0x1c;
+constexpr std::size_t DeleteClanMessage = 0x2c, DeleteClanMessageResponse = 0x1c;
+constexpr std::size_t GetAllClanMessages = 0x30, GetAllClanMessagesResponse = 0xf0;
 }  // namespace msize
 
 // Field offsets every message shares (the API functions copy these two fields first).

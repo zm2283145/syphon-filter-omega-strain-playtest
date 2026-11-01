@@ -350,6 +350,23 @@ std::vector<std::uint8_t> clan_invite(std::string_view key, std::int32_t account
     put_str(r, 0x2c, 200, message);
     return r;
 }
+std::vector<std::uint8_t> clan_get_all_messages(std::string_view key) {
+    auto r = base(msize::GetAllClanMessages, "1", key);
+    put_i32(r, 0x28, 1);
+    put_i32(r, 0x2c, 0x1e);
+    return r;
+}
+std::vector<std::uint8_t> clan_delete_message(std::string_view key, std::int32_t message) {
+    auto r = base(msize::DeleteClanMessage, "1", key);
+    put_i32(r, 0x28, message);
+    return r;
+}
+std::vector<std::uint8_t> set_localization(std::string_view key, std::int32_t encoding, std::int32_t language) {
+    auto r = base(msize::SetLocalizationParams, "1", key);
+    put_i32(r, 0x28, encoding);
+    put_i32(r, 0x2c, language);
+    return r;
+}
 std::vector<std::uint8_t> clan_invitations(std::string_view key) {
     auto r = base(msize::CheckMyClanInvitations, "1", key);
     put_i32(r, 0x28, 0);

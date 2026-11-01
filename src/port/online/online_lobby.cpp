@@ -31,6 +31,18 @@ bool OnlineLobby::start() {
         return false;
     }
     session_key_ = get_str(r->body, kSessionKeyOffset, kSessionKeyLength);
+    // 133on1: SFOLobby_Authenticate 0044d510 ends with 0044d3d0: SetLocalizationParams (163) waited for its answer
+    // (164, 00445f40); no answer is error 2, a status other than 0 error 1 (either fails the connect).
+    client_.send_medius(mid::SetLocalizationParams, request::set_localization(session_key_));
+    const auto loc = client_.wait_for(mid::SetLocalizationParamsResponse, options_.timeout_ms);
+    if (!loc || loc->body.size() < msize::SetLocalizationParamsResponse ||
+        get_i32(loc->body, kStatusOffset) != status::Success) {
+        error_ = !loc ? "no SetLocalizationParams response from " + options_.server
+                      : "SetLocalizationParams refused (status " + std::to_string(get_i32(loc->body, kStatusOffset)) + ")";
+        client_.disconnect();
+        session_key_.clear();
+        return false;
+    }
     started_ = true;
     return true;
 }
@@ -327,8 +339,20 @@ std::optional<std::int32_t> OnlineLobby::clan_remove(std::int32_t account, std::
     return st;
 }
 
+// 133on1: SFOLobby_CellSetMessage 0044a420's order: GetAllClanMessages (waited to its EndOfList +ec), a
+// DeleteClanMessage for each row of status 0 (its ClanMessageID +1c), then SendClanMessage. The server's TextFilter
+// that 0044a420 runs first (SFOLobby_ServerTextFilter) is not sent: the server filters the stored message itself.
 std::optional<std::int32_t> OnlineLobby::clan_set_message(const std::string& message) {
     if (!logged_in()) return std::nullopt;
+    client_.send_medius(mid::GetAllClanMessages, request::clan_get_all_messages(session_key_));
+    for (const Frame& row : client_.wait_for_list(mid::GetAllClanMessagesResponse, 0xec, options_.timeout_ms)) {
+        if (row.body.size() < msize::GetAllClanMessagesResponse || get_i32(row.body, kStatusOffset) != status::Success)
+            continue;
+        client_.send_medius(mid::DeleteClanMessage, request::clan_delete_message(session_key_, get_i32(row.body, 0x1c)));
+        if (!status_of(client_.wait_for(mid::DeleteClanMessageResponse, options_.timeout_ms),
+                       msize::DeleteClanMessageResponse))
+            break;  // 0044a420 stops deleting on a timeout (i = 999) and still sends
+    }
     client_.send_medius(mid::SendClanMessage, request::clan_set_message(session_key_, message));
     const auto st =
         status_of(client_.wait_for(mid::SendClanMessageResponse, options_.timeout_ms), msize::SendClanMessageResponse);

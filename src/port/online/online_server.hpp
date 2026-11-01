@@ -256,6 +256,8 @@ private:
         std::uint64_t chat_at = 0;
         std::vector<std::uint64_t> chat_drops;
         bool hashing = false;  // 132on2h: a registration / login waits for its password work
+        // 133on1: SetLocalizationParams (163): the CharacterEncoding / Language the RT system messages carry.
+        std::uint8_t encoding = 0, language = 0;
         Platform platform() const { return kind == ClientKind::Original ? Platform::Ps2 : hello.platform; }
         bool has(std::uint32_t c) const { return kind == ClientKind::Port && helloed && (hello.caps & c) == c; }
     };
@@ -337,6 +339,13 @@ private:
     // A server line to one session: ext::Notice `code` when it has cap::Notices, else a private ChatFwd from
     // "omega_server" (account id 0; the original wire, NETMESS type 9 outside the room).
     void server_message(const Conn& c, std::uint32_t code, const std::string& text);
+    // 133on1 (ONLINE.md §3.7): an RT system message (rt::SystemMessage) with an SFOLobby event tag to an account's
+    // session, when it is logged in (the original server's events; their fields follow 0x00445f90's parse).
+    void system_event(std::uint32_t account, std::uint8_t code, const std::vector<std::string>& fields);
+    void send_system_message(const Conn& c, std::uint8_t severity, const std::string& text);
+    void on_set_localization(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_get_all_messages(Conn& c, std::span<const std::uint8_t> req);
+    void on_clan_delete_message(Conn& c, std::span<const std::uint8_t> req);
 
     void log_out(Conn& c, const char* why);
     void leave_world(Conn& c);

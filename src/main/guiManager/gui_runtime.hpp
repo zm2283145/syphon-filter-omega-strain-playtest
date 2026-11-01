@@ -1051,6 +1051,7 @@ struct Widget {
         Widget* invite_agent = nullptr;        // +168 "invite_agent"
         Widget* set_message = nullptr;         // +16c "set_message"
         std::uint8_t b170 = 0;                 // +170 player leads the cell
+        std::string s174;                      // +174 the cell's name at the activate (002afa80; 002af040 reads it)
         // PORT-ONLY (132on2b): the last game list (GuiHost::LobbyGameList::serial) 00447790 copied into +e4
         std::uint32_t port_list_serial = 0;
         // PORT-ONLY (132on2c): the last player list (GuiHost::LobbyPlayerList::serial) 00447a30 copied into +c8
@@ -1429,10 +1430,12 @@ public:
         std::int32_t id = 0;    // +8 (00450f30's answer key)
         std::string from;       // +c (0x20 bytes)
         std::string text;       // +2c
+        std::int32_t seen = 0;  // +4 (133on1: AGENTCEL's poll 002af040 marks a kick / disband it has looked at)
     };
     virtual std::int32_t lobby_message_count();                                  // list +4
     virtual std::optional<LobbyMessage> lobby_message(std::int32_t index);       // 00451010(session, i)
     virtual void lobby_message_answer(std::int32_t index, std::int32_t accept);  // 00450f30(session, i, accept)
+    virtual void lobby_message_mark(std::int32_t index);                         // 133on1: +4 = 1 (002af040)
     virtual bool lobby_messages_changed();                                       // list +18
     virtual void lobby_messages_set_changed(bool changed);                       // 0044f280(list, changed)
     // 00418420(manager, "default") +10..+1c / +20..+2c, as GuiNetMessages' init 00347820 sets them (the two colours
@@ -2929,6 +2932,7 @@ public:
     void cell_activate(Widget* w);
     void cell_deactivate(Widget* w);
     void cell_remove(Widget* w, LobbyRecord* r);
+    void cell_poll(Widget* w);  // 002af040 (133on1)
     void ct_add(Widget* w, std::int32_t id, const std::string& name);  // 0033c7c0
     void mlist_init(Widget* w);                      // 002accf0
     void mlist_wake(Widget* w);                      // 002abd50

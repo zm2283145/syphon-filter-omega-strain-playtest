@@ -372,7 +372,8 @@ void GuiRuntime::lb_update(Widget* w, float dt) {  // 0033de00
     auto& l = *w->lb;
     if (host_.net_session()) lb_session_refresh(w);  // PORT-ONLY (132on2b): the lobby's game list callback
     base_update(w, dt);  // 0033d310: 0041e3b0, vt +60 0033cca0, byte 00532fe8
-    net_poll(w, w->lb->start_button);  // 0033cca0
+    if (w->cls == WidgetClass::netagencycell) cell_poll(w);  // vt +60 002af040 (133on1)
+    else net_poll(w, w->lb->start_button);  // 0033cca0
     if (g.b_2fe8) unhosted(0x33d0c0, "net screen update (byte 00532fe8)");
     if (top() == w) repeat_mask |= 0x3;
     else repeat_mask &= ~0x3u;
@@ -1276,6 +1277,7 @@ void GuiRuntime::cell_activate(Widget* w) {  // 002afa80
         l.list->mls->b5 = 1;
         mlist_attach(l.list, l.source);
     }
+    l.s174 = cstr_of(host_.lobby_cell_name());  // 002afa80: the lobby's +e8c (also the agent's +8bc)
     if (l.agency_message) set_text(l.agency_message, cstr_of(host_.lobby_cell_message()), false);
     l.b170 = host_.lobby_cell_leader() ? 1 : 0;
     for (Widget* button : {l.invite_agent, l.set_message, l.agent_remove}) {
@@ -1289,6 +1291,33 @@ void GuiRuntime::cell_activate(Widget* w) {  // 002afa80
                      l.b170 ? "Destroy Cell" : "Resign Cell")),
                  false);
     l.active = 1;
+}
+
+// 002af040 (GuiNetAgencyCell's vt +60, checkpoint 133on1): with +78 set, each lobby message (session +1c) of type 2
+// (a kick) or 6 (a disband) not yet looked at (+4) is marked; one whose +2c (the event's cell, 0x00445f90's first
+// field) names this screen's cell (+174, case-insensitive) clears +78 and pops LOBBY_STR 0x2f / 0x7f ($1 +c, $2 +2c)
+// with the reply 0x17 (cell_event: back to the command centre). Otherwise the net screen's poll 0033cca0.
+void GuiRuntime::cell_poll(Widget* w) {
+    auto& l = *w->lb;
+    if (!l.b78) return;
+    if (!host_.net_session()) return;  // cDME_GetLobby
+    const std::int32_t n = host_.lobby_message_count();
+    for (std::int32_t i = 0; i < n; ++i) {
+        const auto m = host_.lobby_message(i);
+        if (!m || (m->type != 2 && m->type != 6) || m->seen) continue;
+        host_.lobby_message_mark(i);
+        const std::string name = cstr_of(m->text), cell = cstr_of(l.s174);
+        const bool same = name.size() == cell.size() &&
+                          std::equal(name.begin(), name.end(), cell.begin(), [](char a, char b) {
+                              return std::tolower(static_cast<unsigned char>(a)) ==
+                                     std::tolower(static_cast<unsigned char>(b));
+                          });
+        if (!same) continue;
+        l.b78 = 0;
+        popup_open(2, std::string(), lobby_string(m->type == 2 ? 0x2f : 0x7f, m->from, m->text), w, 0x17);
+        return;
+    }
+    net_poll(w, l.start_button);  // GuiScreen_PollLobby 0033cca0
 }
 
 void GuiRuntime::cell_deactivate(Widget* w) {  // 002afa20

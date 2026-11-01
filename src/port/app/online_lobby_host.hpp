@@ -161,6 +161,10 @@ public:
     std::int32_t message_count() override { return static_cast<std::int32_t>(messages_.size()); }
     std::optional<gui::GuiHost::LobbyMessage> message(std::int32_t index) override;
     void message_answer(std::int32_t index, std::int32_t accept) override;
+    void message_mark(std::int32_t index) override {
+        if (index >= 0 && static_cast<std::size_t>(index) < messages_.size())
+            messages_[static_cast<std::size_t>(index)].seen = 1;
+    }
     bool messages_changed() override { return messages_changed_; }
     void messages_set_changed(bool changed) override { messages_changed_ = changed; }
     // Checkpoint 132on2c: the room's chat (00451050 / 00447bb0 / 00447c70), its player list (004516e0 / 00447a30)
@@ -323,7 +327,14 @@ private:
     std::vector<gui::GuiHost::LobbyCachedGame> game_cache_updates_;
     std::uint64_t game_info_fetch_ms_ = 0;  // *00585e50
     bool invitations_asked_ = false, social_asked_ = false;
-    bool clan_invitations_asked_ = false;
+    // 133on1: SFOLobby_CellUpdateClanInvitations 004498c0 / SFOLobby_CellScreenIntel 0044b180's clock (session
+    // +2584): CheckMyClanInvitations every *004977e8 (0x4e20) ms in the lobby states 4 / 5 / 6 / 7 (0: at once).
+    std::uint64_t clan_invitations_ms_ = 0;
+    // 0044b180's cell clocks (+2588 / +258c): the cell (GetMyClans), its members and its message every *00497800
+    // (0x2710) ms while AGENTCEL holds the lobby state 7.
+    std::uint64_t cell_refresh_ms_ = 0;
+    void system_messages();  // SFOLobby_Callback_SystemMessage 0x00445f90 over each RT system message
+    void cell_invitation(const online::Frame& f);  // SFOLobby_Callback_GetCellInvites 0x004482e0
     std::optional<bool> chat_filter_;
     online::OnlineLobby::ClanInfo clan_;
     std::vector<online::OnlineLobby::ClanMember> clan_members_;

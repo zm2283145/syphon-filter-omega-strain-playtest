@@ -71,6 +71,7 @@
 #include <ctime>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -197,6 +198,7 @@ int usage() {
                  "               [--stats FILE] [--log-format text|json] [--no-console] [--run-seconds N]\n"
                  "               [--mod-policy gameplay|any|cosmetic|none] [--relay-port N|any] [--social FILE]\n"
                  "               [--data-dir DIR] [--parent-pid N] [--service]\n"
+                 "  omega_server check [the server's options]   (validate the config and the stores, change nothing)\n"
                  "  omega_server admin HOST[:PORT] (--token TOKEN | --user NAME --password PASSWORD) COMMAND...\n"
                  "  omega_server demo HOST[:PORT]\n"
                  "  omega_server login HOST[:PORT] NAME PASSWORD [--original]\n"
@@ -228,7 +230,7 @@ struct CommandLine {
     std::optional<std::string> bind, accounts, policy, log, stats, log_format, mod_policy, social;
 };
 
-Settings load_settings(const CommandLine& cl) {
+Settings load_settings(const CommandLine& cl, bool write_policy = true) {
     Settings s;
     ServerConfig& cfg = s.cfg;
     if (!cl.config_path.empty()) {
@@ -280,7 +282,7 @@ Settings load_settings(const CommandLine& cl) {
     bool have_policy = false;
     const std::string policy_text = read_file(s.policy_path, &have_policy);
     if (have_policy) parse_policy_file(policy_text, cfg);
-    else write_file_atomic(s.policy_path, format_policy_file(cfg));  // a first, editable copy
+    else if (write_policy) write_file_atomic(s.policy_path, format_policy_file(cfg));  // a first, editable copy
     return s;
 }
 
@@ -317,7 +319,7 @@ private:
 #endif
 };
 
-int run_server(int argc, char** argv, bool service) {
+int run_server(int argc, char** argv, bool service, bool check_only = false) {
     CommandLine cl;
     bool console = !service;
     int run_seconds = 0;
@@ -353,10 +355,53 @@ int run_server(int argc, char** argv, bool service) {
     Settings s;
     try {
         if (!data_dir.empty()) std::filesystem::current_path(data_dir);
-        s = load_settings(cl);
+        s = load_settings(cl, !check_only);
     } catch (const std::exception& e) {
         std::cerr << "omega_server: " << e.what() << "\n";
         return 1;
+    }
+    if (check_only) {
+        // 133on1 (ONLINE_DEPLOY.md §6): the config, the bind address and each store parsed as the server would read
+        // them, without opening a port or writing a file (a store that does not parse is reported, not recovered).
+        int bad = 0;
+        auto report = [&](const std::string& what, bool ok, const std::string& detail) {
+            std::cout << (ok ? "ok    " : "FAIL  ") << what << (detail.empty() ? "" : ": " + detail) << "\n";
+            if (!ok) ++bad;
+        };
+        report("config", true, cl.config_path.empty() ? "defaults (no --config)" : cl.config_path);
+        const auto ip = s.bind_text == "0.0.0.0" ? std::optional<std::uint32_t>(0) : resolve_ipv4(s.bind_text);
+        report("bind address", ip.has_value(), s.bind_text + ":" + std::to_string(s.cfg.port));
+        auto store = [&](const std::string& what, const std::string& path, const std::function<std::string()>& load) {
+            if (!std::filesystem::exists(path)) return report(what, true, path + " (absent: created at the first save)");
+            try {
+                report(what, true, path + " (" + load() + ")");
+            } catch (const std::exception& e) {
+                report(what, false, path + ": " + e.what());
+            }
+        };
+        store("accounts", s.accounts_path, [&] {
+            AccountStore a(s.accounts_path, s.iterations);
+            a.load();
+            return std::to_string(a.accounts().size()) + " account(s)";
+        });
+        store("stats", s.stats_path, [&] {
+            StatsStore st(s.stats_path, 0, s.cfg.max_results, 0);
+            st.load();
+            return std::string("parsed");
+        });
+        store("social", s.social_path, [&] {
+            SocialStore so(s.social_path);
+            so.load();
+            return std::string("parsed");
+        });
+        if (!s.filter_words_path.empty()) {
+            bool ok = false;
+            (void)read_file(s.filter_words_path, &ok);
+            report("chat_filter_words", ok, s.filter_words_path);
+        }
+        report("policy", true, std::filesystem::exists(s.policy_path) ? s.policy_path : s.policy_path + " (absent: the defaults)");
+        std::cout << (bad ? "CHECK FAILED" : "CHECK OK") << "\n";
+        return bad ? 1 : 0;
     }
 
     RotatingLog log_file;
@@ -1002,6 +1047,7 @@ int run_login(int argc, char** argv) {
 int run_load(int argc, char** argv);  // omega_server_load.cpp
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "check") return run_server(argc - 1, argv + 1, false, true);
     if (argc >= 2 && std::string(argv[1]) == "load") return run_load(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "admin") return run_admin(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "demo") return run_demo(argc, argv);

@@ -421,6 +421,16 @@ docker run -d --name omega_server --restart unless-stopped --stop-timeout 30 \
 
 ## 6. Administration
 
+**Checking a configuration (133on1).** `omega_server check [the server's options]` reads the config, the policy file
+and each store exactly as the server would (the same `--config`, `--data-dir`, `--accounts`, ... options), resolves the
+bind address, and prints one `ok` / `FAIL` line each and `CHECK OK` / `CHECK FAILED` (exit 0 / 1). It opens no port,
+writes no file (no first policy copy) and does not fall back to a backup, so a store that does not parse is reported
+instead of silently recovered. Run it after editing the config or restoring a backup, before restarting the service:
+
+```
+omega_server check --config /etc/omega_server/omega_server.cfg --data-dir /var/lib/omega_server
+```
+
 Admin commands run in the console, or remotely:
 
 ```
@@ -557,9 +567,9 @@ A second announcement page.
     notice, so a password-guessing script costs the server almost nothing. This is on top of the failed-login
     lockout (`login_failures`), which only counts wrong passwords.
   - **Lobby chat** per player (`chat_per_minute`, `chat_burst`) and per address (`chat_per_minute_ip`). A line over
-    the limit is dropped and the sender told: a notice for a port client, or a private chat line from
-    `omega_server` for an original (PS2-kind) client, so a PS2 never receives port-only data. `chat_flood_kick`
-    dropped lines within a minute disconnect the player.
+    the limit is dropped and the sender told: a notice for a port client, or (133on1) an original server message, the
+    RT system message `<SFO_ServerMessage>` (ONLINE.md §3.7), for an original (PS2-kind) client, so a PS2 never
+    receives port-only data. `chat_flood_kick` dropped lines within a minute disconnect the player.
   - **Flood disconnect.** A connection over `message_rate` / `message_burst`, or kicked for chat flooding, is a
     flood disconnect. `flood_block_after` of them from one address within `flood_window` block the address for
     `flood_block`: its new connections are closed at once. `limits` lists the blocks, and `limits clear` lifts them.
@@ -574,6 +584,13 @@ A second announcement page.
 - **The relay.** Off unless `relay_port` is set. Its tokens, same-game forwarding and rate limits are in §2.3.
 - **Admin token.** Make `admin_token` long and random, or leave it empty and use admin accounts. Wrong tokens are throttled like failed logins, and a refused token is never written to the log.
 - **Run unprivileged.** Run it as an unprivileged user that owns only its working directory.
+- **Malformed input (133on1).** Every byte from the network goes through fixed-size readers: the frame reader refuses
+  a length over 64 KiB, each Medius request shorter than its original size is logged and dropped, the extension and
+  RT decoders bound every read, and the SFOLobby text parsers work on bounded copies. The core test "Online server"
+  includes a deterministic fuzz (`test_protocol_fuzz`): 300 random streams through the frame reader, 3000 random
+  bodies through every decoder and parser, and 20000 random, zeroed and mutated frames of every message type from
+  port and original sessions, logged in and not; nothing may throw, and the server must serve a fresh session after
+  it.
 
 ## 10. PS2 clients
 
@@ -597,6 +614,11 @@ disturbed by a test run, and a test never collides with another agent's.
 
 `tools/run_online_load.ps1` (132on2h, §12) follows the same rules: its servers use `--port 0`, `--relay-port any`, a
 per-run admin token and `--parent-pid`, and the script checks that they are gone at the end.
+
+The games' LAN sockets, however, use the original's fixed ports (3658 and the discovery port). 133on1:
+`run_online_two_instances.ps1 -Address 127.0.0.137` binds omega_server (`--bind`), both games (`--online-server`) and
+their LAN sockets (`--lan-address`) to another loopback address, so two-process runs of several clones on one machine
+do not join each other's games. The default stays 127.0.0.1.
 
 ## 12. Load test (132on2h)
 

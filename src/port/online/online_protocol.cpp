@@ -2,6 +2,7 @@
 #include "online_protocol.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstring>
 
@@ -224,6 +225,174 @@ std::optional<GameNameFields> parse_game_name(std::string_view text) {
             rest = rest.substr(end + 1);
         }
     }
+    return f;
+}
+
+// ---- Checkpoint 133on1: the RT system message and SFOLobby's event tags (ONLINE.md §3.7) ----------------------------
+
+namespace sysmsg {
+namespace {
+struct TagRow {
+    std::uint8_t id;
+    const char* tag;
+};
+// 0x004976e0, in the table's order (ParseSystemMessage tries them in this order).
+constexpr TagRow kTags[8] = {{ServerMessage, "<SFO_ServerMessage>"},     {ClanDisband, "<SFO_ClanDisband>"},
+                             {ClanKick, "<SFO_ClanKick>"},               {ClanConfirmation, "<SFO_ClanConfirmation>"},
+                             {BuddyConfirmation, "<SFO_BuddyConfirmation>"}, {BuddyRemove, "<SFO_BuddyRemove>"},
+                             {CheatDetection, "<SFO_CheatDetection>"},   {ClanResign, "<SFO_ClanResign>"}};
+
+std::string c_string(const char* p) { return std::string(p); }
+
+bool equal_no_case(std::string_view a, std::string_view b) {  // String_CompareNoCase(a, b) == 0
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const auto x = static_cast<unsigned char>(a[i]), y = static_cast<unsigned char>(b[i]);
+        if (std::tolower(x) != std::tolower(y)) return false;
+    }
+    return true;
+}
+
+// strncpy(dst[n], src, n) read back as a C string bounded by n (the next field supplies the tail when unterminated).
+std::string bounded(const std::string& s, std::size_t n) { return s.substr(0, std::min(s.size(), n)); }
+}  // namespace
+
+const char* tag(std::uint8_t code) {
+    for (const auto& row : kTags)
+        if (row.id == code) return row.tag;
+    return nullptr;
+}
+
+// ParseSystemMessage 0x00446340 over a NUL-terminated copy of the text (0x00445f90's buf[0x200]).
+Parsed parse(std::string_view text) {
+    std::vector<char> buf(0x200 + 1, 0);
+    const std::size_t len = std::min<std::size_t>(text.size(), 0x200);
+    std::memcpy(buf.data(), text.data(), len);
+    char* str = buf.data();
+    const int ilen = static_cast<int>(len);
+    Parsed out;
+    for (const auto& row : kTags) {
+        const int n = static_cast<int>(std::strlen(row.tag));
+        if (std::strncmp(str, row.tag, static_cast<std::size_t>(n)) != 0) continue;
+        const int rem = ilen - n;
+        char* p = str + n;
+        char* const base = p;
+        std::vector<char*> fields;
+        if (rem >= 0) {
+            do {
+                fields.push_back(p);
+                char* q = std::strchr(p, kSeparator);
+                if (!q || q - base > rem || fields.size() == 4) break;
+                *q = 0;
+                p = q + 1;
+            } while (p - base <= rem);
+        }
+        for (char*& s : fields) {
+            while (*s && static_cast<unsigned char>(*s) <= ' ') ++s;
+            for (int k = static_cast<int>(std::strlen(s)) - 1; k >= 0 && static_cast<unsigned char>(s[k]) <= ' '; --k)
+                s[k] = 0;
+            out.fields.push_back(c_string(s));
+        }
+        out.code = row.id;
+        return out;
+    }
+    out.code = ServerMessage;
+    out.fields.push_back(c_string(str));
+    return out;
+}
+
+std::string compose(std::uint8_t code, const std::vector<std::string>& fields) {
+    std::string out = tag(code) ? tag(code) : "";
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (i) out.push_back(kSeparator);
+        std::string f = fields[i];
+        std::replace(f.begin(), f.end(), kSeparator, ' ');
+        out += f;
+    }
+    return out;
+}
+
+// SFOLobby_Callback_SystemMessage 0x00445f90.
+Event event(std::uint8_t severity, std::string_view text) {
+    Event e;
+    if (text.size() >= 0x200) return e;
+    const Parsed p = parse(text);
+    const std::uint8_t code = p.code;
+    if ((code == ServerMessage || code == CheatDetection) && (code != ServerMessage || severity == kSeverityBig)) {
+        e.kind = Event::Kind::Big;
+        e.type = code;
+        if (code == CheatDetection) e.s1 = p.fields.size() == 1 ? bounded(p.fields[0], 0x200) : std::string();
+        else e.s1 = std::string(text.substr(0, text.find('\0')));
+        return e;
+    }
+    if (text.size() >= 0x80) return e;
+    const std::size_t n = p.fields.size();
+    auto field = [&](std::size_t i) { return i < n ? p.fields[i] : std::string(); };
+    // s0[0x20] is followed by s1 in the record (+c, +2c): an unterminated 32-byte s0 reads on into s1.
+    auto set_s0 = [&](const std::string& v) { e.s0 = v.size() >= 0x20 ? v.substr(0, 0x20) + e.s1 : v; };
+    switch (code) {
+    case ServerMessage:
+        if (n > 0) {
+            e.type = 10;
+            e.s1 = bounded(field(0), 0x80);
+            e.kind = Event::Kind::Lobby;
+        }
+        break;
+    case ClanKick:
+    case ClanDisband:
+    case ClanResign:
+        if (n == 2) {
+            e.type = code == ClanKick ? 2 : code == ClanDisband ? 6 : 11;
+            e.s1 = bounded(field(0), 0x20);
+            set_s0(field(1));
+            e.kind = Event::Kind::Lobby;
+        }
+        break;
+    case ClanConfirmation:
+    case 5:
+        if (n == 3) {
+            e.type = equal_no_case(field(2), "ACCEPT") ? 4 : 5;
+            e.s1 = bounded(field(0), 0x20);
+            set_s0(field(1));
+            e.kind = Event::Kind::Lobby;
+        }
+        break;
+    case BuddyConfirmation:
+    case 7:
+        if (n == 2) {
+            e.type = equal_no_case(field(1), "ACCEPT") ? 7 : 8;
+            set_s0(field(0));
+            e.kind = Event::Kind::Lobby;
+        }
+        break;
+    case BuddyRemove:
+        if (n == 1) {
+            e.type = 3;
+            set_s0(field(0));
+            e.kind = Event::Kind::Lobby;
+        }
+        break;
+    default: break;
+    }
+    return e;
+}
+}  // namespace sysmsg
+
+std::vector<std::uint8_t> encode_system_message(std::uint8_t severity, std::uint8_t encoding, std::uint8_t language,
+                                                std::string_view text) {
+    std::vector<std::uint8_t> out = {severity, encoding, language, 1};
+    out.insert(out.end(), text.begin(), text.end());
+    return out;
+}
+
+std::optional<SystemMessageFields> decode_system_message(std::span<const std::uint8_t> body) {
+    if (body.size() < 4) return std::nullopt;  // 0x00300450 reads four bytes, then len - 4 of text
+    SystemMessageFields f;
+    f.severity = body[0];
+    f.encoding = body[1];
+    f.language = body[2];
+    f.end = body[3];
+    f.text.assign(body.begin() + 4, body.end());
     return f;
 }
 

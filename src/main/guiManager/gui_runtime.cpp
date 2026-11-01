@@ -323,6 +323,7 @@ std::int32_t GuiHost::lobby_universe_list(std::vector<LobbyUniverse>&) { unhoste
 std::int32_t GuiHost::lobby_message_count() { unhosted(0x348a3c, "the lobby message list's count (session +1c, +4)"); }
 std::optional<GuiHost::LobbyMessage> GuiHost::lobby_message(std::int32_t) { unhosted(0x451010, "the lobby message"); }
 void GuiHost::lobby_message_answer(std::int32_t, std::int32_t) { unhosted(0x450f30, "the lobby message's answer"); }
+void GuiHost::lobby_message_mark(std::int32_t) { unhosted(0x2af0e0, "the lobby message's +4 store (002af040)"); }
 bool GuiHost::lobby_messages_changed() { unhosted(0x348a20, "the lobby message list's changed flag (+18)"); }
 void GuiHost::lobby_messages_set_changed(bool) { unhosted(0x44f280, "the lobby message list's changed flag store"); }
 void GuiHost::font_colors(std::uint32_t, const std::array<float, 4>&, const std::array<float, 4>&) {}
@@ -7432,6 +7433,10 @@ public:
         log_.push_back("msgans " + std::to_string(i) + " " + std::to_string(accept));
         if (i < 0 || static_cast<std::size_t>(i) >= msgs_.size()) return;
         msgs_.erase(msgs_.begin() + i);
+    }
+    void lobby_message_mark(std::int32_t i) override {
+        if (i < 0 || static_cast<std::size_t>(i) >= msgs_.size()) return;
+        msgs_[static_cast<std::size_t>(i)].seen = 1;
     }
     bool lobby_messages_changed() override { return msgs_changed_; }
     void lobby_messages_set_changed(bool c) override { msgs_changed_ = c; }

@@ -1342,6 +1342,10 @@ void FrontendSession::lobby_message_answer(std::int32_t index, std::int32_t acce
     services_.lobby->message_answer(index, accept);
     record("00450f30 message " + std::to_string(index) + " answered " + std::to_string(accept));
 }
+void FrontendSession::lobby_message_mark(std::int32_t index) {
+    if (!services_.lobby) return GuiHost::lobby_message_mark(index);
+    services_.lobby->message_mark(index);
+}
 bool FrontendSession::lobby_messages_changed() {
     return services_.lobby ? services_.lobby->messages_changed() : GuiHost::lobby_messages_changed();
 }

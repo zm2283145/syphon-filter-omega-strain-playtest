@@ -635,6 +635,11 @@ void OmegaServer::on_frame(std::uint32_t conn, const Frame& frame) {
     case mid::GetMyClans: if (sized(msize::GetMyClans)) on_clan_get_mine(c, b); break;
     case mid::GetMyClanMessages: if (sized(msize::GetMyClanMessages)) on_clan_get_message(c, b); break;
     case mid::SendClanMessage: if (sized(msize::SendClanMessage)) on_clan_set_message(c, b); break;
+    case mid::SetLocalizationParams:
+        if (sized(msize::SetLocalizationParams)) on_set_localization(c, b);
+        break;
+    case mid::GetAllClanMessages: if (sized(msize::GetAllClanMessages)) on_clan_get_all_messages(c, b); break;
+    case mid::DeleteClanMessage: if (sized(msize::DeleteClanMessage)) on_clan_delete_message(c, b); break;
     default:
         log("conn " + std::to_string(conn) + ": unhandled Medius id " + std::to_string(frame.type) + " (" +
             std::to_string(b.size()) + " bytes)");
@@ -1342,18 +1347,81 @@ bool OmegaServer::filter_for(const Conn& c) const {
     return *c.chat_filter;
 }
 
+// 133on1: a session without cap::Notices (an original client) gets the server's line as the original server sent its
+// own: an RT system message "<SFO_ServerMessage>text" (0x00445f90: NETMESS type 10 from the system). 0x00445f90 drops
+// a text of 0x80 bytes or more, so the line is cut to fit.
 void OmegaServer::server_message(const Conn& c, std::uint32_t code, const std::string& text) {
     if (c.has(cap::Notices)) {
         send_notice(c, code, text);
         return;
     }
     if (!c.account_id) return;
-    std::vector<std::uint8_t> fwd(msize::ChatFwdMessage, 0);
-    put_i32(fwd, 0x18, 0);
-    put_str(fwd, 0x1c, 32, "omega_server");
-    put_i32(fwd, 0x3c, 1);  // private: outside the room, 00447c70 makes it the lobby message of type 9 (NETMESS)
-    put_str(fwd, 0x40, 64, text.substr(0, 63));
-    send(c.id, mid::ChatFwdMessage, fwd);
+    const std::string tag = sysmsg::tag(sysmsg::ServerMessage);
+    send_system_message(c, 0, sysmsg::compose(sysmsg::ServerMessage, {text.substr(0, 0x7f - tag.size())}));
+}
+
+void OmegaServer::send_system_message(const Conn& c, std::uint8_t severity, const std::string& text) {
+    send(c.id, rt::SystemMessage, encode_system_message(severity, c.encoding, c.language, text));
+}
+
+void OmegaServer::system_event(std::uint32_t account, std::uint8_t code, const std::vector<std::string>& fields) {
+    const Conn* to = conn_of_account(account);
+    if (!to) return;  // the event is not kept: the next refresh (GetMyClans, the lists) shows the outcome
+    const std::string text = sysmsg::compose(code, fields);
+    send_system_message(*to, 0, text);
+    std::string shown = text;
+    std::replace(shown.begin(), shown.end(), sysmsg::kSeparator, '|');
+    log("event to " + to->name + ": " + shown + " (RT system message)");
+}
+
+// 133on1: 0044a420's GetAllClanMessages (0x30). omega_server keeps one message per cell (SendClanMessage replaces
+// it), so the answer is one 0xf0 row (+18 status 0, +1c the ClanMessageID = the cell's id, +20 the message, +ec
+// EndOfList) for a member of a cell with a message, else status 1 (CellGetAllMessage's "none") with EndOfList.
+void OmegaServer::on_clan_get_all_messages(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::GetAllClanMessagesResponse);
+    const auto* clan = c.account_id ? social_.clan_for(c.account_id) : nullptr;
+    if (!c.account_id) {
+        put_i32(r, kStatusOffset, status::WMError);
+    } else if (!clan || clan->message.empty()) {
+        put_i32(r, kStatusOffset, 1);
+    } else {
+        put_i32(r, kStatusOffset, status::Success);
+        put_i32(r, 0x1c, static_cast<std::int32_t>(clan->id));
+        put_str(r, 0x20, 200, clan->message);
+    }
+    r[0xec] = 1;
+    send(c.id, mid::GetAllClanMessagesResponse, r);
+}
+
+// 0044a420's DeleteClanMessage (0x2c: +28 the ClanMessageID): the leader empties the cell's message. 0x1c answer:
+// Success, DataDoesNotExist for another id or no message, NotClanLeader for a member, NotClanMember otherwise.
+void OmegaServer::on_clan_delete_message(Conn& c, std::span<const std::uint8_t> req) {
+    auto r = response(req, msize::DeleteClanMessageResponse);
+    const auto id = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const auto* clan = c.account_id ? social_.clan_for(c.account_id) : nullptr;
+    std::int32_t code = status::WMError;
+    if (c.account_id) {
+        if (!clan) code = status::NotClanMember;
+        else if (clan->leader != c.account_id) code = status::NotClanLeader;
+        else if (clan->id != id || clan->message.empty()) code = status::DataDoesNotExist;
+        else code = social_.set_clan_message(c.account_id, std::string());
+        if (code == status::Success) {
+            save_social();
+            log("cell: " + c.name + " deleted its agency message");
+        }
+    }
+    put_i32(r, kStatusOffset, code);
+    send(c.id, mid::DeleteClanMessageResponse, r);
+}
+
+// 0044d3d0's SetLocalizationParams (0x30: +15 SessionKey, +28 CharacterEncoding, +2c Language): kept for the
+// session's system messages; the 0x1c answer 164 (00445f40) has status +18 = 0, which the connect requires.
+void OmegaServer::on_set_localization(Conn& c, std::span<const std::uint8_t> req) {
+    c.encoding = static_cast<std::uint8_t>(get_i32(req, 0x28));
+    c.language = static_cast<std::uint8_t>(get_i32(req, 0x2c));
+    auto r = response(req, msize::SetLocalizationParamsResponse);
+    put_i32(r, kStatusOffset, status::Success);
+    send(c.id, mid::SetLocalizationParamsResponse, r);
 }
 
 // 0044d860's GetBuddyList_ExtraInfo (0x15: MessageID, SessionKey +15; the requester is the session). One 0xd0 response
@@ -1480,9 +1548,9 @@ void OmegaServer::on_buddy_answer(Conn& c, std::span<const std::uint8_t> req) {
         log("contacts: " + c.name + (accepted ? " accepted " : " declined ") + from_name + "'s invitation");
     }
     save_social();
-    // PORT-ONLY: the inviter hears the outcome as a notice (an original inviter sees it in its next contact list).
-    if (Conn* o = conn_of_account(from); o && o->has(cap::Notices))
-        send_notice(*o, notice::Info, c.name + (accepted ? " accepted" : " declined") + " your contact invitation");
+    // 133on1: the inviter hears the outcome as the original's event "<SFO_BuddyConfirmation>name\tACCEPT|DECLINE"
+    // (0x00445f90: NETMESS 7 / 8 from the invitee).
+    system_event(from, sysmsg::BuddyConfirmation, {c.name, accepted ? "ACCEPT" : "DECLINE"});
 }
 
 // 0044d9c0's RemoveFromBuddyList (0x2c: SessionKey +15, the AccountID +28). The 0x1c response 66 has the status +18
@@ -1496,6 +1564,8 @@ void OmegaServer::on_buddy_remove(Conn& c, std::span<const std::uint8_t> req) {
         if (code == status::Success) {
             save_social();
             log("contacts: " + c.name + " removed account " + std::to_string(other));
+            // 133on1: "<SFO_BuddyRemove>name" (0x00445f90: NETMESS 3, s0 the remover).
+            system_event(other, sysmsg::BuddyRemove, {c.name});
         }
     }
     put_i32(r, kStatusOffset, code);
@@ -1539,10 +1609,16 @@ void OmegaServer::on_clan_create(Conn& c, std::span<const std::uint8_t> req) {
 void OmegaServer::on_clan_disband(Conn& c, std::span<const std::uint8_t> req) {
     auto r = response(req, msize::DisbandClanResponse);
     const auto clan = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    const SocialStore::Clan* found = social_.clan(clan);
+    const SocialStore::Clan before = found ? *found : SocialStore::Clan{};
     const auto code = c.account_id ? social_.disband_clan(c.account_id, clan) : status::WMError;
     if (code == status::Success) {
         save_social();
         log("cell: " + c.name + " disbanded cell " + std::to_string(clan));
+        // 133on1: each other member gets "<SFO_ClanDisband>cell\tleader" (0x00445f90: NETMESS 6, s1 the cell, s0 the
+        // leader; an open AGENTCEL of that cell pops LOBBY_STR 0x7f and leaves, 002af040).
+        for (const auto member : before.members)
+            if (member != c.account_id) system_event(member, sysmsg::ClanDisband, {before.name, c.name});
     }
     put_i32(r, kStatusOffset, code);
     send(c.id, mid::DisbandClanResponse, r);
@@ -1623,17 +1699,10 @@ void OmegaServer::on_clan_invite(Conn& c, std::span<const std::uint8_t> req) {
             save_social();
             log("cell: " + c.name + " invited account " + std::to_string(account));
             if (auto* target = conn_of_account(account)) {
-                auto fwd = response(req, msize::CheckMyClanInvitationsResponse);
-                put_i32(fwd, kStatusOffset, status::Success);
-                put_i32(fwd, 0x1c, static_cast<std::int32_t>(invitation));
-                if (const auto* clan = social_.clan_for(c.account_id)) {
-                    put_i32(fwd, 0x20, static_cast<std::int32_t>(clan->id));
-                    put_str(fwd, 0x28, 200, get_str(req, 0x2c, 200));
-                }
-                put_i32(fwd, 0xf0, static_cast<std::int32_t>(c.account_id));
-                put_str(fwd, 0xf4, 32, c.name);
-                fwd[0x114] = 1;
-                send(target->id, mid::CheckMyClanInvitationsResponse, fwd);
+                // 133on1: no unsolicited 101 (the 132on2i compatibility path). The original has no invitation event:
+                // the invitee's lobby asks CheckMyClanInvitations every *004977e8 ms (20 s) in states 4..7.
+                log("cell: account " + std::to_string(account) + " (" + target->name + ") is online; invitation " +
+                    std::to_string(invitation) + " waits for its CheckMyClanInvitations");
             }
         }
     }
@@ -1654,7 +1723,11 @@ void OmegaServer::on_clan_invitations(Conn& c, std::span<const std::uint8_t> req
     for (std::size_t i = 0; i < invitations.size(); ++i) {
         auto r = response(req, msize::CheckMyClanInvitationsResponse);
         put_i32(r, kStatusOffset, status::Success);
-        put_i32(r, 0x1c, static_cast<std::int32_t>(invitations[i].id));
+        // 133on1: ClanInvitationID +1c is the leader's account (+f0). 004482e0 keeps one NETMESS message per
+        // invitation by comparing the message's +8 (this field) with the row's +f0, so only equal values stop the
+        // 20-second polls from repeating it; a leader leads one cell, so (invitee, leader) names the invitation.
+        const auto* inv_clan = social_.clan(invitations[i].clan);
+        put_i32(r, 0x1c, static_cast<std::int32_t>(inv_clan ? inv_clan->leader : invitations[i].id));
         put_i32(r, 0x20, static_cast<std::int32_t>(invitations[i].clan));
         put_i32(r, 0x24, 0);
         put_str(r, 0x28, 200, invitations[i].message);
@@ -1669,14 +1742,29 @@ void OmegaServer::on_clan_invitations(Conn& c, std::span<const std::uint8_t> req
 
 void OmegaServer::on_clan_answer(Conn& c, std::span<const std::uint8_t> req) {
     auto r = response(req, msize::RespondToClanInvitationResponse);
-    const auto invitation = static_cast<std::uint32_t>(get_i32(req, 0x28));
+    auto invitation = static_cast<std::uint32_t>(get_i32(req, 0x28));
     const bool accept = get_i32(req, 0x2c) == 1;
+    // 133on1: the key is the leader's account (on_clan_invitations); a store invitation id is accepted too.
+    std::uint32_t leader = 0;
+    std::string cell;
+    if (c.account_id) {
+        for (const auto& inv : social_.clan_invitations(c.account_id)) {
+            const auto* clan = social_.clan(inv.clan);
+            if (!clan || (clan->leader != invitation && inv.id != invitation)) continue;
+            invitation = inv.id;
+            leader = clan->leader;
+            cell = clan->name;
+            break;
+        }
+    }
     const auto code =
         c.account_id ? social_.answer_clan_invitation(c.account_id, invitation, accept) : status::WMError;
     if (code == status::Success) {
         save_social();
         log("cell: " + c.name + (accept ? " accepted" : " declined") + " invitation " +
             std::to_string(invitation));
+        // "<SFO_ClanConfirmation>cell\tinvitee\tACCEPT|DECLINE" to the leader (0x00445f90: NETMESS 4 / 5).
+        if (leader) system_event(leader, sysmsg::ClanConfirmation, {cell, c.name, accept ? "ACCEPT" : "DECLINE"});
     }
     put_i32(r, kStatusOffset, code);
     send(c.id, mid::RespondToClanInvitationResponse, r);
@@ -1686,11 +1774,17 @@ void OmegaServer::on_clan_remove(Conn& c, std::span<const std::uint8_t> req) {
     auto r = response(req, msize::RemovePlayerFromClanResponse);
     const auto account = static_cast<std::uint32_t>(get_i32(req, 0x28));
     const auto clan = static_cast<std::uint32_t>(get_i32(req, 0x2c));
+    const SocialStore::Clan* found = social_.clan(clan);
+    const SocialStore::Clan before = found ? *found : SocialStore::Clan{};
     const auto code = c.account_id ? social_.remove_clan_member(c.account_id, clan, account) : status::WMError;
     if (code == status::Success) {
         save_social();
         log("cell: " + c.name + " removed account " + std::to_string(account) + " from cell " +
             std::to_string(clan));
+        // 133on1: a resignation tells the leader "<SFO_ClanResign>cell\tmember" (NETMESS 11); a removal tells the
+        // member "<SFO_ClanKick>cell\tleader" (NETMESS 2; an open AGENTCEL of that cell pops 0x2f and leaves).
+        if (account == c.account_id) system_event(before.leader, sysmsg::ClanResign, {before.name, c.name});
+        else system_event(account, sysmsg::ClanKick, {before.name, c.name});
     }
     put_i32(r, kStatusOffset, code);
     send(c.id, mid::RemovePlayerFromClanResponse, r);

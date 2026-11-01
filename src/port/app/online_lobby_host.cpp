@@ -140,8 +140,10 @@ void OnlineLobbyHost::message_answer(std::int32_t index, std::int32_t accept) {
 // message of type 1 from the inviter (NETMESS), answered by message_answer. PORT-ONLY (cap::Social): the player's
 // chat filter choice (online_chat_filter) and the recent players list, asked once per login and logged.
 void OnlineLobbyHost::contacts_service() {
+    system_messages();
     if (!lobby_.logged_in()) {
-        invitations_asked_ = clan_invitations_asked_ = social_asked_ = false;
+        invitations_asked_ = social_asked_ = false;
+        clan_invitations_ms_ = 0;
         return;
     }
     auto& client = lobby_.client();
@@ -168,25 +170,15 @@ void OnlineLobbyHost::contacts_service() {
         if (f->body.size() < online::msize::AddToBuddyListFwdConfirmation) continue;
         invitation(online::get_i32(f->body, 0x18), online::get_str(f->body, 0x1c, 32), "259");
     }
-    if (!clan_invitations_asked_ && state_ >= 4) {
-        clan_invitations_asked_ = true;
+    // 133on1: 004498c0 (the mission / lobby / contacts screens' intel) and 0044b180 (AGENTCEL's): every 0x4e20 ms in
+    // the states 4..7 (SFOLobby_Intel 004536b0 runs one of them per frame), CheckMyClanInvitations (+28 1, +2c 999).
+    if (state_ >= 4 && state_ <= 7 && (clan_invitations_ms_ == 0 || now_ms() - clan_invitations_ms_ > 0x4e20)) {
         client.send_medius(online::mid::CheckMyClanInvitations,
                            online::request::clan_invitations(lobby_.session_key()));
-        log("online: CheckMyClanInvitations sent (100)");
+        clan_invitations_ms_ = now_ms();
+        log("online: CheckMyClanInvitations sent (100, state " + std::to_string(state_) + ")");
     }
-    while (const auto f = client.wait_for(online::mid::CheckMyClanInvitationsResponse, 0)) {
-        if (f->body.size() < online::msize::CheckMyClanInvitationsResponse) continue;
-        if (online::get_i32(f->body, online::kStatusOffset) == online::status::Success) {
-            gui::GuiHost::LobbyMessage m;
-            m.type = 0;
-            m.id = online::get_i32(f->body, 0x1c);
-            m.text = online::get_str(f->body, 0x28, 200);
-            m.from = online::get_str(f->body, 0xf4, 32);
-            messages_.push_back(std::move(m));
-            messages_changed_ = true;
-            log("online: agency cell invitation received (101)");
-        }
-    }
+    while (const auto f = client.wait_for(online::mid::CheckMyClanInvitationsResponse, 0)) cell_invitation(*f);
     if (!social_asked_ && client.welcomed() && (client.caps() & online::cap::Social)) {
         social_asked_ = true;
         if (chat_filter_) {
@@ -200,6 +192,60 @@ void OnlineLobbyHost::contacts_service() {
         for (const auto& p : *recent)
             names += (names.empty() ? ": " : ", ") + online::badged_name(p.name, p.platform, badges_) + (p.online ? " (online)" : "");
         log("online: recent players (port-only): " + std::to_string(recent->size()) + names);
+    }
+}
+
+// 004482e0 (CheckMyClanInvitations' callback): status 1 is no invitation; another non-zero status is error 1
+// (SetError at line 0x8ce). A row is skipped when a type-0 message's +8 already equals its +f0 (the original compares
+// those two fields; omega_server keeps them equal), or when +f0 is negative or the own account (+eac). Otherwise a
+// type-0 message: +8 the row's +1c, +c the leader's name (+f4), +2c the invitation's text (+28, 0x20 bytes).
+void OnlineLobbyHost::cell_invitation(const online::Frame& f) {
+    if (f.body.size() < online::msize::CheckMyClanInvitationsResponse) return;
+    const std::int32_t st = online::get_i32(f.body, online::kStatusOffset);
+    if (st == 1) return;
+    if (st != online::status::Success) {
+        error_ = 1;
+        log("online: CheckMyClanInvitations status " + std::to_string(st) + " (004482e0: error 1)");
+        return;
+    }
+    const std::int32_t leader = online::get_i32(f.body, 0xf0);
+    for (const auto& m : messages_)
+        if (m.type == 0 && m.id == leader) return;
+    if (leader < 0 || leader == own_id()) return;
+    gui::GuiHost::LobbyMessage m;
+    m.type = 0;
+    m.id = online::get_i32(f.body, 0x1c);
+    m.from = online::get_str(f.body, 0xf4, 32);
+    m.text = online::get_str(f.body, 0x28, 200).substr(0, 0x20);
+    log("online: agency cell invitation from " + m.from + " (101): lobby message 0");
+    messages_.push_back(std::move(m));
+    messages_changed_ = true;
+}
+
+// 0x00445f90 over each RT system message (rt::SystemMessage, 0x00300450's fields): ParseSystemMessage's event as a
+// NETMESS message (session +1c), or a record for the session's +38 list, which nothing in the port reads (logged).
+void OnlineLobbyHost::system_messages() {
+    auto& client = lobby_.client();
+    while (const auto f = client.wait_for(online::rt::SystemMessage, 0)) {
+        const auto m = online::decode_system_message(f->body);
+        if (!m) continue;
+        const auto e = online::sysmsg::event(m->severity, m->text);
+        std::string shown = m->text;
+        std::replace(shown.begin(), shown.end(), online::sysmsg::kSeparator, '|');
+        if (e.kind == online::sysmsg::Event::Kind::Lobby) {
+            gui::GuiHost::LobbyMessage lm;
+            lm.type = e.type;
+            lm.from = e.s0;
+            lm.text = e.s1;
+            messages_.push_back(std::move(lm));
+            messages_changed_ = true;
+            log("online: system message '" + shown + "' (0x00445f90): lobby message " + std::to_string(e.type));
+        } else if (e.kind == online::sysmsg::Event::Kind::Big) {
+            log("online: system message '" + shown + "' (0x00445f90): session +38 record, code " +
+                std::to_string(e.type));
+        } else {
+            log("online: system message '" + shown + "' dropped (0x00445f90)");
+        }
     }
 }
 
@@ -749,6 +795,19 @@ void OnlineLobbyHost::service() {
         online::put_i32(blob, 0xe8, clan_.id);
         upload_record("lobby refresh", blob);
     }
+    // 133on1: 0044b180 in state 7 (AGENTCEL open, not busy): SFOLobby_CellGetInfo every 0x2710 ms (+2588), and the
+    // member list with the cell message every 0x2710 ms (+258c). AGENTCEL redraws both every frame (002af2a0 sets
+    // agency_message; the member rows come from the lobby's list), so a remote change shows within ten seconds.
+    if (state_ == 7 && lobby_.logged_in() && now_ms() - cell_refresh_ms_ > 0x2710) {
+        cell_refresh_ms_ = now_ms();
+        const auto before_members = clan_members_.size();
+        const auto before_message = clan_.message;
+        const bool member = refresh_clan();
+        log("online: agency cell refresh (0044b180): " + std::string(member ? "" : "no cell, ") +
+            std::to_string(clan_members_.size()) + " member(s)" +
+            (clan_members_.size() != before_members ? " (changed)" : "") +
+            (clan_.message != before_message ? ", message '" + clan_.message + "'" : ""));
+    }
     if (pending_ == Pending::Create) {
         if (const auto r = client.wait_for(online::mid::CreateGameResponse, 0)) {
             pending_ = Pending::None;
@@ -1263,6 +1322,7 @@ std::int32_t OnlineLobbyHost::cell_open() {
         return 0;
     }
     state_ = 7;
+    cell_refresh_ms_ = now_ms();  // 0044b420 just loaded the cell, its members and message
     error_ = 0;
     log("online: agency cell '" + clan_.name + "' opened: " + std::to_string(clan_members_.size()) +
         " member(s), message '" + clan_.message + "'");
@@ -1292,7 +1352,7 @@ std::int32_t OnlineLobbyHost::cell_set_message(const std::string& message) {
     }
     clan_.message = message;
     error_ = 0;
-    log("online: agency cell message set to '" + message + "' (124 -> 126)");
+    log("online: agency cell message set to '" + message + "' (0044a420: 126 -> 127, 114 -> 115, 110 -> 111)");
     return 1;
 }
 

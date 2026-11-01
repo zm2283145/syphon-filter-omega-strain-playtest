@@ -110,6 +110,9 @@ struct ScriptStep {
     // PORT-ONLY test (132on2h): "capture NAME" keeps the last drawn frame as a --frontend-capture BMP when this step
     // begins (a screen whose content changes after it settled, e.g. a list filled by the server).
     std::optional<std::string> capture;
+    // PORT-ONLY test (133on1): "waitmessages N" holds the step until the online lobby's message list (NETMESS, session
+    // +1c) holds at least N messages: invitations arrive by the original's 20-second polls, not at once.
+    std::optional<std::size_t> wait_messages;
 };
 
 // PORT-ONLY test (checkpoint 132on2b): "keys TEXT" as USB keyboard reports (sceUsbKb HID codes, shift = mod 2), then
@@ -253,7 +256,7 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
     int number = 0;
     std::optional<std::string> card;
     std::optional<std::string> keys, touch_file, wait_file, capture;
-    std::optional<std::size_t> wait_games;
+    std::optional<std::size_t> wait_games, wait_messages;
     std::optional<std::uint8_t> wait_mission;
     // The rest of the line, trimmed (a path or text that may hold spaces).
     const auto rest = [](std::istringstream& s) {
@@ -294,6 +297,13 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
             wait_games = static_cast<std::size_t>(n);
             continue;
         }
+        if (word == "waitmessages") {  // PORT-ONLY test (133on1): see ScriptStep
+            long long n = -1;
+            if (!(s >> n) || n < 0)
+                throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"waitmessages N\"");
+            wait_messages = static_cast<std::size_t>(n);
+            continue;
+        }
         if (word == "waitmission") {  // PORT-ONLY test (A10): see ScriptStep
             long long n = -1;
             if (!(s >> n) || n < 0 || n > 0xff)
@@ -315,8 +325,9 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
         if (!(s >> buttons) || n <= 0)
             throw std::runtime_error("Front-end script line " + std::to_string(number) + ": expected \"N BUTTONS\"");
         steps.push_back({n, frontend_buttons(buttons), std::move(card), std::move(keys), std::move(touch_file), std::move(wait_file),
-                         wait_games, wait_mission, std::move(capture)});
+                         wait_games, wait_mission, std::move(capture), wait_messages});
         capture.reset();
+        wait_messages.reset();
         card.reset();
         keys.reset();
         touch_file.reset();
@@ -324,7 +335,7 @@ std::vector<ScriptStep> read_script(const std::filesystem::path& path) {
         wait_games.reset();
         wait_mission.reset();
     }
-    if (touch_file || wait_file || wait_games || wait_mission || capture)
+    if (touch_file || wait_file || wait_games || wait_mission || capture || wait_messages)
         throw std::runtime_error(
             "Front-end script: a \"touch\" / \"waitfile\" / \"waitgames\" / \"waitmission\" / \"capture\" line after the last step");
     if (keys) throw std::runtime_error("Front-end script: a \"keys\" line after the last step");
@@ -2038,7 +2049,8 @@ FrontendResult FrontendApp::Impl::loop() {
                 }
                 if (script[script_index].capture) capture(*script[script_index].capture);  // PORT-ONLY test (132on2h)
                 script_waiting = script[script_index].wait_file.has_value() || script[script_index].wait_games.has_value() ||
-                                 script[script_index].wait_mission.has_value();
+                                 script[script_index].wait_mission.has_value() ||
+                                 script[script_index].wait_messages.has_value();
             }
             std::uint16_t held = script[script_index].held;
             if (script_waiting) {  // PORT-ONLY test (132on2c): the step waits, buttons up, for its file / games
@@ -2052,8 +2064,14 @@ FrontendResult FrontendApp::Impl::loop() {
                                      (lan_session && std::ranges::any_of(lan_session->games(), [&](const lan::LanBrowseEntry& e) {
                                           return e.advert.mission_index == *st.wait_mission;
                                       }));
-                if (file && games && mission) {
+                const bool messages =
+                    !st.wait_messages ||
+                    (online_lobby && static_cast<std::size_t>(online_lobby->message_count()) >= *st.wait_messages);
+                if (file && games && mission && messages) {
                     script_waiting = false;
+                    if (st.wait_messages)
+                        std::cout << "Front-end script: waitmessages " << *st.wait_messages << " met at front-end frame "
+                                  << s.frames() << " (port-only)\n";
                     if (st.wait_file)
                         std::cout << "Front-end script: waitfile \"" << *st.wait_file << "\" found at front-end frame "
                                   << s.frames() << " (port-only)\n";

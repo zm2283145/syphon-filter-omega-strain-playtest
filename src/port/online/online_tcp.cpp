@@ -456,6 +456,13 @@ bool TcpClient::connect(std::uint32_t ip, std::uint16_t port, int timeout_ms, st
     set_nonblocking(s);
     set_nodelay(s);
     const sockaddr_in addr = make_addr(ip, port);
+    // PORT-ONLY (133on1): a server on a loopback address other than 127.0.0.1 is reached from that same address, so
+    // the server sees the client (its game host endpoint) there too, not at the system's default 127.0.0.1; the test
+    // runs keep parallel pairs apart this way (run_online_two_instances.ps1 -Address).
+    if ((ip >> 24) == 127 && ip != 0x7f000001u) {
+        const sockaddr_in local = make_addr(ip, 0);
+        (void)::bind(as_native(s), reinterpret_cast<const sockaddr*>(&local), sizeof local);
+    }
     const int r = ::connect(as_native(s), reinterpret_cast<const sockaddr*>(&addr), sizeof addr);
     if (r != 0 && !would_block()) {
         error_ = socket_error_text();

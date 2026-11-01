@@ -134,6 +134,12 @@ std::vector<std::uint8_t> clan_remove(std::string_view session_key, std::int32_t
 std::vector<std::uint8_t> clan_get_mine(std::string_view session_key);
 std::vector<std::uint8_t> clan_get_message(std::string_view session_key, std::int32_t clan);
 std::vector<std::uint8_t> clan_set_message(std::string_view session_key, std::string_view message);
+// 133on1: 0044a420's GetAllClanMessages (126: +28 1, +2c 30) and DeleteClanMessage (114: +28 the ClanMessageID).
+std::vector<std::uint8_t> clan_get_all_messages(std::string_view session_key);
+std::vector<std::uint8_t> clan_delete_message(std::string_view session_key, std::int32_t message);
+// 133on1: 0044d3d0's SetLocalizationParams (163): CharacterEncoding +28 = 2, Language +2c = session +26a4 (1).
+std::vector<std::uint8_t> set_localization(std::string_view session_key, std::int32_t encoding = 2,
+                                           std::int32_t language = 1);
 }  // namespace request
 
 // The decoded fields of a NetConnectionInfo (login +0x28, join +0x20).
