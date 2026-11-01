@@ -43,6 +43,8 @@ public:
     void receive_trigger(std::uint32_t id);
     void script_reset_and_trigger(std::uint32_t id);
     void script_seek(std::uint32_t id, int waypoint);
+    // 134lt5: the host's replicated stop target arriving on a joiner (00212540; PathMotion::replicated_seek).
+    void replicated_target(std::uint32_t id, int waypoint);
     void script_stop(std::uint32_t id);
     void script_set_speed(std::uint32_t id, float speed);
     // A lift link's parent (PathMotion::set_parent) and the lift's 00218200 carry.

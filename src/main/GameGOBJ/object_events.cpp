@@ -85,6 +85,11 @@ void PathWorld::script_seek(std::uint32_t id, int waypoint) {
     try { target.seek(waypoint); collect(id); }
     catch (...) { failed_ = true; throw; }
 }
+void PathWorld::replicated_target(std::uint32_t id, int waypoint) {
+    auto& target = entry(id).motion;
+    try { target.replicated_seek(waypoint); collect(id); }
+    catch (...) { failed_ = true; throw; }
+}
 void PathWorld::script_stop(std::uint32_t id) { entry(id).motion.stop(); }
 void PathWorld::script_set_speed(std::uint32_t id, float speed) { entry(id).motion.set_speed(speed); }
 void PathWorld::set_parent(std::uint32_t id, std::function<std::array<float,16>()> parent) {

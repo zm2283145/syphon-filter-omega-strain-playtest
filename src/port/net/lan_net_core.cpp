@@ -1378,6 +1378,118 @@ void LanNetCore::send_particle_toggle(std::uint32_t key, bool on) {
     sp_ = caller;
     ++particle_sent_;
 }
+// 134lt5 (the header): 00212220's network branch for a PathedGOBJ on the host.
+void LanNetCore::register_pathed(std::uint32_t id, std::int32_t index, std::int32_t direction, std::int32_t target) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN PathedGOBJ info object during the background load pump");
+    if (pathed_data_.contains(id)) unhosted(0x212220, "a PathedGOBJ's info object created twice (" + std::to_string(id) + ")");
+    // 00212220: g_IsMultiplayer ? 005721c0 : 1, and 005721d0; otherwise the local 0x20 block (00219820's) stays.
+    if (!m.read(dme::kHostRole, 1) || !m.read(0x5721d0, 1)) return;
+    const auto caller = sp_;
+    sp_ -= 0x200;
+    const auto sp = sp_;
+    try {
+        // PORT-ONLY: the local block 00219820 allocated (+0 index, +4 direction, +8 target, +0xc 0) from the play's state.
+        const auto block = sp + 0x100;
+        for (std::uint32_t k = 0; k < 0x20; k += 4) m.write(block + k, 4, 0);
+        m.write(block, 4, static_cast<std::uint32_t>(index));
+        m.write(block + 4, 4, static_cast<std::uint32_t>(direction));
+        m.write(block + 8, 4, static_cast<std::uint32_t>(target));
+        const auto cls = m.read(0x4f5480);
+        m.write(sp, 4, 0x4a4590);  // "PathedGobjInfoObject"
+        m.write(sp + 4, 4, 0);
+        m.write(sp + 8, 4, cls);
+        m.write(sp + 0xc, 4, (cls & 0x80000000U) ? 0xffffffffU : 0U);
+        if (call_framed(m, 0x2eaf28, {sp + 0x40, 1, 3, 0, 0, 0, 0, block}, sp)) {
+            sp_ = caller;
+            return;
+        }
+        const auto handle = m.read(sp + 0x40);
+        if (call(m, 0x2eb650, {sp + 0x48, handle})) {
+            sp_ = caller;
+            return;
+        }
+        const auto data = m.read(m.read(sp + 0x48) + 0x1c);
+        m.write(data + 0xc, 1, 1);
+        m.write(data + 0xe, 2, (id & 0xff0000U) >> 16);
+        m.write(data + 0x10, 2, id & 0xffffU);
+        m.write(data + 0x1c, 4, handle);
+        // NetLocalId: 0x00494178, filled by NetGetMyClientIndex 002ebaf8 when still -1.
+        if (m.read(0x494178) == 0xffffffffU) call(m, 0x2ebaf8, {0x494178, m.read(dme::kWorld)});
+        m.write(data + 0x14, 4, m.read(0x494178));
+        m.write(data + 0x18, 4, id);  // PORT-ONLY: cNetObj_GetNetID's word, the population ID on both consoles
+        pathed_data_.emplace(id, data);
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+// 134lt5 (the header): the host's motion writes the shared block's +8 (the replicated stop target); the DME flush
+// (002e4550 -> 002e31d0, mode 1: any change, 500 ms) sends it.
+void LanNetCore::pathed_target(std::uint32_t id, std::int32_t target) {
+    const auto it = pathed_data_.find(id);
+    if (it == pathed_data_.end()) return;
+    memory_.write(it->second + 8, 4, static_cast<std::uint32_t>(target));
+}
+
+// 134lt5: cPathedGOBJ_PathedGobjCreationCallback 00212700 (GameGOBJ_17.c) on a joiner: the GOB the data's ID names
+// takes the data as its +d0 (the local block's +0 / +4 copied in, then +4 = 1, +0x1c the handle, +0xc 1; the GOB's
+// +14 = 0). PORT-ONLY: the play's PathedGOBJ keeps its motion state; the data is recorded by handle.
+void LanNetCore::pathed_created_00212700(std::uint32_t handle) {
+    auto& m = memory_;
+    if (!m.read(0x5723c8, 1)) m.write(0x5723c8, 1, 1);
+    const auto caller = sp_;
+    sp_ -= 0x80;
+    const auto out = sp_ + 0x58;
+    if (!call(m, 0x2eb650, {out, handle})) {
+        const auto data = m.read(m.read(out) + 0x1c);
+        if (data) {
+            m.write(data + 4, 4, 1);
+            m.write(data + 0x1c, 4, handle);
+            m.write(data + 0xc, 1, 1);
+            remote_pathed_[handle] = m.read(data + 0x10, 2) | (m.read(data + 0xe, 2) << 16);
+            ++pathed_announced_;
+        }
+    }
+    sp_ = caller;
+    m.write(0x5723c8, 1, 0);
+}
+
+// 134lt5: cPathedGOBJ_PathedGobjUpdateCallback 00212540 (GameGOBJ_16.c) through the owner slot (002e7b60 ->
+// 002de950 with the field index): for the +8 field (0x004f5488) with a target > -1, the GOB of the data's ID.
+void LanNetCore::pathed_update_00212540(std::uint32_t handle, std::uint32_t field) {
+    auto& m = memory_;
+    if (!m.read(0x5723c8, 1)) m.write(0x5723c8, 1, 1);
+    if (field == m.read(0x4f5488)) {
+        const auto caller = sp_;
+        sp_ -= 0x80;
+        const auto out = sp_ + 0x10;
+        const bool got = call(m, 0x2eb650, {out, handle}) == 0;
+        const auto data = got ? m.read(m.read(out) + 0x1c) : 0U;
+        sp_ = caller;
+        if (data) {
+            const auto target = static_cast<std::int32_t>(m.read(data + 8));
+            if (target > -1) {
+                const auto id = m.read(data + 0x10, 2) | (m.read(data + 0xe, 2) << 16);
+                if (!pathed_receiver_) unhosted(0x212540, "a PathedGOBJ's replicated stop target without the play's receiver");
+                ++pathed_received_;
+                pathed_receiver_(id, target);
+            }
+        }
+    }
+    m.write(0x5723c8, 1, 0);
+}
+
+// 134lt5: 002128a0 (GameGOBJ_18.c), the remove callback: the GOB's +d0 cleared.
+void LanNetCore::pathed_removed_002128a0(std::uint32_t handle) {
+    auto& m = memory_;
+    if (!m.read(0x5723c8, 1)) m.write(0x5723c8, 1, 1);
+    remote_pathed_.erase(handle);
+    std::erase_if(pathed_data_, [&](const auto& e) { return m.read(e.second + 0x1c) == handle; });
+    m.write(0x5723c8, 1, 0);
+}
 // 134lt6 (the header): 002d4460 (NetNPC_13.c) lse if (self->IsLocal()): cNPCInfoObject_ctor(&t),
 // cNPCInfoObject_GetOwner(&t, actor + 0xc), cNetObjectMgr_RemoveFromTerrainActivation(actor) when +141 bit 7, the dtor.
 void LanNetCore::npc_remote_release_002d4460(std::uint32_t c, bool terrain) {
@@ -2698,7 +2810,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         if (m.read(0x48c4d7, 1) != 1) return 0x11;
         if (m.read(0x48c4dc, 1) != 1) return 0x2b;
         // Preflight all live handles: 002dea68 invokes the registered remove callback before deleting an
-        // object's buffers. Other registered classes (notably GameGOBJ's 00210780 / 00212040 / 002128a0)
+        // object's buffers. Other registered classes (notably GameGOBJ's 00210780 / 00212040; 002128a0 since 134lt5)
         // remain unhosted, so none of the earlier handles may be freed when one of those is present.
         for (std::uint32_t i = 0; i < 0x1000; ++i) {
             if (m.read(0x58c178 + i, 1) != 2) continue;
@@ -2709,7 +2821,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
             if (cls >= 16) unhosted(address, "a live object with an unregistered class");
             const auto cb = m.read(0x58c138 + 4 * cls);
             if (cb && cb != 0x2d1d50 && cb != 0x16a450 && cb != 0x438c20 && cb != 0x4321d0 &&
-                cb != 0x4375d0 && cb != 0x2c7b20)
+                cb != 0x4375d0 && cb != 0x2c7b20 && cb != 0x2128a0)   // 134lt5: NetPathedGobj's 002128a0 is hosted
                 unhosted(address, "a live object's unhosted remove callback 0x" + hex8(cb));
         }
         if (call(m, 0x302260, {0x5253f0, 0})) return 0x2b;  // rt_mutex_lock
@@ -3178,6 +3290,10 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x432230: { Frame f(sp_); npc_info_owner_00432230(m, *this, arg(1), arg(2), f.caller); return 0; }
     case 0x4321d0: npc_info_removed_004321d0(m); return 0;
     case 0x437830: { Frame f(sp_); headset_created_00437830(m, *this, arg(1), f.caller); return 0; }
+    // 134lt5: NetPathedGobj's callbacks (00212920): create (master, handle), field update (owner, handle, index), remove.
+    case 0x212700: pathed_created_00212700(arg(1)); return 0;
+    case 0x212540: pathed_update_00212540(arg(1), arg(2)); return 0;
+    case 0x2128a0: pathed_removed_002128a0(arg(1)); return 0;
     case 0x437640: { Frame f(sp_); headset_owner_00437640(m, *this, arg(1), arg(2), f.caller); return 0; }
     case 0x4375d0: headset_removed_004375d0(m); return 0;
     case 0x3fb4b0: { Frame f(sp_); net_map_set_client_003fb4b0(m, *this, arg(0), arg(1), f.caller); return 0; }

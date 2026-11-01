@@ -111,6 +111,17 @@ void PathMotion::seek(int index) {
     state_.stop_target=state_.replicated_stop_target=index; state_.stopped=false;
     notice("moving",index);
 }
+void PathMotion::replicated_seek(int index) {
+    events_.clear();
+    if (index>=0 && index<=static_cast<int>(pose_.motion.points.size())-1 && state_.index!=index) {
+        state_.direction=state_.index<index ? 1 : -1;
+        state_.stop_target=state_.replicated_stop_target=index;
+        state_.stopped=false;
+        notice("moving",index);
+    }
+    state_.stopped=false;
+    notice("moving",0);
+}
 void PathMotion::set_speed(float speed) {
     nonnegative(speed,"script speed"); events_.clear(); state_.speed=speed;
 }

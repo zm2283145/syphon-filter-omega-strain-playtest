@@ -753,9 +753,15 @@ std::optional<std::pair<std::array<float, 3>, float>> MissionScriptHost::checkpo
     return std::pair{std::array<float, 3>{p.x, p.y, p.z}, population_node_yaw(record->second)};
 }
 
+void MissionScriptHost::set_remote_player_figure(Word key, Word npc) {
+    if (!remote_players_.contains(key)) throw std::runtime_error("A remote player figure for an unregistered key");
+    remote_player_figures_[key] = npc;
+}
+
 void MissionScriptHost::unregister_remote_player(Word key) {
     if (!remote_players_.erase(key)) return;
     departed_players_.insert(key);   // 134lt6: natives given it are skipped (a null object)
+    remote_player_figures_.erase(key);
     objects_.objects.remove(key);
     objects_.sections.erase(key);
 }
@@ -2215,7 +2221,13 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                               objects_.objects.alive(*handle) &&
                               (handle->id == objects_.player || npc_actor(handle->id) || remote_players_.contains(handle->id));
         if (!actor_ok) throw std::runtime_error(name + " is hosted only for the player actor or an NPC actor");
-        auto& items = item_list(handle->id);
+        Word owner = handle->id;
+        if (remote_players_.contains(owner)) {   // 134lt5: this console's copy of that human (the play's figure)
+            const auto figure = remote_player_figures_.find(owner);
+            if (figure == remote_player_figures_.end()) throw std::runtime_error(name + " on a remote player without a figure");
+            owner = figure->second;
+        }
+        auto& items = item_list(owner);
         const auto* key = std::get_if<std::string>(&arguments.at(1));
         if (!key) throw std::runtime_error(name + " without an item key string");
         const auto& localization = objectives_.inputs().localization;
@@ -4237,7 +4249,13 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
                 throw std::runtime_error("game::PerformAction_WithObject: a player handle of another record");
         } else if (actor->kind == RuntimeObjectHandle::Kind::ai) {
             npc = actor->id;
-        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object && actor->id != objects_.player) {
+        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object && remote_players_.contains(actor->id)) {
+            // 134lt5: another console's human (the Who of a joiner's routed trigger): the message goes with transport 0 to
+            // this console's copy of that human, the play's figure for the key.
+            const auto figure = remote_player_figures_.find(actor->id);
+            if (figure == remote_player_figures_.end())
+                throw std::runtime_error("game::PerformAction_WithObject to a remote player without a figure: " + std::to_string(actor->id));
+            npc = figure->second;        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object && actor->id != objects_.player) {
             const auto section = objects_.sections.find(actor->id);
             if (section == objects_.sections.end() || section->second != "npc")
                 throw std::runtime_error("game::PerformAction_WithObject to a GOBJ that is not an actor (its CAS receiver is not hosted): " +
@@ -4299,7 +4317,12 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
             if (actor->id != objects_.player) throw std::runtime_error(native + ": a player handle of another record");
         } else if (actor->kind == RuntimeObjectHandle::Kind::ai) {
             npc = actor->id;
-        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object) {
+        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object && remote_players_.contains(actor->id)) {
+            // 134lt5: another console's human: this console's copy (the play's figure for the key), transport 0.
+            const auto figure = remote_player_figures_.find(actor->id);
+            if (figure == remote_player_figures_.end())
+                throw std::runtime_error(native + " to a remote player without a figure: " + std::to_string(actor->id));
+            npc = figure->second;        } else if (actor->kind == RuntimeObjectHandle::Kind::world_object) {
             const auto section = objects_.sections.find(actor->id);
             if (section == objects_.sections.end() || section->second != "npc")
                 throw std::runtime_error(native + " to a GOBJ that is not an actor (its CAS receiver is not hosted): " +

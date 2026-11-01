@@ -693,6 +693,29 @@ public:
     std::uint32_t particle_messages_sent() const { return particle_sent_; }
     std::uint32_t particle_messages_received() const { return particle_received_; }
 
+    // 134lt5: NetPathedGobj (GameGOBJ_15.c / _16.c / _17.c / _18.c / _19.c, matched): a PathedGOBJ in the network game.
+    // 00212920 registers the class "NetPathedGobj" (0x20 bytes, handle 0x004f5480) with 002129a0's fields +0x14, +0x18
+    // (4 bytes), +0xe, +0x10 (2 bytes) and +8 (4 bytes, field index 0x004f5488), each every 500 ms on any change (mode 1,
+    // kind 0x40), and the callbacks 00212700 (create), 00212540 (field update, through the owner slot) and 002128a0
+    // (remove). The object's +d0 block is its motion state (+0 the index, +4 the direction, +8 the stop target). On the
+    // host with 0x005721d0 set, 00212220 (00219820 / 00212210 in a network game) creates "PathedGobjInfoObject" from that
+    // block (002eaf28(&h, 1, 3, 0, 0, 0, 0, +d0, name, class)), and the object's +d0 becomes the shared data: +0xc 1,
+    // +0xe / +0x10 the ID's high / low halves, +0x1c the handle, +0x14 the local client, +0x18 the net ID (PORT-ONLY: the
+    // population ID, NET_INLEVEL.md "NetObj keys"). register_pathed runs that branch (the play's motion state stands in
+    // for +d0); pathed_target writes +8 when the play's replicated stop target changes, and the DME flush sends it. On a
+    // joiner the callbacks run here: 00212540 hands the play the new stop target of the object the ID names (the
+    // receiver applies its game side, PathMotion::replicated_seek). Without a receiver an update throws naming 00212540.
+    void register_pathed(std::uint32_t id, std::int32_t index, std::int32_t direction, std::int32_t target);
+    void pathed_target(std::uint32_t id, std::int32_t target);
+    bool pathed_registered(std::uint32_t id) const { return pathed_data_.contains(id); }
+    void clear_pathed() {
+        pathed_data_.clear();
+        remote_pathed_.clear();
+    }
+    using PathedReceiver = std::function<void(std::uint32_t id, std::int32_t target)>;
+    void set_pathed_receiver(PathedReceiver receiver) { pathed_receiver_ = std::move(receiver); }
+    std::uint32_t pathed_updates_received() const { return pathed_received_; }
+    std::uint32_t pathed_objects_announced() const { return pathed_announced_; }
     // 132ln5h12 (research/NET_INLEVEL.md 4.22): a generator's spawned NPCs in the network game. register_npc gives
     // the NPC (its key c: the actor's +c, the population id with the owning client + 1 in the top byte) a PORT-ONLY
     // character block in this memory (0x35a0-byte cHuman layout: vtable 0x004da690, +c / +10 the key, +0x2c..+0x2e
@@ -1109,6 +1132,13 @@ private:
     std::map<std::uint32_t, std::uint32_t> particle_blocks_;  // key -> block
     std::uint32_t next_particle_ = kParticles;
     ParticleReceiver particle_receiver_;
+    // 134lt5: NetPathedGobj (register_pathed): the host's shared data by ID; a joiner's announced objects by handle.
+    std::map<std::uint32_t, std::uint32_t> pathed_data_, remote_pathed_;
+    PathedReceiver pathed_receiver_;
+    std::uint32_t pathed_received_ = 0, pathed_announced_ = 0;
+    void pathed_created_00212700(std::uint32_t handle);
+    void pathed_update_00212540(std::uint32_t handle, std::uint32_t field);
+    void pathed_removed_002128a0(std::uint32_t handle);
     std::uint32_t particle_sent_ = 0, particle_received_ = 0;    // 132ln5h12: the NPC blocks (register_npc; 0x4000 bytes each from kNpcBlocks, below the stack), key -> block.
     static constexpr std::uint32_t kNpcBlocks = 0x1d50000, kNpcBlockSize = 0x4000, kNpcBlockCount = 0x60;
     static constexpr std::uint32_t kNpcController = 0x3800, kNpcInventory = 0x3c00;   // 132ln5h14b: +0x3524's

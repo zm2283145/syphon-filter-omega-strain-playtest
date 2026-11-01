@@ -23,6 +23,11 @@ public:
     void reset_path();
     void stop();
     void seek(int index);
+    // 134lt5: cPathedGOBJ_PathedGobjUpdateCallback 00212540 on another console (the host's replicated stop target, the
+    // NetPathedGobj +8 field): with the index in range and not the current one, the direction toward it, the target
+    // +8 and +cc = index, the stopped byte +dc cleared and PathedNotice(1, index) queued; then, in any case, +dc cleared
+    // and PathedNotice(1, 0). Unlike seek (the script's SetPos) the progress is left as it is.
+    void replicated_seek(int index);
     void set_speed(float speed);
     // The +6c parent the GameGOBJ base's link setup (0021b440 -> vt+110 =
     // 00216c50) gives a lift's pathed link: the function answers the parent's

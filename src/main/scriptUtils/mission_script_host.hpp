@@ -971,6 +971,9 @@ public:
     // key 003fb650 gives the human 002c6b70 builds): an object with a player controller in the root scope, so
     // Who / WhoPlayer / SetCheckpoint can name it. unregister when its client leaves (001b2e90).
     void register_remote_player(Word key);
+    // 134lt5: the script NPC of the remote human's figure on this console (the play's run-time NPC for that key), the
+    // receiver of a CAS action queued to that player (game::PerformAction[_WithObject], transport 0: the local copy).
+    void set_remote_player_figure(Word key, Word npc);
     void unregister_remote_player(Word key);
     bool remote_player(Word key) const { return remote_players_.contains(key); }
     // 134lt6: a remote player that left (unregistered and not back): native calls given it are skipped (003de464).
@@ -1530,6 +1533,7 @@ private:
     bool multiplayer_{};
     std::set<Word> remote_players_;   // 133lt4: register_remote_player
     std::set<Word> departed_players_;   // 134lt6: unregistered remote players
+    std::map<Word, Word> remote_player_figures_;   // 134lt5: set_remote_player_figure
     std::optional<std::uint32_t> local_client_;   // 133lt4: set_local_client
     std::int32_t local_player_team() const;
     bool partner_objectives_{};

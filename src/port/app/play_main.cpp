@@ -12899,7 +12899,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 // (001b8130) for the client that joined again (134lt5: lan_remake_remote).
                 if(slot->gone){std::cout<<"\n";lan_remake_remote(*slot,frame);std::cout<<"\nLAN (port-only, 132ln5f): 002c6b70: remote human key "<<std::hex<<h.key<<std::dec;}
                 slot->key=h.key;
-                if(mission_host)mission_host->register_remote_player(h.key);   // 133lt4: Who / WhoPlayer / SetCheckpoint
+                if(mission_host){mission_host->register_remote_player(h.key);   // 133lt4: Who / WhoPlayer / SetCheckpoint
+                    mission_host->set_remote_player_figure(h.key,slot->figure->actor_id);}   // 134lt5: its CAS actions' receiver
                 // 132ln5h8: the agent first (a rebuild of the figure, 001b8130, replaces its actor before it is activated).
                 bool dress=false;
                 if(h.packing&&slot->dressed!=*h.packing){
@@ -13658,6 +13659,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::cout<<": queued to actor "<<*actor<<" (life state "<<int(actors.actor(*actor).life_state())<<") at frame "<<frame<<"\n";
             }
         };
+        std::map<std::uint32_t,std::int32_t> lan_pathed_sent;   // 134lt5: the host's NetPathedGobj +8 last written
+        bool lan_pathed_created=false;                          // 134lt5: 00212220's network branch ran (0x005721d0 set)
         if(lan_net&&!lan_net->level_loaded()){
             const double pumped=lan_net->stop_load_pump();
             for(auto& call:objective_network_load_calls)call();
@@ -13666,10 +13669,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             struct PlayNetLevel final:LevelLoadHost{
                 std::function<void()> generators;   // 132ln5h11: the generators' network constructor parts
                 std::function<void()> particles;    // 134lt6: the PLR: placements' network constructor tails
+                std::function<void()> pathed;       // 134lt5: the PathedGOBJs' NetPathedGobj objects (00212210 / 00212220)
                 std::uint32_t call(LevelLoadMemory&,std::uint32_t address,std::initializer_list<std::uint32_t>)override{
                     if(address==0x1350e0){   // the level setup above (the timer events pumped meanwhile)
                         if(generators)generators();
                         if(particles)particles();
+                        if(pathed)pathed();
                         return 0;
                     }
                     char text[96];std::snprintf(text,sizeof text,"unhosted(0x%08x): the play side of a network game is not ported",address);
@@ -13743,6 +13748,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 for(auto& [id,a]:p->assets)a.set_network(send);
                 std::cout<<"LAN (134lt6): 001c59d0's network tails: "<<p->placements.size()<<" particle placements in the NetMap (003fb650), "
                     <<p->assets.size()<<" NIE particle assets networked (001c5710 / 001c5680 send)\n";
+            };
+            // 134lt5: each PathedGOBJ's network part (00219820 in a network game -> 00212220; cPathedGOBJ_InitNetwork 00212210):
+            // on the host the NetPathedGobj object "PathedGobjInfoObject" from its motion block (LanNetCore::register_pathed);
+            // a joiner keeps its local block, and the host's objects' +8 updates reach it through 00212540 (the receiver).
+            // PORT-ONLY order: the objects were built with the population load; their network parts run here, beside the
+            // generators'.
+            if(mission_host)level.pathed=[&]{
+                lan_net->clear_pathed();
+                lan_pathed_sent.clear();
+                lan_pathed_created=false;
+                lan_net->set_pathed_receiver([&](std::uint32_t id,std::int32_t target){
+                    if(std::find(pathed_order.begin(),pathed_order.end(),id)==pathed_order.end())return;   // 00212540: no GOB of that ID
+                    const auto before=pathed_objects.motion(id).state();
+                    pathed_objects.replicated_target(id,target);
+                    std::cout<<"LAN (134lt5): NetPathedGobj +8 -> PathedGOBJ "<<id<<": 00212540 stop target "<<target<<" (index "<<before.index
+                        <<(before.stopped?", stopped":", moving")<<")\n";
+                });
             };
             lan_net->mirror_empty_level_objects();
             auto& m=lan_net->memory();
@@ -15065,6 +15087,27 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         lan_net->advance_timer(std::chrono::duration<double,std::milli>(now-lan_timer_at).count());
                     lan_timer_at=now;
                     lan_set_local_player();
+                    // 134lt5: 00212220's network branch needs 0x005721d0 (the start barrier sets it after the level setup, so the
+                    // construction-time call 00219820 finds it clear): PORT-ONLY, the host creates each PathedGOBJ's object at
+                    // the first in-level frame with it set (the original's later caller, cPathedGOBJ_InitNetwork 00212210, is
+                    // not decoded).
+                    if(mission_host&&!lan_pathed_created&&lan_net->memory().read(0x5721d0,1)){
+                        lan_pathed_created=true;
+                        std::size_t created=0;
+                        for(const auto id:pathed_order){
+                            const auto& s=pathed_objects.motion(id).state();
+                            lan_net->register_pathed(id,s.index,s.direction,s.replicated_stop_target);
+                            if(lan_net->pathed_registered(id)){lan_pathed_sent[id]=s.replicated_stop_target;++created;}
+                        }
+                        std::cout<<"LAN (134lt5): 00212220 at frame "<<frame<<": "<<created<<" of "<<pathed_order.size()
+                            <<" PathedGOBJs created their NetPathedGobj object"<<(created?" (the host)":" (a joiner keeps the local blocks)")<<"\n";
+                    }
+                    // 134lt5: the host's PathedGOBJ motion writes its NetPathedGobj +8 (the replicated stop target).
+                    for(auto& [id,sent]:lan_pathed_sent){
+                        const auto now=pathed_objects.motion(id).state().replicated_stop_target;
+                        if(now!=sent){lan_net->pathed_target(id,now);sent=now;
+                            std::cout<<"LAN (134lt5): PathedGOBJ "<<id<<" NetPathedGobj +8 = "<<now<<" at frame "<<frame<<"\n";}
+                    }
                     lan_net->net_frame();
                     lan_print_log();
                     lan_place_remotes(frame);
