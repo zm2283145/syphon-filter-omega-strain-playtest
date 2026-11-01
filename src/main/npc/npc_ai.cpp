@@ -42,6 +42,7 @@ NpcPathHost path_host(NpcAiHost& host){
     h.actor_translation=[&host]{return host.actor.world_matrix()[3];};
     // Path events reach the +58 component with transport 0.
     h.send=[&host](const NpcPathEvent& e){host.send(component_message(NpcAiMessage::Kind::path,e.event,e.value,0));};
+    h.network_path=host.network_path;
     return h;
 }
 const NpcNodeGraph& graph_of(const NpcAiHost& host){
@@ -882,28 +883,39 @@ std::vector<std::string> deactivate_npc_ai_anonymous(NpcAiHost& host,const NpcAi
     skipped.push_back("NetObjectMgr 0042d910");
     return skipped;
 }
-void check_npc_activation_radius(NpcAiComponent& c,const NpcAiSystem& system,NpcAiHost& host,const NpcAiRadiusHost& radius){
-    if(!(c.flags_141&0x80U))return;
-    if((((radius.actor_id&0xffffU)+system.frame)&7U)!=0)return;
+std::int32_t check_npc_activation_radius(NpcAiComponent& c,const NpcAiSystem& system,NpcAiHost& host,const NpcAiRadiusHost& radius){
+    if(!(c.flags_141&0x80U))return -1;
+    if((((radius.actor_id&0xffffU)+system.frame)&7U)!=0)return -1;
     auto range=[&]{
         float r2=c.radius_squared_98;
         if(r2<std::bit_cast<float>(0x3727c5acU))r2=system.far_distance*system.far_distance;   // 0053834c squared
         return r2;
     };
-    if(!host.actor.eligible()){
+    std::int32_t act=-1;
+    // busy = +2d && +2c && !+2e; 134lt14: a network game also takes the deactivation branch when 004340c0 answers.
+    if(!host.actor.eligible()&&!(radius.network&&radius.active_on_remote())){
         if(!c.latch_1d5){
             if(const auto d2=radius.closest_player_distance_squared()){
-                if(*d2<range()){radius.activate_actor();c.latch_1d5=1;}
+                if(*d2<range()){
+                    if(radius.network)act=radius.closest_player_slot();   // ((+c & 0x7f000000) >> 24) - 1
+                    else radius.activate_actor();
+                    c.latch_1d5=1;
+                }
             }
         }
         c.latch_1d4=0;
-        return;
+        return act;
     }
-    if(c.latch_1d4)return;
+    if(c.latch_1d4)return act;
     const auto d2=radius.closest_player_distance_squared();
     if(!d2)throw std::runtime_error("NPC AI: 0015a440 without a player reads an unset distance");
-    if(!(*d2<=std::bit_cast<float>(0x441c4000U)+range())){radius.deactivate_actor();c.latch_1d4=1;}   // r^2 + 625
+    if(!(*d2<=std::bit_cast<float>(0x441c4000U)+range())){   // r^2 + 625
+        if(radius.network)radius.deactivate_global();          // +c0 = 00157510
+        else radius.deactivate_actor();
+        c.latch_1d4=1;
+    }
     c.latch_1d5=0;
+    return act;
 }
 void activate_npc_by_radius(NpcAiComponent& c,float radius){
     if(radius<std::bit_cast<float>(0x3727c5acU))c.radius_squared_98=0;

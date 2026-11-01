@@ -254,6 +254,10 @@ struct FrontendServices {
     PortOptionRows port_rows;
     // Port-only (checkpoint 132ln1, research/LAN_PLAY.md): GuiHost::port_lan_play (LAN Play on ONOFFSEL).
     bool lan_play = false;
+    // Port-only (checkpoint 134ui1, the PC): the F7 port menu (GuiHost::port_menu, PORTMENU from INGAMENU) and, while
+    // it is open, its Cheats screen (the pause menu's PortGuiCheats: the toggles take effect in the next level; the
+    // unlock actions apply to the agent now; End Level needs a level).
+    bool port_menu = false;
     // Port-only (checkpoint 132ln3, research/LAN_PLAY.md §4 row 6b): the LAN session behind GuiHost::lan_host /
     // lan_hosting (MSNSETUP's begin_mission in LAN mode). Unset: hosting throws, lan_hosting answers false.
     std::function<bool(const gui::GuiHost::LanHostRequest& request)> lan_host;
@@ -610,6 +614,17 @@ public:
     bool port_options_pressed(gui::Widget* screen, gui::Widget* sender) override;
     bool port_lan_play() override { return services_.lan_play; }  // port-only (132ln1)
     gui::PortSettingsScreen* port_settings_screen() override { return services_.port_rows.settings; }  // 132win11
+    // Port-only (checkpoint 134ui1): the F7 port menu and its Cheats screen (FrontendServices::port_menu).
+    bool port_menu() override { return services_.port_menu; }
+    bool port_cheat_menu() override { return services_.port_menu && rt_.port_menu_active(); }
+    std::int32_t port_cheat_count() override;
+    bool port_cheat_action(std::int32_t i) override;
+    bool port_cheat_on(std::int32_t i) override;
+    bool port_cheat_toggle(std::int32_t i) override;
+    // F7: opens the port menu over the front end's menus (app +28 set; not over a movie, a loading screen or the level
+    // load), or closes
+    // it. Answers whether it is open afterwards; `why` names the refusal.
+    bool port_menu_toggle(std::string* why = nullptr);
     void radio_sound(std::int32_t kind, std::int32_t type, const std::string& name, std::int32_t priority) override;
     std::uint32_t zeus_archive() override;
     std::int32_t zeus_lookup(std::uint32_t archive, const std::string& name) override;

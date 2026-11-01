@@ -377,6 +377,7 @@ endif()
 # client transport. Standalone library (portable C++, no omega_core dependency) so the server can build alone.
 add_library(omega_online STATIC src/port/online/online_hash.cpp src/port/online/online_protocol.cpp
     src/port/online/online_accounts.cpp src/port/online/online_server.cpp src/port/online/online_tcp.cpp src/port/online/online_rt.cpp
+    src/port/online/online_rt_crypto.cpp src/port/online/online_dns.cpp
     src/port/online/online_client.cpp src/port/online/online_lobby.cpp src/port/online/online_mod_report.cpp
     src/port/online/online_stats.cpp src/port/online/online_files.cpp src/port/online/online_relay.cpp
     src/port/online/online_upnp.cpp src/port/online/online_portmap.cpp src/port/online/online_social.cpp)

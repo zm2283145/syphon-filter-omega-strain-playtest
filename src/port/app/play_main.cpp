@@ -1348,6 +1348,8 @@ struct PlayGuiHost final:GuiStaticHost{
     std::vector<std::string> log;
     gui::PortSettingsScreen* settings=nullptr;  // port-only (132win11): the pause menu's Port Settings page
     gui::PortSettingsScreen* port_settings_screen() override{return settings;}
+    bool port_menu_enabled=false;  // port-only (134ui1): the PC's F7 port menu PORTMENU (built from INGAMENU)
+    bool port_menu() override{return port_menu_enabled;}
     std::optional<std::int32_t> resource(const std::string& name) override{   // 004133b0
         for(std::size_t i=0;i<resources.size();++i)
             if(_stricmp(resources[i].c_str(),(name+".HOG").c_str())==0)return static_cast<std::int32_t>(i);
@@ -1355,10 +1357,27 @@ struct PlayGuiHost final:GuiStaticHost{
         if(port_cheat_menu_enabled()&&name=="PORTCHEATS")return static_cast<std::int32_t>(resources.size());
         // Port-only (checkpoint 132win11): the Port Settings screen, two past.
         if(settings&&name=="PORTSETTINGS")return static_cast<std::int32_t>(resources.size()+1);
+        // Port-only (checkpoint 134ui1): the F7 port menu, three past.
+        if(port_menu_enabled&&name=="PORTMENU")return static_cast<std::int32_t>(resources.size()+2);
         return std::nullopt;
     }
     const GuiNode* open_gui(const std::string& file,std::int32_t res) override{   // 0036e1b0 + 00419020
-        if(res<0||static_cast<std::size_t>(res)>resources.size()+1)return nullptr;
+        if(res<0||static_cast<std::size_t>(res)>resources.size()+2)return nullptr;
+        if(static_cast<std::size_t>(res)==resources.size()+2){
+            // Port-only (checkpoint 134ui1): the F7 port menu, INGAMENU.GUI's Cheats / Port Settings buttons alone.
+            if(!port_menu_enabled)return nullptr;
+            const std::string key="PORTMENU/"+file;
+            auto it=files.find(key);
+            if(it==files.end()){
+                const auto bytes=gui_file("INGAMENU");
+                if(bytes.size()<3||bytes[0]!='G'||bytes[1]!='U'||bytes[2]!='I')
+                    throw std::runtime_error("port-only port menu: INGAMENU.GUI is not in the front end");
+                auto f=std::make_unique<GuiFile>(decode_gui(bytes));
+                f->root=omega::port_menu_screen(f->root);
+                it=files.emplace(key,std::move(f)).first;
+            }
+            return &it->second->root;
+        }
         if(static_cast<std::size_t>(res)==resources.size()+1){
             // Port-only (checkpoint 132win11): the Port Settings screen, built from GAMEOPT2.GUI's widgets.
             if(!settings)return nullptr;
@@ -1397,10 +1416,11 @@ struct PlayGuiHost final:GuiStaticHost{
             const auto bytes=gui_file(screen);
             if(bytes.size()<3||bytes[0]!='G'||bytes[1]!='U'||bytes[2]!='I')return nullptr;
             auto f=std::make_unique<GuiFile>(decode_gui(bytes));
-            // Port-only (checkpoint 132f5): the start menu's 8th entry, Cheats.
-            if(port_cheat_menu_enabled()&&_stricmp(screen.c_str(),"INGAMENU")==0)port_cheats_patch_ingamenu(f->root);
-            // Port-only (checkpoint 132win11): its 9th entry, Port Settings.
-            if(settings&&_stricmp(screen.c_str(),"INGAMENU")==0)port_settings_patch_ingamenu(f->root);
+            // Port-only (checkpoint 132f5): the start menu's 8th entry, Cheats; (132win11) its 9th, Port Settings.
+            // Checkpoint 134ui1: on the PC both are in the F7 port menu instead, unless pause_menu_extras=1.
+            const bool extras=port_pause_menu_extras();
+            if(extras&&port_cheat_menu_enabled()&&_stricmp(screen.c_str(),"INGAMENU")==0)port_cheats_patch_ingamenu(f->root);
+            if(extras&&settings&&_stricmp(screen.c_str(),"INGAMENU")==0)port_settings_patch_ingamenu(f->root);
             it=files.emplace(key,std::move(f)).first;
         }
         return &it->second->root;
@@ -4281,6 +4301,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::optional<int> worker_threads_flag;   // --worker-threads N|auto (port-only, checkpoint 132mt3; else worker_threads=)
         std::set<std::uint64_t> test_overlay_key;   // --test-overlay-key <frame>: posts the overlay key to the window (132win10)
     std::set<std::int64_t> frontend_test_overlay_key;   // --frontend-test-overlay-key <front-end frame> (132win11)
+    // Port-only tests (checkpoint 134ui1): --test-port-menu <frame> toggles the F7 port menu in play (no window needed),
+    // --frontend-test-port-menu <front-end frame> in the front end, --test-window-key <frame> <key> posts a key-down to
+    // the game window (its hotkeys on, even hidden); a test-paused application resumes by itself after 300 ms.
+    std::set<std::uint64_t> test_port_menu;
+    std::set<std::int64_t> frontend_test_port_menu;
+    std::multimap<std::uint64_t,std::uint8_t> test_window_keys;
+    std::optional<bool> pause_menu_extras_flag;   // --pause-menu-extras on|off (port-only, 134ui1; else pause_menu_extras=)
     std::vector<std::uint8_t> port_settings_test_keys;   // --port-settings-test-keys (132win11): the page's captures
         // Port-only diagnostics (132win10, the present-stall study): the swap chain variant and the present probe.
         std::optional<HostWindowOptions::SwapEffect> swap_effect_flag;unsigned frame_latency_flag=0;bool waitable_swap=false,present_probe_on=false;
@@ -4321,6 +4348,11 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         std::vector<std::pair<unsigned,std::string>> debug_script_calls;   // harness: (frame, module::function) script calls
         std::set<unsigned> debug_objective_state_frames;   // read-only snapshot after this frame's script/network delivery
         bool lan_end_results=false;   // opt-in composed multiplayer ending validation
+        // PORT-ONLY (134lt14): opt-in network activation of NPCs (0015a440's multiplayer radius half and the script's
+        // Activate through 00157800 / 00157940). Off by default until cNetActivateAndControlMsg (0042caa0 / 0042cc40 /
+        // 0042cbb0 / 0042ccc0), 001b5fe0's NPC info Add for authored NPCs and the local player's client bits in +c are
+        // ported (research/NET_INLEVEL.md "0015a440's radius half and 00157800 in play (134lt14)").
+        bool lan_npc_activation_net=false;
         std::optional<std::array<std::int64_t,2>> test_level_end;   // PORT-ONLY --test-level-end <kind> <frame>
         // PORT-ONLY LAN acceptance drivers (133lt1, research/NET_INLEVEL.md "LAN timing and audio acceptance"): they call
         // the live script-native routes (00267860, 001c6a00 / 001c6890, 001c67c0) with this console's LAN targets.
@@ -4349,6 +4381,19 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     if(!omega::crash::test_crash_kind(kind)||at<0)
                         throw std::runtime_error("--test-crash needs throw|unported|access-violation|terminate and a frame >= 0");
                     (arg==L"--test-crash"?test_crash:frontend_test_crash)=std::pair{kind,at};}
+                else if(arg==L"--test-port-menu")test_port_menu.insert(std::stoull(value()));   // 134ui1
+                else if(arg==L"--frontend-test-port-menu")frontend_test_port_menu.insert(std::stoll(value()));
+                else if(arg==L"--test-window-key"){
+                    const auto at=std::stoull(value());
+                    const auto name=narrow(value());
+                    const auto vk=key_code(name);
+                    if(!vk)throw std::runtime_error("--test-window-key: unknown key "+name);
+                    test_window_keys.emplace(at,*vk);
+                }else if(arg==L"--pause-menu-extras"){
+                    const auto v=narrow(value());
+                    if(v!="on"&&v!="off")throw std::runtime_error("--pause-menu-extras needs on or off");
+                    pause_menu_extras_flag=v=="on";
+                }
                 else if(arg==L"--test-pads")test_pads=narrow(value());
                 else if(arg==L"--test-audio-device")test_audio_device=narrow(value());
                 else if(arg==L"--test-mouse")test_mouse=parse_mouse_motion(narrow(value()));
@@ -4393,6 +4438,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 else if(arg==L"--freed-ai-resend-skip")freed_ai_resend_skip=true;   // 132ms3 (port-only aid)
                 else if(arg==L"--debug-objective-state")debug_objective_state_frames.insert(number<unsigned>(value()));
                 else if(arg==L"--lan-end-results")lan_end_results=true;
+            else if(arg==L"--lan-npc-activation-net")lan_npc_activation_net=true;
                 else if(arg==L"--test-level-end"){
                     const auto kind=std::stoll(value()),at=std::stoll(value());
                     if(kind<0||kind>3||at<0)throw std::runtime_error("--test-level-end needs a kind 0..3 and a frame >= 0");
@@ -4733,8 +4779,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     "uses local/port_settings.txt; scripted runs only an explicit --port-settings). --no-coop-partner forces it off.\n"
                     "--fullscreen (port-only) starts the game window in borderless fullscreen on its monitor; Alt+Enter or F11 toggle\n"
                     "it at any time, as does the front end's Options > Video \"FULLSCREEN\" row, and the choice is kept as fullscreen=1\n"
-                    "in the port settings file. Pause/Break or the window system menu pauses/resumes the entire application without\n"
-                    "changing focus, minimise, resize, fullscreen or the game's Start-menu pause.\n"
+                    "in the port settings file. Esc, Pause/Break or the window system menu pauses/resumes the entire application\n"
+                    "without changing focus, minimise, resize, fullscreen or the game's Start-menu pause. F7 (PC) opens the port menu\n"
+                    "(Port Settings, Cheats) in the front end's menus and in a level, the game paused while it is open; on the PC the\n"
+                    "pause menu and the title Options are then the original's (--pause-menu-extras on, or pause_menu_extras=1, lists\n"
+                    "Port Settings / Cheats there as well, as the consoles always do). hotkey.pause / hotkey.fullscreen /\n"
+                    "hotkey.port_menu=<keys>|none rebind Esc / F11 / F7 (input_bindings.hpp). --test-port-menu <frame>,\n"
+                    "--frontend-test-port-menu <front-end frame> and --test-window-key <frame> <key> are their port-only tests.\n"
                     "The one game window and D3D11 device stay from the boot movies to the exit\n"
                     "(host_window.hpp; hidden runs keep theirs invisible, without the hotkeys). The 2D layers (front end, movies,\n"
                     "loading screens, the HUD and menus) keep the PS2 frame's 4:3 shape with black bars on any window shape; the\n"
@@ -5072,6 +5123,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             if(!settings.empty()&&fs::exists(settings))try{
                 const auto s=read_port_settings(settings);
                 controller_prompt=controller_prompt_setting(s);
+                port_set_pause_menu_extras(pause_menu_extras_setting(s));   // 134ui1
                 bindings=parse_input_bindings(s);
                 std::cout<<"Input bindings (port-only): "<<bindings.overridden<<" bind.* key(s) from "<<settings.string()
                     <<(controller_prompt?"":"; controller_prompt=0")<<"\n";
@@ -5275,6 +5327,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     <<placement_settings.string()<<"\n";
             }catch(const std::exception& e){std::cerr<<"Port settings (port-only): "<<e.what()<<" (window placement not saved)\n";}
         }};
+        // Port-only (checkpoint 134ui1): the window hotkeys (input_bindings.hpp WindowHotkeys) on the game window and, as
+        // reserved keys, out of the bindings (a hotkey's key presses no pad button). Logged once at the window's start.
+        const auto apply_window_hotkeys=[&](const PortSettings& s,bool log){
+            WindowHotkeys h;
+            try{h=window_hotkeys(s);}
+            catch(const std::exception& e){std::cerr<<"Window hotkeys (port-only): "<<e.what()<<"; the defaults are used\n";}
+            if(host_window)host_window->set_hotkeys(h);
+            set_reserved_host_keys(port_pc_build?window_hotkey_keys(h):InputBindings::Keys{});
+            if(!log||!port_pc_build)return;
+            const auto keys=[](const InputBindings::Keys& k){
+                std::string t;for(const auto vk:k)t+=(t.empty()?"":",")+key_name(vk);return t.empty()?std::string("none"):t;};
+            std::cout<<"Window hotkeys (port-only): pause "<<keys(h.pause)<<" (and Pause/Break), fullscreen "<<keys(h.fullscreen)
+                <<" (and Alt+Enter), port menu "<<keys(h.port_menu)<<"\n";
+            for(const auto& line:bindings_using_reserved_keys(bindings,reserved_host_keys()))
+                std::cout<<"Window hotkeys (port-only): "<<line<<" is a window hotkey's key: the binding ignores it\n";
+        };
         bool vsync_on=vsync_flag.value_or(true);   // port-only (132win3): --vsync, else the settings file's vsync
         const auto open_host_window=[&](const HostWindowOptions& o,bool shown){
             {
@@ -5300,6 +5368,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // end, which leaves the CPU PARTNER setting alone) local/port_settings.txt for the fullscreen and vsync keys only.
             const fs::path settings=!port_settings_path.empty()?port_settings_path
                 :shown&&script_path.empty()&&frontend_script.empty()?fs::path(port_settings_default_file):fs::path();
+            {   // 134ui1: the window hotkeys
+                PortSettings hs;
+                try{if(!settings.empty()&&fs::exists(settings))hs=read_port_settings(settings);}
+                catch(const std::exception& e){std::cerr<<"Window hotkeys (port-only): "<<e.what()<<"\n";}
+                apply_window_hotkeys(hs,shown);
+            }
+            if(!test_window_keys.empty())host_window->allow_hotkeys(true);   // 134ui1 test: --test-window-key, even hidden
             bool from_setting=false;
             // The windowed placement (132win5): restored from window= (kept on a present monitor's work area) and
             // saved at the end, unless --window-size asks for a size. Hidden runs only with an explicit --port-settings.
@@ -5389,6 +5464,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 if(host_window)host_window->set_render_scale(display.render_scale);
                 if(host_window)host_window->set_native_resolution(display.resolution==InternalResolution::native);
                 vsync_on=s.vsync;
+                apply_window_hotkeys(s,false);   // 134ui1
             }catch(const std::exception& e){std::cerr<<"Port Settings page (port-only): "<<e.what()<<"\n";}
         };
         PortSettingsPage settings_page(settings_store,page_hooks);
@@ -5403,6 +5479,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         frontend_options.settings_store=settings_store;frontend_options.settings_page=&settings_page;
         frontend_options.frame_overlay=display.frame_overlay;frontend_options.frame_overlay_key=display.frame_overlay_key;
         frontend_options.test_overlay_key=frontend_test_overlay_key;
+        frontend_options.test_port_menu=frontend_test_port_menu;   // 134ui1
+        if(pause_menu_extras_flag)port_set_pause_menu_extras(*pause_menu_extras_flag);   // 134ui1: over pause_menu_extras=
         frontend_options.lan_play=lan_play_flag;  // port-only (132ln1)
         frontend_options.lan_loopback=lan_loopback_flag;  // port-only (132ln3)
         frontend_options.lan_loopback_peer=lan_loopback_peer;  // port-only test (132ln4)
@@ -8166,6 +8244,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
         bool hud_global_timer_expired=false;   // 133lt1: +6c4 expired on this console (the script's "waittimer")
         std::optional<unsigned> lan_peer_frame;bool lan_music_played=false;   // 133lt1 test drivers' clock and state
         std::map<std::uint32_t,int> lan_point_flags;   // 133lt1 log: the last record block byte +0 per LAN key
+        std::map<std::uint32_t,std::string> lan_npc_info_logged;   // 134lt14 log: the last NPC info bytes per LAN key
         if(mission_scripts){
             const std::vector<std::string> archive{"GAMEDATA",mission,"SCRIPTS.HOG"};
             std::map<std::string,Script> modules;
@@ -8463,7 +8542,9 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                             [net,c](std::uint8_t contact,const RootVector& p){net->npc_contact_0014c510(c,contact,{p[0],p[1],p[2]});},
                             [net,c](float speed){net->npc_speed_0014c6e0(c,speed);},
                             [net,c](float yaw){net->npc_heading_001a99a4(c,yaw);},
-                            [net,c]{net->npc_activate_peers_00157df0(c,true);}});   // 134lt8: +7c answers: nothing sent
+                            [net,c]{net->npc_activate_peers_00157df0(c,true);},   // 134lt8: +7c answers: nothing sent
+                            [net,c](const NpcNetPath& p){   // 134lt15: 002d7be0 (the owner's route to every client)
+                                net->send_net_path(c,p.last_2c,p.first_30,p.point_34,{p.point[0],p.point[1],p.point[2]});}});
                         NpcRemoteLink link;
                         link.link=[net,c]()->std::optional<NpcRemoteAim>{
                             const auto l=net->npc_net_link(c);
@@ -8534,12 +8615,19 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 const auto actor_20=[&](std::uint32_t actor,const char* what){
                     const auto& sp=spawned_at(actor,what);
                     auto& sim=actors.actor(actor);
-                    if(!sim.eligible()&&lan_net->npc_remote_controller_001b4f40(sp.c)){
+                    const bool was_ready=sim.eligible();
+                    if(!was_ready&&lan_net->npc_remote_controller_001b4f40(sp.c)){
                         npcs.at(sp.figure).ai->set_remote(sim);
                         std::cout<<"LAN: NPC +c 0x"<<std::hex<<sp.c<<std::dec<<" (actor "<<actor<<") has the remote NPC controller "
                             "0x004de2a0 (001b4f40 -> 002d6030) at frame "<<frame<<"\n";
                     }
                     actors.activate(actor);
+                    // 134lt15: 001b4f40's tail on the block (cNetObj_AddSystem 003fb650(+10, owner), +3268, SetActive).
+                    if(!was_ready){
+                        lan_net->npc_net_activate_tail_001b50d0(sp.c);
+                        std::cout<<"LAN (134lt15): NPC +c 0x"<<std::hex<<sp.c<<std::dec<<" (actor "<<actor<<") 001b4f40 tail: "
+                            "003fb650 NetMap object, +3268 1, 004341f0 SetActive at frame "<<frame<<"\n";
+                    }
                 };
                 // 132ln5h13: 0x00582730's controller swaps (001b3d98; LanNetCore ports it on the block) as they happen:
                 // kind 2 the remote NPC controller 002d6030 (NpcAiController::set_remote), kind 1 a fresh AI controller
@@ -12965,7 +13053,9 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                             const auto before=net->npc_activate_peers_sent();
                             net->npc_activate_peers_00157df0(key,false);
                             std::cout<<"LAN (134lt8): 00157df0 activation of +c 0x"<<std::hex<<key<<std::dec<<": "
-                                     <<(net->npc_activate_peers_sent()-before)<<" peer(s) sent cNetTerrainActivation(0)\n";}});
+                                     <<(net->npc_activate_peers_sent()-before)<<" peer(s) sent cNetTerrainActivation(0)\n";},
+                        [net,key](const NpcNetPath& p){   // 134lt15: 002d7be0
+                            net->send_net_path(key,p.last_2c,p.first_30,p.point_34,{p.point[0],p.point[1],p.point[2]});}});
                     std::cout<<"LAN (132ln5h15): authored "<<npc.label<<" uses stable key 0x"<<std::hex<<key<<std::dec
                              <<" on actor "<<npc.actor<<"\n";
                 }
@@ -13358,6 +13448,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             std::cout<<"LAN (133lt4): GOBJTriggerEventMsg "<<t.action_24<<" from player 0x"<<std::hex<<who<<std::dec<<" -> "<<t.receiver
                      <<": native receiver at frame "<<frame<<"\n";
         };
+        unsigned lan_net_path_logged=0;   // 134lt15: the first MSGGAME_NET_PATH_REQUEST receipts are logged
         unsigned lan_world_frame=0;   // the frame of the last lan_world_messages (the sim's sends happen in the next step)
         if(lan_net){
             // 00170660 / 001714c0 on a joiner: the kind-2 HotboxMsg to the session host (box key +4, occupant +14 = its key).
@@ -13402,6 +13493,12 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             sim.set_notify_checkpoint_network_sink([&]{
                 lan_net->send_notify_checkpoint(lan_net->local_player_key());
                 std::cout<<"LAN (133lt4): 001898f0's MSGGAME_NOTIFY_CHECKPOINT sent to every client (byte +20 5)\n";});
+            // 134lt15: the respawn poll 00177c60's MSGGAME_RESPAWN keeps event byte 5: 003c9420 sends the cRespawnMsg
+            // (0022e2c0, +8 the message's +24 = 0) for this console's human to every client.
+            sim.set_respawn_network_sink([&]{
+                lan_net->send_respawn(lan_net->local_player_key(),0);
+                std::cout<<"LAN (134lt15): 00177c60's MSGGAME_RESPAWN for player 0x"<<std::hex<<lan_net->local_player_key()<<std::dec
+                         <<" sent to every client (byte +20 5) at frame "<<lan_world_frame<<"\n";});
             if(script_world)script_world->network_trigger=[&](Word target,Word action,Word word_28,Word other_2c,Word source_30){
                 lan_net->send_trigger(target,static_cast<std::uint16_t>(action),word_28,other_2c,source_30,lan::kLanAll);
                 std::cout<<"LAN (133lt4): Trigger(PathedGOBJ) 00211350's GOBJTriggerEventMsg to "<<target<<" sent to every client (byte +20 5)\n";
@@ -13440,8 +13537,17 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             for(const auto& c:lan_net->take_remote_checkpoints()){
                 std::cout<<"LAN (133lt4): 0022e710 cAddCheckpointMsg for 0x"<<std::hex<<c.target_key<<std::dec<<" node "<<c.node_key<<" \""<<c.label
                          <<"\" from client "<<c.origin<<" at frame "<<frame;
-                if(c.target_key!=local_key){std::cout<<": another player's human here (001b3b60 on it: no port state)\n";continue;}
                 const auto node=mission_host?mission_host->checkpoint_node(c.node_key):std::nullopt;
+                if(c.target_key!=local_key){
+                    // 134lt15: 0022e710 queues it to the NetMap object of the key, this console's copy of that human:
+                    // its 001b3b60 sets the copy's checkpoint +33f0 (the matrix its revive 001898f0 teleports to).
+                    auto* remote=lan_remote_of(c.target_key);
+                    if(!remote||remote->gone||!remote->figure){std::cout<<": another player's human, not placed here: dropped\n";continue;}
+                    if(!node)throw std::runtime_error("unhosted(0x0022e800): cAddCheckpointMsg for a node that is not hosted: "+std::to_string(c.node_key));
+                    actors.actor(remote->figure->actor).queue_checkpoint(node->first,node->second,c.label);
+                    std::cout<<": MSGGAME_ADD_CHECKPOINT queued to the remote human (actor "<<remote->figure->actor<<")\n";
+                    continue;
+                }
                 if(!node)throw std::runtime_error("unhosted(0x0022e800): cAddCheckpointMsg for a node that is not hosted: "+std::to_string(c.node_key));
                 sim.queue_checkpoint(node->first,node->second,c.label);
                 std::cout<<": MSGGAME_ADD_CHECKPOINT queued to the local player\n";
@@ -13452,7 +13558,17 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 if(p.target_key!=local_key){
                     // 0022e4f0 queues it to the NetMap object of the key: the remote human's cNetPlayer, whose script
                     // filter takes OnNotifyCheckpointMsg (the co-op levels' checkpoint bookkeeping per player).
-                    if(!p.respawn&&mission_host&&mission_host->remote_player(p.target_key)){
+                    if(p.respawn){
+                        // 134lt15: 0022e320 queues MSGGAME_RESPAWN (+24 = +8) to this console's copy of that human
+                        // (transport 0). Its 001b45dc: +14 clear, so the revive 001898f0 (death actions off).
+                        auto* remote=lan_remote_of(p.target_key);
+                        if(!remote||remote->gone||!remote->figure){std::cout<<": another player's human, not placed here: dropped\n";continue;}
+                        auto& a=actors.actor(remote->figure->actor);
+                        a.queue_respawn();
+                        std::cout<<": queued to the remote human (actor "<<remote->figure->actor<<", life state "<<int(a.life_state())<<")\n";
+                        continue;
+                    }
+                    if(mission_host&&mission_host->remote_player(p.target_key)){
                         const bool taken=mission_host->deliver_notify_checkpoint(p.target_key);
                         std::cout<<": the remote player's controller"<<(taken?": script handler\n":": no script handler\n");
                     }else std::cout<<": another player's controller here (no port state)\n";
@@ -13674,7 +13790,12 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                     std::cout<<"LAN (134lt13): 0042d360: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<n.actor
                         <<") handed over: +98(1), +60(0)\n";
                     return std::pair<std::uint8_t,float>{a.life_state(),a.health().health_40};},
-                {}});
+                // 134lt14: cNPC_GetClosestPlayer 0014afd0 (003ce850 over the four client slots): the slot, -1 for none.
+                [&](std::uint32_t c)->std::int32_t{
+                    const auto a=lan_actor_of_key(c,false);
+                    if(!a)throw std::runtime_error("0014afd0: an NPC key with no actor here");
+                    if(!script_npcs_host)throw std::runtime_error("0014afd0: the closest player needs the script NPC host (003ce850)");
+                    return script_npcs_host->actor_closest_player_slot(*a);}});
         }
         // 134lt7: Follow in a network game (001488f0 / 002d2d50): the cNetNPCMsgs 0x32 {the target's +c or -1, the two
         // floats' bits}; len 4 (every peer) from an AI controller, len 8 (the owner) from a remote one, whose 002d2d50
@@ -13707,6 +13828,35 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             lan_net->npc_deactivate_global_00157510(key,generator);
             std::cout<<"LAN (134lt7): 00157510 DeactivateGlobal of +c 0x"<<std::hex<<key<<std::dec<<" (actor "<<actor<<"): "
                 <<(lan_net->npc_deactivate_globals_sent()-before)<<" peer(s) sent cDeactivateMsg + cNetTerrainActivation\n";});
+        // 134lt14: 003ce850 in a network game scans cNetObj_GetPlayer(i) of the four clients: this console's player in its
+        // slot and every present remote human's figure in its peer's.
+        const auto lan_player_slots=[&]{
+            std::array<std::optional<std::size_t>,4> slots{};
+            slots.at(lan_net->local_client_index())=std::size_t{0};
+            for(const auto& r:lan_remotes)if(!r.gone&&r.key&&r.figure&&r.peer<4)slots[r.peer]=r.figure->actor;
+            return slots;};
+        if(lan_net&&script_npcs_host&&lan_npc_activation_net)script_npcs_host->set_network_players(lan_player_slots);
+        // 134lt14: the script's Activate / ActivateAnon in a network game: 00157800 on the NPC's block with the GOBJ's
+        // object (its LAN key: this console's player, a remote human's, or an NPC's).
+        // The joiner's authored NPC blocks (134lt9, lan_joiner_authored) are keyed by the figure's stable ID.
+        const auto lan_npc_key=[&](std::size_t actor)->std::uint32_t{
+            if(const auto key=lan_actor_key(actor))return key;
+            for(const auto& n:npcs)
+                if(n.actor==actor&&lan_joiner_authored.contains(static_cast<std::uint32_t>(n.actor_id)))return static_cast<std::uint32_t>(n.actor_id);
+            return 0;};
+        if(lan_net&&script_npcs_host&&lan_npc_activation_net)script_npcs_host->set_activate_net([&,lan_npc_key](std::size_t actor,std::optional<Word> gobj){
+            const auto key=lan_npc_key(actor);
+            if(!key)throw std::runtime_error("00157800: Activate of an NPC without a LAN key in a network game");
+            std::uint32_t gkey=0;
+            if(gobj){
+                if(*gobj==lan_net->local_player_key()||(mission_host&&*gobj==mission_host->objects().player))gkey=lan_net->local_player_key();
+                for(const auto& r:lan_remotes)if(!gkey&&!r.gone&&(r.key==*gobj||(r.figure&&r.figure->actor_id==*gobj)))gkey=r.key;
+                for(const auto& n:npcs)if(!gkey&&static_cast<Word>(n.actor_id)==*gobj)gkey=lan_actor_key(n.actor);
+                if(!gkey)throw std::runtime_error("00157800: the Activate GOBJ "+std::to_string(*gobj)+" has no LAN key (003cc820)");
+            }
+            lan_net->npc_activate_00157800(key,gkey);
+            std::cout<<"LAN (134lt14): 00157800 Activate of +c 0x"<<std::hex<<key<<" (gobj 0x"<<gkey<<std::dec<<", actor "<<actor
+                <<"): enabled mask 0x"<<std::hex<<lan_net->npc_enabled_mask(key)<<std::dec<<"\n";});
         // 134lt9: the remote NPC controller's link of an authored NPC (002c6690's, and 001b3b60's action 2).
         const auto lan_authored_remote_link=[&](std::uint32_t key)->NpcRemoteLink{
             NpcRemoteLink link;
@@ -14044,6 +14194,27 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 actors.actor(*actor).queue_network_death(d.code);
                 lan_deaths_queued.push_back(*actor);
                 std::cout<<": queued to actor "<<*actor<<" (life state "<<int(actors.actor(*actor).life_state())<<") at frame "<<frame<<"\n";
+            }
+            for(const auto key:lan_net->take_dropped_deaths())
+                std::cout<<"LAN (134lt15): death action 0x42 received for +c 0x"<<std::hex<<key<<std::dec
+                         <<": 003fbb10 finds no NetMap object of the key (003e4f70 drops it) at frame "<<frame<<"\n";
+            // 134lt15: MSGGAME_NET_PATH_REQUEST (002d7a80 -> the NetMap object of the key, this console's copy of the
+            // NPC: 001b3b60 -> its controller's 002d4ff0).
+            for(const auto& p:lan_net->take_remote_net_paths()){
+                const auto actor=lan_actor_of_key(p.target_key,false);
+                NpcFigure* figure=nullptr;
+                if(actor)for(auto& f:npcs)if(f.actor==*actor&&f.ai){figure=&f;break;}
+                bool taken=false;
+                if(figure)taken=figure->ai->remote_net_path_002d4ff0(actors.actor(*actor),p.last_2c,p.first_30,p.point_34,
+                    RootVector{p.point[0],p.point[1],p.point[2],1.0F});
+                if(lan_net_path_logged<400){
+                    ++lan_net_path_logged;
+                    std::cout<<"LAN (134lt15): 002d7a80 MSGGAME_NET_PATH_REQUEST for 0x"<<std::hex<<p.target_key<<std::dec<<" (+2c "<<p.last_2c
+                             <<", +30 "<<p.first_30<<", +34 "<<int(p.point_34)<<" ("<<p.point[0]<<", "<<p.point[1]<<", "<<p.point[2]
+                             <<")) from client "<<p.origin<<" at frame "<<frame
+                             <<(!actor?": no object of the key here: dropped\n":taken?": 002d4ff0 on the remote controller\n"
+                                :": not a cNetNPC here (cNPC_HandleMessage takes no MSGGAME_NET_PATH_REQUEST)\n");
+                }
             }
         };
         std::map<std::uint32_t,std::int32_t> lan_pathed_sent;   // 134lt5: the host's NetPathedGobj +8 last written
@@ -14426,6 +14597,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
             catch(const std::exception& e){o.host.par_error=e.what();}
             o.host.mission=mission_host.get();
             o.host.settings=&settings_page;   // port-only (132win11): the pause menu's Port Settings page
+            o.host.port_menu_enabled=port_pc_build;   // port-only (134ui1): the PC's F7 port menu
             o.host.game_sound=game_sound.get();
             o.host.hud=&*hud_object;
             o.host.radar_blips=&hud_blips;   // 132hud2: the marker records' +4 (00272ad0's 003e7ee0)
@@ -15383,6 +15555,7 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 <<(sound_device?"":" (no real-time sound output)")<<"\n";
         };
         bool application_pause_shown=false;
+        std::vector<std::uint8_t> test_window_keys_posted;   // 134ui1: the --test-window-key keys posted so far
         const auto wait_application_pause=[&](const std::string& where){
             if(!window.application_paused())return true;
             if(!application_pause_shown){
@@ -15392,9 +15565,19 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                 if(session_gamepad)session_gamepad->set_vibration(false,0);
                 apply_window_mute(true);
                 std::cout<<"Host window (port-only): application paused "<<where
-                    <<" (Pause/Break or the window system menu; focus, minimise, resize and the game's Start pause stay separate)\n";
+                    <<" (Esc, Pause/Break or the window system menu; focus, minimise, resize and the game's Start pause stay separate)\n";
             }
-            while(window.application_paused()&&!window.close_requested())Sleep(16);
+            {
+                const auto paused_at=std::chrono::steady_clock::now();
+                while(window.application_paused()&&!window.close_requested()){
+                    Sleep(16);
+                    // 134ui1 test: a --test-window-key pause resumes by itself (no one is there to press the key again).
+                    if(!test_window_keys_posted.empty()&&std::chrono::steady_clock::now()-paused_at>std::chrono::milliseconds(300)){
+                        std::cout<<"Host window (port-only test): --test-window-key resumes the application after 300 ms\n";
+                        window.set_application_paused(false);
+                    }
+                }
+            }
             if(window.close_requested())return false;
             application_pause_shown=false;
             const auto resumed=std::chrono::steady_clock::now();
@@ -15443,6 +15626,12 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                     std::cout<<"Frame overlay (port-only): "<<(frame_overlay_on?"on":"off")<<" ("<<key_name(*display.frame_overlay_key)
                         <<") at frame "<<frame<<"\n";
                 }
+            }
+            for(auto [it,end]=test_window_keys.equal_range(frame);it!=end;++it){   // port-only test (134ui1)
+                std::cout<<"Host window (port-only test): --test-window-key posts "<<key_name(it->second)<<" at frame "<<frame
+                    <<" (hotkey: "<<window_hotkey_name(window_hotkey(it->second,window.hotkeys()))<<")\n";
+                test_window_keys_posted.push_back(it->second);
+                PostMessageW(window.handle(),WM_KEYDOWN,it->second,LPARAM(1));
             }
             if(test_overlay_key.count(frame)&&display.frame_overlay_key){   // port-only test (132win10)
                 PostMessageW(window.handle(),WM_KEYDOWN,*display.frame_overlay_key,LPARAM(1));
@@ -15648,6 +15837,59 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                         const auto actor=n.actor;
                         n.ai->set_critical_net([&,actor](float dt){
                             if(const auto key=lan_actor_key(actor))lan_net->npc_critical_net_0015a440(key,dt);});
+                    }
+                    // 134lt14: 0015a440's radius half in a network game (NpcAiController::RadiusNet): nothing on a joining
+                    // console; on the host IsActiveOnRemote 004340c0, the closest player's slot, +c0 = 00157510 and
+                    // +c8 = 00157940 on the figure's NPC block.
+                    if(lan_npc_activation_net)for(auto& n:npcs)if(n.ai&&!n.ai->has_radius_net()){
+                        const auto actor=n.actor;
+                        NpcAiController::RadiusNet rn;
+                        rn.host=lan_net->host_console();
+                        const auto need_key=[&,actor](const char* what){
+                            const auto key=lan_actor_key(actor);
+                            if(!key)throw std::runtime_error(std::string(what)+": an NPC figure without a LAN key in a network game");
+                            return key;};
+                        rn.active_on_remote=[&,need_key]{return lan_net->npc_active_on_remote_004340c0(need_key("004340c0"));};
+                        rn.closest_player_slot=[&,actor]{
+                            if(!script_npcs_host)throw std::runtime_error("003ce850: the closest player needs the script NPC host");
+                            return script_npcs_host->actor_closest_player_slot(actor);};
+                        rn.set_enabled_none=[&,need_key]{lan_net->npc_set_enabled_0015b220(need_key("0015b220"),-1,false);};
+                        rn.deactivate_global_net=[&,actor,need_key]{
+                            const auto key=need_key("00157510");
+                            bool generator=false;
+                            for(const auto& [k,sp]:spawned_npcs)if(sp.c==key)generator=true;
+                            const auto before=lan_net->npc_deactivate_globals_sent();
+                            lan_net->npc_deactivate_global_00157510(key,generator);
+                            std::cout<<"LAN (134lt14): 0015a440 radius +c0 = 00157510 DeactivateGlobal of +c 0x"<<std::hex<<key<<std::dec
+                                <<" (actor "<<actor<<") at frame "<<frame<<": "<<(lan_net->npc_deactivate_globals_sent()-before)<<" peer(s) sent\n";};
+                        rn.activate=[&,actor,need_key](std::int32_t act){
+                            const auto key=need_key("00157940");
+                            lan_net->npc_activate_00157940(key,act);
+                            std::cout<<"LAN (134lt14): 0015a440 radius +c8 = 00157940("<<act<<") of +c 0x"<<std::hex<<key<<" (actor "<<std::dec
+                                <<actor<<") at frame "<<frame<<": enabled mask 0x"<<std::hex<<lan_net->npc_enabled_mask(key)<<std::dec<<"\n";};
+                        n.ai->set_radius_net(std::move(rn));
+                    }
+                    // 134lt14: the NPC info bytes per client (owner +4 / previous +5, SetActive 004341f0's +6+s,
+                    // SetInActiveTerrain 00433f20's +a+s) and the enabled mask, printed when they change.
+                    for(const auto& n:npcs){
+                        if(!n.ai)continue;
+                        const auto key=lan_npc_key(n.actor);
+                        if(!key||!lan_net->has_npc(key))continue;
+                        const auto b=lan_net->npc_info_bytes(key);
+                        std::string s;
+                        if(b){
+                            std::ostringstream o;
+                            o<<"owner "<<int(static_cast<std::int8_t>(b->owner))<<" prev "<<int(static_cast<std::int8_t>(b->previous))<<" active";
+                            for(auto v:b->active)o<<" "<<int(v);
+                            o<<" in-terrain";
+                            for(auto v:b->in_terrain)o<<" "<<int(v);
+                            o<<" enabled 0x"<<std::hex<<lan_net->npc_enabled_mask(key);
+                            s=o.str();
+                        }else s="no entry";
+                        auto& last=lan_npc_info_logged[key];
+                        if(last==s)continue;
+                        last=s;
+                        std::cout<<"LAN (134lt14): NPC info +c 0x"<<std::hex<<key<<std::dec<<" (actor "<<n.actor<<") at frame "<<frame<<": "<<s<<"\n";
                     }
                     lan_npc_sections(frame);
                     lan_damages(frame);
@@ -17057,6 +17299,30 @@ std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored 
                     // Port-only (checkpoint 132win11): the Port Settings page's key capture (port_settings_page.hpp): while
                     // it waits for a key it gets the keyboard (a scripted run's keys: --port-settings-test-keys) and the
                     // menu gets no buttons, until every input is up after the capture.
+                    // Port-only (checkpoint 134ui1): F7 (hotkey.port_menu) or --test-port-menu: the port menu (Port Settings,
+                    // Cheats) over the level, the world paused as the start menu pauses it; F7 again closes it. Not during
+                    // the level-start loadout or the level end.
+                    window.set_key_capture(settings_page.capturing());
+                    {
+                        const bool test=test_port_menu.erase(frame)!=0;
+                        if(window.take_port_menu_request()||test){
+                            auto& prt=gui_overlay_draw->rt;
+                            const char* source=test?"--test-port-menu":"hotkey.port_menu, F7 by default";
+                            if(prt.port_menu_active()){
+                                prt.port_menu_close();
+                                std::cout<<"Port menu (port-only): closed ("<<source<<") at frame "<<frame<<"\n";
+                            }else if(gui_overlay_draw->loadout_pending||gui_overlay_draw->loadout_done_pending||sim.game_end().state_50!=0x0f){
+                                std::cout<<"Port menu (port-only): not opened ("<<source<<") at frame "<<frame
+                                    <<": the level is not in play (G+50 0x"<<std::hex<<int(sim.game_end().state_50)<<std::dec<<")\n";
+                            }else if(prt.port_menu_open()){
+                                std::cout<<"Port menu (port-only): opened ("<<source<<") at frame "<<frame
+                                    <<"; the world paused (00131470(1))\n";
+                            }else{
+                                std::cout<<"Port menu (port-only): not opened ("<<source<<") at frame "<<frame
+                                    <<": the start menu or the map is open\n";
+                            }
+                        }
+                    }
                     if(settings_page.capturing())settings_page.feed_keys(script.empty()?keys:KeyboardState{});
                     for(const auto& line:settings_page.take_log())std::cout<<line<<" at frame "<<frame<<"\n";
                     if(settings_page.holds_input(held!=0||std::any_of(keys.begin(),keys.end(),[](bool d){return d;})))held=0;

@@ -156,7 +156,7 @@ HostWindow::HostWindow(const HostWindowOptions& options) : title_(options.title)
             if (!hwnd_) throw std::runtime_error("Cannot create the game window");
             if (HMENU menu = GetSystemMenu(hwnd_, FALSE)) {
                 AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-                AppendMenuW(menu, MF_STRING, pause_command, L"Pause application\tPause/Break");
+                AppendMenuW(menu, MF_STRING, pause_command, L"Pause application\tEsc");
             }
             // Checkpoint 132win14 (port-only HiDPI): the size at the DPI of the monitor the window was placed on (the
             // window is not shown yet). An unaware process's window is always 96 DPI, so nothing changes there.
@@ -585,6 +585,16 @@ void HostWindow::set_title(const std::wstring& title) {
     });
 }
 
+void HostWindow::set_hotkeys(const WindowHotkeys& hotkeys) {
+    std::lock_guard lock(hotkeys_mutex_);
+    hotkeys_keys_ = hotkeys;
+}
+
+WindowHotkeys HostWindow::hotkeys() const {
+    std::lock_guard lock(hotkeys_mutex_);
+    return hotkeys_keys_;
+}
+
 void HostWindow::set_application_paused(bool paused) {
     on_ui([this, paused] { apply_application_pause(paused); });
 }
@@ -593,13 +603,13 @@ void HostWindow::apply_application_pause(bool paused) {
     if (application_paused_.exchange(paused) == paused) return;
     if (HMENU menu = GetSystemMenu(hwnd_, FALSE)) {
         ModifyMenuW(menu, pause_command, MF_BYCOMMAND | MF_STRING, pause_command,
-                    paused ? L"Resume application\tPause/Break" : L"Pause application\tPause/Break");
+                    paused ? L"Resume application\tEsc" : L"Pause application\tEsc");
         CheckMenuItem(menu, pause_command, MF_BYCOMMAND | (paused ? MF_CHECKED : MF_UNCHECKED));
     }
     refresh_title();
     update_mouse_capture();
     std::cout << "Host window (port-only): application " << (paused ? "paused" : "resumed")
-              << " (Pause/Break or the window system menu)\n";
+              << " (Esc, Pause/Break or the window system menu)\n";
 }
 
 void HostWindow::refresh_title() {
@@ -898,17 +908,26 @@ LRESULT HostWindow::handle_message(HWND window, UINT message, WPARAM w, LPARAM l
                 return 0;
             }
             break;
-        case WM_KEYDOWN:
-            if (w == VK_PAUSE) {
-                if (!(l & (1 << 30)) && hotkeys_) apply_application_pause(!application_paused_);
-                return 0;
+        case WM_KEYDOWN: {
+            // Checkpoint 134ui1: the window hotkeys (hotkey.pause / .fullscreen / .port_menu; Pause/Break always pauses).
+            WindowHotkey hotkey;
+            {
+                std::lock_guard lock(hotkeys_mutex_);
+                hotkey = window_hotkey(static_cast<std::uint8_t>(w), hotkeys_keys_);
             }
-            if (w == VK_F11) {
-                if (!(l & (1 << 30)) && hotkeys_) apply_fullscreen(!fullscreen_);
+            // A Port Settings key capture takes Esc (cancel) and any key it binds; only fullscreen stays live.
+            if (key_capture_ && hotkey != WindowHotkey::fullscreen && w != VK_PAUSE) hotkey = WindowHotkey::none;
+            if (hotkey != WindowHotkey::none) {
+                if (!(l & (1 << 30)) && hotkeys_) {
+                    if (hotkey == WindowHotkey::pause) apply_application_pause(!application_paused_);
+                    else if (hotkey == WindowHotkey::fullscreen) apply_fullscreen(!fullscreen_);
+                    else if (!application_paused_) port_menu_request_ = true;
+                }
                 return 0;
             }
             push(HostEvent::Type::key, static_cast<int>(w));
             return 0;
+        }
         case WM_SYSKEYDOWN:
             if (w == VK_SPACE && (l & (1 << 29))) return DefWindowProcW(window, message, w, l);
             if (w == VK_RETURN && (l & (1 << 29))) {

@@ -6,6 +6,7 @@
 // DPI, mouse capture, hiding) are the fixed screen's answers. Nothing here reaches the game's state or clock.
 
 #include "gfx_device.hpp"
+#include "input_bindings.hpp"
 #include "port_settings.hpp"
 
 #include <array>
@@ -129,6 +130,11 @@ public:
     void toggle_fullscreen() {}
     void on_fullscreen_change(std::function<void(bool)>) {}
     void allow_hotkeys(bool) {}
+    // 134ui1: the PC's window hotkeys (Esc / F11 / F7) have no PS5 counterpart; the port menu is the pause menu's.
+    void set_hotkeys(const WindowHotkeys&) {}
+    WindowHotkeys hotkeys() const { return {}; }
+    bool take_port_menu_request() { return false; }
+    void set_key_capture(bool) {}
 
     void want_mouse_capture(bool) {}
     bool mouse_captured() const { return false; }

@@ -175,9 +175,19 @@ bool background_audio_setting(const PortSettings& s) {
 }
 
 bool lan_play_setting(const PortSettings& s) {
-    bool on = true;
+    bool on = false;  // 134ui1: off by default (the PS2's online / offline select); lan_play=1 or --lan-play shows it
     for (const auto& [key, value] : s.other)
         if (key == "lan_play") on = flag_value(key, value);
+    return on;
+}
+
+bool pause_menu_extras_setting(const PortSettings& s) {
+    bool on = !port_pc_build;
+    for (const auto& [key, value] : s.other) {
+        if (key != "pause_menu_extras") continue;
+        if (value != "0" && value != "1") throw std::runtime_error("port settings: pause_menu_extras must be 0 or 1");
+        on = value == "1";
+    }
     return on;
 }
 
@@ -282,7 +292,7 @@ OnlineServerAddress online_server_setting(const PortSettings& s) {
 }
 
 bool online_platform_badges_setting(const PortSettings& s) {
-    bool on = true;
+    bool on = false;  // 134ui1: off by default (the original lobby shows no badges); online_platform_badges=1 shows them
     for (const auto& [key, value] : s.other)
         if (key == "online_platform_badges") on = flag_value(key, value);
     return on;

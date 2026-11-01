@@ -420,6 +420,7 @@ struct SoloActorSimulation::Impl {
     SoloActorSimulation::RemoteTriggerSink remote_trigger_sink;
     SoloActorSimulation::HotboxTriggerSink box_trigger_network_sink;   // 133lt4 (batch2)
     std::function<void()> notify_network_sink;                          // 133lt4 (batch2)
+    std::function<void()> respawn_network_sink;                         // 134lt15: 00177c60's cRespawnMsg copy
     bool joiner() const{return network_game&&!network_host;}   // 005721c8 set, 005721c0 clear
     std::function<bool(const ActorDamageEvent&)> network_damage;   // 132ln5h14c: 003c9420 of a network damage message
     bool port_ladder_arrival_at_end{};                     // port-only: the partner's ladder arrival (132ob5)
@@ -2935,6 +2936,11 @@ void SoloActorSimulation::Impl::frame_event(){
 void SoloActorSimulation::Impl::advance_respawn_poll(){
     if(!advance_actor_respawn_poll(respawn_poll,config.dt*1000.0F,fader))return;
     QueuedMessage message;message.kind=QueuedMessage::Kind::respawn;queue.push_back(message);
+    // 134lt15: 00177c60 leaves the cMessage constructor's event byte +20 = 5 (it writes only +1c = 0x40 and +24 = 0)
+    // and queues to the actor with transport 0, so in a network game 003c9420 also sends the message (cRespawnMsg,
+    // Pack 0022e2c0) to every client when the actor is a network object (the local human, +14 set). Each other
+    // console's 0022e320 queues MSGGAME_RESPAWN to its copy of this human, whose 001b45dc revives it (+14 clear).
+    if(network_game&&player()&&actions.byte_14!=0&&respawn_network_sink)respawn_network_sink();
 }
 
 // 00186360(actor, 0, 0, 0, 0, -1.0), fire off (actor_ignition.hpp): on an
@@ -3614,6 +3620,7 @@ void SoloActorSimulation::set_remote_hotbox_actor_sink(RemoteHotboxActorSink sin
 void SoloActorSimulation::set_remote_trigger_sink(RemoteTriggerSink sink){impl_->remote_trigger_sink=std::move(sink);}
 void SoloActorSimulation::set_box_trigger_network_sink(std::function<void(const HotboxType3Trigger&)> sink){impl_->box_trigger_network_sink=std::move(sink);}
 void SoloActorSimulation::set_notify_checkpoint_network_sink(std::function<void()> sink){impl_->notify_network_sink=std::move(sink);}
+void SoloActorSimulation::set_respawn_network_sink(std::function<void()> sink){impl_->respawn_network_sink=std::move(sink);}
 // 00170200 on the host: the rebuilt HotboxMsg (+24 action, +28 code, +2c value, +30 the occupant) queued to the box
 // (003c9350, transport 0), then +98 for actions 0 / 2 (clamped to 0..3) while 005721c8 is clear or 005721c0 set.
 void SoloActorSimulation::queue_actor_hotbox(const HotboxActorEvent& e){

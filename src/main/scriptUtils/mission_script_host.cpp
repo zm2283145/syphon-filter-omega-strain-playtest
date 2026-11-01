@@ -2686,8 +2686,13 @@ std::optional<Value> MissionScriptHost::hosted_call(const Script& script, const 
         if (name == "ActivateAnon" || ai_activate) {
             // 0014a2c0 / 0014a280 -> 00157800: in single player (005721c8
             // clear) actor virtual +5c(1); Activate's GOBJ goes through
-            // 003cc820 (identity) and is not used.
-            npcs->activate(handle->id);
+            // 003cc820 (identity) and is not used. 134lt14: a network game
+            // passes it (ActivateAnon: null) to 00157800's multiplayer branch.
+            std::optional<Word> gobj;
+            if (ai_activate)
+                if (const auto* target = std::get_if<RuntimeObjectHandle>(&arguments.at(1)))
+                    if (objects_.objects.alive(*target)) gobj = target->id;
+            npcs->activate_gobj(handle->id, gobj);
             return std::nullopt;
         }
         if (ai_activate_one) {

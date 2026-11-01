@@ -1103,6 +1103,9 @@ public:
     // links, after the local trigger sink; 001898f0's MSGGAME_NOTIFY_CHECKPOINT of the player.
     void set_box_trigger_network_sink(std::function<void(const HotboxType3Trigger&)> sink);
     void set_notify_checkpoint_network_sink(std::function<void()> sink);
+    // 134lt15: the respawn poll 00177c60's MSGGAME_RESPAWN (event byte 5) copy to every client, for the local player
+    // (+14 set) in a network game, called when the poll queues the message.
+    void set_respawn_network_sink(std::function<void()> sink);
     // Port-only (checkpoint 132ob5, omega_play --coop-partner, the partner
     // only): in actor mode 16, 001a80e0 marks the navigation arrived (+30ad,
     // 001a84c8..001a84e8) on every frame its ladder request (00476490: 31 / 32)

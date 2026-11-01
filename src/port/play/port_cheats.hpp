@@ -227,4 +227,14 @@ GuiNode port_settings_screen(const GuiNode& gameopt2, std::size_t rows);
 // INGAMENU.GUI with the Port Settings button "09" ($StartMenu8) appended to ingame_button_grp (after "07",
 // or "08" when the Cheats entry is there) and label_paused moved below it.
 void port_settings_patch_ingamenu(GuiNode& ingamenu);
+// Port-only (checkpoint 134ui1): the PC's F7 port menu PORTMENU, built from INGAMENU.GUI (the original seven
+// buttons): the Cheats button "08" ($StartMenu7) and the Port Settings button "09" ($StartMenu8) as the patches above
+// make them, moved up to the first two rows; the option text (xbutton_message) and label_paused kept, label_paused
+// one row under the two buttons; the objectives panel and the clock labels left out. Every decorator keeps INGAMENU's
+// IE ("INGAMENU" or "game"). Throws when INGAMENU is not the expected layout.
+GuiNode port_menu_screen(const GuiNode& ingamenu);
+// Port-only (checkpoint 134ui1): whether the PC's in-game pause menu also lists Cheats and Port Settings (the
+// pause_menu_extras port setting; default off on the PC, where F7 opens them; the consoles always list them).
+bool port_pause_menu_extras();
+void port_set_pause_menu_extras(bool on);
 }  // namespace omega

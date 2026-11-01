@@ -414,6 +414,9 @@ struct NpcAiHost {
     std::function<void(std::uint8_t contact_158,const RootVector& position)> network_contact;
     std::function<void(float speed)> network_speed;
     std::function<void(float yaw)> network_heading;
+    // 134lt15: the path follower's cNetPathMsg send (NpcPathHost::network_path), set for an NPC of this console
+    // (+14) in a network game.
+    std::function<void(const NpcRouteBuffer&)> network_path;
     // 132ln5h13: the remote NPC controller 0x004de2a0 (002d6030; npc_remote.hpp) answers 0014bff0's virtual calls
     // on the controller from its own fields: +d8 002d3480 the speed +200, +a4 002d2bd0 (1 while +200 > 1e-6), +a8
     // 002d2b50 (0: no look entry 2), +b4 002d3ff0 / +ac 002d4030 (the cNetHuman linked and its +0x20) and +b0
@@ -714,8 +717,17 @@ struct NpcAiRadiusHost {
     std::function<void()> activate_actor;                     // actor +5c(1)
     std::function<void()> deactivate_actor;                   // actor +60(1)
     std::uint32_t actor_id{};
+    // 134lt14: a network game (005721c8, g_IsMultiplayer): IsActiveOnRemote 004340c0 joins the busy test for the
+    // activation branch; the activation is act = ((the closest player's +c & 0x7f000000) >> 24) - 1 (returned: 0015a440
+    // calls the component's +c8, 00157940, with it after its network half) and the deactivation is the component's +c0
+    // (cNPC_DeactivateGlobal 00157510).
+    bool network{};
+    std::function<bool()> active_on_remote;                   // 004340c0(info, &id)
+    std::function<std::int32_t()> closest_player_slot;        // 003ce850's player: its slot
+    std::function<void()> deactivate_global;                  // +c0 = 00157510
 };
-void check_npc_activation_radius(NpcAiComponent& c,const NpcAiSystem& system,NpcAiHost& host,const NpcAiRadiusHost& radius);
+// Returns act: the slot 0015a440 passes to +c8 (00157940) at its end, or -1 (always -1 in single player).
+std::int32_t check_npc_activation_radius(NpcAiComponent& c,const NpcAiSystem& system,NpcAiHost& host,const NpcAiRadiusHost& radius);
 // ActivateByRadius (component +1cc, 0014ad30) / Off (+1d0, 0014ae30).
 void activate_npc_by_radius(NpcAiComponent& c,float radius);
 void deactivate_npc_by_radius(NpcAiComponent& c);

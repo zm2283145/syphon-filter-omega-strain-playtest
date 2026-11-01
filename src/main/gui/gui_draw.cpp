@@ -874,6 +874,7 @@ void GuiDrawer::draw_widget(GuiDrawList& out, const GuiRuntime& gui, const Widge
     case WidgetClass::equippane:  // GuiEquipmentPane (004e12f0): +30 is 0041e470 (132f3b)
     case WidgetClass::port_cheats:  // port-only (132f5): GuiGameOptions' 0041e470 draw
     case WidgetClass::port_settings:  // port-only (132win11): likewise
+    case WidgetClass::port_menu:      // port-only (134ui1): GuiStartMenu's 0041e470 draw
     case WidgetClass::agentsave:    // GuiAgentSave (004dd3a0): +30 is 0041e470 (132cc5)
     case WidgetClass::endobjectives:  // GuiEndGameObjectives (004e17c0) / GuiEndGameAwards (004e1730) /
     case WidgetClass::endawards:      // GuiAutoSaver (004e16d0): +30 is 0041e470 (132f11)

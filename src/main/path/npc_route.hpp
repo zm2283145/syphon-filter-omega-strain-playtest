@@ -293,6 +293,11 @@ std::uint8_t npc_route_rebuild(NpcRouteManager& m,std::int32_t start,std::int32_
 // nodes), +50 = -1, +58 = the destination node, then the route step; bit 3
 // = no segment. True when there is path left.
 bool start_npc_route(NpcPathFollower& pf,const NpcNodeGraph& graph,const NpcPathHost& host);
+// 134lt15: cNetPathMsg_SendPath 002d7be0's fields from a route buffer: +2c the last node (+20[+28 - 1]), +30 the
+// first (+20[0]; both -1 with an empty route), byte +34 = !(+10 >= 0), +38..+40 the point +0. PORT-ONLY: a buffer no
+// route wrote has no point (the original sends the heap block's earlier content): zeros.
+struct NpcNetPath { std::int32_t last_2c{-1},first_30{-1}; bool point_34{}; RootVector point{}; };
+NpcNetPath npc_net_path_002d7be0(const NpcRouteBuffer& b);
 // 0015fe80(pf, node) (the AI's +84, 0014f3f0, with the hold node's type-7
 // link target): without a node array (+74 +20) false. Otherwise the route is
 // the one node (count +28 = 1), +00 = its position (0015ddb0 -> 0015c2c0,

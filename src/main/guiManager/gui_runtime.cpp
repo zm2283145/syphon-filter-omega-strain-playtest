@@ -175,6 +175,7 @@ const char* class_id(WidgetClass c) {
     case WidgetClass::missionstats: return "GuiMissionStatistics";  // 0034f370
     case WidgetClass::missionstatlist: return "GuiMissionStatList";  // 00350560
     case WidgetClass::port_settings: return "PortGuiSettings";  // port-only (132win11)
+    case WidgetClass::port_menu: return "PortGuiMenu";          // port-only (134ui1)
     case WidgetClass::dossiers: return "GuiDossiers";
     case WidgetClass::ranks: return "GuiRanks";
     case WidgetClass::ratings: return "GuiRatings";
@@ -524,6 +525,7 @@ std::optional<float> GuiHost::scores_connection_status(std::int32_t) {
 bool GuiHost::port_cheat_menu() { return false; }
 // Port-only (checkpoint 132win11): no Port Settings screen unless a host offers one.
 PortSettingsScreen* GuiHost::port_settings_screen() { return nullptr; }
+bool GuiHost::port_menu() { return false; }  // port-only (134ui1)
 std::vector<std::int32_t> GuiHost::eqm_unlocked_items() { unhosted(0x332ac0, "the agent's unlocked weapons"); }
 bool GuiHost::eqm_byte_51ee38() { return false; }  // BSS, never written by the original
 std::int32_t GuiHost::weapon_record_count() { unhosted(0x2bf234, "the weapon database's record count"); }
@@ -703,9 +705,9 @@ Widget* GuiRuntime::make_widget(WidgetClass cls) {
         w->cc = std::make_unique<Widget::CmdCenter>();
         w->cc->open.fill(1);
     }
-    if (cls == WidgetClass::objectives || cls == WidgetClass::startmenu) {  // 00368e10(1, 1)
+    if (cls == WidgetClass::objectives || cls == WidgetClass::startmenu || cls == WidgetClass::port_menu) {  // 00368e10(1, 1)
         w->ob = std::make_unique<Widget::Objectives>();
-        if (cls == WidgetClass::startmenu) w->flags &= ~flag_releasable;  // 00456d90
+        if (cls != WidgetClass::objectives) w->flags &= ~flag_releasable;  // 00456d90 (134ui1: the port menu too)
     }
     if (cls == WidgetClass::startback) w->flags &= ~flag_releasable;
     if (cls == WidgetClass::slider) {  // 0043f910
@@ -836,6 +838,7 @@ Widget* GuiRuntime::new_widget(const std::string& name) {  // 0041f960
     // Port-only (checkpoint 132f5): the Cheats screen is not a registered class.
     if (name == "PortGuiCheats") return host_.port_cheat_menu() ? make_widget(WidgetClass::port_cheats) : nullptr;
     if (name == "PortGuiSettings") return host_.port_settings_screen() ? make_widget(WidgetClass::port_settings) : nullptr;
+    if (name == "PortGuiMenu") return host_.port_menu() ? make_widget(WidgetClass::port_menu) : nullptr;  // 134ui1
     const char* hit = nullptr;
     for (const char* c : registered_classes)
         if (iequal(name, c)) {
@@ -1176,6 +1179,10 @@ void GuiRuntime::v_init(Widget* w) {
         pc_init(w);
         return;
     }
+    if (w->cls == WidgetClass::port_menu) {  // 134ui1
+        xm_init(w);
+        return;
+    }
     if (w->cls == WidgetClass::port_settings) {
         ps_init(w);
         return;
@@ -1266,6 +1273,7 @@ void GuiRuntime::v_wake(Widget* w) {
     case WidgetClass::equippane: ep_wake(w); break;
     case WidgetClass::scoresequip: se_wake(w); break;
     case WidgetClass::port_cheats: pc_wake(w); break;
+    case WidgetClass::port_menu: xm_wake(w); break;  // 134ui1
     case WidgetClass::port_settings: ps_wake(w); break;
     case WidgetClass::endobjectives: eo_wake(w); break;
     case WidgetClass::endstats: es_wake(w); break;
@@ -1384,6 +1392,7 @@ std::uint8_t GuiRuntime::v_input(Widget* w, const PadEvent& ev) {
     case WidgetClass::equippane: return ep_input(w, ev);
     case WidgetClass::scoresequip: return se_input(w, ev);
     case WidgetClass::port_cheats: return pc_input(w, ev);
+    case WidgetClass::port_menu: return xm_input(w, ev);  // 134ui1
     case WidgetClass::port_settings: return ps_input(w, ev);
     case WidgetClass::eqmodify: return em_input(w, ev);
     case WidgetClass::eqsetup: return eqs_input(w, ev);  // 002a1d20
@@ -1486,6 +1495,7 @@ std::uint8_t GuiRuntime::v_event(Widget* w, Widget* sender, std::uint32_t type, 
     case WidgetClass::netcontacts: return ct_event(w, sender, type, a3, t0);  // 002adab0 (132on2h)
     case WidgetClass::netagencycell: return cell_event(w, sender, type, a3, t0);
     case WidgetClass::port_cheats: return pc_event(w, sender, type, a3, t0);
+    case WidgetClass::port_menu: return xm_event(w, sender, type, a3, t0);  // 134ui1
     case WidgetClass::port_settings: return ps_event(w, sender, type, a3, t0);
     case WidgetClass::eqmodify: return em_event(w, sender, type, a3, t0);
     case WidgetClass::eqsetup: return eqs_event(w, sender, type, a3, t0);  // 002a2170
@@ -4915,6 +4925,15 @@ void GuiRuntime::sm_select(Widget* w, std::int32_t idx) {  // 004562e0
 }
 
 void GuiRuntime::sm_back(Widget* screen) {  // 00456160
+    if (port_menu_mode_) {  // port-only (134ui1): back to the F7 port menu
+        Widget* m = factory("PortGuiMenu", std::string("PORTMENU"));
+        if (!m) return;
+        port_menu_focus_ = screen->id10 == 8 ? 8 : 7;
+        const std::int16_t layer = screen->layer;
+        pop(screen);
+        push(m, layer);
+        return;
+    }
     Widget* s = factory("GuiStartMenu", std::string("INGAMENU"));
     if (!s) return;
     s->id10 = screen->id10;
@@ -4932,6 +4951,11 @@ void GuiRuntime::sm_back(Widget* screen) {  // 00456160
 }
 
 void GuiRuntime::sm_exit(Widget* screen) {  // 00456100
+    if (port_menu_mode_) {  // port-only (134ui1): Start in the port menu's screens closes the F7 port menu
+        pop(screen);
+        port_menu_close();
+        return;
+    }
     pop(screen);
     hud_close();
     host_.app_131470(0);
@@ -6766,7 +6790,10 @@ void GuiRuntime::update_stack(float dt) {  // 00415950
     iterating_ = true;
     while (!pending_list_.empty()) {
         Widget* s = pending_list_.front();
-        if (s->flags & flag_enabled) {
+        // Port-only (134ui1): the front end's screens under the F7 port menu wait while it is open.
+        const bool frozen = port_menu_mode_ && std::find(port_menu_frozen_.begin(), port_menu_frozen_.end(), s) !=
+                                                   port_menu_frozen_.end();
+        if ((s->flags & flag_enabled) && !frozen) {
             OMEGA_ZONE("gui.v_update(stack)");
             v_update(s, f);
             if (!pending_list_.empty() && pending_list_.front() == s) pending_list_.erase(pending_list_.begin());
@@ -9460,7 +9487,7 @@ void GuiRuntime::ps_update(Widget* w, float dt) {
 
 void GuiRuntime::ps_leave(Widget* w) {
     if (PortSettingsScreen* m = host_.port_settings_screen()) m->closed();
-    if (game_canvas) {
+    if (game_canvas || port_menu_mode_) {
         sm_back(w);
         return;
     }
@@ -9496,7 +9523,7 @@ std::uint8_t GuiRuntime::ps_input(Widget* w, const PadEvent& ev) {
         ps_leave(w);
         return 1;
     }
-    if (pressed(0x800) && game_canvas) {
+    if (pressed(0x800) && (game_canvas || port_menu_mode_)) {
         if (m) m->closed();
         sm_exit(w);
         return 1;
@@ -9530,6 +9557,132 @@ std::uint8_t GuiRuntime::ps_event(Widget* w, Widget* sender, std::uint32_t type,
         }
     }
     return base_event(w, sender, type, a3, t0);
+}
+
+// ---------------------------------------------------------------- port-only F7 port menu (134ui1)
+
+// Port-only (checkpoint 134ui1, not in the original): PortGuiMenu, the PC's F7 port menu (PORTMENU, synthesised by
+// the host from INGAMENU's widgets: the Cheats button "08" and the Port Settings button "09" alone). It behaves as
+// the start menu's button list (sm_*): Cross opens the entry's screen in its place, Triangle or Start close it.
+void GuiRuntime::xm_init(Widget* w) {
+    auto& o = *w->ob;
+    base_init(w);
+    o.button_grp = find(w, "ingame_button_grp");
+    if (o.button_grp)
+        for (Widget* c : o.button_grp->children) {
+            if (c->name == "08") {
+                o.buttons[7] = c;
+                c->id10 = 7;
+            } else if (c->name == "09") {
+                o.buttons[8] = c;
+                c->id10 = 8;
+            }
+        }
+    o.paused = find(w, "label_paused");
+    o.option = 7;
+}
+
+void GuiRuntime::xm_wake(Widget* w) {
+    auto& o = *w->ob;
+    base_wake(w);
+    const std::int32_t idx = o.buttons[static_cast<std::size_t>(port_menu_focus_)] ? port_menu_focus_ : (o.buttons[7] ? 7 : 8);
+    o.option = idx;
+    sm_label(w, idx);
+    if (Widget* b = o.buttons[static_cast<std::size_t>(idx)]) {
+        set_focus(b);
+        w->focus = b;
+    }
+    if (o.paused) o.paused->flags |= flag_visible;
+}
+
+std::uint8_t GuiRuntime::xm_input(Widget* w, const PadEvent& ev) {
+    auto pressed = [&](std::uint32_t m) { return ev.kind == 1 && ev.port == 0 && ev.mask == m && ev.released == 0; };
+    (void)w;
+    if (pressed(pad_triangle) || pressed(0x800)) {
+        port_menu_close();
+        return 1;
+    }
+    return 0;
+}
+
+std::uint8_t GuiRuntime::xm_event(Widget* w, Widget* sender, std::uint32_t type, std::int32_t a3, std::int32_t t0) {
+    const std::uint32_t t = type & 0xffff;
+    if (t == 0 && sender && sender->id10 != -1) {
+        w->ob->option = sender->id10;
+        sm_label(w, sender->id10);
+        return 1;
+    }
+    if (t == 2) {
+        const std::int32_t idx = canvas_.focus ? canvas_.focus->id10 : -1;
+        if (idx == 7 || idx == 8) {
+            xm_select(w, idx);
+            return 1;
+        }
+    }
+    return base_event(w, sender, type, a3, t0);
+}
+
+void GuiRuntime::xm_select(Widget* w, std::int32_t idx) {
+    Widget* s = nullptr;
+    if (idx == 7 && host_.port_cheat_menu()) s = factory("PortGuiCheats", std::string("PORTCHEATS"));
+    if (idx == 8 && host_.port_settings_screen()) s = factory("PortGuiSettings", std::string("PORTSETTINGS"));
+    if (!s) return;
+    s->id10 = idx;
+    s->flags |= flag_focusable;
+    port_menu_focus_ = idx;
+    const std::int16_t layer = w->layer;
+    pop(w);
+    push(s, layer);
+}
+
+bool GuiRuntime::port_menu_open() {
+    if (port_menu_mode_ || !host_.port_menu()) return false;
+    if (game_canvas && (g.controller_6a8 || g.hud_6a9)) return false;  // the start menu or the map is open
+    Widget* m = factory("PortGuiMenu", std::string("PORTMENU"));
+    if (!m) return false;
+    port_menu_frozen_.clear();
+    if (!game_canvas) port_menu_frozen_ = canvas_.children;
+    port_menu_mode_ = true;
+    port_menu_focus_ = 7;
+    port_menu_backdrop_ = false;
+    std::int32_t layer = 100;  // the front end: over every screen
+    if (game_canvas) {
+        // As hud_open 002429f0: the world pause 00131470(1), the pad reset, the backdrop at layer -1, the menu at 0.
+        host_.app_131470(1);
+        if (!hud_busy()) host_.pad_reset();
+        if (Widget* bd = factory("GuiStartMenuBackdrop", std::string("GAMEBACK"))) {
+            push(bd, -1);
+            port_menu_backdrop_ = true;
+        }
+        g.controller_6a8 = 1;
+        layer = 0;
+    }
+    push(m, layer);
+    return true;
+}
+
+void GuiRuntime::port_menu_close() {
+    if (!port_menu_mode_) return;
+    // Every port screen still shown (the menu, or the Cheats / Port Settings screen it opened).
+    std::vector<Widget*> shown;
+    for (Widget* s : canvas_.children)
+        if (s->cls == WidgetClass::port_menu || s->cls == WidgetClass::port_cheats || s->cls == WidgetClass::port_settings)
+            shown.push_back(s);
+    for (Widget* s : shown) {
+        if (s->cls == WidgetClass::port_settings)
+            if (PortSettingsScreen* p = host_.port_settings_screen()) p->closed();
+        pop(s);
+    }
+    port_menu_mode_ = false;
+    port_menu_frozen_.clear();
+    if (game_canvas) {
+        if (port_menu_backdrop_)
+            if (Widget* bd = lookup("GuiStartMenuBackdrop")) pop(bd);
+        host_.pad_reset();
+        g.controller_6a8 = 0;
+        if (g.b_bb7) host_.app_131470(0);
+    }
+    port_menu_backdrop_ = false;
 }
 
 bool GuiRuntime::port_open_settings(Widget* options) {

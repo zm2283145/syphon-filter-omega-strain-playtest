@@ -594,12 +594,88 @@ A second announcement page.
 
 ## 10. PS2 clients
 
-133on1: `--original-port N` (config `original_port=`) opens the SCE-RT listener for original clients (ONLINE.md §8.4):
-unencrypted, so the disc needs the DISABLE_SECURITY patch, and DNAS is skipped by a patch too
-(`tools/pcsx2/SCUS-97264_D5605611.pnach`). The disc's INI names `syphonfilter-prod.pdonline.scea.com:10075`, so give
-10075 to `original_port`, move `port` elsewhere, point the PS2's DNS (or PCSX2's DEV9 hosts override) at this host
-and set `public_ip` to the address the PS2 reaches. `tools/run_pcsx2_original.ps1` prepares a local PCSX2 for it.
-Untested against the real client so far; open points are listed in ONLINE.md §8.4.
+133on1: `--original-port N` (config `original_port=`) opens the SCE-RT listener for original clients (ONLINE.md §8.4).
+The disc's INI names `syphonfilter-prod.pdonline.scea.com:10075`, so give 10075 to `original_port`, move `port`
+elsewhere, and set `public_ip` to the address the PS2 reaches. `tools/run_pcsx2_original.ps1` prepares a local PCSX2
+for it with the pnach (DNAS off, DISABLE_SECURITY on).
+
+### 10.1 An unpatched disc on a real PS2 (134on5, ONLINE.md §8.7)
+
+Three pieces, all on the server side, with no patch on the PS2:
+
+**a) The RT security key.** The retail client encrypts its traffic to a 512-bit RSA key built into the disc. omega_server
+serves it when the operator gives it the matching private key. The port does not ship that key.
+1. Get the SCE-RT default Medius key from the Horizon Medius server (MIT licence): the `DefaultKey` in
+   `Server.Medius/Config/ServerSettings.cs` at https://github.com/Horizon-Private-Server/horizon-server, three
+   decimal numbers, n, e (17) and d.
+2. Write them to a file next to the server, for example `omega_rt_key.txt`:
+   ```
+   n=<the decimal n>
+   e=17
+   d=<the decimal d>
+   ```
+   (Horizon's JSON shape, `{"n": "...", "e": "17", "d": "..."}`, is read too.) Keep the file private like any key.
+3. In the config: `original_rt_key=omega_rt_key.txt`, and to check it against your own disc,
+   `original_rt_elf=<path to SCUS_972.64 extracted from your disc>`.
+4. `omega_server check --config ...` prints `ok original_rt_key: ... pair consistent, matches the disc's Medius public
+   key ...`. At start the server refuses a key whose pair does not invert (`pow(pow(m,17,n),d,n) == m`) or whose n is
+   not the disc's 64 bytes at EE address 0x00492bf0 (KM_GetMediusPublicKey).
+   `original_rt_encrypt_replies=0` makes the server send its own messages plain after the key exchange (the client
+   accepts both); the default 1 encrypts them as the original servers did.
+
+The DISABLE_SECURITY patch keeps working with or without the key: a patched client never asks for encryption.
+
+**b) DNAS.** Sony's DNAS servers are gone, and omega_server has no DNAS. Run a DNAS replacement that replays the
+captured answers (they are Sony's data, so the port does not ship them and you obtain them yourself):
+- clank-dnas (MIT, a Docker image built on DNASrep): https://github.com/hashsploit/clank-dnas; or
+- DNASrep (AGPL-3.0, Apache + PHP + an OpenSSL 1.0.2 with the old SSL hello): https://github.com/corbin-zip/DNASrep.
+  Its `www/dnas/us-gw/packets` holds the US captures. Its README lists Syphon Filter: The Omega Strain (US and EU).
+
+It must answer HTTPS on port 443 for `gate1.us.dnas.playstation.org` (NTSC-U; `eu` / `jp` for the other regions)
+with the replacement's own certificates. Ignore its bundled DNS server (Bind9 / dnsmasq): omega_server's DNS points
+the DNAS names at it (below). Note its address (it can be the omega_server host, if port 443 is free there). [U] DNASrep's
+certificates expired on 2026-04-16: if the DNAS step fails with a certificate error, make new ones with the same
+subject and issuer names (its `etc/dnas` files show them).
+
+**c) DNS.** Start omega_server with its DNS responder:
+```
+omega_server --config omega_server.cfg --original-port 10075 --port 10080 --dns 53
+```
+and in the config:
+```
+# this host, as the PS2 reaches it (also written into the login's ConnectInfo)
+public_ip=192.168.1.20
+# the MAS name's answer (default: public_ip)
+dns_ip=192.168.1.20
+# the DNAS replacement's address
+dns_dnas_ip=192.168.1.21
+# your router or ISP resolver for every other name (unset: refused)
+dns_upstream=192.168.1.1
+```
+The log shows `dns (PORT-ONLY): UDP 0.0.0.0:53; syphonfilter-prod.pdonline.scea.com -> ..., gate1.{us,eu,jp}... -> ...`
+and one line per answered query. Bind to an address the PS2 reaches (`bind=0.0.0.0` or the LAN address). On Linux
+port 53 needs root or `setcap cap_net_bind_service=+ep omega_server`, and a running systemd-resolved may already hold
+it on 127.0.0.53 (bind the LAN address instead). On Windows allow UDP 53 and TCP 10075 in the firewall.
+
+**d) The PS2.** The disc's network setup (the game offers it when the memory card has no network configuration, or
+use the Network Adaptor Start-Up Disc), "Your Network Configuration File":
+1. Create a new configuration (or edit yours): connection type **Network Adaptor (Ethernet)**, hardware
+   **Network Adaptor (Ethernet)**.
+2. IP address: **Auto (DHCP)** is fine (or manual, if your network needs it).
+3. DNS: choose **Do not use automatic** (manual) and set **Primary DNS = the omega_server host's address**
+   (`192.168.1.20` above); leave the secondary empty, so no other resolver answers the game's names.
+4. Save it to the memory card. Then in the game: title -> agent -> ONLINE -> this configuration.
+
+The order the server sees:
+1. DNS: `gate1.us.dnas.playstation.org answered`, then the DNAS replacement's own log;
+2. `dns ...: syphonfilter-prod.pdonline.scea.com answered`;
+3. `rt conn N: rt: type 0x12 (decrypted, context 7) ... the client's RSA public key`, then `sent its RC key (type 0x93)`;
+4. the connect `(decrypted, context 3)`, then the usual Medius flow (ONLINE.md §8.5, §8.6).
+
+The in-level traffic of a PS2 game is peer to peer on port 3658 (ONLINE.md §8.3 item 8).
+
+Untested on real hardware so far (no PS2 at hand). The PCSX2 equivalent keeps the pnach's DNAS line, drops its four
+DISABLE_SECURITY lines and sets `original_rt_key=`.
 
 ## 11. Test scripts and ports (132on2g)
 

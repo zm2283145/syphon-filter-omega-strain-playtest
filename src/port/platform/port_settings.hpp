@@ -31,6 +31,14 @@
 
 namespace omega {
 
+// Port-only (checkpoint 134ui1): the Windows PC build (the F-key port menu, the window hotkeys); false on the PS Vita
+// and the PS5, whose Port Settings and Cheats stay in the in-game menus.
+#if defined(_WIN32) && !defined(OMEGA_PS5)
+inline constexpr bool port_pc_build = true;
+#else
+inline constexpr bool port_pc_build = false;
+#endif
+
 struct PortSettings {
     bool coop_partner = false;
     bool fullscreen = false;  // checkpoint 132win: borderless fullscreen (host_window.hpp)
@@ -52,9 +60,14 @@ std::string update_port_settings_text(std::string_view existing, const PortSetti
 // Checkpoint 132win12 (port-only): background_audio=0|1 (kept in `other`; default 0): 0 silences the game's sound
 // while its window is unfocused (audio_device.hpp set_background_muted), 1 keeps it playing. Throws on another value.
 bool background_audio_setting(const PortSettings& s);
-// Checkpoint 132ln1 (port-only, research/LAN_PLAY.md): lan_play=0|1 (kept in `other`; default 1 since 132ln1b, the user's
-// request): 1 shows Play LAN on the online / offline select (GuiHost::port_lan_play), 0 hides it. Throws on another value.
+// Checkpoint 132ln1 (port-only, research/LAN_PLAY.md): lan_play=0|1 (kept in `other`; default 0 since 134ui1, the user's
+// request that the port starts as the PS2 game; 1 from 132ln1b to 134ui1): 1 shows Play LAN on the online / offline select
+// (GuiHost::port_lan_play), 0 hides it. Throws on another value.
 bool lan_play_setting(const PortSettings& s);
+// Checkpoint 134ui1 (port-only): pause_menu_extras=0|1 (kept in `other`; default 0 on the PC, 1 on the consoles): 1 lists
+// the port's Cheats and Port Settings entries in the in-game pause menu and PORT SETTINGS in the title's Options as
+// well (the PC's F7 port menu has them either way). Throws on another value.
+bool pause_menu_extras_setting(const PortSettings& s);
 // Checkpoint 132md1 (port-only, research/MODDING.md): mods=0|1 (kept in `other`; default 1): 0 turns every mod off
 // (the original game's assets only, as with --no-mods); mods_folder=<folder> (UTF-8; default "mods" next to the game):
 // where interactive runs look for mods. Throws on another mods value.
@@ -100,7 +113,8 @@ struct OnlineServerAddress {
     unsigned short port = 10075;
 };
 OnlineServerAddress online_server_setting(const PortSettings& s);
-// Checkpoint 132on1 (port-only, research/ONLINE.md §7): online_platform_badges=0|1 (kept in `other`; default 1): 1 draws
+// Checkpoint 132on1 (port-only, research/ONLINE.md §7): online_platform_badges=0|1 (kept in `other`; default 0 since 134ui1,
+// 1 before): 1 draws
 // the players' platform badges ("PC", "PS2", ...) next to their names online, 0 hides them. Throws on another value.
 bool online_platform_badges_setting(const PortSettings& s);
 // Checkpoint 132on2g (port-only, research/ONLINE.md §6.15): online_chat_filter=0|1 (kept in `other`; default unset:

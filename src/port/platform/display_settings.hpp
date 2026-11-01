@@ -1,9 +1,11 @@
 #pragma once
 // Port-only display settings (checkpoint 132win10, not the original: the PS2 game draws a 640 x 448 frame for a
 // 4:3 television). Port settings keys (port_settings.hpp keeps them as unknown keys; display_settings reads them):
-//   aspect=pillarbox|4:3|stretch|wide  how the 4:3 frame meets the window (frame_fit.hpp FrameAspect; default pillarbox,
-//                                  the faithful 4:3 frame with black bars and the play's 3D over the whole window;
-//                                  wide (132ws): true wide screen, the 2D frame over the whole window at its PS2 scale)
+//   aspect=pillarbox|4:3|stretch|wide  how the 4:3 frame meets the window (frame_fit.hpp FrameAspect; default 4:3 since
+//                                  134ui1, the PS2's picture: everything in the centred 4:3 rectangle with black bars;
+//                                  pillarbox: the 4:3 2D frame with bars and the play's 3D over the whole window (the
+//                                  default before 134ui1); wide (132ws): true wide screen, the 2D frame over the whole
+//                                  window at its PS2 scale)
 //   hud_margin=<0..20>             132ws: under wide, the HUD's safe-area inset from the window's left / right edges in
 //                                  percent of the window's width (default 0)
 //   fov=<70..150>                  132ws3: under wide, the drawn field of view in percent of the original's view tangent
@@ -48,16 +50,12 @@ namespace omega {
 
 struct PortSettings;
 
-// Port-only (132ps5c hw7): the PS5 (a 16:9 television, like the Vita's 16:9 screen) defaults to wide. Cutscenes use
-// the widescreen zoom while attract trailers and loading / briefing screens keep their native 4:3 picture whole; the port settings file's
-// aspect= / movies= / movie_fill= still selects the other presentations. Other targets: unchanged.
-#if defined(OMEGA_PS5)
-inline constexpr FrameAspect display_default_aspect = FrameAspect::wide;
+// Port-only (checkpoint 134ui1, the user's request: the port runs as the PS2 game by default, its enhancements
+// toggled on in Port Settings): every target defaults to the 4:3 picture. Before 134ui1 the PC defaulted to pillarbox
+// (the 3D over the whole window) and the PS5 (132ps5c hw7) and the Vita (vita_main.cpp) to wide; aspect= (Port
+// Settings > DISPLAY > ASPECT) still selects pillarbox, stretch or wide.
+inline constexpr FrameAspect display_default_aspect = FrameAspect::strict;
 inline constexpr bool display_default_movie_zoom = false;
-#else
-inline constexpr FrameAspect display_default_aspect = FrameAspect::pillarbox;
-inline constexpr bool display_default_movie_zoom = false;
-#endif
 // 132vk1 (port-only, the PC): renderer=.
 enum class PcRenderer : std::uint8_t { d3d11, vulkan };
 enum class GameplayFrameRate : std::uint8_t { native, enhanced_60 };

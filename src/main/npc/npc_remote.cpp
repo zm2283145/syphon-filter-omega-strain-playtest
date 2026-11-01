@@ -10,13 +10,28 @@
 #include "npc_route.hpp"
 #include "vu_float.hpp"
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <type_traits>
 
 namespace omega {
 namespace {
 bool dying_or_dead(std::uint8_t life){return life==2||life==3;}
+// PORT-ONLY diagnostic (134lt15): OMEGA_NPC_REMOTE_TRACE=N prints the remote controller's 002d5160 inputs every N
+// updates per controller (0 / unset: off).
+unsigned remote_trace_every(){
+    static const unsigned n=[]{const char* e=std::getenv("OMEGA_NPC_REMOTE_TRACE");return e?static_cast<unsigned>(std::strtoul(e,nullptr,10)):0U;}();
+    return n;
+}
+bool remote_trace_due(const void* who){
+    const unsigned n=remote_trace_every();
+    if(!n)return false;
+    static std::map<const void*,unsigned> ticks;
+    return (ticks[who]++%n)==0;
+}
 // 0015a430 is false for mode 0 and 2 (it tests +24 == 3), so 0014b1e0 / 0014b160 build the rows: the given three
 // rows and row 3 = the position with w = 1.
 NpcAiSend teleport_send(std::uint8_t mode,const std::array<RootVector,3>& rows,const RootVector& position){
@@ -262,6 +277,26 @@ void NpcAiController::remote_follow_002d2ca0(SoloActorSimulation& actor,std::opt
     npc_follow_mode(component_,m,h);                                           // 00153870
     remote_->flags_214=static_cast<std::uint8_t>(remote_->flags_214|0x01U);
 }
+bool NpcAiController::remote_net_path_002d4ff0(SoloActorSimulation& actor,std::int32_t last_2c,std::int32_t first_30,bool point_34,
+    const RootVector& point){
+    if(!remote_)return false;
+    auto& c=component_;auto& r=*remote_;
+    route_actor_=&actor;
+    r.node_20c=first_30;                                                       // +20c = +30
+    if(!system_.routes)throw std::runtime_error("NPC AI: 002d4ff0's route request 0015f9b0 needs the route manager");
+    if(!point_34){
+        npc_route_request_15f9b0(*system_.routes,c.path,route_client_,last_2c,r.node_20c,nullptr);
+    }else{
+        r.point_1f0={point[0],point[1],point[2],1.0F};                         // 002d79a0: +38..+40, w = 1
+        if(r.node_20c>=0)npc_route_request_15f9b0(*system_.routes,c.path,route_client_,last_2c,r.node_20c,&r.point_1f0);
+        else{
+            auto h=host(actor);
+            npc_follow_point(c.path,graph_,r.point_1f0,npc_path_host(h));      // 0015fbd0(+1b0, +1f0, +5c)
+        }
+    }
+    if(!actor.eligible())r.flags_214=static_cast<std::uint8_t>(r.flags_214|0x02U);   // b2D && b2C && !b2E
+    return true;
+}
 bool NpcAiController::remote_node_in_active_terrain(SoloActorSimulation& actor){
     if(!remote_||remote_->node_1e8<0)return false;                             // b = +1e8 null: 0
     auto h=host(actor);
@@ -446,6 +481,21 @@ void NpcAiController::remote_update(SoloActorSimulation& actor,float dt){
         if(lost){h.remote->speed_200=r.speed_200;return;}
     }
     h.remote->speed_200=r.speed_200;
+    if(remote_trace_due(this)){
+        const auto p=h.actor.world_matrix()[3];
+        const std::uint32_t w38=combat_.word_38?combat_.word_38():0x80U;
+        const bool phys=h.actor.physical_present();
+        std::printf("NPC REMOTE TRACE id 0x%x pos (%.2f, %.2f, %.2f) +44 (%.2f, %.2f, %.2f) dist %.2f +38 0x%x +320c 0x%x"
+            " +2c8 %s%.3f +1ee %u +214 0x%x +60 0x%x +208 %d +50 %d +40 %.2f tgt (%.2f, %.2f, %.2f) order %u +200 %.3f +3c %.3f"
+            " +150 0x%x +158 %u +204 %.2f arrive %u\n",
+            actor_id_,p[0],p[1],p[2],motion?motion->position_44[0]:0.0F,motion?motion->position_44[1]:0.0F,
+            motion?motion->position_44[2]:0.0F,motion?npc_remote_distance(motion->position_44,p):-1.0F,w38,h.actor.mode_320c(),
+            phys?"":"none ",phys?h.actor.physical_2c8():0.0F,unsigned(r.mode_1ee),unsigned(r.flags_214),unsigned(c.path.flags_60),
+            r.node_208,c.path.current_50,c.path.remaining_40,c.path.target_00[0],c.path.target_00[1],c.path.target_00[2],
+            unsigned(npc_route_order_1600a0(c.path,r.node_208)),r.speed_200,motion?motion->speed_3c:-1.0F,
+            remote_link_.word_150(),unsigned(c.contact_158),r.timer_204,unsigned(actor.navigation_target().arrived_30ad));
+        std::fflush(stdout);
+    }
     run_npc_locomotion(c,h);                                                   // 0014bff0
 }
 

@@ -5,8 +5,8 @@
 //
 //  * Framing (rt_msg_client_set_header 0x003009c8 / get_header 0x00300a58): [u8 type][u16 length, little endian]
 //    [payload]. Bit 7 of the type marks an encrypted message (rt_msg_client_process_message 0x002ff4d8: a u32 hash,
-//    then RC4-style KM_Decrypt). This layer serves only the unencrypted client: the retail INI has no DISABLE_SECURITY,
-//    so the disc needs the DISABLE_SECURITY patch (ONLINE.md §8.3); an encrypted message is logged and dropped.
+//    then RC4-style KM_Decrypt). 134on5: served with the operator's key (Security below); without one the disc
+//    needs the DISABLE_SECURITY patch (ONLINE.md §8.3).
 //  * The client's connect (rt_msg_client_update_comm_wait 0x002fdc60): with an encryption key it first sends type
 //    0x12 (its 64-byte public key, 0x002fe8d8); without one, type 0x00 (TCP; 0x15 for the UDP kind), built by
 //    0x002fea88: u8 1, u8 8, u8 0x84 (rt_msg_client_get_client_version 0x003017f8), u16 the target, u32 the
@@ -32,9 +32,20 @@
 //  * Other server types the client handles: 5 (an echo answer), 17 disconnect, 19 / 27 crypt keys, 20 session key,
 //    28 system message (online_protocol.hpp rt::SystemMessage), 29 cheat query, 30 memory poke.
 
+//  * Security (134on5, ONLINE.md §8.7, online_rt_crypto.hpp): a retail client without the DISABLE_SECURITY patch
+//    first sends type 0x92 (0x12 encrypted to the disc's Medius public key, context 7): its own 64-byte RSA public
+//    key. Given the operator's private key, the session answers type 0x93 (0x13, rt_msg_client_process_crypt_key_peer
+//    0x00300248): a fresh 64-byte RC key, RSA-encrypted to the client's key (context 7). The client stores it
+//    (KM_AddSymmetricKey for id 0xffff) and sends its connect; from then on it encrypts with context 3 (that RC key),
+//    and the session decrypts its messages and encrypts its own the same way. Without a key the 0x12 is refused as
+//    before (the DISABLE_SECURITY patch path is unchanged).
+
 #include "online_protocol.hpp"
+#include "online_rt_crypto.hpp"
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -51,6 +62,7 @@ constexpr std::uint8_t ServerConnectReject = 0x06, ServerConnectAccept = 0x07;
 constexpr std::uint8_t ServerApp = 0x0a, ClientAppToServer = 0x0b;
 constexpr std::uint8_t ServerDisconnect = 0x11;
 constexpr std::uint8_t ClientCryptKeyPublic = 0x12;
+constexpr std::uint8_t ServerCryptKeyPeer = 0x13;  // 134on5: the RC key for the client (0x00300248)
 constexpr std::uint8_t ClientConnectUdp = 0x15;
 constexpr std::uint8_t ServerConnectComplete = 0x1a;
 constexpr std::uint8_t ServerSystemMessage = 0x1c;
@@ -73,8 +85,18 @@ public:
         bool close = false;
     };
     explicit RtSession(std::uint16_t client_index) : index_(client_index) {}
+    // 134on5: the operator's key for the disc's Medius public key (nullptr: no security; an encrypting client is
+    // refused). encrypt_replies false sends the session's messages plain after the key exchange (the client takes
+    // both: rt_msg_client_process_message 0x002ff4d8 decrypts only a type with bit 7).
+    using KeySource = std::function<rtcrypto::Block()>;  // the RC key generator (tests pass a fixed one)
+    void set_security(std::shared_ptr<const rtcrypto::RsaKey> server_key, bool encrypt_replies = true,
+                      KeySource keys = {});
     Output feed(std::span<const std::uint8_t> bytes);
     bool connected() const { return connected_; }
+    bool secure() const { return secure_; }
+    // 134on5: RT bytes from this session to the client (whole messages, e.g. from_server_frame), encrypted with the
+    // session's RC key (context 3) once the key exchange is done; unchanged before it or with encrypt_replies off.
+    std::vector<std::uint8_t> seal(std::span<const std::uint8_t> rt_bytes) const;
     // An omega_server frame (encode_frame bytes) to RT bytes: a Medius response as type 10 [1][id][struct], the
     // system message as type 28; an extension (never sent to an original session) or an id that is no registration
     // gives nothing. A class-4 id (mid::kClass4Base..) goes as channel 4 and its index (134on4).
@@ -82,6 +104,13 @@ public:
 
 private:
     void message(std::uint8_t type, std::span<const std::uint8_t> payload, Output& out);
+    void crypt_key_public(std::span<const std::uint8_t> client_key, Output& out);
+    void reply(std::vector<std::uint8_t>& to, std::uint8_t type, std::span<const std::uint8_t> payload) const;
+    std::shared_ptr<const rtcrypto::RsaKey> server_key_;
+    bool encrypt_replies_ = true;
+    KeySource keys_;
+    bool secure_ = false;  // the RC key was sent
+    rtcrypto::Block rc_key_{};
     std::vector<std::uint8_t> buffer_;
     std::uint16_t index_ = 0;
     bool connected_ = false;

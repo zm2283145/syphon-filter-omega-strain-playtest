@@ -273,6 +273,12 @@ public:
     // for ActivateAnon (0014a2c0, gobj null) and Activate(npc, gobj)
     // (0014a280; the gobj, 003cc820, is not used in solo).
     virtual void activate(Word npc) = 0;
+    // 134lt14: 00157800 with its GOBJ (Activate's argument; nullopt for ActivateAnon or a dead object): a network game
+    // runs cNPC_Activate_cGOBJP's multiplayer branch; the default is the single-player activate.
+    virtual void activate_gobj(Word npc, std::optional<Word> gobj) {
+        (void)gobj;
+        activate(npc);
+    }
     // Activate(NPC) (0014a250 -> component +48 = Activate 00157df0): the
     // component's own Activate, which returns unless +159 (inactive) and,
     // for an absent actor, calls the actor's +5c(1) when +44 holds (that

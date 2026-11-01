@@ -66,8 +66,9 @@ Controls, settings (`local\port_settings.txt`), cheats, CPU partners, mods, save
 guide, [tools/package/README-PLAY.md](tools/package/README-PLAY.md), which is copied into the play folder.
 
 In windowed mode, use the standard title-bar **Minimize**, **Maximize / Restore** and **Close** buttons.
-**F11** or **Alt+Enter** switches fullscreen/windowed mode. To pause the whole application, use **Pause/Break**
-or **Alt+Space → Pause application**; repeat to resume. The title shows **[PAUSED]**. Switching focus,
+**F11** or **Alt+Enter** switches fullscreen/windowed mode. To pause the whole application, use **Esc**, **Pause/Break**
+or **Alt+Space → Pause application**; repeat to resume. **F7** opens the port menu (Port Settings, Cheats). The game
+starts as the PS2 version (4:3 picture, 30 fps, native resolution); its enhancements are in Port Settings. The title shows **[PAUSED]**. Switching focus,
 minimizing or using Win+D does not automatically pause or resume it.
 
 ## Playing on PS Vita

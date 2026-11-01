@@ -356,6 +356,56 @@ void LanNetCore::npc_activate_00157940(std::uint32_t c, std::int32_t v) {
     call(m, 0x157940, {controller, static_cast<std::uint32_t>(v)});
 }
 
+// 134lt14 (the header): 00157800 on the NPC's block.
+void LanNetCore::npc_activate_00157800(std::uint32_t c, std::uint32_t gobj_key) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN 00157800 during the background load pump");
+    const auto controller = m.read(npc_block(c) + 0x58);
+    if (!controller) unhosted(0x157800, "an NPC block without a controller");
+    const auto caller = sp_;
+    sp_ -= 0x40;
+    try {
+        std::uint32_t gobj = 0;
+        if (gobj_key) {
+            m.write(sp_ + 0x30, 4, gobj_key);
+            gobj = call(m, 0x40c540, {sp_ + 0x30});
+            if (!gobj) unhosted(0x3cc820, "the Activate GOBJ 0x" + hex8(gobj_key) + " is no object here");
+        }
+        call(m, 0x157800, {controller, gobj});
+        log_.push_back("00157800: NPC +c 0x" + hex8(c) + " Activate(gobj 0x" + hex8(gobj_key) + "): enabled mask 0x" +
+                       hex8(npc_enabled_mask(c)));
+    } catch (...) {
+        sp_ = caller;
+        throw;
+    }
+    sp_ = caller;
+}
+
+void LanNetCore::npc_set_enabled_0015b220(std::uint32_t c, std::int32_t bit, bool set) {
+    auto& m = memory_;
+    const auto controller = m.read(npc_block(c) + 0x58);
+    if (!controller) unhosted(0x15b220, "an NPC block without a controller");
+    call(m, 0x15b220, {controller, static_cast<std::uint32_t>(bit), set ? 1U : 0U});
+}
+
+bool LanNetCore::npc_active_on_remote_004340c0(std::uint32_t c) {
+    return call(memory_, 0x4340c0, {0, npc_block(c) + 0xc}) != 0;
+}
+
+std::optional<LanNetCore::NpcInfoBytes> LanNetCore::npc_info_bytes(std::uint32_t c) {
+    auto& m = memory_;
+    const auto found = call(m, 0x4361c0, {npc_block(c) + 0xc, 0});
+    if (!found) return std::nullopt;
+    NpcInfoBytes b;
+    b.owner = static_cast<std::uint8_t>(m.read(found + 4, 1));
+    b.previous = static_cast<std::uint8_t>(m.read(found + 5, 1));
+    for (std::uint32_t s = 0; s < 4; ++s) {
+        b.active[s] = static_cast<std::uint8_t>(m.read(found + 6 + s, 1));
+        b.in_terrain[s] = static_cast<std::uint8_t>(m.read(found + 0xa + s, 1));
+    }
+    return b;
+}
+
 std::uint32_t LanNetCore::npc_enabled_mask(std::uint32_t c) const {
     const auto item = npc_enabled_item(memory_, c);
     return item ? memory_.read(item + 4) : 0U;
@@ -1225,7 +1275,9 @@ bool LanNetCore::send_world_packet(std::uint32_t type_address, std::uint32_t pac
     // 003fb020 serializes and returns before 003fad50 while 005721d0 is clear.
     if (!m.read(dme::kNetworkGame, 1) || !m.read(dme::kInLevel, 1)) return false;
     const auto type = m.read(type_address);
-    if (!type || type >= 0x100) unhosted(pack, "the message's DME registration is unavailable");
+    // 134lt15: cNetPathMsg (0x0051f0c8) is the first message the boot registration gives an ID (002d78c0 runs before
+    // every other NetRegisterMessage 002e9e50 caller): its ID is 0.
+    if ((!type && type_address != 0x51f0c8) || type >= 0x100) unhosted(pack, "the message's DME registration is unavailable");
     const auto caller = sp_;
     sp_ -= 0x100;
     const auto packet = sp_ + 0x20;
@@ -1315,6 +1367,25 @@ void LanNetCore::send_respawn(std::uint32_t target_key, std::uint32_t value) {
     if (send_world_packet(0x4f7958, 0x22e2c0, 12, {{8, 4, value}}, target_key, 0xffffffffU, 0x40)) ++player_messages_sent_;
 }
 
+void LanNetCore::send_net_path(std::uint32_t target_key, std::int32_t last, std::int32_t first, bool point_flag,
+                               const std::array<float, 3>& point) {
+    // 002d7be0: cNetObj_SendMessage(key, msg, -1, -1); the Pack 002d79d0 writes +1c = 0x40.
+    if (send_world_packet(0x51f0c8, 0x2d79d0, 0x20,
+                          {{8, 4, static_cast<std::uint32_t>(last)}, {0xc, 4, static_cast<std::uint32_t>(first)},
+                           {0x10, 1, point_flag ? 1U : 0U}, {0x14, 4, std::bit_cast<std::uint32_t>(point[0])},
+                           {0x18, 4, std::bit_cast<std::uint32_t>(point[1])}, {0x1c, 4, std::bit_cast<std::uint32_t>(point[2])}},
+                          target_key, 0xffffffffU, 0x40))
+        ++net_paths_sent_;
+}
+
+std::vector<LanNetCore::RemoteNetPath> LanNetCore::take_remote_net_paths() {
+    if (pump_.joinable())
+        throw std::runtime_error("LAN net path access during background load pump; defer until stop_load_pump");
+    std::vector<RemoteNetPath> out;
+    out.swap(remote_net_paths_);
+    return out;
+}
+
 std::vector<LanNetCore::RemotePlayerMessage> LanNetCore::take_remote_player_messages() {
     if (pump_.joinable())
         throw std::runtime_error("LAN checkpoint message access during background load pump; defer until stop_load_pump");
@@ -1336,7 +1407,7 @@ std::vector<LanNetCore::RemoteTrigger> LanNetCore::take_remote_triggers() {
 std::uint32_t LanNetCore::receive_world_message(std::uint32_t callback, std::uint32_t origin, std::uint32_t data) {
     auto& m = memory_;
     const std::uint32_t size = callback == 0x22e710 ? 0x4cU : callback == 0x2115e0 ? 0x10U : callback == 0x22e4f0 ? 8U
-                               : callback == 0x22e320 ? 0xcU : 0x18U;
+                               : callback == 0x22e320 ? 0xcU : callback == 0x2d7a80 ? 0x20U : 0x18U;
     const auto available = dme_->incoming_message_remaining();
     if (available != 0xffffffffU && available < size) unhosted(callback, "a truncated world message");
     m.write(dme::kBusy, 1, 1);
@@ -1363,6 +1434,12 @@ std::uint32_t LanNetCore::receive_world_message(std::uint32_t callback, std::uin
                 const bool respawn = callback == 0x22e320;
                 remote_player_messages_.push_back({o, respawn, key, respawn ? m.read(data + 8) : 0U});
                 ++player_messages_received_;
+            } else if (callback == 0x2d7a80) {  // 134lt15: cNetPathMsg_PathCallback
+                RemoteNetPath p{o, key, static_cast<std::int32_t>(m.read(data + 8)), static_cast<std::int32_t>(m.read(data + 0xc)),
+                                m.read(data + 0x10, 1) != 0, {}};
+                for (std::uint32_t k = 0; k < 3; ++k) p.point[k] = std::bit_cast<float>(m.read(data + 0x14 + k * 4));
+                remote_net_paths_.push_back(p);
+                ++net_paths_received_;
             } else if (callback == 0x2115e0) {
                 remote_lift_locks_.push_back({o, key, static_cast<std::int32_t>(m.read(data + 8)), m.read(data + 0xc, 1) != 0});
                 ++lift_locks_received_;
@@ -1737,6 +1814,15 @@ void LanNetCore::npc_net_activate_001b4f40(std::uint32_t block) {
     // 001af190 and 0022c650 are the play's actor activation (with set_remote when `built`). +2d mirrors 00392900's.
     npc_terrain_hosts_.net_activate(key, built);
     m.write(block + 0x2d, 1, 1);
+    const auto idx = npc_net_activate_tail_index(key);
+    ++npc_net_activations_;
+    log_.push_back("001b4f40: NPC +c 0x" + hex8(key) + " NetActivate (" + (built ? "cNetNPC built, " : "") + "owner " +
+                   std::to_string(static_cast<std::int32_t>(idx)) + ")");
+}
+
+std::uint32_t LanNetCore::npc_net_activate_tail_index(std::uint32_t key) {
+    auto& m = memory_;
+    const auto block = npc_block(key);
     const auto caller = sp_;
     sp_ -= 0x40;
     const auto loc = sp_ + 0x38;
@@ -1750,10 +1836,10 @@ void LanNetCore::npc_net_activate_001b4f40(std::uint32_t block) {
     call(m, 0x4341f0, {loc, block + 0xc});
     call(m, 0x436ba0, {loc, 0xffffffffU});
     sp_ = caller;
-    ++npc_net_activations_;
-    log_.push_back("001b4f40: NPC +c 0x" + hex8(key) + " NetActivate (" + (built ? "cNetNPC built, " : "") + "owner " +
-                   std::to_string(static_cast<std::int32_t>(idx)) + ")");
+    return idx;
 }
+
+void LanNetCore::npc_net_activate_tail_001b50d0(std::uint32_t c) { (void)npc_net_activate_tail_index(c); }
 
 // 134lt7 (the header): cHuman_NetDeactivate 001b4970's block part, from cDeactivateMsg's receive.
 void LanNetCore::npc_net_deactivate_001b4970(std::uint32_t block) {
@@ -3509,6 +3595,7 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x20e350: return receive_end_level(arg(2), arg(3));
     case 0x170200: case 0x22e710: case 0x2115e0: case 0x211700:  // 133lt4: the world messages
     case 0x22e4f0: case 0x22e320:
+    case 0x2d7a80:  // 134lt15: cNetPathMsg
         return receive_world_message(address, arg(2), arg(3));
     case 0x12ed00: return 1;  // matched cSystem_SendCreated: no state packet
     case 0x428ef0: return receive_objective_active(arg(3), true);
@@ -3759,7 +3846,18 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     case 0x184eb0: { Frame f(sp_); return death_action_destroy_00184eb0(m, *this, arg(0), arg(1)); }
     case 0x3e7370: { Frame f(sp_); return death_action_clone_003e7370(m, *this, arg(0)); }
     case 0x3e6270: { Frame f(sp_); return death_action_serialise_003e6270(m, *this, arg(0), arg(1), arg(2), arg(5), arg(6)); }
-    case 0x3e4f70: { Frame f(sp_); ++deaths_received_; return death_action_receive_003e4f70(m, *this, arg(3), f.caller); }
+    case 0x3e4f70: {
+        Frame f(sp_);
+        ++deaths_received_;
+        // PORT-ONLY diagnostic (134lt15): a death action 003e4f70 consumed without a delivery (no NetMap object of
+        // the key: 003fbb10 answered 0) is reported to the play (take_dropped_deaths).
+        const auto key = m.read(arg(3) + 4);
+        const auto queued = remote_deaths_.size();
+        const bool in_level = m.read(dme::kInLevel, 1) != 0;
+        const auto r = death_action_receive_003e4f70(m, *this, arg(3), f.caller);
+        if (in_level && remote_deaths_.size() == queued) dropped_deaths_.push_back(key);
+        return r;
+    }
     // 132ln5h13: the "Generator Message" (vtable 0x004db600) and the "GeneratorBase Message" receive.
     case 0x157d20: { Frame f(sp_); return generator_release_message_destroy_00157d20(m, *this, arg(0), arg(1)); }
     case 0x222410: { Frame f(sp_); return generator_release_message_clone_00222410(m, *this, arg(0)); }
@@ -3999,9 +4097,9 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
     }
     case 0x184cd0: return m.read(arg(0) + 0x3598, 1);   // jr ra; lbu v0, 0x3598(a0)
     case 0x15b060: { Frame f(sp_); return npc_get_enabled_0015b060(m, *this, arg(0)); }
-    case 0x15b220: { Frame f(sp_); npc_set_enabled_0015b220(m, *this, arg(0), arg(1), arg(2)); return 0; }
+    case 0x15b220: { Frame f(sp_); omega::npc_set_enabled_0015b220(m, *this, arg(0), arg(1), arg(2)); return 0; }
     case 0x157940: { Frame f(sp_); omega::npc_activate_00157940(m, *this, arg(0), arg(1)); return 0; }
-    case 0x157800: { Frame f(sp_); npc_activate_00157800(m, *this, arg(0), arg(1)); return 0; }
+    case 0x157800: { Frame f(sp_); omega::npc_activate_00157800(m, *this, arg(0), arg(1)); return 0; }
     case 0x14afd0: {   // cNPC_GetClosestPlayer on an NPC block's controller: the play's (PORT-ONLY boundary), as GetPlayer
         const auto key = m.read(m.read(arg(0) + 0x30) + 0xc);
         if (!npc_transfer_hosts_.closest_player) unhosted(0x14afd0, "the NPC's closest player without the play's host");

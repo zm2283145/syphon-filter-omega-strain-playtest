@@ -8,7 +8,7 @@
 //   menu  the front end (title, menus, loading screens, the level end)
 //   play  the level (the world's input and the in-level start / pause / loadout menus)
 // Defaults (menu):
-//   Up/Down/Left/Right arrows  D-pad         Enter, Space  Cross       Esc, Backspace  Triangle
+//   Up/Down/Left/Right arrows  D-pad         Enter, Space  Cross       Backspace       Triangle
 //   Shift                      Square        Ctrl          Circle      Q / E           L1 / R1
 //   1 / 3                      L2 / R2       Z / C         L3 / R3     Tab             Select
 //   P                          Start
@@ -30,6 +30,15 @@
 //   Comma Period Slash Semicolon Quote LBracket RBracket Backslash Minus Equals Grave
 //   MouseLeft MouseRight MouseMiddle Mouse4 Mouse5. Reserved for the window (host_window.hpp): F11,
 //   Alt+Enter, Alt+F4. The mouse's motion is not bound (the wheel is the sandbox camera zoom).
+//
+// Window hotkeys (port-only, checkpoint 134ui1, the PC; window_hotkeys): the game window's own keys, handled by the
+// window before any binding sees them.
+//   hotkey.pause=<keys>       application pause / resume (default Esc; Pause/Break always does it as well)
+//   hotkey.fullscreen=<keys>  fullscreen / windowed (default F11; Alt+Enter always does it as well)
+//   hotkey.port_menu=<keys>   the port menu (default F7): Port Settings and Cheats, the game paused while it is open
+// "none" leaves a hotkey unbound. A hotkey's key is reserved: the bindings ignore it (set_reserved_host_keys), so a
+// bind.* list that still names it (an older file's bind.menu.triangle=Esc,Backspace) keeps parsing, without that key.
+// Before 134ui1 Esc was also the menu profile's Triangle; Backspace stays Triangle.
 
 #include "keyboard_pad.hpp"
 
@@ -84,6 +93,29 @@ std::string key_name(std::uint8_t vk);
 const char* ds2_button_name(std::size_t bit);                  // "l2" .. "left"
 // One line per input: "cross: Enter, Space".
 std::vector<std::string> describe_input_bindings(const InputBindings& b, BindProfile profile);
+
+// Port-only (134ui1, the PC): the window hotkeys (see above).
+struct WindowHotkeys {
+    InputBindings::Keys pause{0x1b};       // Esc
+    InputBindings::Keys fullscreen{0x7a};  // F11
+    InputBindings::Keys port_menu{0x76};   // F7
+};
+enum class WindowHotkey : std::uint8_t { none, pause, fullscreen, port_menu };
+inline constexpr std::uint8_t vk_pause_break = 0x13;
+// The hotkey.* keys over the defaults; throws on an unknown key name, a mouse button, Pause/Break or a key given to
+// two hotkeys.
+WindowHotkeys window_hotkeys(const PortSettings& settings);
+// What a key-down does in the game window: Pause/Break always pauses; otherwise the hotkey whose list has the key.
+WindowHotkey window_hotkey(std::uint8_t vk, const WindowHotkeys& hotkeys);
+// Every key the hotkeys take (Pause/Break included): the bindings' reserved keys.
+InputBindings::Keys window_hotkey_keys(const WindowHotkeys& hotkeys);
+const char* window_hotkey_name(WindowHotkey h);  // "pause", "fullscreen", "port_menu", "none"
+// The keys every binding evaluation (bound_buttons, bound_input, bound_menu_*, any_bound_key) treats as released:
+// the PC hosts set the window hotkeys' keys. Empty by default (no host set them: the consoles, the tests).
+void set_reserved_host_keys(InputBindings::Keys keys);
+const InputBindings::Keys& reserved_host_keys();
+// "bind.menu.triangle: Esc" for each binding list that names a reserved key (the hosts log them: ignored there).
+std::vector<std::string> bindings_using_reserved_keys(const BindingSet& set, const InputBindings::Keys& reserved);
 
 // The host keyboard and mouse buttons (GetAsyncKeyState); Alt suppresses Enter (Alt+Enter is the fullscreen
 // toggle). All released off Windows.

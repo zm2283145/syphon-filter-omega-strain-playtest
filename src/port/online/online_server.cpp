@@ -216,7 +216,10 @@ std::map<std::string, std::string> parse_server_config(std::string_view text, Se
         } else if (key == "accounts" || key == "log" || key == "bind" || key == "pbkdf2_iterations" ||
                    key == "policy_file" || key == "stats_file" || key == "backups" || key == "backup_interval" ||
                    key == "log_format" || key == "social_file" || key == "chat_filter_words" || key == "password_threads" ||
-                   key == "original_port") {
+                   key == "original_port" ||
+                   // 134on5 (ONLINE.md §8.7): the RT security key and the DNS responder, read by omega_server_main
+                   key == "original_rt_key" || key == "original_rt_elf" || key == "original_rt_encrypt_replies" ||
+                   key == "dns_port" || key == "dns_ip" || key == "dns_dnas_ip" || key == "dns_upstream" || key == "dns_names") {
             extra[key] = value;
         } else {
             throw std::runtime_error("server config line " + std::to_string(number) + ": unknown key " + key);

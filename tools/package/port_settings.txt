@@ -2,7 +2,8 @@
 # Port-only settings: none of these exist in the PS2 game, and none of them change the game's own options
 # (those are saved on the PC memory card folder, local\frontend_card). One key=value per line; lines starting
 # with # are comments and are kept when the game writes this file. README-PLAY.md lists every key. The game's
-# Port Settings page (title Options > Control > PORT SETTINGS, or the pause menu's last entry) changes them too.
+# Port Settings page (F7 > Port Settings, in the menus or a level) changes them too. Every default is the PS2 game's:
+# the port's enhancements are turned on here or on that page.
 
 # The CPU co-op partner in play (also: title Options > Control > CPU PARTNER).
 coop_partner=0
@@ -52,10 +53,11 @@ vsync=1
 # mouse_sensitivity=1
 # mouse_invert_y=0
 
-# Display (none of these changes the game itself): how the 4:3 picture fills the window (pillarbox: menus and HUD at
-# 4:3 with black bars, the 3D view over the whole window; 4:3: black bars everywhere; stretch), the internal
-# resolution as a multiple of the window size (0.25..4), and the frame-time overlay (F3 toggles it in the menus and levels).
-# aspect=pillarbox
+# Display (none of these changes the game itself): how the 4:3 picture fills the window (4:3, the default: the PS2's
+# picture with black bars everywhere; pillarbox: menus and HUD at 4:3 with black bars, the 3D view over the whole window;
+# stretch; wide), the internal resolution as a multiple of the window size (0.25..4), and the frame-time overlay (F3
+# toggles it in the menus and levels).
+# aspect=4:3
 # render_scale=1
 # frame_overlay=0
 # frame_overlay_key=F3
@@ -64,6 +66,14 @@ vsync=1
 # each mod a folder with a manifest.txt). 0: your disc's assets only.
 # mods=1
 # mods_folder=mods
+
+# The window's keys: Esc pauses / resumes the application (Pause/Break too), F11 toggles fullscreen (Alt+Enter too), F7
+# opens the port menu (Port Settings, Cheats). "none" unbinds one; a hotkey's key presses no game button.
+# hotkey.pause=Esc
+# hotkey.fullscreen=F11
+# hotkey.port_menu=F7
+# 1: Cheats and Port Settings also in the in-level start menu, PORT SETTINGS in Title > Options (0: the PS2's menus).
+# pause_menu_extras=0
 
 # Keyboard / mouse bindings: bind.<menu|play>.<button>=<key>[,<key>] ("none" unbinds; on the Port Settings page Cross
 # replaces a list, Right adds a key, Left removes the last one). Examples:

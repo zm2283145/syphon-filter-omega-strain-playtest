@@ -142,6 +142,9 @@ struct FrontendOptions {
     bool frame_overlay = false;
     std::optional<std::uint8_t> frame_overlay_key = std::uint8_t{0x72};
     std::set<std::int64_t> test_overlay_key;
+    // Port-only test (checkpoint 134ui1, --frontend-test-port-menu <front-end frame>): F7's port menu toggled at those
+    // front-end frames without the window (FrontendSession::port_menu_toggle), so a hidden scripted run drives it.
+    std::set<std::int64_t> test_port_menu;
     // Port-only (checkpoint 132ln1, research/LAN_PLAY.md): LAN Play on the online / offline select (GuiHost::
     // port_lan_play), from --lan-play or the settings key lan_play=1. It enters the LAN-mode ONLINECN (checkpoint
     // 132ln2: HOST LAN GAME / JOIN LAN GAME).

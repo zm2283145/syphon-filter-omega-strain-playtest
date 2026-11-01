@@ -1183,8 +1183,10 @@ int App::play(DiscImage& disc, const std::string& iso) {
 
     launcher::Options options;
     options.dialogs = false;
-    if (!has_aspect) options.extra = {L"--aspect", L"wide"};   // the 960 x 544 screen's default (132ws)
-    options.extra.push_back(L"--frame-overlay");
+    // 134ui1 (the user's request: the port starts as the PS2 game): the 4:3 picture, as every target (wide from 132ws to
+    // 134ui1), and no frame-time overlay at start (it was on from 132vt2; frame_overlay=1 in port_settings.txt or
+    // "--frame-overlay" in play_args.txt turns it on).
+    if (!has_aspect) options.extra = {L"--aspect", L"4:3"};
     // 132vt2d: the play's render thread (gfx_render_thread.hpp, core 1) is on, as on the PC: the vitaGL backend takes
     // its mutex around every vitaGL call (gfx_vitagl.cpp), so the level's GPU submission overlaps the next step on
     // core 0 (Vita3K TRAINING: no abort, 3.1 fps against 2.7). "--render-thread 0" in play_args.txt turns it off
@@ -2326,8 +2328,8 @@ std::thread start_subtitle_setup() {
     });
 }
 
-// Port-only (research/VITA.md "Widescreen", 132ws): the frame aspect. The Vita defaults to wide (the 960 x 544
-// screen is 16:9); ux0:data/omega_strain/port_settings.txt, when present, is read as the PC's port settings file and
+// Port-only (research/VITA.md "Widescreen", 132ws): the frame aspect. The Vita defaults to 4:3 since 134ui1 (wide before,
+// the 960 x 544 screen being 16:9); ux0:data/omega_strain/port_settings.txt, when present, is read as the PC's port settings file and
 // its aspect= / hud_margin= / movie_fill= / movies= / fov= apply (aspect= wins over the default). A malformed file: logged, defaults kept.
 void apply_display_settings() {
     const std::string path = std::string(vita_data_root) + "/port_settings.txt";
@@ -2348,7 +2350,7 @@ void apply_display_settings() {
             log("display settings: %s: %s; the defaults are used", path.c_str(), e.what());
         }
     }
-    frame_aspect_setting() = has_aspect ? display.aspect : FrameAspect::wide;
+    frame_aspect_setting() = has_aspect ? display.aspect : display_default_aspect;
     frame_hud_margin_setting() = display.hud_margin;
     frame_movie_zoom_setting() = display.movie_zoom;
     frame_movie_fit_setting() = display.movie_fit;   // 132vt2a2

@@ -1,6 +1,8 @@
 // Checkpoint 133on1: see online_rt.hpp (research/ONLINE.md §8.4).
 #include "online_rt.hpp"
 
+#include "online_hash.hpp"
+
 #include <algorithm>
 #include <cstdio>
 
@@ -36,7 +38,10 @@ RtSession::Output RtSession::feed(std::span<const std::uint8_t> bytes) {
     std::size_t at = 0;
     while (buffer_.size() - at >= 3) {
         const std::uint8_t type = buffer_[at];
-        const std::size_t len = static_cast<std::size_t>(buffer_[at + 1]) | static_cast<std::size_t>(buffer_[at + 2]) << 8;
+        std::size_t len = static_cast<std::size_t>(buffer_[at + 1]) | static_cast<std::size_t>(buffer_[at + 2]) << 8;
+        // 134on5: an encrypted message's length names its data only; the u32 hash before it is extra
+        // (rt_msg_client_process_recv_buf 0x002ff308: n += 4 when the length is non-zero and bit 7 is set).
+        if ((type & rtmsg::kEncrypted) && len) len += 4;
         if (buffer_.size() - at - 3 < len) break;
         message(type, std::span<const std::uint8_t>(buffer_.data() + at + 3, len), out);
         at += 3 + len;
@@ -54,14 +59,146 @@ RtSession::Output RtSession::feed(std::span<const std::uint8_t> bytes) {
     return out;
 }
 
-void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Output& out) {
-    const std::uint8_t base = type & 0x7f;
-    char head[64];
-    std::snprintf(head, sizeof head, "rt: type 0x%02x, %zu byte(s)", type, p.size());
-    if (type & rtmsg::kEncrypted) {
-        out.log.push_back(std::string(head) + ": encrypted (the client runs with security on: apply the "
-                                              "DISABLE_SECURITY patch, ONLINE.md 8.3); dropped");
+void RtSession::set_security(std::shared_ptr<const rtcrypto::RsaKey> server_key, bool encrypt_replies, KeySource keys) {
+    server_key_ = std::move(server_key);
+    encrypt_replies_ = encrypt_replies;
+    keys_ = std::move(keys);
+}
+
+void RtSession::reply(std::vector<std::uint8_t>& to, std::uint8_t type, std::span<const std::uint8_t> payload) const {
+    const auto m = seal(rt_message(type, payload));
+    to.insert(to.end(), m.begin(), m.end());
+}
+
+std::vector<std::uint8_t> RtSession::seal(std::span<const std::uint8_t> rt_bytes) const {
+    if (!secure_ || !encrypt_replies_) return {rt_bytes.begin(), rt_bytes.end()};
+    std::vector<std::uint8_t> out;
+    out.reserve(rt_bytes.size() + 16);
+    std::size_t at = 0;
+    while (rt_bytes.size() - at >= 3) {
+        const std::uint8_t type = rt_bytes[at];
+        const std::size_t len = static_cast<std::size_t>(rt_bytes[at + 1]) | static_cast<std::size_t>(rt_bytes[at + 2]) << 8;
+        if (rt_bytes.size() - at - 3 < len || (type & rtmsg::kEncrypted) || !len) {  // not ours to encrypt: copy
+            const std::size_t n = std::min(rt_bytes.size() - at, 3 + len);
+            out.insert(out.end(), rt_bytes.begin() + static_cast<std::ptrdiff_t>(at),
+                       rt_bytes.begin() + static_cast<std::ptrdiff_t>(at + n));
+            at += n;
+            continue;
+        }
+        // KM_Encrypt 0x002f9780's context-3 branch: the hash of the plaintext, then RCEncrypt salted with it.
+        std::vector<std::uint8_t> data(rt_bytes.begin() + static_cast<std::ptrdiff_t>(at + 3),
+                                       rt_bytes.begin() + static_cast<std::ptrdiff_t>(at + 3 + len));
+        const std::uint32_t h = rtcrypto::rt_hash(data, rtcrypto::kCtxClientSession);
+        rtcrypto::rc_encrypt(rc_key_, h, data);
+        out.push_back(static_cast<std::uint8_t>(type | rtmsg::kEncrypted));
+        out.push_back(rt_bytes[at + 1]);
+        out.push_back(rt_bytes[at + 2]);
+        for (int k = 0; k < 4; ++k) out.push_back(static_cast<std::uint8_t>(h >> (8 * k)));
+        out.insert(out.end(), data.begin(), data.end());
+        at += 3 + len;
+    }
+    return out;
+}
+
+void RtSession::crypt_key_public(std::span<const std::uint8_t> client_key, Output& out) {
+    if (client_key.size() != rtcrypto::kBlock) {
+        out.log.push_back("rt: the client's public key is " + std::to_string(client_key.size()) + " bytes, not 64; closing");
+        out.close = true;
         return;
+    }
+    rtcrypto::Block cn;
+    std::copy(client_key.begin(), client_key.end(), cn.begin());
+    if (!(cn[0] & 1)) {
+        out.log.push_back("rt: the client's public key is no RSA modulus (even); closing");
+        out.close = true;
+        return;
+    }
+    rtcrypto::Block k{};
+    if (keys_) k = keys_();
+    else {
+        const auto r = random_bytes(rtcrypto::kBlock);
+        std::copy(r.begin(), r.end(), k.begin());
+    }
+    while (!rtcrypto::less_than(k, cn)) k[rtcrypto::kBlock - 1] >>= 1;  // below the client's modulus (no adjust)
+    // 0x00300248: type 0x13 carries the 64-byte key, here RSA-encrypted to the client's key (KM_Decrypt's
+    // context 7 decrypts it with the client's private key and checks the hash of the plaintext).
+    const std::uint32_t h = rtcrypto::rt_hash(k, rtcrypto::kCtxRsa);
+    std::vector<std::uint8_t> payload;
+    for (int i = 0; i < 4; ++i) payload.push_back(static_cast<std::uint8_t>(h >> (8 * i)));
+    std::vector<std::uint8_t> cipher(k.begin(), k.end());
+    rtcrypto::rsa_encrypt17(cn, cipher);
+    payload.insert(payload.end(), cipher.begin(), cipher.end());
+    out.to_client.push_back(rtmsg::ServerCryptKeyPeer | rtmsg::kEncrypted);
+    out.to_client.push_back(static_cast<std::uint8_t>(rtcrypto::kBlock));
+    out.to_client.push_back(0);
+    out.to_client.insert(out.to_client.end(), payload.begin(), payload.end());
+    rc_key_ = k;
+    secure_ = true;
+    out.log.push_back("rt: the client's RSA public key received; sent its RC key (type 0x93, RSA to the client's key); "
+                      "the session is encrypted from here (context 3)");
+}
+
+void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Output& out) {
+    std::uint8_t base = type & 0x7f;
+    char head[96];
+    std::snprintf(head, sizeof head, "rt: type 0x%02x, %zu byte(s)", type, p.size());
+    std::vector<std::uint8_t> plain;
+    bool was_encrypted = false;
+    if ((type & rtmsg::kEncrypted) && !p.empty()) {
+        // 134on5: [u32 hash][data]; for the targeted kinds (2, 3, 0x1b) a plain u16 target precedes the
+        // encrypted part, as the client's receive side has it (0x002ff4d8).
+        if (p.size() < 4) {
+            out.log.push_back(std::string(head) + ": encrypted message shorter than its hash; dropped");
+            return;
+        }
+        const std::uint32_t h = p[0] | static_cast<std::uint32_t>(p[1]) << 8 | static_cast<std::uint32_t>(p[2]) << 16 |
+                                static_cast<std::uint32_t>(p[3]) << 24;
+        const std::size_t skip = (base == rtmsg::ClientAppList || base == rtmsg::ClientAppSingle || base == 0x1b) ? 2 : 0;
+        if (p.size() < 4 + skip) {
+            out.log.push_back(std::string(head) + ": encrypted message without its target; dropped");
+            return;
+        }
+        plain.assign(p.begin() + 4, p.end());
+        std::span<std::uint8_t> data(plain.data() + skip, plain.size() - skip);
+        const std::uint8_t ctx = rtcrypto::hash_context(h);
+        if (!rtcrypto::hash_present(h)) {
+            // no hash bits: the client sent it plain (KM_Decrypt's case 0)
+        } else if (ctx == rtcrypto::kCtxRsa) {
+            if (!server_key_) {
+                out.log.push_back(std::string(head) + ": encrypted to the disc's Medius public key, and omega_server "
+                                                      "has no original_rt_key (ONLINE_DEPLOY.md; or apply the "
+                                                      "DISABLE_SECURITY patch, ONLINE.md 8.3); closing");
+                out.close = true;
+                return;
+            }
+            rtcrypto::rsa_decrypt(*server_key_, data);
+            if (rtcrypto::rt_hash(data, ctx) != h && data.size() == rtcrypto::kBlock) {  // KM_RSAAdjust
+                rtcrypto::Block b;
+                std::copy(data.begin(), data.end(), b.begin());
+                b = rtcrypto::add_mod_2_512(b, server_key_->n);
+                std::copy(b.begin(), b.end(), data.begin());
+            }
+            if (rtcrypto::rt_hash(data, ctx) != h) {
+                out.log.push_back(std::string(head) + ": RSA (context 7) hash differs: the key is not the disc's; "
+                                                      "closing");
+                out.close = true;
+                return;
+            }
+        } else if (ctx == rtcrypto::kCtxClientSession && secure_) {
+            rtcrypto::rc_decrypt(rc_key_, h, data);
+            if (rtcrypto::rt_hash(data, ctx) != h) {
+                out.log.push_back(std::string(head) + ": RC (context 3) hash differs; dropped");
+                return;
+            }
+        } else {
+            char b[96];
+            std::snprintf(b, sizeof b, ": encrypted with context %u, which this session holds no key for; dropped", ctx);
+            out.log.push_back(std::string(head) + b);
+            return;
+        }
+        was_encrypted = rtcrypto::hash_present(h);
+        p = plain;
+        std::snprintf(head, sizeof head, "rt: type 0x%02x (decrypted, context %u), %zu byte(s)", base, ctx, p.size());
     }
     switch (base) {
     case rtmsg::ClientConnectTcp: {
@@ -79,22 +216,25 @@ void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Outp
         std::vector<std::uint8_t> accept = {1, 8, 0x84, static_cast<std::uint8_t>(index_ & 0xff),
                                             static_cast<std::uint8_t>(index_ >> 8), 1, 0};
         accept.resize(accept.size() + 16, 0);
-        const auto a = rt_message(rtmsg::ServerConnectAccept, accept);
-        out.to_client.insert(out.to_client.end(), a.begin(), a.end());
+        reply(out.to_client, rtmsg::ServerConnectAccept, accept);
         const std::uint8_t done[2] = {1, 0};
-        const auto c = rt_message(rtmsg::ServerConnectComplete, done);
-        out.to_client.insert(out.to_client.end(), c.begin(), c.end());
+        reply(out.to_client, rtmsg::ServerConnectComplete, done);
         out.log.push_back("rt: connect accepted (type 7, client index " + std::to_string(index_) +
-                          ") and completed (type 26)");
+                          ") and completed (type 26)" + (secure_ && encrypt_replies_ ? ", encrypted" : ""));
         connected_ = true;
         out.connected = true;
         return;
     }
     case rtmsg::ClientCryptKeyPublic:
-        out.log.push_back(std::string(head) + ": the client's RSA public key (it holds an encryption key: the "
-                                              "DISABLE_SECURITY patch is not applied); omega_server has no RT "
-                                              "encryption, closing");
-        out.close = true;
+        if (!server_key_) {
+            out.log.push_back(std::string(head) + ": the client's RSA public key (it holds an encryption key: the "
+                                                  "DISABLE_SECURITY patch is not applied) and omega_server has no "
+                                                  "original_rt_key (ONLINE.md 8.7); closing");
+            out.close = true;
+            return;
+        }
+        out.log.push_back(std::string(head) + ": the client's RSA public key");
+        crypt_key_public(p, out);
         return;
     case rtmsg::ClientConnectUdp:
         out.log.push_back(std::string(head) + ": connect (UDP kind) on the TCP stream; ignored");
@@ -103,8 +243,7 @@ void RtSession::message(std::uint8_t type, std::span<const std::uint8_t> p, Outp
         // 134on4: the keep-alive (0x002fddf0 queues type 5, byte 0xa5, every 15 s in state 8); the client's type-5
         // handler 0x002ff760 takes one off its count of unanswered echoes, and any received byte restarts its 35 s
         // receive timer (0x002fdae8). The answer is type 5 with the same payload.
-        const auto e = rt_message(rtmsg::ServerEcho, p);
-        out.to_client.insert(out.to_client.end(), e.begin(), e.end());
+        reply(out.to_client, rtmsg::ServerEcho, p);
         out.log.push_back(std::string(head) + ": echo " + hex_preview(p) + ", answered (type 5)");
         return;
     }

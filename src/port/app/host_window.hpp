@@ -47,6 +47,7 @@
 #include <wrl/client.h>
 
 #include "gfx_device.hpp"
+#include "input_bindings.hpp"
 #include "port_settings.hpp"
 
 #include <array>
@@ -237,6 +238,15 @@ public:
     void on_fullscreen_change(std::function<void(bool)> callback);
     // Hotkey toggles are ignored while false (hidden runs).
     void allow_hotkeys(bool allow) { hotkeys_ = allow; }
+    // Port-only (checkpoint 134ui1): the window hotkeys (input_bindings.hpp WindowHotkeys: hotkey.pause, default Esc;
+    // hotkey.fullscreen, default F11; hotkey.port_menu, default F7). Pause/Break and Alt+Enter always work. A hotkey's
+    // key-down is not recorded as a key event. The port menu key only raises a request the hosts take each frame
+    // (take_port_menu_request), so the menu opens on the game's own thread.
+    void set_hotkeys(const WindowHotkeys& hotkeys);
+    WindowHotkeys hotkeys() const;
+    bool take_port_menu_request() { return port_menu_request_.exchange(false); }
+    // While a Port Settings key row waits for a key (Esc cancels it there), the pause and port menu hotkeys are off.
+    void set_key_capture(bool on) { key_capture_ = on; }
 
     // Port-only mouse look (checkpoint 132win7, mouse_look.hpp). The window reads the mouse through raw input
     // (relative counts, no pointer acceleration). The cursor is captured (hidden over the client area and clipped
@@ -295,7 +305,9 @@ private:
     HRESULT lost_reason_ = S_OK;
 
     std::atomic<bool> focused_{false}, minimized_{false}, close_{false}, fullscreen_{false}, hotkeys_{true}, keep_hidden_{false},
-        focus_simulated_{false}, dpi_test_{false}, application_paused_{false};
+        focus_simulated_{false}, dpi_test_{false}, application_paused_{false}, port_menu_request_{false}, key_capture_{false};
+    WindowHotkeys hotkeys_keys_;   // 134ui1: guarded by hotkeys_mutex_
+    mutable std::mutex hotkeys_mutex_;
     std::atomic<unsigned> dpi_{96};
     bool log_shutdown_ = false;
     std::atomic<bool> mouse_wanted_{false}, mouse_captured_{false};

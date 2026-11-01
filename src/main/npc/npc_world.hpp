@@ -24,6 +24,7 @@
 #include "npc_perception.hpp"
 #include "npc_perception_think.hpp"
 #include "npc_remote.hpp"
+#include "npc_route.hpp"
 #include "weapon_database.hpp"
 #include "weapon_inventory.hpp"
 #include "population.hpp"
@@ -253,6 +254,7 @@ public:
         std::function<void(float speed)> speed;
         std::function<void(float yaw)> heading;
         std::function<void()> activated;   // 134lt8: 00157df0's peer loop (LanNetCore::npc_activate_peers_00157df0)
+        std::function<void(const NpcNetPath&)> path;   // 134lt15: 002d7be0's cNetObj_SendMessage(actor +10, msg, -1, -1)
     };
     void set_network_hooks(NetworkHooks hooks){network_hooks_=std::move(hooks);}
     // 132ln5h13 (npc_remote.hpp): the remote NPC controller 0x004de2a0 as this controller's remote mode.
@@ -279,6 +281,13 @@ public:
     // +f4 / +100 / +104 / +108 / +10c and mode 9 at priority 100, npc_follow), then cNPC_Follow(cMessage) 00153870 with
     // the AI message 004ee550 event 0 (+28 -1), then +214 bit 0 = 1; without one, bit 0 = 0. Remote mode only.
     void remote_follow_002d2ca0(SoloActorSimulation& actor,std::optional<std::int32_t> target_id,float a,float b);
+    // 134lt15: cNetNPC_HandleMessage 002d4ff0's MSGGAME_NET_PATH_REQUEST (another console's cNetPathMsg for this
+    // NPC): +20c = +30; without the point byte 0015f9b0(+1b0, +2c, +30, null); with it +1f0 = the point and
+    // 0015f9b0(+1b0, +2c, +30, &+1f0) when +30 >= 0, else 0015fbd0(+1b0, +1f0, +1b0 +5c); then +214 bit 1 when the
+    // actor is not active (b2D && b2C && !b2E). Returns false (nothing done) outside remote mode: an AI controller's
+    // 001b3b60 -> cNPC_HandleMessage takes no MSGGAME_NET_PATH_REQUEST.
+    bool remote_net_path_002d4ff0(SoloActorSimulation& actor,std::int32_t last_2c,std::int32_t first_30,bool point_34,
+        const RootVector& point);
     bool remote_following() const{return remote_&&(remote_->flags_214&0x01U)!=0;}
     // 134lt11 (npc_remote.hpp; PORT-ONLY boundary, the original's byte layout): the NPC ownership transfer.
     void set_transfer_link(NpcTransferLink link){transfer_link_=std::move(link);}
@@ -288,6 +297,22 @@ public:
     // half, on both the AI and the remote controller (0015a440 is both vtables' +3c). Unset: single player.
     void set_critical_net(std::function<void(float dt)> f){critical_net_=std::move(f);}
     bool has_critical_net() const{return static_cast<bool>(critical_net_);}
+    // 134lt14 (PORT-ONLY boundary): 0015a440's radius half in a network game. `host` is 005721c0: 0015a440 returns at
+    // once on a joining console (neither half runs there). On the host the radius check takes the multiplayer branches
+    // (NpcAiRadiusHost::network): IsActiveOnRemote 004340c0, the closest player's slot (003ce850's player), the
+    // deactivation +c0 (cNPC_DeactivateGlobal 00157510: `deactivate_global` runs SetEnabled(-1, 0), then this
+    // controller's deactivate_anonymous (+60(1) when present), then `deactivate_global_net`, the network part) and the
+    // activation +c8(act) (00157940, `activate`) after the network half (critical_net). Unset: single player.
+    struct RadiusNet {
+        bool host{};
+        std::function<bool()> active_on_remote;
+        std::function<std::int32_t()> closest_player_slot;
+        std::function<void()> set_enabled_none;       // 00157510's cNPC_SetEnabled(self, -1, 0) (0015b220)
+        std::function<void()> deactivate_global_net;  // 00157510's 0042d910 and peer loop
+        std::function<void(std::int32_t act)> activate;   // +c8 = 00157940(act)
+    };
+    void set_radius_net(RadiusNet net){radius_net_=std::move(net);}
+    bool has_radius_net() const{return radius_net_.has_value();}
     // cNPC::GetCopyMsg 00158350's payload (both NPC controllers' +90): 00148b50 of this component into `out` (the
     // controller's +50, 0015b820, does nothing on either controller).
     void pack_transfer_00148b50(NpcTransferBytes& out);
@@ -554,7 +579,7 @@ public:
     void set_not_gasable(bool value){not_gasable_346b_=value?1:0;}
 private:
     NpcAiHost host(SoloActorSimulation& actor);
-    void radius_half(SoloActorSimulation& actor);   // 0015a440's radius half (check_npc_activation_radius)
+    std::int32_t radius_half(SoloActorSimulation& actor);   // 0015a440's radius half (check_npc_activation_radius): act
     void script_weapon(const char* what,const std::function<void(WeaponInventoryOps&)>& body);
     // npc_remote.cpp
     void remote_update(SoloActorSimulation& actor,float dt);                 // 002d5160
@@ -571,6 +596,7 @@ private:
     NpcRemoteLink remote_link_;
     NpcTransferLink transfer_link_;
     std::function<void(float dt)> critical_net_;   // 134lt13
+    std::optional<RadiusNet> radius_net_;          // 134lt14
     NpcAiSystem& system_;
     const NpcNodeGraph& graph_;
     std::uint32_t actor_id_;

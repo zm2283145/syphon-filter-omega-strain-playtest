@@ -79,6 +79,9 @@ NpcAiHost NpcAiController::host(SoloActorSimulation& actor){
     NpcAiHost h;h.graph=&graph_;
     h.network_contact=network_hooks_.contact;h.network_speed=network_hooks_.speed;h.network_heading=network_hooks_.heading;
     auto& a=h.actor;SoloActorSimulation* p=&actor;
+    // 134lt15: 00160ce0 / 00160220 send the route (002d7be0) only for an actor with +14 (this console's NPC).
+    if(network_hooks_.path&&!remote_)
+        h.network_path=[this,p](const NpcRouteBuffer& b){if(p->byte_14()!=0)network_hooks_.path(npc_net_path_002d7be0(b));};
     a.eligible=[p]{return p->eligible();};
     a.life_state=[p]{return p->life_state();};
     // Virtual +f4 (00132280): 00132380 (the conversion of root_placement_matrix,
@@ -472,10 +475,18 @@ void NpcAiController::always_run(SoloActorSimulation& actor,float dt){
     if(port_remote_controlled_)return;                                         // PORT-ONLY (132ln5h)
     // 132ln5h13: the remote controller (npc_remote.hpp) has no radius half here; PORT-ONLY (132fx2): once per logic
     // frame. 134lt13: 0015a440's network half then runs on both controllers (critical_net_).
-    if(!remote_&&npc_logic_step(system_,actor)&&(component_.flags_141&0x80U))radius_half(actor);
+    // 134lt14: in a network game 0015a440 returns at once on a joining console (005721c0 clear), and the activation
+    // +c8(act) comes after the network half.
+    if(radius_net_&&!radius_net_->host)return;
+    std::int32_t act=-1;
+    if(!remote_&&npc_logic_step(system_,actor)&&(component_.flags_141&0x80U))act=radius_half(actor);
     if(critical_net_)critical_net_(dt);
+    if(act>=0){
+        if(!radius_net_||!radius_net_->activate)throw std::runtime_error("NPC AI: 0015a440's +c8 (00157940) without the network host");
+        radius_net_->activate(act);
+    }
 }
-void NpcAiController::radius_half(SoloActorSimulation& actor){
+std::int32_t NpcAiController::radius_half(SoloActorSimulation& actor){
     auto h=host(actor);
     NpcAiRadiusHost r;r.actor_id=actor_id_;
     r.closest_player_distance_squared=[this]{
@@ -485,7 +496,23 @@ void NpcAiController::radius_half(SoloActorSimulation& actor){
     SoloActorSimulation* p=&actor;
     r.activate_actor=[p]{p->activate();};
     r.deactivate_actor=[p]{p->deactivate();};
-    check_npc_activation_radius(component_,system_,h,r);
+    if(radius_net_){   // 134lt14: the multiplayer branches (the host's)
+        r.network=true;
+        r.active_on_remote=[this]{
+            if(!radius_net_->active_on_remote)throw std::runtime_error("NPC AI: 0015a440 needs IsActiveOnRemote 004340c0");
+            return radius_net_->active_on_remote();};
+        r.closest_player_slot=[this]{
+            if(!radius_net_->closest_player_slot)throw std::runtime_error("NPC AI: 0015a440 needs the closest player's slot (003ce850)");
+            return radius_net_->closest_player_slot();};
+        r.deactivate_global=[this,p]{   // +c0 = cNPC_DeactivateGlobal 00157510
+            if(!radius_net_->set_enabled_none||!radius_net_->deactivate_global_net)
+                throw std::runtime_error("NPC AI: 0015a440's +c0 (00157510) without the network host");
+            radius_net_->set_enabled_none();          // cNPC_SetEnabled(self, -1, 0)
+            deactivate_anonymous(*p);                 // +60(1) when present (deactivate_npc_ai_anonymous)
+            radius_net_->deactivate_global_net();     // 0042d910, cDeactivateMsg / cNetTerrainActivation to peers
+        };
+    }
+    return check_npc_activation_radius(component_,system_,h,r);
 }
 void NpcAiController::update(SoloActorSimulation& actor,float dt){
     // PORT-ONLY (132fx2): the update 00159590 runs once per logic frame with that frame's dt

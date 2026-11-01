@@ -101,6 +101,7 @@ void npc_route_ready(NpcAiComponent& c,NpcAiHost& host){
         NpcAiSend s;s.kind=NpcAiSend::Kind::component;s.transport=0;s.message={NpcAiMessage::Kind::path,e.event,e.value};
         host.send(s);
     };
+    ph.network_path=host.network_path;                                        // 134lt15: 00160ce0's 002d7be0
     if(!start_npc_route(c.path,*host.graph,ph))return;                        // 00160ce0
     set_npc_movement_state(c,1,20,host);                                     // 0014d510(c, 1, 20)
     npc_travel_speed_for_purpose(c,c.byte_140,host);                          // virtual +d4(+140, 10)

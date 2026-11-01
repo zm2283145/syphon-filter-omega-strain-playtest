@@ -8,7 +8,9 @@
 #include "mission_script_host.hpp"
 #include "npc_world.hpp"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -248,8 +250,21 @@ public:
     // 00188d80(actor, -1): a present actor's skeleton node 5 (00132910 through
     // its model), otherwise its model transform component's translation.
     RootVector eye_position(std::size_t actor) const;
-    // 003ce850 for an actor of the world over the single player slot.
+    // 003ce850 for an actor of the world over the single player slot (134lt14: over the four client slots when the
+    // play gave the network players).
     float actor_closest_player_distance_squared(std::size_t actor) const;
+    // 134lt14: 003ce850 in a network game scans cNetObj_GetPlayer(i) for the four clients: the play's player actor of
+    // each slot (nullopt: no player there). Unset: the single player slot (player_actor_ in slot 0).
+    using NetworkPlayers = std::function<std::array<std::optional<std::size_t>, 4>()>;
+    void set_network_players(NetworkPlayers players) { network_players_ = std::move(players); }
+    // 134lt14: the slot of 003ce850's answer (the closest player with d < 1e8 by a strict compare, in slot order; none:
+    // nGobjManager_GetPlayer, the local player's slot): ((its +c & 0x7f000000) >> 24) - 1.
+    std::int32_t actor_closest_player_slot(std::size_t actor) const;
+    // 134lt14: the script's Activate / ActivateAnon in a network game (0014a280 / 0014a2c0 -> cNPC_Activate_cGOBJP
+    // 00157800 on the NPC's block, the play's LanNetCore) with the NPC's actor and the GOBJ (nullopt for ActivateAnon or a
+    // dead object). Unset: single player (the actor's +5c(1)).
+    void set_activate_net(std::function<void(std::size_t actor, std::optional<Word> gobj)> net) { activate_net_ = std::move(net); }
+    void activate_gobj(Word npc, std::optional<Word> gobj) override;
     std::size_t actor_of(Word npc) const;
     NpcAiController& controller(Word npc);
 
@@ -267,6 +282,8 @@ private:
     ActorWorld& world_;
     NpcAiSystem& system_;
     std::size_t player_actor_;
+    NetworkPlayers network_players_;                                                       // 134lt14
+    std::function<void(std::size_t actor, std::optional<Word> gobj)> activate_net_;        // 134lt14
     std::map<Word, Entry> npcs_;
     MissionScriptHost* host_{};
     std::int32_t port_overlay_first_{-1};

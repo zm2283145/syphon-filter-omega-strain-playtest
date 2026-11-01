@@ -25,6 +25,10 @@
 //       --parent-pid N stops the server when process N ends (the test scripts pass their own). --service (Windows)
 //       runs under the Service Control Manager (no console). --port 0 and --relay-port any take system-picked ports,
 //       which the log's "listening on" / "relay: UDP port" lines name (the test scripts' free ports).
+//       Checkpoint 134on5 (ONLINE.md §8.7, ONLINE_DEPLOY.md §10.1): --original-rt-key FILE (original_rt_key=) serves
+//       the retail client with its RT security on (online_rt_crypto.hpp); --original-rt-elf FILE checks the key against
+//       the operator's own executable. --dns PORT (dns_port=, dns_ip=, dns_dnas_ip=, dns_upstream=, dns_names=) opens the
+//       optional DNS responder for a PS2 whose manual DNS is this host (online_dns.hpp).
 //   omega_server admin HOST[:PORT] (--token TOKEN | --user NAME --password PASSWORD) COMMAND...
 //       Runs one admin command against a running server and prints the reply.
 //   omega_server demo HOST[:PORT]
@@ -45,9 +49,11 @@
 
 #include "online_accounts.hpp"
 #include "online_client.hpp"
+#include "online_dns.hpp"
 #include "online_files.hpp"
 #include "online_mod_report.hpp"
 #include "online_rt.hpp"
+#include "online_rt_crypto.hpp"
 #include "online_server.hpp"
 #include "online_social.hpp"
 #include "online_tcp.hpp"
@@ -201,6 +207,7 @@ int usage() {
                  "               [--stats FILE] [--log-format text|json] [--no-console] [--run-seconds N]\n"
                  "               [--mod-policy gameplay|any|cosmetic|none] [--relay-port N|any] [--social FILE]\n"
                  "               [--data-dir DIR] [--parent-pid N] [--service] [--original-port N|any]\n"
+                 "               [--original-rt-key FILE] [--original-rt-elf FILE] [--dns PORT] [--dns-upstream IP]\n"
                  "  omega_server check [the server's options]   (validate the config and the stores, change nothing)\n"
                  "  omega_server admin HOST[:PORT] (--token TOKEN | --user NAME --password PASSWORD) COMMAND...\n"
                  "  omega_server demo HOST[:PORT]\n"
@@ -228,6 +235,16 @@ struct Settings {
     // -1: off, 0: a free port. The disc's INI names MAS_PORT=10075, so a PS2 / PCSX2 deployment gives 10075 to this
     // listener and moves the port framing (`port`) elsewhere.
     int original_port = -1;
+    // 134on5 (ONLINE.md §8.7): the private key for the disc's Medius public key (original_rt_key=, a file the
+    // operator supplies; none in this repository), the operator's own retail executable to check it against
+    // (original_rt_elf=), and whether the session's own messages are encrypted after the key exchange.
+    std::string rt_key_path, rt_elf_path;
+    bool rt_encrypt_replies = true;
+    // 134on5 (online_dns.hpp): the optional DNS responder. dns_port -1: off. dns_ip: the address our names answer
+    // with (default public_ip); dns_dnas_ip: the DNAS replacement's address (empty: the DNAS names are not ours);
+    // dns_upstream: IP[:port] for every other name (empty: refused); dns_names: more "name[=ip]" entries, commas.
+    int dns_port = -1;
+    std::string dns_ip, dns_dnas_ip, dns_upstream, dns_names;
 };
 
 struct CommandLine {
@@ -235,6 +252,8 @@ struct CommandLine {
     int port_override = -1;  // 0: a system-picked port (the log's "listening on" line names it)
     int relay_port_override = -1;
     int original_port_override = -2;  // 133on1: -2 none, -1 off, 0 any
+    int dns_port_override = -2;       // 134on5: -2 none, -1 off
+    std::optional<std::string> rt_key, rt_elf, dns_upstream;
     std::optional<std::string> bind, accounts, policy, log, stats, log_format, mod_policy, social;
 };
 
@@ -274,8 +293,24 @@ Settings load_settings(const CommandLine& cl, bool write_policy = true) {
             if (p < -1 || p > 65535) throw std::runtime_error("bad original_port " + it->second);
             s.original_port = p;
         }
+        take("original_rt_key", s.rt_key_path);
+        take("original_rt_elf", s.rt_elf_path);
+        if (auto it = extra.find("original_rt_encrypt_replies"); it != extra.end()) s.rt_encrypt_replies = it->second != "0";
+        if (auto it = extra.find("dns_port"); it != extra.end()) {
+            const int p = std::atoi(it->second.c_str());
+            if (p < -1 || p > 65535) throw std::runtime_error("bad dns_port " + it->second);
+            s.dns_port = p == 0 ? -1 : p;
+        }
+        take("dns_ip", s.dns_ip);
+        take("dns_dnas_ip", s.dns_dnas_ip);
+        take("dns_upstream", s.dns_upstream);
+        take("dns_names", s.dns_names);
     }
     if (cl.original_port_override != -2) s.original_port = cl.original_port_override;
+    if (cl.dns_port_override != -2) s.dns_port = cl.dns_port_override;
+    if (cl.rt_key) s.rt_key_path = *cl.rt_key;
+    if (cl.rt_elf) s.rt_elf_path = *cl.rt_elf;
+    if (cl.dns_upstream) s.dns_upstream = *cl.dns_upstream;
     if (cl.bind) s.bind_text = *cl.bind;
     if (cl.accounts) s.accounts_path = *cl.accounts;
     if (cl.policy) s.policy_path = *cl.policy;
@@ -333,6 +368,97 @@ private:
 #endif
 };
 
+// 134on5 (ONLINE.md §8.7): the operator's RT key file, parsed; its pair checked (e = 17 then d gives m back); its
+// modulus compared with the disc's Medius public key when the operator's own executable is configured. Throws with
+// the reason (the server does not start on a key that cannot serve the disc). nullptr: no key configured.
+std::shared_ptr<const rtcrypto::RsaKey> load_rt_key(const Settings& s, std::string* detail) {
+    if (s.rt_key_path.empty()) return nullptr;
+    bool ok = false;
+    const std::string text = read_file(s.rt_key_path, &ok);
+    if (!ok) throw std::runtime_error("cannot read original_rt_key " + s.rt_key_path);
+    std::shared_ptr<rtcrypto::RsaKey> key;
+    try {
+        key = std::make_shared<rtcrypto::RsaKey>(rtcrypto::parse_rsa_key(text));
+    } catch (const std::exception& e) {
+        throw std::runtime_error("original_rt_key " + s.rt_key_path + ": " + e.what());
+    }
+    if (!rtcrypto::rsa_pair_consistent(*key))
+        throw std::runtime_error("original_rt_key " + s.rt_key_path + ": d does not invert e = 17 for this n");
+    std::string d = s.rt_key_path + " (n " + rtcrypto::to_hex_be(key->n).substr(0, 16) + "..., pair consistent";
+    if (!s.rt_elf_path.empty()) {
+        const std::string elf = read_file(s.rt_elf_path, &ok);
+        if (!ok) throw std::runtime_error("cannot read original_rt_elf " + s.rt_elf_path);
+        const auto pub = rtcrypto::read_disc_public_key(
+            std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(elf.data()), elf.size()));
+        if (!pub) throw std::runtime_error("original_rt_elf " + s.rt_elf_path + " is no ELF holding EE address 0x00492bf0");
+        if (*pub != key->n)
+            throw std::runtime_error("original_rt_key " + s.rt_key_path + ": n is not the disc's Medius public key "
+                                     "(KM_GetMediusPublicKey 0x00352c30 in " + s.rt_elf_path + ")");
+        d += ", matches the disc's Medius public key in " + s.rt_elf_path;
+    } else {
+        d += ", not checked against the disc: set original_rt_elf=";
+    }
+    *detail = d + ")";
+    return key;
+}
+
+// 134on5 (online_dns.hpp): the DNS responder's names and upstream from the settings. Throws on a bad address.
+struct DnsSetup {
+    DnsResponder rules;
+    std::optional<std::pair<std::uint32_t, std::uint16_t>> upstream;
+    std::string summary;
+};
+DnsSetup make_dns(const Settings& s) {
+    DnsSetup d;
+    auto ip_of = [](const std::string& text, const char* what) {
+        const auto ip = resolve_ipv4(text);
+        if (!ip || *ip == 0) throw std::runtime_error(std::string("bad ") + what + " '" + text + "'");
+        return *ip;
+    };
+    const std::string own_text = s.dns_ip.empty() ? s.cfg.public_ip : s.dns_ip;
+    const std::uint32_t own = ip_of(own_text, "dns_ip");
+    d.rules.add(kMasHostName, own);
+    d.summary = std::string(kMasHostName) + " -> " + own_text;
+    if (!s.dns_dnas_ip.empty()) {
+        const std::uint32_t dnas = ip_of(s.dns_dnas_ip, "dns_dnas_ip");
+        for (const char* n : kDnasHostNames) d.rules.add(n, dnas);
+        d.summary += ", gate1.{us,eu,jp}.dnas.playstation.org -> " + s.dns_dnas_ip;
+    } else {
+        d.summary += ", DNAS names not answered (dns_dnas_ip unset)";
+    }
+    std::stringstream names(s.dns_names);
+    for (std::string item; std::getline(names, item, ',');) {
+        item.erase(0, item.find_first_not_of(" \t"));
+        item.erase(item.find_last_not_of(" \t") + 1);
+        if (item.empty()) continue;
+        const auto eq = item.find('=');
+        const std::string name = item.substr(0, eq);
+        const std::string ip_text = eq == std::string::npos ? own_text : item.substr(eq + 1);
+        d.rules.add(name, ip_of(ip_text, "dns_names address"));
+        d.summary += ", " + name + " -> " + ip_text;
+    }
+    if (!s.dns_upstream.empty()) {
+        std::string host = s.dns_upstream;
+        std::uint16_t port = 53;
+        if (const auto colon = host.find(':'); colon != std::string::npos) {
+            const int p = std::atoi(host.c_str() + colon + 1);
+            if (p <= 0 || p > 65535) throw std::runtime_error("bad dns_upstream '" + s.dns_upstream + "'");
+            port = static_cast<std::uint16_t>(p);
+            host.resize(colon);
+        }
+        d.upstream = std::make_pair(ip_of(host, "dns_upstream"), port);
+        d.summary += "; other names forwarded to " + s.dns_upstream;
+    } else {
+        d.summary += "; other names refused (dns_upstream unset)";
+    }
+    return d;
+}
+
+std::string ip_text(std::uint32_t ip) {
+    return std::to_string(ip >> 24) + "." + std::to_string((ip >> 16) & 0xff) + "." + std::to_string((ip >> 8) & 0xff) +
+           "." + std::to_string(ip & 0xff);
+}
+
 int run_server(int argc, char** argv, bool service, bool check_only = false) {
     CommandLine cl;
     bool console = !service;
@@ -366,6 +492,14 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
             cl.original_port_override = v == "any" ? 0 : v == "off" ? -1 : std::atoi(v.c_str());
             if (cl.original_port_override < -1 || cl.original_port_override > 65535) return usage();
         }
+        else if (a == "--dns") {
+            const std::string v = next();
+            cl.dns_port_override = v == "off" ? -1 : std::atoi(v.c_str());
+            if (cl.dns_port_override < -1 || cl.dns_port_override == 0 || cl.dns_port_override > 65535) return usage();
+        }
+        else if (a == "--dns-upstream") cl.dns_upstream = next();
+        else if (a == "--original-rt-key") cl.rt_key = next();
+        else if (a == "--original-rt-elf") cl.rt_elf = next();
         else if (a == "--parent-pid") parent_pid = std::strtoul(next().c_str(), nullptr, 10);
         else if (a == "--data-dir") data_dir = next();
         else if (a == "--service") continue;
@@ -419,6 +553,22 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
             report("chat_filter_words", ok, s.filter_words_path);
         }
         report("policy", true, std::filesystem::exists(s.policy_path) ? s.policy_path : s.policy_path + " (absent: the defaults)");
+        if (!s.rt_key_path.empty()) {  // 134on5
+            try {
+                std::string detail;
+                (void)load_rt_key(s, &detail);
+                report("original_rt_key", true, detail);
+            } catch (const std::exception& e) {
+                report("original_rt_key", false, e.what());
+            }
+        }
+        if (s.dns_port > 0) {
+            try {
+                report("dns", true, "UDP " + std::to_string(s.dns_port) + ": " + make_dns(s).summary);
+            } catch (const std::exception& e) {
+                report("dns", false, e.what());
+            }
+        }
         std::cout << (bad ? "CHECK FAILED" : "CHECK OK") << "\n";
         return bad ? 1 : 0;
     }
@@ -467,6 +617,34 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
         return 1;
     }
     std::map<std::uint32_t, RtSession> rt_sessions;
+    // 134on5: the RT key (a retail client with security on) and the DNS responder; both refuse to start on a bad
+    // setting rather than run half-configured.
+    std::shared_ptr<const rtcrypto::RsaKey> rt_key;
+    std::optional<DnsSetup> dns_setup;
+    UdpSocket dns_socket, dns_upstream_socket;
+    DnsForwarder dns_forwarder;
+    try {
+        std::string detail;
+        rt_key = load_rt_key(s, &detail);
+        if (rt_key) log("original clients: RT security key " + detail);
+        if (s.dns_port > 0) dns_setup = make_dns(s);
+    } catch (const std::exception& e) {
+        std::cerr << "omega_server: " << e.what() << "\n";
+        log("omega_server: " + std::string(e.what()));
+        return 1;
+    }
+    if (dns_setup) {
+        if (!dns_socket.open(*bind_ip, static_cast<std::uint16_t>(s.dns_port), &error)) {
+            std::cerr << "omega_server: DNS UDP port " << s.dns_port << " failed: " << error << "\n";
+            log("omega_server: DNS UDP port " + std::to_string(s.dns_port) + " failed: " + error);
+            return 1;
+        }
+        if (dns_setup->upstream && !dns_upstream_socket.open(0, 0, &error)) {
+            log("omega_server: DNS upstream socket failed: " + error);
+            return 1;
+        }
+        log("dns (PORT-ONLY): UDP " + s.bind_text + ":" + std::to_string(dns_socket.port()) + "; " + dns_setup->summary);
+    }
 
     std::mutex console_mutex;
     std::deque<std::string> console_lines;
@@ -537,6 +715,8 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
                 while (auto f = r.next()) {
                     std::string note;
                     auto bytes = RtSession::from_server_frame(*f, &note);
+                    if (auto rs = rt_sessions.find(conn & ~kOriginalConn); rs != rt_sessions.end() && !bytes.empty())
+                        bytes = rs->second.seal(bytes);  // 134on5: encrypted after the key exchange
                     if (!note.empty()) log("rt conn " + std::to_string(conn & ~kOriginalConn) + ": " + note);
                     if (!bytes.empty()) {
                         log("rt conn " + std::to_string(conn & ~kOriginalConn) + " <- Medius " + std::to_string(f->type) +
@@ -593,8 +773,8 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
         else
             log("relay: off (relay_port=0)");
         if (s.original_port >= 0)
-            log("original clients (SCE-RT, unencrypted): TCP " + first_bind + ":" + std::to_string(original.port()) +
-                " (ONLINE.md 8.4)");
+            log("original clients (SCE-RT, " + std::string(rt_key ? "encrypted or unencrypted" : "unencrypted only") +
+                "): TCP " + first_bind + ":" + std::to_string(original.port()) + " (ONLINE.md 8.4, 8.7)");
 
         auto last_flush = std::chrono::steady_clock::now();
         auto last_relay_log = last_flush, last_parent_check = last_flush;
@@ -613,6 +793,7 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
         rt_events.connected = [&](std::uint32_t conn, std::uint32_t ip) {
             rt_sessions.erase(conn);
             rt_sessions.emplace(conn, RtSession(static_cast<std::uint16_t>(conn & 0xffff)));
+            rt_sessions.at(conn).set_security(rt_key, s.rt_encrypt_replies);
             log("rt conn " + std::to_string(conn) + " connected from " + std::to_string(ip >> 24) + "." +
                 std::to_string((ip >> 16) & 0xff) + "." + std::to_string((ip >> 8) & 0xff) + "." + std::to_string(ip & 0xff) +
                 " (original client)");
@@ -651,6 +832,29 @@ int run_server(int argc, char** argv, bool service, bool check_only = false) {
             tcp.poll(passwords.outstanding() ? 2 : (s.original_port >= 0 ? 20 : 50), events, relay ? &udp : nullptr);
             if (s.original_port >= 0) original.poll(0, rt_events);
             passwords.drain();
+            if (dns_setup) {  // 134on5: the DNS responder (polled each tick; at most 50 ms late)
+                for (int n = 0; n < 256; ++n) {
+                    auto d = dns_socket.receive();
+                    if (!d) break;
+                    const auto r = dns_setup->rules.handle(d->bytes, dns_setup->upstream.has_value());
+                    if (r.kind == DnsResponder::Kind::Forward) {
+                        const auto q = dns_forwarder.outgoing(d->bytes, d->ip, d->port, steady_ms());
+                        if (!q.empty())
+                            dns_upstream_socket.send_to(dns_setup->upstream->first, dns_setup->upstream->second, q);
+                    } else if (!r.reply.empty()) {
+                        dns_socket.send_to(d->ip, d->port, r.reply);
+                        log("dns " + ip_text(d->ip) + ": " + r.name + " (type " + std::to_string(r.qtype) + ") " +
+                            (r.kind == DnsResponder::Kind::Answer ? "answered" : "refused"));
+                    }
+                }
+                for (int n = 0; dns_setup->upstream && n < 256; ++n) {
+                    auto d = dns_upstream_socket.receive();
+                    if (!d) break;
+                    if (d->ip != dns_setup->upstream->first) continue;
+                    if (auto back = dns_forwarder.incoming(d->bytes, steady_ms()))
+                        dns_socket.send_to(back->ip, back->port, back->reply);
+                }
+            }
             if (relay) {
                 for (int n = 0; n < 4096; ++n) {
                     auto d = udp.receive();

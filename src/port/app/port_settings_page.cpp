@@ -127,7 +127,7 @@ std::size_t button_bit(const char* name) {
 }
 // A key the page can bind: named (key_name / key_code round trip), not Esc (cancel) nor F11 (the window's).
 bool bindable(std::uint8_t vk) {
-    if (vk == 0 || vk == vk_escape || vk == vk_f11) return false;
+    if (vk == 0 || vk == vk_escape || vk == vk_f11 || vk == vk_pause_break) return false;  // 134ui1: Pause/Break pauses
     const std::string n = key_name(vk);
     if (n.rfind("VK", 0) == 0) return false;
     const auto back = key_code(n);
@@ -155,6 +155,10 @@ std::vector<PortSettingsPage::Binding> PortSettingsPage::bindings_on(std::int32_
         all.push_back({"bind.play.walk", "WALK"});
         for (std::size_t d = 0; d < 4; ++d)
             all.push_back({std::string("bind.play.menu_dpad.") + directions[d], std::string("MENU ") + direction_labels[d]});
+        // 134ui1: the window hotkeys (input_bindings.hpp WindowHotkeys) fill PLAY KEYS 4's last three rows.
+        all.push_back({"hotkey.pause", "PAUSE KEY"});
+        all.push_back({"hotkey.fullscreen", "FULLSCREEN KEY"});
+        all.push_back({"hotkey.port_menu", "PORT MENU KEY"});
     }
     const std::int32_t first_page = play ? static_cast<std::int32_t>(Page::play_keys_1) : static_cast<std::int32_t>(Page::menu_keys_1);
     const std::size_t from = static_cast<std::size_t>(page - first_page) * page_rows;
@@ -275,6 +279,12 @@ std::vector<std::uint8_t> PortSettingsPage::keys_of(const PortSettings& s, const
         const auto d = display_settings(s);
         return d.frame_overlay_key ? std::vector<std::uint8_t>{*d.frame_overlay_key} : std::vector<std::uint8_t>{};
     }
+    if (b.key.rfind("hotkey.", 0) == 0) {  // 134ui1
+        const WindowHotkeys h = window_hotkeys(s);
+        if (b.key == "hotkey.pause") return h.pause;
+        if (b.key == "hotkey.fullscreen") return h.fullscreen;
+        return h.port_menu;
+    }
     const BindingSet set = parse_input_bindings(s);
     const bool play = b.key.rfind("bind.play.", 0) == 0;
     const InputBindings& in = play ? set.play : set.menu;
@@ -374,6 +384,7 @@ void PortSettingsPage::commit(PortSettings& s, const std::string& what) {
     (void)display_settings(s);
     (void)mouse_look_settings(s);
     (void)parse_input_bindings(s);
+    (void)window_hotkeys(s);  // 134ui1
     (void)controller_prompt_setting(s);
     (void)background_audio_setting(s);
     (void)mods_setting(s);
@@ -525,7 +536,8 @@ bool PortSettingsPage::act(std::int32_t row, Action a) {
         case 5: {
             if (a != Action::press) return false;
             const auto n = erase_port_settings(s, "bind.");
-            commit(s, "RESET KEYS (" + std::to_string(n) + " bind.* keys removed)");
+            const auto h = erase_port_settings(s, "hotkey.");  // 134ui1: the window hotkeys back to Esc / F11 / F7
+            commit(s, "RESET KEYS (" + std::to_string(n) + " bind.* and " + std::to_string(h) + " hotkey.* keys removed)");
             return true;
         }
         case 6: {  // 132ws3: the wide view's field of view (draw only; the original 100%)
@@ -595,6 +607,22 @@ void PortSettingsPage::bind_key(std::uint8_t vk) {
     const bool append = capture_->append;
     capture_.reset();
     wait_release_ = true;
+    if (target.key.rfind("hotkey.", 0) == 0) {  // 134ui1: a window hotkey takes keyboard keys another hotkey does not use
+        auto keys = append ? keys_of(s, target) : std::vector<std::uint8_t>{};
+        if (std::find(keys.begin(), keys.end(), vk) == keys.end()) keys.push_back(vk);
+        PortSettings t = s;
+        set_port_setting(t, target.key, keys_text(keys));
+        try {
+            if (vk < 0x08) throw std::runtime_error("a hotkey is a keyboard key");
+            (void)window_hotkeys(t);
+        } catch (const std::exception& e) {
+            log_.push_back("Port settings page (port-only): " + target.label + " not set to " + key_name(vk) + " (" + e.what() + ")");
+            ++revision_;
+            return;
+        }
+        commit(t, target.label + " = " + keys_text(keys) + " (" + target.key + ")");
+        return;
+    }
     if (append) {
         auto keys = keys_of(s, target);
         if (std::find(keys.begin(), keys.end(), vk) != keys.end()) {

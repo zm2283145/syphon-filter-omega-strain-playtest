@@ -1,6 +1,7 @@
 #include "port_cheats.hpp"
 
 #include "awards_agent_host.hpp"
+#include "port_settings.hpp"
 #include "profile_awards.hpp"
 
 #include <algorithm>
@@ -396,6 +397,50 @@ void port_cheats_patch_ingamenu(GuiNode& ingamenu) {
     if (!paused) throw std::runtime_error("port cheats: INGAMENU.GUI has no label_paused");
     append_ingame_button(*group, "08", "$StartMenu7");
     shift_y(*paused, -30.0F);
+}
+
+namespace {
+bool& pause_menu_extras_flag() {
+    // The PC: the original pause menu (F7 opens the port menu); the consoles keep Cheats / Port Settings there.
+    static bool on = !port_pc_build;
+    return on;
+}
+}  // namespace
+
+bool port_pause_menu_extras() { return pause_menu_extras_flag(); }
+void port_set_pause_menu_extras(bool on) { pause_menu_extras_flag() = on; }
+
+GuiNode port_menu_screen(const GuiNode& ingamenu) {
+    GuiNode root = ingamenu;
+    const GuiNode* original = find_node(ingamenu, "ingame_button_grp");
+    if (!original || original->children.size() != 7 || original->children.back().name != "07")
+        throw std::runtime_error("port menu: INGAMENU.GUI's ingame_button_grp is not the seven buttons 01..07");
+    const float row0 = original->children[0].rect[1], row1 = original->children[1].rect[1];
+    const float bottom_margin = original->rect[3] - (original->rect[1] - original->children.back().rect[1]);
+    port_cheats_patch_ingamenu(root);
+    port_settings_patch_ingamenu(root);
+    GuiNode* group = find_node(root, "ingame_button_grp");
+    std::vector<GuiNode> kept;
+    for (auto& c : group->children)
+        if (c.name == "08" || c.name == "09") kept.push_back(std::move(c));
+    if (kept.size() != 2) throw std::runtime_error("port menu: the Cheats / Port Settings buttons are missing");
+    shift_y(kept[0], row0 - kept[0].rect[1]);
+    shift_y(kept[1], row1 - kept[1].rect[1]);
+    group->children = std::move(kept);
+    group->rect[3] = (group->rect[1] - row1) + bottom_margin;
+    GuiNode grp = *group;
+    GuiNode* message = find_node(root, "xbutton_message");
+    GuiNode* paused = find_node(root, "label_paused");
+    if (!message || !paused) throw std::runtime_error("port menu: INGAMENU.GUI has no xbutton_message / label_paused");
+    GuiNode msg = *message, pause = *paused;
+    shift_y(pause, (row1 + (row1 - row0)) - pause.rect[1]);
+    root.children.clear();
+    root.children.push_back(std::move(grp));
+    root.children.push_back(std::move(msg));
+    root.children.push_back(std::move(pause));
+    root.name = "portmenu";
+    pin_decorators(root, "INGAMENU");
+    return root;
 }
 
 void port_settings_patch_ingamenu(GuiNode& ingamenu) {

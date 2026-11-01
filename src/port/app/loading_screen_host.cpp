@@ -278,7 +278,7 @@ void LoadingScreenHost::run() {
                 if (!application_pause_shown) {
                     application_pause_shown = true;
                     std::cout << "Loading screen: application paused at loading frame " << frames_
-                              << " (Pause/Break or the window system menu)\n";
+                              << " (Esc, Pause/Break or the window system menu)\n";
                 }
                 phase_ = "application paused";
                 while (window->application_paused() && !window->close_requested() &&

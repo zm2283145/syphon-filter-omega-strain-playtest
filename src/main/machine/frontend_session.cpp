@@ -1083,7 +1083,72 @@ void FrontendSession::resume_after_level(std::uint8_t state_50, std::uint8_t pre
 
 // ---------------------------------------------------------------- GuiHost
 
-std::optional<std::string> FrontendSession::get_string(const std::string& key) { return services_.strings(key); }
+std::optional<std::string> FrontendSession::get_string(const std::string& key) {
+    // Port-only (checkpoint 134ui1): the F7 port menu's and its Cheats screen's strings (port_cheats.hpp).
+    if (services_.port_menu && rt_.port_menu_active())
+        if (auto p = port_cheat_string(key)) return p;
+    return services_.strings(key);
+}
+
+// ---------------------------------------------------------------- port-only F7 port menu (134ui1)
+
+std::int32_t FrontendSession::port_cheat_count() { return static_cast<std::int32_t>(omega::port_cheat_count); }
+
+bool FrontendSession::port_cheat_action(std::int32_t i) {
+    return i >= 0 && i < static_cast<std::int32_t>(omega::port_cheat_count) && port_cheat_is_action(static_cast<PortCheat>(i));
+}
+
+bool FrontendSession::port_cheat_on(std::int32_t i) {
+    if (i < 0 || i >= static_cast<std::int32_t>(omega::port_cheat_count)) throw std::runtime_error("port-only Cheats: row out of range");
+    return port_cheat(static_cast<PortCheat>(i));
+}
+
+bool FrontendSession::port_cheat_toggle(std::int32_t i) {
+    if (i < 0 || i >= static_cast<std::int32_t>(omega::port_cheat_count)) throw std::runtime_error("port-only Cheats: row out of range");
+    const auto c = static_cast<PortCheat>(i);
+    const std::string name = port_cheat_names[static_cast<std::size_t>(i)];
+    if (c == PortCheat::end_level) {
+        record("port-only cheat End Level: no level is running (the front end)");
+        return false;
+    }
+    if (port_cheat_is_action(c)) {
+        try {
+            switch (c) {
+            case PortCheat::unlock_weapons: port_unlock_all_weapons(); break;
+            case PortCheat::unlock_levels: port_unlock_all_levels(); break;
+            case PortCheat::max_rank: port_max_rank(); break;
+            case PortCheat::unlock_rank_rewards: port_unlock_all_rank_rewards(); break;
+            default: break;
+            }
+            record("port-only cheat " + name + " applied (the front end's agent)");
+        } catch (const std::exception& e) {
+            record("port-only cheat " + name + " not applied: " + e.what());
+        }
+        return false;
+    }
+    port_set_cheat(c, !port_cheat(c));
+    record("port-only cheat " + name + (port_cheat(c) ? " On" : " Off") + " (from the next level)");
+    return false;
+}
+
+bool FrontendSession::port_menu_toggle(std::string* why) {
+    if (rt_.port_menu_active()) {
+        rt_.port_menu_close();
+        record("port-only port menu closed (F7)");
+        return false;
+    }
+    const auto refuse = [&](const char* reason) {
+        if (why) *why = reason;
+        return false;
+    };
+    if (!services_.port_menu) return refuse("no port menu host");
+    if (!gui_active() || movie_playing() || handoff())
+        return refuse("not in the front end's menus (a movie, the boot or a level load)");
+    if (loading_widget_) return refuse("a loading screen is shown");
+    if (!rt_.port_menu_open()) return refuse("the port menu screen did not open");
+    record("port-only port menu opened (F7)");
+    return true;
+}
 
 std::uint32_t FrontendSession::font(const std::string& name) { return services_.font(name); }
 
@@ -1674,10 +1739,29 @@ std::optional<std::int32_t> FrontendSession::resource(const std::string& name) {
         if (iequal(services_.gui_resources[i], name + ".HOG")) return static_cast<std::int32_t>(i);
     // Port-only (132win11): the Port Settings screen, one past the disc's resources (open_gui).
     if (services_.port_rows.settings && name == "PORTSETTINGS") return static_cast<std::int32_t>(services_.gui_resources.size());
+    // Port-only (134ui1): the F7 port menu and its Cheats screen, two and three past.
+    if (services_.port_menu && name == "PORTMENU") return static_cast<std::int32_t>(services_.gui_resources.size() + 1);
+    if (services_.port_menu && name == "PORTCHEATS") return static_cast<std::int32_t>(services_.gui_resources.size() + 2);
     return std::nullopt;
 }
 
 const GuiNode* FrontendSession::open_gui(const std::string& file, std::int32_t res) {   // 0036e1b0 + 00419020
+    if (res >= 0 && services_.port_menu &&
+        (static_cast<std::size_t>(res) == services_.gui_resources.size() + 1 ||
+         static_cast<std::size_t>(res) == services_.gui_resources.size() + 2)) {
+        // Port-only (134ui1): PORTMENU (INGAMENU's Cheats / Port Settings buttons) and PORTCHEATS (GAMEOPT2's widgets).
+        const bool menu = static_cast<std::size_t>(res) == services_.gui_resources.size() + 1;
+        const std::string key = (menu ? "PORTMENU/" : "PORTCHEATS/") + file;
+        auto it = gui_files_.find(key);
+        if (it == gui_files_.end()) {
+            const auto bytes = services_.gui_file(menu ? "INGAMENU" : "GAMEOPT2");
+            if (bytes.size() < 3 || bytes[0] != 'G' || bytes[1] != 'U' || bytes[2] != 'I') return nullptr;
+            auto f = std::make_unique<GuiFile>(decode_gui(bytes));
+            f->root = menu ? omega::port_menu_screen(f->root) : omega::port_cheats_screen(f->root);
+            it = gui_files_.emplace(key, std::move(f)).first;
+        }
+        return &it->second->root;
+    }
     if (res >= 0 && static_cast<std::size_t>(res) == services_.gui_resources.size() && services_.port_rows.settings) {
         // Port-only (132win11): PORTSETTINGS, GAMEOPT2's widgets rearranged (port_settings_screen), made once.
         const std::string key = "PORTSETTINGS/" + file;

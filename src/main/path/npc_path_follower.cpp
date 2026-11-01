@@ -138,6 +138,14 @@ void update_npc_path_follower(NpcPathFollower& pf,const NpcNodeGraph& graph,cons
         const bool segment=set_npc_path_segment(pf,graph,next,host);
         set_bit(pf.flags_60,3,!segment);
         pf.destination_5c=graph.node(pf.current_50).parameter_7c;
+        // 134lt15 (path_17.c 00160220, g_IsMultiplayer and actor +14): with the route's node array, the route
+        // becomes {next, +4c, +54} (+28 = 0, then three pushes) and goes out with cNetPathMsg_SendPath 002d7be0.
+        if(host.network_path&&pf.route_74&&pf.route_74->array_20){
+            auto& b=*pf.route_74;
+            b.nodes.clear();
+            b.nodes.push_back(next);b.nodes.push_back(pf.hold_4c);b.nodes.push_back(pf.previous_54);
+            host.network_path(b);
+        }
         return;
     }
     const auto& n=graph.node(pf.current_50);

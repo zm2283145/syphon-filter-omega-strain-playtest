@@ -66,9 +66,19 @@ std::size_t bit_index(std::uint16_t mask) {
     return k;
 }
 
+Keys& reserved_keys() {
+    static Keys k;
+    return k;
+}
+
+bool reserved(std::uint8_t vk) {
+    const auto& r = reserved_keys();
+    return std::find(r.begin(), r.end(), vk) != r.end();
+}
+
 bool any_down(const Keys& list, const KeyboardState& state) {
     for (const auto vk : list)
-        if (state[vk]) return true;
+        if (state[vk] && !reserved(vk)) return true;
     return false;
 }
 
@@ -132,7 +142,8 @@ InputBindings default_input_bindings(BindProfile profile) {
         set(ds2::down, keys({0x28}));
         set(ds2::left, keys({0x25}));
         set(ds2::cross, keys({0x0d, 0x20}));
-        set(ds2::triangle, keys({0x1b, 0x08}));
+        // 134ui1: Esc is the window's pause hotkey (hotkey.pause); Backspace stays Triangle.
+        set(ds2::triangle, keys({0x08}));
         set(ds2::square, keys({0x10}));
         set(ds2::circle, keys({0x11}));
         set(ds2::l1, keys({'Q'}));
@@ -273,6 +284,94 @@ std::vector<std::string> describe_input_bindings(const InputBindings& b, BindPro
         for (std::size_t d = 0; d < 4; ++d) lines.push_back(std::string("menu_dpad.") + direction_names[d] + ": " + list(b.menu_dpad[d]));
     }
     return lines;
+}
+
+WindowHotkeys window_hotkeys(const PortSettings& settings) {
+    WindowHotkeys h;
+    struct Slot {
+        const char* key;
+        Keys* list;
+    };
+    const Slot slots[] = {{"hotkey.pause", &h.pause}, {"hotkey.fullscreen", &h.fullscreen}, {"hotkey.port_menu", &h.port_menu}};
+    for (const auto& [key, value] : settings.other) {
+        if (key.rfind("hotkey.", 0) != 0) continue;
+        Keys* target = nullptr;
+        for (const auto& s : slots)
+            if (lower(key) == s.key) target = s.list;
+        if (!target) throw std::runtime_error("port settings: " + key + ": the hotkeys are hotkey.pause, hotkey.fullscreen and hotkey.port_menu");
+        Keys out;
+        if (lower(trim(value)) != "none") {
+            std::size_t at = 0;
+            while (at <= value.size()) {
+                const auto end = std::min(value.find(',', at), value.size());
+                const std::string name = trim(std::string_view(value).substr(at, end - at));
+                at = end + 1;
+                const auto vk = key_code(name);
+                if (!vk) throw std::runtime_error("port settings: " + key + ": unknown key '" + name + "'");
+                if (*vk < 0x08) throw std::runtime_error("port settings: " + key + ": a hotkey is a keyboard key, not a mouse button");
+                if (*vk == vk_pause_break) throw std::runtime_error("port settings: " + key + ": Pause/Break always pauses (reserved)");
+                if (std::find(out.begin(), out.end(), *vk) == out.end()) out.push_back(*vk);
+            }
+        }
+        *target = std::move(out);
+    }
+    for (const auto& a : slots)
+        for (const auto& b : slots) {
+            if (a.list >= b.list) continue;
+            for (const auto vk : *a.list)
+                if (std::find(b.list->begin(), b.list->end(), vk) != b.list->end())
+                    throw std::runtime_error(std::string("port settings: ") + a.key + " and " + b.key + " both use " + key_name(vk));
+        }
+    return h;
+}
+
+WindowHotkey window_hotkey(std::uint8_t vk, const WindowHotkeys& h) {
+    if (vk == vk_pause_break) return WindowHotkey::pause;
+    auto has = [vk](const Keys& k) { return std::find(k.begin(), k.end(), vk) != k.end(); };
+    if (has(h.pause)) return WindowHotkey::pause;
+    if (has(h.fullscreen)) return WindowHotkey::fullscreen;
+    if (has(h.port_menu)) return WindowHotkey::port_menu;
+    return WindowHotkey::none;
+}
+
+Keys window_hotkey_keys(const WindowHotkeys& h) {
+    Keys out{vk_pause_break};
+    for (const auto* list : {&h.pause, &h.fullscreen, &h.port_menu})
+        for (const auto vk : *list)
+            if (std::find(out.begin(), out.end(), vk) == out.end()) out.push_back(vk);
+    return out;
+}
+
+const char* window_hotkey_name(WindowHotkey h) {
+    switch (h) {
+    case WindowHotkey::pause: return "pause";
+    case WindowHotkey::fullscreen: return "fullscreen";
+    case WindowHotkey::port_menu: return "port_menu";
+    default: return "none";
+    }
+}
+
+void set_reserved_host_keys(Keys keys) { reserved_keys() = std::move(keys); }
+
+const Keys& reserved_host_keys() { return reserved_keys(); }
+
+std::vector<std::string> bindings_using_reserved_keys(const BindingSet& set, const Keys& reserved_list) {
+    std::vector<std::string> out;
+    auto check = [&](const std::string& name, const Keys& list) {
+        for (const auto vk : list)
+            if (std::find(reserved_list.begin(), reserved_list.end(), vk) != reserved_list.end())
+                out.push_back(name + ": " + key_name(vk));
+    };
+    for (const auto& [profile, b] : {std::pair<const char*, const InputBindings*>{"menu", &set.menu}, {"play", &set.play}}) {
+        for (std::size_t k = 0; k < b->buttons.size(); ++k) check(std::string("bind.") + profile + "." + button_names[k], b->buttons[k]);
+        for (std::size_t d = 0; d < 4; ++d) {
+            check(std::string("bind.") + profile + ".stick_left." + direction_names[d], b->stick_left[d]);
+            check(std::string("bind.") + profile + ".stick_right." + direction_names[d], b->stick_right[d]);
+            check(std::string("bind.") + profile + ".menu_dpad." + direction_names[d], b->menu_dpad[d]);
+        }
+        check(std::string("bind.") + profile + ".walk", b->walk);
+    }
+    return out;
 }
 
 KeyboardState host_keyboard_state() {

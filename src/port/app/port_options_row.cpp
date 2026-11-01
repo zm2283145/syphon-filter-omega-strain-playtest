@@ -1,4 +1,5 @@
 #include "port_options_row.hpp"
+#include "port_cheats.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -139,7 +140,8 @@ std::function<PortSettings()> bind_port_settings_rows(FrontendServices& services
     services.port_rows.patch = [screen_row, page](const std::string& screen, GuiFile& file) {
         if (screen != "GAMEOPT") return;
         inject_cpu_partner_row(file.root);
-        if (page) inject_port_settings_row(file.root);
+        // 134ui1: on the PC the F7 port menu opens the Port Settings page; the row only with pause_menu_extras=1.
+        if (page && port_pause_menu_extras()) inject_port_settings_row(file.root);
         if (screen_row) inject_video_rows(file.root);
     };
     const auto show = [strings](gui::GuiRuntime& rt, gui::Widget* value, bool on) {

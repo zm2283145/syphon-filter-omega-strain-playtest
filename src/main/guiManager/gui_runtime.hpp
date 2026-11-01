@@ -122,7 +122,7 @@ enum class WidgetClass : std::uint8_t { widget, text, button, title, canvas, edi
                                         missionstatlist, port_settings, dossiers, ranks, ratings, omega, achieve, pmenu,
                                         agentinfo, agentdisplay, onlinecn, msnsetup,
                                         netjoin, missionlist, chatwin, acntlogn, onlinepref, netmess,
-                                        netmsgarray, netcontacts, netagencycell, eqsetup };
+                                        netmsgarray, netcontacts, netagencycell, eqsetup, port_menu };
 
 // PORT-ONLY (checkpoint 132ln1): the label ONOFFSEL's "lan" button shows with GuiHost::port_lan_play (the
 // disc's text there is the developer placeholder "TEST"; no LAN string exists on the disc). Worded like the disc's
@@ -1857,6 +1857,10 @@ public:
     // Port-only (checkpoint 132win11): the Port Settings screen's model (nullptr, the default: no screen, no pause
     // menu entry).
     virtual PortSettingsScreen* port_settings_screen();
+    // Port-only (checkpoint 134ui1, the PC's F7 port menu): whether the host builds the port menu screen PORTMENU
+    // (INGAMENU's Cheats and Port Settings buttons alone, port_cheats.hpp port_menu_screen). False (the default):
+    // GuiRuntime::port_menu_open does nothing.
+    virtual bool port_menu();
 
     // GuiAgentModify's services (checkpoint 132cc4b).
     // 0055dda0: the front end's character part cache (frontCharacter 0022a220).
@@ -2004,6 +2008,15 @@ public:
     // Port Settings screen PORTSETTINGS: the options leave as on Triangle (0029ad10 without a save: unsaved
     // changes are undone), then the screens switch. False when the host has no settings screen.
     bool port_open_settings(Widget* options);
+    // Port-only (checkpoint 134ui1, the PC's F7): the port menu PortGuiMenu (PORTMENU: Cheats, Port Settings) over
+    // whatever is shown. In game it pauses the world as the start menu does (00131470(1), the GAMEBACK backdrop,
+    // the HUD's +6a8 set so Start does not open the start menu over it) and refuses while the start menu or the map
+    // is open; in the front end the screens under it stop updating (their timers, the title's attract countdown)
+    // until it closes. Its Cheats / Port Settings screens come back to it on Triangle; Triangle or Start on it, Start
+    // on them, or port_menu_close (F7 again) close it all. False when nothing opened.
+    bool port_menu_open();
+    void port_menu_close();
+    bool port_menu_active() const { return port_menu_mode_; }
     void set_focus(Widget* f);                       // 00414b30
     void update(float dt);                           // +60 00465500
     // 00415b60(canvas, dt): 002cbb30's update while 0051eeb0 is set (a card wait's nested poll): if the
@@ -2474,6 +2487,16 @@ public:
     std::uint8_t pc_input(Widget* w, const PadEvent& ev);
     std::uint8_t pc_event(Widget* w, Widget* sender, std::uint32_t type, std::int32_t a3, std::int32_t t0);
     void pc_refresh(Widget* w);
+    // Port-only (checkpoint 134ui1): the F7 port menu PortGuiMenu.
+    void xm_init(Widget* w);
+    void xm_wake(Widget* w);
+    std::uint8_t xm_input(Widget* w, const PadEvent& ev);
+    std::uint8_t xm_event(Widget* w, Widget* sender, std::uint32_t type, std::int32_t a3, std::int32_t t0);
+    void xm_select(Widget* w, std::int32_t idx);
+    bool port_menu_mode_ = false;
+    bool port_menu_backdrop_ = false;          // in game: the GAMEBACK backdrop was pushed with it
+    std::int32_t port_menu_focus_ = 7;         // the button focused when it shows (7 Cheats, 8 Port Settings)
+    std::vector<Widget*> port_menu_frozen_;    // front end: the screens under it, not updated while it is open
     // Port-only (checkpoint 132win11): PortGuiSettings.
     void ps_init(Widget* w);
     void ps_wake(Widget* w);

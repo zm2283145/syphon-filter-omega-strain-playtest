@@ -620,8 +620,18 @@ void relocate_npc_path_follower_15ffd0(NpcPathFollower& pf,const NpcNodeGraph& g
     }
     hold_npc_path_node(pf,graph,node);                                             // 00160084 00160c40 (0015ffd0's tail)
 }
+NpcNetPath npc_net_path_002d7be0(const NpcRouteBuffer& b){
+    NpcNetPath p;
+    if(!b.nodes.empty()){p.last_2c=b.nodes.back();p.first_30=b.nodes.front();}
+    p.point_34=!(b.destination_10>=0);
+    if(b.point_00)p.point=*b.point_00;
+    p.point[3]=1.0F;
+    return p;
+}
 bool start_npc_route(NpcPathFollower& pf,const NpcNodeGraph& graph,const NpcPathHost& host){
     if(!pf.route_74)throw std::runtime_error("NPC route: the route start without a route buffer");
+    // 134lt15 (path_21.c 00160ce0): in a network game an actor with +14 sends the new route first (002d7be0).
+    if(host.network_path)host.network_path(*pf.route_74);
     if(bit(pf.flags_60,0)){set_bit(pf.flags_60,0,false);hold_npc_path_node(pf,graph,-1);}
     const auto& nodes=pf.route_74->nodes;
     pf.index_48=static_cast<std::int32_t>(nodes.size());

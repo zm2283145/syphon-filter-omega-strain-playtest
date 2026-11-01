@@ -63,7 +63,7 @@ The keyboard and mouse are a second controller that is always connected (port-on
 |---|---|
 | D-pad | Arrow keys |
 | Cross (accept) | Enter, Space |
-| Triangle (back) | Esc, Backspace |
+| Triangle (back) | Backspace (Esc is the pause key) |
 | Square | Shift |
 | Circle | Ctrl |
 | L1 / R1 | Q / E |
@@ -90,7 +90,8 @@ The keyboard and mouse are a second controller that is always connected (port-on
 | Start (start menu) | P |
 | D-pad | Y / B / V / N (the arrow keys in the in-level menus) |
 
-**Window** (port-only, at any time): **Alt+Enter** or **F11** toggles borderless fullscreen on the window's monitor;
+**Window** (port-only, at any time): **Esc** pauses / resumes the application (below), **F7** opens the port menu
+(**Port Settings** and **Cheats**; below), **Alt+Enter** or **F11** toggles borderless fullscreen on the window's monitor;
 **Alt+F4** or the close button quits (the game shuts down cleanly). On a scaled display (125 %, 150 %, ...) the window
 is drawn at the display's real resolution (no blur); its default size grows with the scale, and moving it to a monitor
 with another scale resizes it. **F3** (in the menus or a level) shows or hides the frame-time
@@ -100,7 +101,7 @@ In windowed mode, the title bar has the standard Windows **Minimize**, **Maximiz
 You can also resize the window by dragging its borders. Minimize, maximize, Win+D and switching to another window
 do not pause the application.
 
-**Pause the application:** press **Pause/Break** to freeze it, then press it again to resume. You can also open the
+**Pause the application:** press **Esc** (or **Pause/Break**) to freeze it, then press it again to resume. You can also open the
 window menu with **Alt+Space** or by right-clicking the title bar and choose **Pause application / Resume application**.
 The title shows **[PAUSED]** while this pause is active. This stops the application, including game advancement and
 audio, independently of the game's **P / Start** menu. Restoring focus or the window does not cancel your pause.
@@ -111,7 +112,7 @@ and when the window loses focus.
 
 **In the background** (port-only): the PS2 game has no pause on focus loss, so the game keeps running while you use
 another window, but its sound is silenced (`background_audio=1` keeps it) and the keyboard, mouse and controller are
-ignored until you click back in. Use **Pause/Break** or **Pause application** first if you want the whole application
+ignored until you click back in. Use **Esc**, **Pause/Break** or **Pause application** first if you want the whole application
 to stop while you step away.
 
 **Controllers** (port-only): XInput pads, DualShock 4 and DualSense (USB or Bluetooth) can be plugged in or out at any
@@ -156,7 +157,10 @@ below except `window`, `iso`, `iso_verified`, `partner_friendly_fire`, `partner_
 | `mods_folder` | a folder (`mods` next to the game) | `--mods <folder>`; the settings file only |
 | `bind.<menu\|play>.<button>` | `<key>[,<key>]` or `none` | Port Settings |
 | `online_server` | `<host>[:<port>]` (`127.0.0.1:10075`): the omega_server the Online mode uses (see below) | the settings file only |
-| `online_platform_badges` | `0` / `1` (1): the platform badges ("PC", "PS2", ...) next to player names online | the settings file only |
+| `online_platform_badges` | `0` / `1` (0): the platform badges ("PC", "PS2", ...) next to player names online | the settings file only |
+| `lan_play` | `0` / `1` (0): show **Play LAN** on the online / offline select | `--lan-play`; the settings file only |
+| `hotkey.pause` / `hotkey.fullscreen` / `hotkey.port_menu` | `<key>[,<key>]` or `none` (Esc / F11 / F7): the window's keys. Pause/Break always pauses and Alt+Enter always toggles fullscreen; a hotkey's key presses no game button | Port Settings (PLAY KEYS 4) |
+| `pause_menu_extras` | `0` / `1` (0 on the PC): also list **Cheats** and **Port Settings** in the in-level start menu and **PORT SETTINGS** in Title > Options (F7 has them either way) | `--pause-menu-extras on\|off`; the settings file only |
 | `online_chat_filter` | `0` / `1` (the server's default): hide rude words in the lobby chat you receive (port-only; the server owner sets the word list) | the settings file only |
 | `online_game_password` | text, up to 31 characters (empty): the password other players must type to join the online games you create | the settings file only (`--online-game-password`) |
 | `online_game_port` | `0`..`65535` (`3658`, the original game's port): the UDP port of the online games you host; forward it on your router if UPnP does not (see "Hosting behind a home router"). When it is busy, another port is used for that game (logged); `0`: always another | the settings file only (`--online-game-port`) |
@@ -170,14 +174,15 @@ takes the left mouse button off Square). Key names: `A`..`Z`, `0`..`9`, `F1`..`F
 `MouseMiddle`, `Mouse4`, `Mouse5`, `Backspace`, `Tab`, `Enter`, `Shift`, `Ctrl`, `Alt`, `Esc`, `Space`, `PageUp`,
 `PageDown`, `End`, `Home`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `NumMul`, `NumAdd`, `NumSub`,
 `NumDecimal`, `NumDiv`, `LShift`, `RShift`, `LCtrl`, `RCtrl`, `Semicolon`, `Equals`, `Comma`, `Minus`, `Period`,
-`Slash`, `Grave`, `LBracket`, `Backslash`, `RBracket`, `Quote`. F11, Alt+Enter and Alt+F4 are kept for the window.
+`Slash`, `Grave`, `LBracket`, `Backslash`, `RBracket`, `Quote`. The window hotkeys (Esc, F11, F7 by default, and
+Pause/Break), Alt+Enter and Alt+F4 are kept for the window: a binding that names one of their keys ignores it.
 On the Port Settings page's key pages Cross replaces a button's keys with the next key pressed, Right adds one and
 Left removes the last one.
 
-By default (`aspect=pillarbox`) the game keeps its own 4:3 picture: in a wider or narrower window, and in fullscreen,
-menus, movies, loading screens and the HUD are shown at 4:3 with black bars, never stretched, while the 3D view of a
-level fills the window. `aspect=4:3` shows only the 4:3 picture everywhere (black bars in levels too, as on a 4:3
-television); `aspect=stretch` stretches the 4:3 picture over the whole window.
+By default (`aspect=4:3`) the game shows the PS2's 4:3 picture: in a wider or narrower window, and in fullscreen,
+everything (menus, movies, loading screens, the HUD and the levels' 3D view) is shown at 4:3 with black bars, as on a
+4:3 television. `aspect=pillarbox` keeps the 2D layers at 4:3 but lets the 3D view of a level fill the window (the
+default before this change); `aspect=stretch` stretches the 4:3 picture over the whole window.
 
 `aspect=wide` is the port-only true-widescreen mode. Levels keep the original vertical FOV and show more at the sides;
 HUD elements anchor to the screen edges without stretching. Front-end menus, including the NEW AGENT / LOAD AGENT
@@ -265,8 +270,10 @@ guns by range, and to another gun when one runs dry.
 
 ## Port Settings page (port-only)
 
-The PS2 game has no such page; the port adds it. Open it from **Title > Options > Control > PORT SETTINGS** (under
-CPU PARTNER; opening it leaves the Options without saving them, as backing out does) or from the start menu's last
+The PS2 game has no such page; the port adds it. On the PC press **F7** (in the menus or a level) and choose **Port
+Settings**; the game is paused while the F7 menu is open, and F7, Triangle or Start closes it. With
+`pause_menu_extras=1` (and always on the PS Vita and PS5) it is also in **Title > Options > Control > PORT SETTINGS**
+(under CPU PARTNER; opening it leaves the Options without saving them, as backing out does) and the start menu's last
 entry **Port Settings** in a level. It uses the game's own menu look and sounds:
 
 - **DISPLAY**: fullscreen, VSYNC, aspect, render scale, the frame overlay and its key, BG AUDIO (`background_audio`);
@@ -282,11 +289,12 @@ written to `local\port_settings.txt` straight away, keeping its comments.
 
 ## Cheats (port-only)
 
-- **In a level:** the start menu (P / Start) has an extra **Cheats** entry: Infinite Health, Infinite Armour,
-  Infinite Ammo, End Level, Super Agent, NPCs Ignore You and Unlock All, each On / Off. All cheats are off at the start
-  of every level.
-- **Title Options:** the extra entries **CHEAT: ALL** (every award, part and weapon) and **CHEAT: WEAPONS** (every
-  loadout weapon) change the agent saved on the memory card.
+- **F7 > Cheats** (the PC; in the menus or a level): Infinite Health, Infinite Armour, Infinite Ammo, End Level, Super
+  Agent, NPCs Ignore You (each On / Off; in the menus they take effect in the next level) and the one-click unlocks
+  (Unlock All Weapons, Unlock All Levels, Max Rank, Unlock All Rank Rewards). End Level needs a level. All cheats are off
+  until you turn them on.
+- **In a level** on the PS Vita and PS5 (and on the PC with `pause_menu_extras=1`): the start menu (P / Start) has the
+  same **Cheats** entry.
 
 Without them the game is the original.
 

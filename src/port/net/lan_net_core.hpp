@@ -675,6 +675,24 @@ public:
     std::vector<RemotePlayerMessage> take_remote_player_messages();
     std::uint32_t player_messages_sent() const { return player_messages_sent_; }
     std::uint32_t player_messages_received() const { return player_messages_received_; }
+    //  - 134lt15: MSGGAME_NET_PATH_REQUEST, cNetPathMsg (Pack 002d79d0, 0x20 bytes, type 0x0051f0c8 from 002d78c0; receive
+    //    002d7a80). cNetPathMsg_SendPath 002d7be0 (from the owner's 00160ce0 route start and 00160220 patrol step)
+    //    fills +2c the route's last node, +30 its first (the destination), byte +34 "the route's +10 < 0" and +38..+40
+    //    the route's point, then cNetObj_SendMessage(the actor's +10, msg, -1, -1): every client. The Pack copies
+    //    them to +8 / +c / +10 / +14..+1c and writes +1c = 0x40; 002d7a80 queues the message to the NetMap object of
+    //    the header's key (the copy's human, whose 001b3b60 hands it to its controller: 002d4ff0 on a cNetNPC).
+    struct RemoteNetPath {
+        std::uint16_t origin{};
+        std::uint32_t target_key{};
+        std::int32_t last_2c{-1}, first_30{-1};
+        bool point_34{};
+        std::array<float, 3> point{};
+    };
+    void send_net_path(std::uint32_t target_key, std::int32_t last, std::int32_t first, bool point_flag,
+                       const std::array<float, 3>& point);
+    std::vector<RemoteNetPath> take_remote_net_paths();
+    std::uint32_t net_paths_sent() const { return net_paths_sent_; }
+    std::uint32_t net_paths_received() const { return net_paths_received_; }
 
     // 132ln5h11 (research/NET_INLEVEL.md 4.21): the level's generators (cGenerator 004db680) in the network game.
     // register_generator gives a generator (its population id: the block's +0xc and +0x10, the key everywhere) a
@@ -852,6 +870,12 @@ public:
     // actor), 001ae450(actor, 4, 0, it) (the block as install_remote_npc_controller). True: it was installed, so the
     // play's NpcAiController takes its remote mode (set_remote). The rest of 001b4f40 is the play's activation.
     bool npc_remote_controller_001b4f40(std::uint32_t c);
+    // 134lt15: 001b4f40's tail after the activation (001b50d0..): idx = 003fb340(+c) (-1: the local index),
+    // cNetObj_AddSystem 003fb650(+10, idx, the block), +3268 = 1, the NPC info object's SetActive 004341f0(&+c). A
+    // generator NPC's virtual +20 (the play's actor_20) ran only the controller part, so another console's spawn that
+    // a console activated (its generator active, 0021e320) had no NetMap object here and 003e4f70 dropped its death
+    // action (also its other NetMap-addressed messages).
+    void npc_net_activate_tail_001b50d0(std::uint32_t c);
     // 132ln5h13: the controller swaps (NpcControl) go to this handler as they happen (the original's synchronous
     // 003c9420(msg, actor, 1) delivery and 0021e380's construction); unset, they are queued for take_npc_controls.
     void set_npc_control_handler(std::function<void(const NpcControl&)> handler) { npc_control_handler_ = std::move(handler); }
@@ -965,6 +989,21 @@ public:
     // 134lt13: cNPC_Activate_int 00157940(controller, v) on the NPC's block (the enabled list 0x004ea1b0; AddActivate
     // 0042e180 when the NPC was enabled for nobody).
     void npc_activate_00157940(std::uint32_t c, std::int32_t v);
+    // 134lt14: cNPC_Activate_cGOBJP 00157800(controller, gobj) on the NPC's block, as the script's Activate (the GOBJ)
+    // and ActivateAnon (none) run it in a network game: `gobj_key` 0 is a null gobj (00157940(-1): the closest player,
+    // 0014afd0); otherwise 0040c540 finds the object (none here throws naming 003cc820).
+    void npc_activate_00157800(std::uint32_t c, std::uint32_t gobj_key);
+    // 134lt14: cNPC_SetEnabled 0015b220(controller, bit, set) on the NPC's block (00157510's SetEnabled(-1, 0)).
+    void npc_set_enabled_0015b220(std::uint32_t c, std::int32_t bit, bool set);
+    // 134lt14: cNPCInfoObject_IsActiveOnRemote 004340c0(info, &+c): a client other than this one has the NPC active.
+    bool npc_active_on_remote_004340c0(std::uint32_t c);
+    // 134lt14: the NPC info entry of +c (0x004361c0's find): owner +4, previous owner +5, the per-client active bytes
+    // +6+s (SetActive 004341f0) and in-active-terrain bytes +a+s (SetInActiveTerrain 00433f20). nullopt: no entry.
+    struct NpcInfoBytes {
+        std::uint8_t owner{}, previous{};
+        std::array<std::uint8_t, 4> active{}, in_terrain{};
+    };
+    std::optional<NpcInfoBytes> npc_info_bytes(std::uint32_t c);
     std::uint32_t npc_enabled_mask(std::uint32_t c) const;    // the 0x004ea1b0 item's +4 (0 without one)
     float npc_enabled_timer(std::uint32_t c) const;           // its +8
     bool npc_enabled_listed(std::uint32_t c) const;
@@ -1096,6 +1135,8 @@ public:
     std::vector<RemoteDeath> take_remote_deaths();
     std::uint32_t deaths_sent() const { return deaths_sent_; }
     std::uint32_t deaths_received() const { return deaths_received_; }
+    // PORT-ONLY diagnostic (134lt15): the keys of received death actions 003e4f70 delivered to no object.
+    std::vector<std::uint32_t> take_dropped_deaths() { std::vector<std::uint32_t> out; out.swap(dropped_deaths_); return out; }
     bool host_console() const { return memory_.read(0x5721c0, 1) != 0; }   // 005721c0
     std::uint32_t npc_sections_run() const { return npc_sections_run_; }
 
@@ -1299,6 +1340,7 @@ private:
     std::uint32_t damages_sent_ = 0, damages_received_ = 0, damage_notices_dropped_ = 0;
     std::vector<RemoteDeath> remote_deaths_;
     std::uint32_t deaths_sent_ = 0, deaths_received_ = 0;
+    std::vector<std::uint32_t> dropped_deaths_;   // 134lt15 (diagnostic)
     std::uint32_t despawns_sent_ = 0, despawns_received_ = 0;
     static constexpr std::uint32_t kObjectiveBlocks = 0x1d46100;
     std::uint32_t objective_counter_ = 0;
@@ -1352,6 +1394,9 @@ private:
     std::vector<RemoteTrigger> remote_triggers_;
     std::vector<RemotePlayerMessage> remote_player_messages_;
     std::uint32_t player_messages_sent_ = 0, player_messages_received_ = 0;
+    std::vector<RemoteNetPath> remote_net_paths_;   // 134lt15
+    std::uint32_t npc_net_activate_tail_index(std::uint32_t key);   // 134lt15: 001b50d0.. (returns idx)
+    std::uint32_t net_paths_sent_ = 0, net_paths_received_ = 0;
     std::uint32_t hotbox_sent_ = 0, hotbox_received_ = 0, checkpoints_sent_ = 0, checkpoints_received_ = 0;
     std::uint32_t lift_locks_sent_ = 0, lift_locks_received_ = 0, triggers_sent_ = 0, triggers_received_ = 0;
 };

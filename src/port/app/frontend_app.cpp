@@ -577,6 +577,7 @@ struct FrontendApp::Impl {
     std::optional<omega::FrameProfile> overlay_profile;
     std::uint64_t overlay_logged = ~0ull;
     void overlay_events();
+    void port_menu_toggle(const char* source);  // 134ui1: F7 / --frontend-test-port-menu
     void draw_overlay(std::int64_t frame);
     std::vector<std::string> overlay_lines(std::int64_t frame);
     void draw_overlay_lines(const std::vector<std::string>& lines);
@@ -793,11 +794,13 @@ FrontendApp::Impl::Impl(DiscImage& disc, const FrontendOptions& o) : options(o) 
         };
         port_settings_reader = bind_port_settings_rows(services, store, std::move(row), std::move(vrow), page);
     }
+    // Port-only (134ui1): the PC's F7 port menu (Port Settings, Cheats) over the front end's menus.
+    services.port_menu = port_pc_build;
     // Port-only (132ln1): LAN Play on the online / offline select.
     services.lan_play = options.lan_play || lan_play_setting(store->read());
     if (services.lan_play)
         std::cout << "Front end: LAN Play (port-only, 132ln1) shown on the online / offline select"
-                  << (options.lan_play ? " (--lan-play)" : " (lan_play=1, the default)") << "\n";
+                  << (options.lan_play ? " (--lan-play)" : " (lan_play=1)") << "\n";
     if (services.lan_play) {  // Port-only (132ln3): the LAN session behind MSNSETUP's begin_mission
         lan::LanSessionConfig lc;
         lc.build_hash = lan::lan_build_hash(OMEGA_ISO_SHA256, OMEGA_EXE_SHA256);
@@ -1386,6 +1389,7 @@ void FrontendApp::Impl::capture(const std::string& name) {
 
 void FrontendApp::Impl::step(std::uint16_t held) {
     FrontendSession& s = *session;
+    if (options.test_port_menu.count(s.frames() + 1)) port_menu_toggle("--frontend-test-port-menu");  // 134ui1 test
 #ifndef __vita__
     const std::string movie_before = s.movie_playing() ? s.movie_name() : std::string{};
 #endif
@@ -1891,11 +1895,23 @@ void FrontendApp::Impl::overlay_events() {
         std::cout << "Front end: frame overlay (port-only) " << (overlay_on ? "on" : "off") << " (" << key_name(*overlay_key)
                   << ") at front-end frame " << session->frames() << "\n";
     }
+    // Port-only (checkpoint 134ui1): F7 (hotkey.port_menu), the port menu; a Port Settings key capture keeps Esc / F7.
+    host->set_key_capture(page && page->capturing());
+    if (host->take_port_menu_request()) port_menu_toggle("hotkey.port_menu, F7 by default");
     if (overlay_key && options.test_overlay_key.count(session->frames() + 1)) {
         std::cout << "Front end: --frontend-test-overlay-key (port-only test) posts " << key_name(*overlay_key)
                   << " to the game window at front-end frame " << session->frames() + 1 << "\n";
         PostMessageW(host->handle(), WM_KEYDOWN, *overlay_key, LPARAM(1));
     }
+}
+
+// Port-only (checkpoint 134ui1): the PC's F7 port menu over the front end (FrontendSession::port_menu_toggle).
+void FrontendApp::Impl::port_menu_toggle(const char* source) {
+    std::string why;
+    const bool was = session->runtime().port_menu_active();
+    const bool open = session->port_menu_toggle(&why);
+    std::cout << "Front end: port menu (port-only) " << (open ? std::string("opened") : was ? std::string("closed") : "not opened: " + why)
+              << " (" << source << ") at front-end frame " << session->frames() << "\n";
 }
 
 // Port-only (checkpoint 132win11): the Port Settings page's key capture. While it waits for a key it gets the
@@ -2087,7 +2103,7 @@ FrontendResult FrontendApp::Impl::loop() {
                     if (gamepad) gamepad->set_vibration(false, 0);
                     apply_focus_mute();
                     std::cout << "Front end: application paused at front-end frame " << s.frames()
-                              << " (Pause/Break or the window system menu; focus, minimise and resize remain independent)\n";
+                              << " (Esc, Pause/Break or the window system menu; focus, minimise and resize remain independent)\n";
                 }
 #ifndef __vita__
                 if (movie_stage) movie_stage->set_paused(true);

@@ -4,6 +4,7 @@
 #include "npc_script_control.hpp"
 
 #include <array>
+#include <bit>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -735,9 +736,44 @@ RootVector ActorWorldScriptNpcs::eye_position(std::size_t actor) const {
 }
 
 float ActorWorldScriptNpcs::actor_closest_player_distance_squared(std::size_t actor) const {
-    const std::array<std::optional<RootVector>, 4> players{eye_position(player_actor_), std::nullopt, std::nullopt,
-                                                           std::nullopt};
+    std::array<std::optional<RootVector>, 4> players{eye_position(player_actor_), std::nullopt, std::nullopt,
+                                                     std::nullopt};
+    if (network_players_) {   // 134lt14: cNetObj_GetPlayer(i), i = 0..3
+        const auto slots = network_players_();
+        for (std::size_t i = 0; i < 4; ++i)
+            players[i] = slots[i] ? std::optional<RootVector>(eye_position(*slots[i])) : std::nullopt;
+    }
     return npc_closest_player_eye_distance_squared(eye_position(actor), players);
+}
+
+std::int32_t ActorWorldScriptNpcs::actor_closest_player_slot(std::size_t actor) const {
+    if (!network_players_) return 0;   // single player: the player's +c top byte is 1
+    const auto slots = network_players_();
+    const auto eye = eye_position(actor);
+    float best = std::bit_cast<float>(0x4cbebc20U);   // 1e8
+    std::optional<std::int32_t> slot;
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (!slots[i]) continue;
+        const auto p = eye_position(*slots[i]);
+        const float dx = eye[0] - p[0], dy = eye[1] - p[1], dz = eye[2] - p[2];
+        const float d = (dx * dx + dy * dy) + dz * dz;   // vmul.xyz, vmulax.x / vmadday.x / vmaddz.x
+        if (d < best) {
+            best = d;
+            slot = static_cast<std::int32_t>(i);
+        }
+    }
+    if (slot) return *slot;
+    for (std::size_t i = 0; i < 4; ++i)   // nGobjManager_GetPlayer: the local player
+        if (slots[i] == player_actor_) return static_cast<std::int32_t>(i);
+    throw std::runtime_error("Script NPCs: 003ce850 found no player and the local player has no slot");
+}
+
+void ActorWorldScriptNpcs::activate_gobj(Word npc, std::optional<Word> gobj) {
+    if (!activate_net_) {
+        activate(npc);   // 00157800 in single player: +30's +5c(1); the GOBJ is not used
+        return;
+    }
+    activate_net_(entry(npc).actor, gobj);
 }
 
 }

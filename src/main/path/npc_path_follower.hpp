@@ -95,6 +95,9 @@ struct NpcPathHost {
     std::function<RootVector()> actor_translation;
     // 003c9420 to the actor's +58 component with transport 0.
     std::function<void(const NpcPathEvent&)> send;
+    // 134lt15: cNetPathMsg_SendPath 002d7be0 of the route buffer +74, in a network game for an actor with +14 set
+    // (00160ce0 tests g_IsMultiplayer and +14, 00160220's patrol step g_IsMultiplayer and +14); unset: no send.
+    std::function<void(const NpcRouteBuffer&)> network_path;
 };
 // 00160f60 (Activate): with bit 6, clear it; with a hold node, hold it
 // (00160c40) and target its position; from a Path node set bits 0/1, take the
