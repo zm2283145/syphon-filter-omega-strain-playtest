@@ -244,6 +244,11 @@ void NpcAiController::remote_activate(SoloActorSimulation& actor){
     r.timer_204=0.0F;
     c.inactive_159=0;
 }
+bool NpcAiController::remote_node_in_active_terrain(SoloActorSimulation& actor){
+    if(!remote_||remote_->node_1e8<0)return false;                             // b = +1e8 null: 0
+    auto h=host(actor);
+    return npc_node_association_eligible(graph_.node(remote_->node_1e8),h);  // c = node +60: +2d && +2c && !+2e
+}
 void NpcAiController::remote_relocate(NpcAiHost& h){
     relocate_npc_path_follower_15ffd0(component_.path,graph_,remote_->node_208,npc_path_host(h));   // 0015ffd0(+1b0, +208)
 }

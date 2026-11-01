@@ -785,9 +785,21 @@ public:
     // so the find misses and nothing is erased; a populated map throws naming 0042d910.
     void npc_remote_release_002d4460(std::uint32_t c, bool terrain);
     // 134lt6: cNetObjectMgr_TerrainActivation 0042d790 (NetObjectMgr_3.c) for an NPC: nothing when its virtual +7c answers
-    // (cHuman: the generator-spawned byte +3598); otherwise the TransferReference insert into 0x00582700 and, unless the
-    // controller's +5c answers, the notice 0x00582730: not ported (0042eb20 would call the block's +94 / +20), it throws.
+    // (cHuman: the generator-spawned byte +3598); otherwise the TransferReference insert into 0x00582700
+    // (terrain_activation_insert_0042d790) and, unless the controller's +5c answers (cNetNPC_IsNetNPC 002d2b20: 1), the
+    // notice 0x00582730 (not ported: it throws). PORT-ONLY: the block's +2d mirrors the actor's +60(1) that came first.
+    // Each network frame 0042eb20 then asks an inactive entry's controller +88 (2), +94 (cNetNPC_IsNodeInActiveTerrain
+    // 002d2ab0: the play's NpcTerrainHosts::node_active) and +44, and calls the object's +20 (cHuman_NetActivate 001b4f40:
+    // NpcTerrainHosts::net_activate, then +2d = 1) before releasing the reference.
     void npc_terrain_activation_0042d790(std::uint32_t c, bool generator_created);
+    struct NpcTerrainHosts {
+        std::function<bool(std::uint32_t c)> node_active;   // 002d2ab0: the remote controller's node +1e8 in active terrain
+        std::function<void(std::uint32_t c)> net_activate;  // 001b4f40 on the NPC's actor (PORT-ONLY stand-in: the play)
+    };
+    void set_npc_terrain_hosts(NpcTerrainHosts hosts) { npc_terrain_hosts_ = std::move(hosts); }
+    std::uint32_t npc_terrain_references() const;       // the entries of 0x00582700
+    std::uint32_t npc_net_activations() const { return npc_net_activations_; }
+    std::uint32_t npc_block_address(std::uint32_t c) const { return npc_block(c); }   // tests
     // 134lt6: the cNetNPCMsgs channel. send_npc_message is 002d7290(target, type, len, a, b, c, 0) for the NPC of key c:
     // 003c9e30(msg, 0x0051f0a8), vtable 0x004de4d0, +2c type, +1c 0x40, +30 / +34 / +38 a / b / c, +20 len (8: to the
     // object's owner), 003c9420(msg, the NPC block, 0), 003c9d60. The receive 002d7190 (registered by 002d7020 as
@@ -1033,6 +1045,9 @@ private:
     GeneratorReceiver generator_receiver_;
     std::uint32_t generator_sent_ = 0, generator_received_ = 0;
     std::uint32_t npc_remote_releases_ = 0;
+    NpcTerrainHosts npc_terrain_hosts_;
+    std::uint32_t npc_net_activations_ = 0;
+    static constexpr std::uint32_t kFnNpcNodeActive = 0x1d38f2c, kFnNpcNetActivate = 0x1d38f30;
     std::vector<RemoteNpcMessage> remote_npc_messages_;
     std::uint32_t npc_messages_sent_ = 0, npc_messages_received_ = 0;
     std::uint32_t receive_npc_message_002d7190(std::uint32_t buf);

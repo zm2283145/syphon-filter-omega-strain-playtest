@@ -324,6 +324,9 @@ void net_objects_send_0042cf30(LevelLoadMemory& m, LevelLoadHost& host, std::uin
 // 0042e6d0: release the owned references in 0x00582700 and clear it and the transfer-timer map 0x00582720. The
 // transfer-object, short-value and pending-message maps remain required to be empty until their producers are hosted.
 void net_objects_reset_0042e6d0(LevelLoadMemory& m, LevelLoadHost& host);
+// 134lt6: 0042d790's insert for an object whose +7c answers 0: a TransferReference {object, +c} (0036b180(8)) under +c in
+// 0x00582700 by insert_one (an existing key keeps its node; the new reference is not freed). True when inserted.
+bool terrain_activation_insert_0042d790(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object);
 // 00438340 (from 00438770): on the host / solo, once (0x00582cf0 clear): in a level the "HeadsetSemaphore" DME object
 // (002eaf28(sp+0x48, 2, 4, 1000, 0, 0, 0, 0), the class 0x00583868; its handle into 0x00583870, its +0x1c into
 // 0x00582cf0 when 002eb650 finds it), before the level 0x00582cf0 = 0. The first call (0x00497568) runs the headset

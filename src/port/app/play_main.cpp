@@ -13115,6 +13115,22 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             for(const auto& r:lan_remotes)if(!r.gone&&r.figure&&r.key==key)return r.figure->actor;
             return std::nullopt;
         };
+        // 134lt6: what 0042eb20 asks of a terrain-activation entry (an authored remote NPC that lost contact, 0042d790):
+        // its remote controller's node in active terrain (002d2ab0) and the actor's NetActivate (001b4f40; PORT-ONLY:
+        // the play's activation, as for the named NPC's activation message above).
+        if(lan_net)lan_net->set_npc_terrain_hosts({
+            [&](std::uint32_t c){
+                const auto a=lan_actor_of_key(c,false);
+                if(!a)return false;
+                for(auto& n:npcs)if(n.actor==*a&&n.ai&&n.ai->is_remote())return n.ai->remote_node_in_active_terrain(actors.actor(n.actor));
+                return false;},
+            [&](std::uint32_t c){
+                const auto a=lan_actor_of_key(c,false);
+                if(!a)throw std::runtime_error("001b4f40: the NetActivate of an NPC key with no actor here");
+                NpcFigure* npc=nullptr;for(auto& n:npcs)if(n.actor==*a)npc=&n;
+                if(npc&&script_npcs_host)script_npcs_host->activate(npc->actor_id);
+                else actors.activate(*a);
+                std::cout<<"LAN (134lt6): 0042eb20 -> 001b4f40: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<*a<<") reactivated\n";}});
         if(lan_net)lan_net->set_named_npc_receiver([&](const lan::LanNetCore::RemoteNamedNpc& msg){
             const auto found=std::find_if(npcs.begin(),npcs.end(),[&](const NpcFigure& f){
                 return f.ai&&f.record<population.npcs.size()&&!lan_remote_slot_of(f.record)&&!coop_partner_index_of(f.record)&&f.actor_id==msg.key;});

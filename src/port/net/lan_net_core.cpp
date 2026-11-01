@@ -212,6 +212,10 @@ LanNetCore::LanNetCore(LanTransport& transport, LanClock clock, bool host_role) 
     m.write(0x4de4d0 + 0x8, 4, 0x2d6380);
     m.write(0x4de4d0 + 0xc, 4, 0x2d6250);
     m.write(0x4de4d0 + 0x10, 4, 0x2d7100);
+    // 134lt6: what 0042eb20 asks of a terrain-activation entry: the remote NPC controller's +0x94 (002d2ab0) and the
+    // NPC block's +0x20 (001b4f40), both PORT-ONLY stand-ins answered by the play (NpcTerrainHosts).
+    m.write(0x4de2a0 + 0x94, 4, kFnNpcNodeActive);
+    m.write(0x4da690 + 0x20, 4, kFnNpcNetActivate);
     m.write(0x4da690 + 0xc0, 4, kFnHumanPosition);
     m.write(kHumanVtable + 0xc0, 4, kFnHumanPosition);
     // 132ln5h12: the spawn message 0x004de240 (+8 the destructor 0021df80, +0xc the clone 002d0ee0, +0x10 the
@@ -1391,9 +1395,20 @@ void LanNetCore::npc_terrain_activation_0042d790(std::uint32_t c, bool generator
         log_.push_back("0042d790: NPC +c 0x" + hex8(c) + " is generator-spawned (+7c answers): nothing");
         return;
     }
-    unhosted(0x42d790, "the transfer-reference insert (0x00582700) for an authored NPC 0x" + hex8(c) +
-                           " (0042eb20's +94 / +20 on the NPC block are not hosted)");
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN terrain activation during the background load pump");
+    const auto block = npc_block(c);
+    m.write(block + 0x2d, 1, 0);  // PORT-ONLY: the actor's +60(1) just before (002d5160)
+    const bool inserted = terrain_activation_insert_0042d790(m, *this, block);
+    const auto controller = m.read(block + 0x58);
+    const bool handled = controller && call(m, m.read(m.read(controller) + 0x5c), {controller}) != 0;
+    if (!handled)
+        unhosted(0x42d790, "the notice 0x00582730 (action 2) to an NPC whose controller +5c does not manage the transfer");
+    log_.push_back("0042d790: NPC +c 0x" + hex8(c) + (inserted ? " in 0x00582700" : " already in 0x00582700") +
+                   " (the controller manages the transfer: no notice)");
 }
+
+std::uint32_t LanNetCore::npc_terrain_references() const { return memory_.read(0x582700); }
 
 // 134lt6 (the header): 002d7290.
 void LanNetCore::send_npc_message(std::uint32_t c, std::uint8_t type, std::uint8_t len, std::uint32_t a, std::uint32_t b,
@@ -3193,6 +3208,22 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
         generator_receiver_(id, static_cast<std::int32_t>(arg(1)), enable);
         return 0;
     }
+    case kFnNpcNodeActive: {  // PORT-ONLY: cNetNPC_IsNodeInActiveTerrain 002d2ab0 (controller +0x94): the play's answer
+        const auto key = m.read(m.read(arg(0) + 0x30) + 0xc);
+        if (!npc_terrain_hosts_.node_active) unhosted(0x2d2ab0, "the remote NPC's node terrain without the play's host");
+        return npc_terrain_hosts_.node_active(key) ? 1U : 0U;
+    }
+    case kFnNpcNetActivate: {  // PORT-ONLY: cHuman_NetActivate 001b4f40 (virtual +0x20) of an NPC block: the play's
+        const auto key = m.read(arg(0) + 0xc);
+        if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != arg(0))
+            unhosted(0x1b4f40, "the virtual +0x20 of an object that is not an NPC block");
+        if (!npc_terrain_hosts_.net_activate) unhosted(0x1b4f40, "an NPC's NetActivate without the play's host");
+        npc_terrain_hosts_.net_activate(key);
+        m.write(arg(0) + 0x2d, 1, 1);
+        ++npc_net_activations_;
+        log_.push_back("0042eb20 -> 001b4f40: NPC +c 0x" + hex8(key) + " reactivated (its node's terrain is active)");
+        return 0;
+    }
     case kFnParticleEnable:
     case kFnParticleDisable: {  // PORT-ONLY: the particle's virtual +0x28 (001c5650) / +0x2c (001c5660): the play's
         const bool on = address == kFnParticleEnable;
@@ -3290,6 +3321,7 @@ void LanNetCore::finish_level_teardown(bool retain_session) {
     lobby_exit_ = {};
     generator_receiver_ = {};
     particle_receiver_ = {};
+    npc_terrain_hosts_ = {};
     remote_npc_messages_.clear();
     particle_blocks_.clear();
     next_particle_ = kParticles;

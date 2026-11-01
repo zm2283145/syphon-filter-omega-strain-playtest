@@ -1371,6 +1371,47 @@ std::uint32_t rb_map_find(const LevelLoadMemory& m, std::uint32_t map, std::uint
 }
 }  // namespace
 
+// 134lt6: cNetObjectMgr_TerrainActivation 0042d790's insert (NetObjectMgr_3.c) for an object whose +7c answers 0.
+bool terrain_activation_insert_0042d790(LevelLoadMemory& m, LevelLoadHost& host, std::uint32_t object) {
+    constexpr std::uint32_t map = 0x582700;
+    heap_enter(m, host);
+    const auto reference = host.call(m, 0x36b180, {0, 8, 0x4bfb00, 0x1ba});  // "NetObjectMgr.cc" 0x1ba
+    heap_leave(m, host);
+    const auto id = r32(m, object + 0xc);
+    if (reference) {
+        w32(m, reference, object);   // +0 the object, +4 its id (reference_id: the object's +c)
+        w32(m, reference + 4, id);
+    }
+    // insert_one (std_tree_pair_int_value_compare_insert_one_pairR_3): an existing key keeps its node and the new
+    // reference is not freed, as in the original.
+    if (rb_map_find(m, map, id) != map + 4) return false;
+    bool left = true, leftmost = true;
+    std::uint32_t parent = map + 4;
+    for (auto n = r32(m, map + 4); n;) {
+        parent = n;
+        if (s32(id) < s32(r32(m, n + 0xc))) {
+            n = r32(m, n);
+            left = true;
+        } else {
+            n = r32(m, n + 4);
+            left = leftmost = false;
+        }
+    }
+    heap_enter(m, host);
+    const auto node = host.call(m, 0x36b180, {0, 0x14, 0x4ad508, 0x5c});  // "allocator.hh"
+    heap_leave(m, host);
+    w32(m, node + 0xc, id);
+    w32(m, node + 0x10, reference);
+    w32(m, node + 4, 0);
+    w32(m, node, 0);
+    w32(m, node + 8, parent | (r32(m, node + 8) & 1));
+    w32(m, parent + (left ? 0 : 4), node);
+    w32(m, map, r32(m, map) + 1);
+    net_map_rebalance(m, node, r32(m, map + 4));
+    if (leftmost) w32(m, map + 0xc, node);
+    return true;
+}
+
 // 003fbcd0, cNetObj_Clear, runs after the end screens and before the level's
 // GOBJ destruction. The NetObj and client maps own their tree nodes, not the
 // receivers. The NPC/GenInfo constructors make temporary stack objects whose
