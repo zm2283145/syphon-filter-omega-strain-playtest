@@ -7995,6 +7995,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         // stable LAN key. The value is their figure index; unlike generator
         // spawns, both peers already constructed the same actor.
         std::map<std::size_t,std::size_t> lan_named_npcs;
+std::set<std::uint32_t> lan_joiner_authored;   // 134lt9: the joiner's authored NPC blocks (LanNetCore::register_authored_npc)
         // Checkpoint 132fx1: the DespawnedNPCMsgs 00220bb0 sends its generator (transport 0), delivered with the SpawnedNPCMsgs.
         std::vector<std::pair<std::uint32_t,std::uint32_t>> despawned_npc_msgs;
         // The type-1/6/7 boxes' EnableMsg / DisableMsg (transport 0) to generators, queued (005435c0) for the next pump.
@@ -8396,7 +8397,8 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                         npc.ai->set_network_hooks({
                             [net,c](std::uint8_t contact,const RootVector& p){net->npc_contact_0014c510(c,contact,{p[0],p[1],p[2]});},
                             [net,c](float speed){net->npc_speed_0014c6e0(c,speed);},
-                            [net,c](float yaw){net->npc_heading_001a99a4(c,yaw);}});
+                            [net,c](float yaw){net->npc_heading_001a99a4(c,yaw);},
+                            [net,c]{net->npc_activate_peers_00157df0(c,true);}});   // 134lt8: +7c answers: nothing sent
                         NpcRemoteLink link;
                         link.link=[net,c]()->std::optional<NpcRemoteAim>{
                             const auto l=net->npc_net_link(c);
@@ -12638,6 +12640,23 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
         };
         std::optional<omega::AgentPacking> lan_sent_packing;
         std::uint32_t lan_floor_logged=0;
+        // 134lt9: the joiner's authored NPCs: cHuman_InitNetwork 001856d0's block, SetNetworkID and NetMap entry
+        // (LanNetCore::register_authored_npc), the AI controller kept, so a peer's cNetTerrainActivation finds an NPC block
+        // (00431d60 -> 0042d790 -> the notice 0x00582730 -> 001b3b60). The original's InitNetwork runs as 001350e0 creates
+        // each human (the play's 001350e0 hook below); the host's are registered by its mirror (mirror_named_npc).
+        const auto lan_register_joiner_authored=[&](const char* where){
+            if(lan_net->host_console())return;
+            std::size_t added=0;
+            for(const auto& npc:npcs){
+                if(!npc.ai||npc.record>=population.npcs.size()||lan_remote_slot_of(npc.record)||coop_partner_index_of(npc.record))continue;
+                const auto key=static_cast<std::uint32_t>(npc.actor_id);
+                if(lan_joiner_authored.contains(key))continue;
+                lan_net->register_authored_npc(key);
+                lan_joiner_authored.insert(key);++added;
+            }
+            if(added)std::cout<<"LAN (134lt9): 001856d0 ("<<where<<"): "<<added<<" authored NPC block(s) registered on the joiner ("
+                <<lan_joiner_authored.size()<<" in all), AI controllers kept\n";
+        };
         const auto lan_set_local_player=[&]{
             // 132ln5h6: the player's packing (+0xa0) 002c72a0 compacts with 004073c0 (a body switch's, once one is made).
             if(lan_part_cache){
@@ -12698,10 +12717,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                     npc.ai->set_network_hooks({
                         [net,key](std::uint8_t contact,const RootVector& p){net->npc_contact_0014c510(key,contact,{p[0],p[1],p[2]});},
                         [net,key](float speed){net->npc_speed_0014c6e0(key,speed);},
-                        [net,key](float yaw){net->npc_heading_001a99a4(key,yaw);}});
-                    // 134lt8: the fourth hook (activated: 00157df0's peer loop, LanNetCore::npc_activate_peers_00157df0) is
-                    // not set yet. A joiner can receive the cNetTerrainActivation(0) of an authored NPC before 002c6690 has
-                    // bound that NPC's block, and its 00431d60 then finds a GOBJ that is not an NPC block (it throws there).
+                        [net,key](float yaw){net->npc_heading_001a99a4(key,yaw);},
+                        [net,key]{   // 134lt8: 00157df0's peer loop for an authored NPC (+7c 0); 134lt9: set in play
+                            const auto before=net->npc_activate_peers_sent();
+                            net->npc_activate_peers_00157df0(key,false);
+                            std::cout<<"LAN (134lt8): 00157df0 activation of +c 0x"<<std::hex<<key<<std::dec<<": "
+                                     <<(net->npc_activate_peers_sent()-before)<<" peer(s) sent cNetTerrainActivation(0)\n";}});
                     std::cout<<"LAN (132ln5h15): authored "<<npc.label<<" uses stable key 0x"<<std::hex<<key<<std::dec
                              <<" on actor "<<npc.actor<<"\n";
                 }
@@ -12725,6 +12746,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 lan_net->mirror_named_npc(snapshot);
             }
+            else lan_register_joiner_authored("a frame");   // 134lt9: any figure 001350e0 did not register
         };
         // Checkpoint 132ln5h6: the remote human's agent. 002c6b70 expands the message's compact appearance (00406ec0) into
         // the descriptor 001b8130 builds the role-3 human from; its model +40 is that packing, which 0038db30 resolves as the
@@ -13357,7 +13379,12 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 }
                 actors.activate(*a);
                 std::cout<<"LAN (134lt7): 001b4f40: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<*a<<") NetActivate"
-                    <<(remote_built?" (cNetNPC built)":"")<<"\n";}});
+                    <<(remote_built?" (cNetNPC built)":"")<<"\n";},
+            [&](std::uint32_t c){   // 134lt9: 001b3b60's Activate(0) for the notice 0x00582680 (the actor's activation)
+                const auto a=lan_actor_of_key(c,false);
+                if(!a)throw std::runtime_error("001b3b60: the Activate(0) of an NPC key with no actor here");
+                actors.activate(*a);
+                std::cout<<"LAN (134lt9): 001b3b60: NPC +c 0x"<<std::hex<<c<<std::dec<<" (actor "<<*a<<") Activate(0)\n";}});
         // 134lt7: Follow in a network game (001488f0 / 002d2d50): the cNetNPCMsgs 0x32 {the target's +c or -1, the two
         // floats' bits}; len 4 (every peer) from an AI controller, len 8 (the owner) from a remote one, whose 002d2d50
         // reads the target's +c without a null test.
@@ -13389,6 +13416,33 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             lan_net->npc_deactivate_global_00157510(key,generator);
             std::cout<<"LAN (134lt7): 00157510 DeactivateGlobal of +c 0x"<<std::hex<<key<<std::dec<<" (actor "<<actor<<"): "
                 <<(lan_net->npc_deactivate_globals_sent()-before)<<" peer(s) sent cDeactivateMsg + cNetTerrainActivation\n";});
+        // 134lt9: the remote NPC controller's link of an authored NPC (002c6690's, and 001b3b60's action 2).
+        const auto lan_authored_remote_link=[&](std::uint32_t key)->NpcRemoteLink{
+            NpcRemoteLink link;
+            auto* net=lan_net;
+            link.link=[net,key]()->std::optional<NpcRemoteAim>{
+                const auto l=net->npc_net_link(key);if(!l)return std::nullopt;
+                NpcRemoteAim a;a.aiming_20=l->aiming_20;a.firing_21=l->firing_21;a.point_valid_0=l->point_valid_0;
+                a.target_8=l->target_8;a.subtarget_c=l->subtarget_c;a.point_10={l->point_10[0],l->point_10[1],l->point_10[2],1.F};return a;};
+            link.fire_gate=[net,key]{return net->npc_fire_gate_002c4f20(key);};
+            link.motion=[net,key]()->std::optional<NpcRemoteMotion>{
+                const auto n=net->npc_net_motion(key);if(!n)return std::nullopt;
+                NpcRemoteMotion r;r.speed_3c=n->speed_3c;r.heading_40=n->heading_40;
+                r.position_44={n->position_44[0],n->position_44[1],n->position_44[2],1.F};return r;};
+            link.write_position=[net,key](const RootVector& p){net->npc_net_write_position(key,{p[0],p[1],p[2]});};
+            link.word_150=[net,key]{return net->npc_controller_150(key);};
+            link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
+            link.generator_message=[](std::uint32_t){};
+            link.local_release=[net,key](bool terrain){net->npc_remote_release_002d4460(key,terrain);};
+            link.terrain_activation=[net,key]{net->npc_terrain_activation_0042d790(key,false);};   // authored: +3598 0
+            link.object_by_key=[&,net](std::uint32_t target)->std::uint64_t{
+                if(target==0||target==0xffffffffU)return 0;
+                if(target==net->local_player_key())return actors.actor(0).handle();
+                if(const auto actor=lan_actor_of_key(target,false))return actors.actor(*actor).handle();
+                std::ostringstream o;o<<"LAN: 0040c540 of the remote named NPC's target key 0x"<<std::hex<<target<<": no object of this console";
+                throw std::runtime_error(o.str());};
+            return link;
+        };
         if(lan_net)lan_net->set_named_npc_receiver([&](const lan::LanNetCore::RemoteNamedNpc& msg){
             const auto found=std::find_if(npcs.begin(),npcs.end(),[&](const NpcFigure& f){
                 return f.ai&&f.record<population.npcs.size()&&!lan_remote_slot_of(f.record)&&!coop_partner_index_of(f.record)&&f.actor_id==msg.key;});
@@ -13415,30 +13469,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 RootVector{msg.position[0],msg.position[1],msg.position[2],1}};
             const auto placed=actor.teleport(ActorTeleportMode::place,matrix);
             actor.set_byte_14(0);
-            NpcRemoteLink link;
-            auto* net=lan_net;const auto key=msg.key;
-            link.link=[net,key]()->std::optional<NpcRemoteAim>{
-                const auto l=net->npc_net_link(key);if(!l)return std::nullopt;
-                NpcRemoteAim a;a.aiming_20=l->aiming_20;a.firing_21=l->firing_21;a.point_valid_0=l->point_valid_0;
-                a.target_8=l->target_8;a.subtarget_c=l->subtarget_c;a.point_10={l->point_10[0],l->point_10[1],l->point_10[2],1.F};return a;};
-            link.fire_gate=[net,key]{return net->npc_fire_gate_002c4f20(key);};
-            link.motion=[net,key]()->std::optional<NpcRemoteMotion>{
-                const auto n=net->npc_net_motion(key);if(!n)return std::nullopt;
-                NpcRemoteMotion r;r.speed_3c=n->speed_3c;r.heading_40=n->heading_40;
-                r.position_44={n->position_44[0],n->position_44[1],n->position_44[2],1.F};return r;};
-            link.write_position=[net,key](const RootVector& p){net->npc_net_write_position(key,{p[0],p[1],p[2]});};
-            link.word_150=[net,key]{return net->npc_controller_150(key);};
-            link.object_live=[net](std::uint32_t word){return net->npc_object_live(word);};
-            link.generator_message=[](std::uint32_t){};
-            link.local_release=[net,key](bool terrain){net->npc_remote_release_002d4460(key,terrain);};
-            link.terrain_activation=[net,key]{net->npc_terrain_activation_0042d790(key,false);};   // authored: +3598 0
-            link.object_by_key=[&,net](std::uint32_t target)->std::uint64_t{
-                if(target==0||target==0xffffffffU)return 0;
-                if(target==net->local_player_key())return actors.actor(0).handle();
-                if(const auto actor=lan_actor_of_key(target,false))return actors.actor(*actor).handle();
-                std::ostringstream o;o<<"LAN: 0040c540 of the remote named NPC's target key 0x"<<std::hex<<target<<": no object of this console";
-                throw std::runtime_error(o.str());};
-            npc.ai->set_remote_link(std::move(link));
+            npc.ai->set_remote_link(lan_authored_remote_link(msg.key));
             npc.ai->set_remote(actor);
             npc.active=actor.eligible();
             std::cout<<"LAN (132ln5h15): 002c6690 attached remote controller to existing "<<npc.label<<" (actor "<<npc.actor
@@ -13446,6 +13477,32 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                      <<(msg.active?"activated":"left inactive")<<", teleport "<<(placed.applied?"applied":"not applied")
                      <<" from client "<<msg.origin<<"\n";
             return true;
+        });
+        // 134lt9: 001b3b60's controller swaps of an authored NPC (the notices 0x00582730 / 0x00582680): kind 2 the remote
+        // NPC controller with its link (as 002c6690: the figure joins lan_named_npcs), kind 1 a fresh AI.
+        if(lan_net)lan_net->set_authored_npc_control_handler([&](const lan::LanNetCore::NpcControl& ctl){
+            const auto found=std::find_if(npcs.begin(),npcs.end(),[&](const NpcFigure& f){
+                return f.ai&&f.record<population.npcs.size()&&!lan_remote_slot_of(f.record)&&!coop_partner_index_of(f.record)
+                    &&static_cast<std::uint32_t>(f.actor_id)==ctl.c;});
+            if(found==npcs.end()){
+                std::ostringstream o;o<<"001b3b60: a controller swap for authored NPC key 0x"<<std::hex<<ctl.c<<" with no figure here";
+                throw std::runtime_error(o.str());
+            }
+            auto& npc=*found;auto& actor=actors.actor(npc.actor);
+            if(ctl.kind==2){
+                lan_named_npcs[npc.actor]=static_cast<std::size_t>(found-npcs.begin());
+                npc.ai->set_remote_link(lan_authored_remote_link(ctl.c));
+                npc.ai->set_remote(actor);
+                npc.active=actor.eligible();
+                std::cout<<"LAN (134lt9): 001b3b60: authored "<<npc.label<<" (actor "<<npc.actor<<", key 0x"<<std::hex<<ctl.c<<std::dec
+                    <<") is another console's: the remote NPC controller 0x004de2a0 (cNetNPC)"
+                    <<(npc.active?", active":", inactive")<<"\n";
+                return;
+            }
+            if(ctl.kind!=1)throw std::runtime_error("001b3b60: controller swap kind "+std::to_string(ctl.kind));
+            npc.ai->make_fresh_ai(actor);
+            std::cout<<"LAN (134lt9): 001b3b60: authored "<<npc.label<<" (key 0x"<<std::hex<<ctl.c<<std::dec
+                <<") is this console's again: a fresh AI controller 0x004d9380\n";
         });
         std::set<std::size_t> lan_damage_unkeyed;
         std::vector<std::size_t> lan_deaths_queued;   // logged once delivered (the actor's next pump)
@@ -13709,11 +13766,13 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
                 std::function<void()> generators;   // 132ln5h11: the generators' network constructor parts
                 std::function<void()> particles;    // 134lt6: the PLR: placements' network constructor tails
                 std::function<void()> pathed;       // 134lt5: the PathedGOBJs' NetPathedGobj objects (00212210 / 00212220)
+                std::function<void()> authored;     // 134lt9: the authored humans' cHuman_InitNetwork 001856d0 (a joiner's)
                 std::uint32_t call(LevelLoadMemory&,std::uint32_t address,std::initializer_list<std::uint32_t>)override{
                     if(address==0x1350e0){   // the level setup above (the timer events pumped meanwhile)
                         if(generators)generators();
                         if(particles)particles();
                         if(pathed)pathed();
+                        if(authored)authored();
                         return 0;
                     }
                     char text[96];std::snprintf(text,sizeof text,"unhosted(0x%08x): the play side of a network game is not ported",address);
@@ -13726,6 +13785,7 @@ std::optional<std::uint32_t> mods_texture_cap_flag;   // --mods-texture-cap <MB>
             // 004398e0(-1), the stamp 004f56b8). PORT-ONLY order: the play built the generators and applied the
             // level-start zone requests before this load; their network parts (00224330's +5c / 00224180's +60) are
             // replayed here, after every tail, as the original's first zone update follows the load.
+            level.authored=[&]{lan_register_joiner_authored("001350e0");};
             if(generator_world)level.generators=[&]{
                 // Each generator's block in LanNetCore's memory (the NetMap object of its key; 003ff8b0 / 003ff5d0 find
                 // it); a remote client's cEnableMsg / cDisableMsg reaches its virtual +28 00220e60 / +2c 00220d00 here,

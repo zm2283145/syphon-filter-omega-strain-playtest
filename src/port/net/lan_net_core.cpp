@@ -1687,13 +1687,109 @@ void LanNetCore::npc_terrain_activation_0042d790(std::uint32_t c, bool generator
     const bool inserted = terrain_activation_insert_0042d790(m, *this, block);
     const auto controller = m.read(block + 0x58);
     const bool handled = controller && call(m, m.read(m.read(controller) + 0x5c), {controller}) != 0;
-    if (!handled)
-        unhosted(0x42d790, "the notice 0x00582730 (action 2) to an NPC whose controller +5c does not manage the transfer");
+    if (!handled) {
+        // 134lt9: 0042d790's notice: 003c9e30(&notice, 0x00582730), vtable 004d9300, +20 1, +24 2 (action 2),
+        // 003c9420(&notice, the object, 1) (delivered at once: 001b3b60), the vtable again, 003c9d60(&notice, 0).
+        const auto caller = sp_;
+        sp_ -= 0x100;
+        const auto notice = sp_ + 0x40;
+        try {
+            call(m, 0x3c9e30, {notice, 0x582730});
+            m.write(notice, 4, 0x4d9300);
+            m.write(notice + 0x20, 1, 1);
+            m.write(notice + 0x24, 1, 2);
+            call(m, 0x3c9420, {notice, block, 1});
+            m.write(notice, 4, 0x4d9300);
+            call(m, 0x3c9d60, {notice, 0});
+        } catch (...) {
+            sp_ = caller;
+            throw;
+        }
+        sp_ = caller;
+    }
     log_.push_back("0042d790: NPC +c 0x" + hex8(c) + (inserted ? " in 0x00582700" : " already in 0x00582700") +
-                   " (the controller manages the transfer: no notice)");
+                   (handled ? " (the controller manages the transfer: no notice)" : " (notice 0x00582730 action 2 sent)"));
 }
 
 std::uint32_t LanNetCore::npc_terrain_references() const { return memory_.read(0x582700); }
+
+// 134lt9 (the header): the joiner's authored NPC blocks from the level start.
+bool LanNetCore::register_authored_npc(std::uint32_t c) {
+    auto& m = memory_;
+    if (pump_.joinable()) throw std::runtime_error("LAN authored NPC registration during the background load pump");
+    if (npc_blocks_.contains(c)) return false;
+    register_npc(c, 0);
+    const auto block = npc_block(c);
+    call(m, 0x185940, {block, c});
+    call(m, 0x3fb650, {m.read(block + 0x10), dme_->local_index(), block});
+    log_.push_back("001856d0 (134lt9): authored NPC +c 0x" + hex8(c) + " registered (00185940, 003fb650 owner " +
+                   std::to_string(dme_->local_index()) + "), AI controller 0x004d9380");
+    return true;
+}
+
+bool LanNetCore::authored_npc_control(const NpcControl& control) {
+    const auto g = npc_generators_.find(control.c);
+    if (g == npc_generators_.end() || g->second != 0) return false;
+    if (!authored_npc_control_handler_) unhosted(0x1b3b60, "a controller swap of an authored NPC without the play's figures");
+    authored_npc_control_handler_(control);
+    return true;
+}
+
+// 134lt9 (the header): cHuman_HandleMessage 001b3b60's transfer notices on an NPC block.
+std::uint32_t LanNetCore::npc_notice_001b3b60(std::uint32_t b, std::uint32_t msg) {
+    auto& m = memory_;
+    const auto key = m.read(b + 0xc);
+    if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != b)
+        unhosted(0x1b3b60, "a transfer notice to an object that is not an NPC block");
+    const auto state = [&]() -> std::uint32_t {   // the controller's State() (+88)
+        const auto controller = m.read(b + 0x58);
+        return controller ? call(m, m.read(m.read(controller) + 0x88), {controller}) & 0xffU : 0xffffffffU;
+    };
+    // cHuman_CreateGobjController(self, 2, ..) on the block (as the control message 1 of 0021eaa0): the AI controller
+    // 0x004d9380 (00158800 keeps the word +0x150; a generator NPC's 0x31f0 / +150 argument is the play's), the remote's
+    // link words cleared; the play's fresh AI (+48 when active: NpcAiController::make_fresh_ai).
+    const auto fresh_ai = [&] {
+        m.write(b + kNpcController, 4, 0x4d9380U);
+        m.write(b + kNpcController + 0x1e0, 4, 0);
+        m.write(b + kNpcController + 0x1e4, 4, 0);
+        m.write(b + 0x58, 4, b + kNpcController);
+        npc_control({key, 1});
+    };
+    ++npc_notices_handled_;
+    if (m.read(msg) == 0x4e0ea0) {   // 0x00582680
+        const bool swapped = state() == 2;
+        if (swapped) fresh_ai();
+        if (!npc_terrain_hosts_.activate_5c0) unhosted(0x1b3b60, "the activate notice's Activate(0) without the play's actor");
+        npc_terrain_hosts_.activate_5c0(key);
+        npc_activate_001b53d0(key);
+        log_.push_back("001b3b60: notice 0x00582680 for +c 0x" + hex8(key) + (swapped ? ": the AI controller again, " : ": ") +
+                       "Activate(0)");
+        return 1;
+    }
+    const auto action = m.read(msg + 0x24, 1);
+    if (action == 2) {
+        const auto controller = m.read(b + 0x58);
+        const bool built = !controller || state() != 2;
+        if (built) {
+            install_remote_npc_controller(b);
+            m.write(b + 0x58, 4, b + kNpcController);
+            npc_control({key, 2});   // cHuman_CreateGobjController(self, 4, 0, p); +48 when active: the play's set_remote
+        }
+        const auto data = m.read(b + 0x3584);
+        if (data) call(m, 0x2d2110, {data});   // cNetHuman_Deactivate
+        log_.push_back("001b3b60: notice 0x00582730 action 2 for +c 0x" + hex8(key) + (built ? ": cNetNPC built" : ": already remote") +
+                       (data ? ", cNetHuman_Deactivate" : ""));
+        return 0;
+    }
+    if (action == 1) {
+        const auto controller = m.read(b + 0x58);
+        const bool swapped = controller && state() != 1;
+        if (swapped) fresh_ai();
+        log_.push_back("001b3b60: notice 0x00582730 action 1 for +c 0x" + hex8(key) + (swapped ? ": the AI controller again" : ": nothing"));
+        return 0;
+    }
+    return 0;   // other actions: the switch has no case
+}
 
 // 134lt6 (the header): 002d7290.
 void LanNetCore::send_npc_message(std::uint32_t c, std::uint8_t type, std::uint8_t len, std::uint32_t a, std::uint32_t b,
@@ -3283,6 +3379,15 @@ std::uint32_t LanNetCore::call(LevelLoadMemory& m, std::uint32_t address, std::i
             if (!human_key(arg(1))) unhosted(address, "the action 0x43 to an object other than a remote human");
             pending_physical_ = static_cast<std::uint8_t>(m.read(msg + 0x2c, 1));
             return 0;
+        }
+        // 134lt9: the transfer notices 0x00582730 (vtable 004d9300, 0042d790 / 0042e180) and 0x00582680 (vtable 004e0ea0,
+        // 0042e180's activate notice) go to the object's handler: an NPC block's is 001b3b60 (npc_notice_001b3b60).
+        // PORT-ONLY: delivered at once for every flags value (003c9420(.., 0) queues it for the next dispatch).
+        if (m.read(msg) == 0x4d9300 || m.read(msg) == 0x4e0ea0) {
+            const auto key = m.read(arg(1) + 0xc);
+            if (!npc_blocks_.contains(key) || npc_blocks_.at(key) != arg(1))
+                unhosted(0x1b3b60, "a transfer notice (vtable 0x" + hex8(m.read(msg)) + ") to an object that is not an NPC block");
+            return npc_notice_001b3b60(arg(1), msg);
         }
         RemoteAction act;
         act.human = arg(1);

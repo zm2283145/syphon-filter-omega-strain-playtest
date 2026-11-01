@@ -737,6 +737,12 @@ public:
     // the object 0040c540 answers for the key, so the native NetMap / NPC info paths (001856d0, 003fb340, 003fb4b0,
     // 0021f0dc's calls) run on it. The play's figure is the actor.
     void register_npc(std::uint32_t c, std::uint32_t generator);
+    // 134lt9: an authored NPC on a console that does not mirror it (the joiner), from the level start, as cHuman_InitNetwork
+    // 001856d0 registers every authored human: its block (register_npc(c, 0), the AI controller 0x004d9380 kept),
+    // SetNetworkID 00185940(block, c) and cNetObj_AddSystem 003fb650(+10, the local index, the block). A peer's
+    // cNetTerrainActivation (00431d60) then finds an NPC block. The play calls it from 001350e0 (the level load, as the
+    // original's InitNetwork runs when each human is created). False (nothing done) when the block exists already.
+    bool register_authored_npc(std::uint32_t c);
     void forget_npc(std::uint32_t c);
     // 0021e740..0021e7bc on the spawning console: the actor's virtual +0xfc (001856d0) and its NPC info entry
     // (00436c00, 00435f30(obj, &+c, the local slot), 00436ba0(obj, -1)).
@@ -831,6 +837,23 @@ public:
     // 132ln5h13: the controller swaps (NpcControl) go to this handler as they happen (the original's synchronous
     // 003c9420(msg, actor, 1) delivery and 0021e380's construction); unset, they are queued for take_npc_controls.
     void set_npc_control_handler(std::function<void(const NpcControl&)> handler) { npc_control_handler_ = std::move(handler); }
+    // 134lt9: the swaps of authored NPCs (register_npc(c, 0): no generator) go to this handler instead (the play's
+    // authored figures: kind 2 the remote NPC controller with its link, kind 1 a fresh AI).
+    void set_authored_npc_control_handler(std::function<void(const NpcControl&)> handler) {
+        authored_npc_control_handler_ = std::move(handler);
+    }
+    // 134lt9: cHuman_HandleMessage 001b3b60 (human/func_001B3B60.c) for the two transfer notices on an NPC block, as
+    // LanNetCore's 003c9420 delivers them:
+    //  - 0x00582680 (vtable 004e0ea0, AddActivate 0042e180's activate notice): a controller whose +88 answers 2 is
+    //    replaced by the AI's (cHuman_CreateGobjController(self, 2, 0, 0)), then the human's Activate(0) (+5c:
+    //    NpcTerrainHosts::activate_5c0, then 001b53d0's network tail).
+    //  - 0x00582730 (vtable 004d9300) action +24 2: no controller or one whose +88 is not 2 gets a cNetNPC (new 0x220,
+    //    cNetNPC_ctor(p, 0, self), cHuman_CreateGobjController(self, 4, 0, p), its +48 when the human is active:
+    //    install_remote_npc_controller and the play's swap); then cNetHuman_Deactivate 002d2110(+3584) when set.
+    //    Action 1: a controller whose +88 is not 1 is replaced by the AI's (+48 when active: the play's fresh AI).
+    // Returns 1 for 0x00582680, 0 for 0x00582730 (the handler's break).
+    std::uint32_t npc_notice_001b3b60(std::uint32_t block, std::uint32_t msg);
+    std::uint32_t npc_notices_handled() const { return npc_notices_handled_; }
     // 132ln5h13: the "Generator Message" (003c9e30 type 0x004a4a68, vtable 0x004db600; +0x24 the NPC's block, byte
     // +0x28 = 1) the AI's Deactivate (00157c44..00157c9c) and the remote NPC controller's (002d4554..) send with
     // 003c9420(msg, 0040c540(&+150), 0) when the word of +150 is a live object (a generator: other objects throw):
@@ -846,7 +869,7 @@ public:
     // 134lt6: cNetObjectMgr_TerrainActivation 0042d790 (NetObjectMgr_3.c) for an NPC: nothing when its virtual +7c answers
     // (cHuman: the generator-spawned byte +3598); otherwise the TransferReference insert into 0x00582700
     // (terrain_activation_insert_0042d790) and, unless the controller's +5c answers (cNetNPC_IsNetNPC 002d2b20: 1), the
-    // notice 0x00582730 (not ported: it throws). PORT-ONLY: the block's +2d mirrors the actor's +60(1) that came first.
+    // notice 0x00582730 (134lt9: built and delivered by 003c9420(notice, the block, 1) to npc_notice_001b3b60). PORT-ONLY: the block's +2d mirrors the actor's +60(1) that came first.
     // Each network frame 0042eb20 then asks an inactive entry's controller +88 (2), +94 (cNetNPC_IsNodeInActiveTerrain
     // 002d2ab0: the play's NpcTerrainHosts::node_active) and +44, and calls the object's +20 (cHuman_NetActivate 001b4f40,
     // npc_net_activate_001b4f40) before releasing the reference.
@@ -857,6 +880,9 @@ public:
         // 134lt7: the play's part of 001b4f40 (PORT-ONLY boundary: 001b5560, 00392900, 001af460 / 001af190, 0022c650: the
         // actor's activation); `remote_built`: 001b4f40 installed a cNetNPC (the play's AI takes its remote mode).
         std::function<void(std::uint32_t c, bool remote_built)> net_activate;
+        // 134lt9: the play's part of the human's virtual Activate(0) (+5c, 001b53d0) that 001b3b60 calls for the activate
+        // notice 0x00582680 (PORT-ONLY boundary: the actor's activation); LanNetCore then runs 001b53d0's network tail.
+        std::function<void(std::uint32_t c)> activate_5c0;
     };
     // 134lt7: cHuman_NetActivate 001b4f40 (human_119.c) on an NPC block (its virtual +0x20, called by 0042eb20): Ready
     // (+2d && +2c && !+2e) returns; the controller part (npc_remote_controller_001b4f40); the play's activation
@@ -1185,7 +1211,11 @@ private:
     std::vector<RemoteSpawn> remote_spawns_;
     std::vector<NpcControl> npc_controls_;
     std::function<void(const NpcControl&)> npc_control_handler_;
+    std::function<void(const NpcControl&)> authored_npc_control_handler_;   // 134lt9
+    std::uint32_t npc_notices_handled_ = 0;                                  // 134lt9
+    bool authored_npc_control(const NpcControl& control);   // 134lt9: an authored NPC's swap (register_npc(c, 0))
     void npc_control(const NpcControl& control) {
+        if (authored_npc_control(control)) return;   // 134lt9
         if (npc_control_handler_) npc_control_handler_(control);
         else npc_controls_.push_back(control);
     }
