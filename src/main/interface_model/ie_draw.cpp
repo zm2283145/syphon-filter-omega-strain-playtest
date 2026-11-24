@@ -94,9 +94,18 @@ void node_matrix(IeDrawState& st, const IeRuntimeNode& n) {
         st.top() = vu_product(st.top(), n.matrix);
         st.dirty = 1;
     }
+    bool rotated = false;
     for (int k = 0; k < 3; ++k) {
         const float s = fadd(n.rot[static_cast<std::size_t>(k)], 0.0F);
-        if (s != 0.0F || std::signbit(s)) fail(0x3ed040, "node '" + n.name + "' rotation (+b0..+b8)");
+        if (s != 0.0F || std::signbit(s)) rotated = true;
+    }
+    // Port fix: a rotated node (an animated rot_x / rot_y / rot_z track, e.g. the thermal vision's
+    // 'therm_reticle') takes the rotation 003e8070 builds for an element, applied as an element's +30 matrix.
+    if (rotated) {
+        IeElement r;
+        ie_element_rotate(r, n.rot);
+        st.top() = vu_product(st.top(), r.matrix);
+        st.dirty = 1;
     }
 }
 
