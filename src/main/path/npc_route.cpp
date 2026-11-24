@@ -1,6 +1,7 @@
 #include "npc_route.hpp"
 #include "npc_node_search.hpp"
 #include "vu_float.hpp"
+#include <iostream>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -64,9 +65,15 @@ void deliver(const NpcRouteRequest& r,std::uint8_t event){
 // closing, 00163298 the open list empty) send event 3 without the found
 // path's guard (00162bd4): a null or stale handle sends to +58 of null
 // (address 0x58, kernel memory; the EE interpreter holds 0 there).
+// Port fix: the EE write to 0x58 has no effect on the game (nothing reads it as an actor), so a failure for a
+// request with no valid actor (a rebuilt route 0015f3d0 of a reactivated NPC, which carries no client) is dropped
+// and logged instead of stopping the game.
 void deliver_failure(const NpcRouteRequest& r,const char* at){
-    if(!client_valid(r))
-        throw std::runtime_error(std::string("NPC route: ")+at+" sends path event 3 for a request without a valid actor to +58 of null (address 0x58, kernel memory): not hosted");
+    if(!client_valid(r)){
+        std::cout<<"NPC route (port fix): "<<at<<" path event 3 for a request without a valid actor dropped"
+                   " (the original writes +58 of null, address 0x58, to no effect)\n";
+        return;
+    }
     deliver(r,3);
 }
 // 00163410(request, node): a pool entry (none when the counter is 400) with

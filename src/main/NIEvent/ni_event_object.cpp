@@ -1093,9 +1093,17 @@ RootVector NiEventWorld::position(std::uint32_t id) const{
     if(!o.light&&o.sw.on&&o.asset&&o.present_2d&&o.enabled_2c){
         // 003cd260: +88 (0023a250 -> the asset's vt+88; +dc, +140, +2d, +2c, !+2e); with bounds, their centre
         // through the +50 world.
-        if((o.kind!=1&&o.kind!=3)||!host_.asset_bounds)
-            fail("the position of "+hex(id)+": the asset bounds 0023a250 are not hosted");
-        if(const auto b=host_.asset_bounds(o.id)){
+        // Port fix: a kind-6 beam's asset reads the same vt+88 bounds, hosted for it as beam_asset_bounds.
+        std::optional<VumBounds> b;
+        if(o.kind==6&&host_.beam_asset_bounds){
+            const auto beam=host_.beam_asset_bounds(o.id);
+            b=VumBounds{beam[0],beam[1]};
+        }else{
+            if((o.kind!=1&&o.kind!=3)||!host_.asset_bounds)
+                fail("the position of "+hex(id)+": the asset bounds 0023a250 are not hosted");
+            b=host_.asset_bounds(o.id);
+        }
+        if(b){
             for(std::size_t r=0;r<4;++r)
                 if(!o.node_rows[r])fail("the position of "+hex(id)+": "+o.node_reason);
             return object_position_e4(&o.node,b);
